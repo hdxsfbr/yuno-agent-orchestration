@@ -1,0 +1,39 @@
+id: 003-cancel
+version: v1
+split: public
+description: A run that is cancelled while it is still working ends as cancelled.
+agent:
+  name: Slow Checker
+  system_prompt: |
+    You are a methodical assistant. Run each health check with the exec tool, one after
+    another, then call yuno__finish with the results.
+  tool_allowlist: [exec, finish]
+  limits:
+    max_steps: 10
+    max_duration_seconds: 120
+task: |
+  Run four slow health checks one after another with the exec tool, then call yuno__finish
+  with a summary of the results.
+script:
+  - tool:
+      name: exec
+      args: { command: "sleep 4 && echo check 1 ok" }
+    usage: { prompt: 110, completion: 18 }
+  - tool:
+      name: exec
+      args: { command: "sleep 4 && echo check 2 ok" }
+    usage: { prompt: 150, completion: 18 }
+  - tool:
+      name: exec
+      args: { command: "sleep 4 && echo check 3 ok" }
+    usage: { prompt: 190, completion: 18 }
+  - tool:
+      name: exec
+      args: { command: "sleep 4 && echo check 4 ok" }
+    usage: { prompt: 230, completion: 18 }
+actions:
+  cancel_after_steps: 1
+expect:
+  status: cancelled
+  min_model_calls: 1
+rubric: []

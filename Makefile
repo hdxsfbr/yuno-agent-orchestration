@@ -9,8 +9,8 @@ WEB_PORT     ?= 8080
 .DEFAULT_GOAL := help
 
 .PHONY: help env run smoke probe-openclaw stop down clean logs ps test test-go test-web \
-        lint tidy install migrate seed eval eval-baseline eval-final tunnel build \
-        openclaw-shell openclaw-logs openclaw-validate
+        test-integration lint tidy install migrate seed eval eval-baseline eval-final \
+        tunnel build openclaw-shell openclaw-logs openclaw-validate prune-sandboxes
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -62,6 +62,9 @@ openclaw-shell: ## Shell with the OpenClaw CLI inside the running gateway contai
 openclaw-validate: ## Validate openclaw.json against the gateway's schema (inside the running gateway)
 	$(COMPOSE) exec openclaw node openclaw.mjs config validate
 
+prune-sandboxes: ## Remove every OpenClaw sandbox container now (they are recreated on demand)
+	@docker ps -aq --filter "name=openclaw-sbx-" | xargs -r docker rm -f >/dev/null && echo "sandbox containers removed"
+
 ps: ## Show container status
 	$(COMPOSE) ps
 
@@ -73,8 +76,11 @@ install: ## pnpm install inside the Node container
 
 test: test-go test-web ## Run all tests
 
-test-go: ## Go unit and integration tests (uses the yuno_test database and the gateway)
+test-go: ## Go unit tests (uses the yuno_test database)
 	$(GO) go test ./... -count=1
+
+test-integration: ## Live tests against the running gateway (serial: the packages patch gateway config)
+	$(GO) go test -tags integration -p 1 ./internal/openclaw/ ./internal/engine/ -run TestIntegration -count=1
 
 test-web: ## Frontend tests
 	$(NODE) pnpm test

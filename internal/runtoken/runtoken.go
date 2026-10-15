@@ -12,6 +12,10 @@ import (
 // Prefix identifies a run token in free text.
 const Prefix = "r_"
 
+// ProtocolHeader opens the platform protocol block the engine appends to every node task
+// message (DESIGN 5.6): run_id, run_token and script_id follow it, one per line.
+const ProtocolHeader = "--- platform protocol ---"
+
 // Pattern matches a token anywhere in text, e.g. inside a task message.
 var Pattern = regexp.MustCompile(`\br_[a-z2-7]{24}\b`)
 
@@ -29,4 +33,17 @@ func New() string {
 // Find returns the first token in text, or "".
 func Find(text string) string {
 	return Pattern.FindString(text)
+}
+
+// ScriptIDPattern matches the "script_id: <id>" marker the engine writes into a task
+// message for scripted (offline) runs; the scripted provider keys its script by it.
+var ScriptIDPattern = regexp.MustCompile(`\bscript_id: ([a-zA-Z0-9._-]{1,80})\b`)
+
+// FindScriptID returns the script id in text, or "".
+func FindScriptID(text string) string {
+	m := ScriptIDPattern.FindStringSubmatch(text)
+	if m == nil {
+		return ""
+	}
+	return m[1]
 }

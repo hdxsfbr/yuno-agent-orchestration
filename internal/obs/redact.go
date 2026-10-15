@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"bytes"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -11,9 +12,9 @@ const Redacted = "[redacted]"
 
 // Values that look like credentials wherever they appear in a string.
 var secretValuePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{10,}`),      // Anthropic API keys
-	regexp.MustCompile(`\b\d{6,}:[A-Za-z0-9_-]{30,}`),    // Telegram bot tokens
-	regexp.MustCompile(`glpat-[A-Za-z0-9_-]{15,}`),       // GitLab personal access tokens
+	regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{10,}`),            // Anthropic API keys
+	regexp.MustCompile(`\b\d{6,}:[A-Za-z0-9_-]{30,}`),          // Telegram bot tokens
+	regexp.MustCompile(`glpat-[A-Za-z0-9_-]{15,}`),             // GitLab personal access tokens
 	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]{16,}`), // Authorization headers
 }
 
@@ -35,10 +36,13 @@ func Redact(s string) string {
 }
 
 // RedactJSON walks a JSON document and redacts secret keys and credential-shaped
-// strings. Invalid JSON is treated as a string. The result is always valid JSON.
+// strings. Invalid JSON is treated as a string. The result is always valid JSON, with
+// numbers kept as written.
 func RedactJSON(raw []byte) []byte {
 	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil || dec.More() {
 		b, _ := json.Marshal(Redact(string(raw)))
 		return b
 	}

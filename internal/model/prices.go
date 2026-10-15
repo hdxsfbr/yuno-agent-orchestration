@@ -3,6 +3,7 @@ package model
 import (
 	_ "embed"
 	"encoding/json"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -29,6 +30,23 @@ func loadPrices() {
 		prices = map[string]Price{}
 		_ = json.Unmarshal(pricesJSON, &prices)
 	})
+}
+
+// ScriptedModelID is the price-table entry of the offline scripted provider.
+const ScriptedModelID = "scripted"
+
+// AgentModelIDs returns the model ids an agent may be configured with: every entry of
+// the price table except the scripted provider, sorted.
+func AgentModelIDs() []string {
+	loadPrices()
+	out := make([]string, 0, len(prices))
+	for id := range prices {
+		if id != ScriptedModelID {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // LookupPrice returns the price for a model id. Unknown models return ok=false and the

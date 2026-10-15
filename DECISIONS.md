@@ -6,6 +6,14 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-15
 
+**D-015 OpenClaw Tool Search is off for the platform gateway.** (Claude, from integration)
+`tools.toolSearch: false` in the baseline and re-asserted at every api start. OpenClaw
+otherwise hides MCP tools behind `tool_search` / `tool_call` meta-tools and a direct
+`yuno__finish` call fails with "not found". Why: the finish protocol and the scripted
+eval provider call platform tools by name; platform agents have small allowlists, so
+there is no catalogue to compact. Cost: an agent given a very large tool set would get
+a long prompt; none exists in this platform.
+
 **D-014 Gated platform tools block, then fall back.** (Andre) An approval-gated MCP tool
 call waits up to `MCP_TOOL_WAIT` for the human decision so the agent sees the outcome in
 its turn; on timeout it returns `pending_approval` and the engine executes the effect

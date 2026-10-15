@@ -112,6 +112,12 @@ Unchanged from revision 1 except rule 5a: an `agent` node visit is one OpenClaw 
 node-scoped session (5.14 rule 5); the visit ends when the `chat` event for that `runId`
 reaches `final`, `error` or `aborted`, or the engine aborts it. Tests T5.1.1 to T5.1.8 stand.
 
+Rule 2 as implemented in wave 1 (the transition table the engine enforces):
+`queued → running | cancelled`; `running → queued` (re-queue after a lost worker or a
+resume), `running → waiting_approval | succeeded | failed | cancelled | timed_out`;
+`waiting_approval → queued | running | failed | cancelled | timed_out`. Anything else is
+rejected with `invalid transition <from>→<to>`.
+
 ### 5.2 Termination limits and cancellation
 
 Rules 1 to 10 stand with these definitions:
@@ -123,9 +129,16 @@ Rules 1 to 10 stand with these definitions:
   against our own price table from the token counts; the larger is recorded.
 - Enforcement is by `chat.abort { sessionKey, runId }` **[docs]**; after abort the engine
   waits up to 10 s for the `aborted` state, then marks the run regardless.
-- Checks run on every event that increments a counter, not only before a model call,
-  because the loop is in OpenClaw. A violation aborts the turn and ends the run with the
-  reason texts of revision 1.
+- Checks run on every event that increments a counter and on a 2 s tick, not only
+  before a model call, because the loop is in OpenClaw. A violation aborts the turn and
+  ends the run with the reason texts of revision 1, plus `tool call limit <n> exceeded`
+  for `max_tool_calls`. Once `finish` has been accepted only cancellation and the time
+  limit still apply to the remainder of the turn.
+- Limits are layered at trigger time: the request's limits, then the agent's own
+  limits, then the defaults, then the platform clamp; negative values are a validation
+  error.
+- Retry backoff (5.5) is 1, 2, 4, 8 … s capped at 30 s without jitter, so tests are
+  deterministic; a wait longer than the time remaining times the run out.
 
 Tests T5.2.1 to T5.2.10 stand, driven by the scripted provider (5.14 rule 9).
 
@@ -359,7 +372,15 @@ Unchanged in rules and tests, with these implementation notes:
   `agent` lifecycle and item events; the model proxy adds a span per upstream request with
   the upstream request id.
 - 5.13: the scripted provider is served by the model proxy (5.14 rule 9); eval cases pin
-  the script by run and node through the run token in the task message.
+  the script with a `script_id: <id>` marker the engine writes into the task message,
+  and scripted tool arguments may use the placeholders `$RUN_ID` and `$RUN_TOKEN`, which
+  the provider substitutes from the task message. The `termination` evaluator accepts
+  `step_count <= max_steps + 1` when the failure reason names the step limit, because
+  the model call that trips the limit is recorded before OpenClaw honours the abort and
+  one more may complete meanwhile (wave 1 interpretation). The gate is the share of
+  public cases where every evaluator passed; end-to-end success is the share whose
+  final status equals `expect.status`. A text-only scripted reply ends the turn, so
+  cases that must exceed a step limit use tool-call steps.
 
 ### 5.14 OpenClaw integration contract
 
@@ -391,7 +412,12 @@ Rules:
    `channels.telegram` and `commands.ownerAllowFrom` from the Telegram variables (5.8).
    Everything after that is RPC. A re-run with unchanged inputs writes nothing.
 4. **Agent materialisation** (on create, update, and before every run when
-   `materialized_hash` differs): `agents.create { name, workspace }` **[docs]**;
+   `materialized_hash` differs): `agents.create { name, workspace }` **[probed]**: it
+   accepts only those two fields, derives the OpenClaw agent id by slugging `name`, and
+   refuses an id that exists; the platform therefore passes its own stable id as the
+   `name` (`"ag"` plus the last ten hex characters of the agent UUID, the last because
+   the first characters of a UUIDv7 are a timestamp), stores the returned id, and sets
+   the display name afterwards through the config entry;
    `config.patch` with `raw` JSON and `baseHash` from `config.get` **[probed]**, setting
    `agents.entries.<id>` (`model.primary`, `thinkingDefault`, `reasoningDefault: "off"`,
    `tools.{profile,allow,deny}`, `skills`, `identity`); `exec.approvals.set` with the
@@ -402,13 +428,24 @@ Rules:
    rest go through the volume). `models.providers` and `agents.defaults.model` patches
    reload hot **[probed]**; the engine checks `config.schema.lookup` `reloadKind` for any
    path it patches and refuses `restart` paths at runtime.
-5. **Sessions.** One session per node visit, key `agent:<id>:yuno-<run8>-<node>-<visit>`;
+5. **Sessions.** One session per node visit, key `agent:<id>:yuno-<run id>-<node>-<visit>`
+   (the full run id: the first characters of a UUIDv7 are a timestamp, so a prefix
+   collides for runs started within the same minute);
    one per Telegram conversation, key `agent:<id>:tg-<chat_id>`. Sessions are created on
-   first `chat.send` (verify in wave 1; otherwise `sessions.create`). Finished node
-   sessions are deleted after the run reaches a terminal state and its trace is stored
-   (`sessions.delete`), keeping OpenClaw's store small.
+   the first `chat.send` or `sessions.patch` **[probed]**; a per-run model override is
+   `sessions.patch { key, model: "provider/model" }` before the first turn **[probed]**.
+   Finished node sessions are archived after the run reaches a terminal state and its
+   trace is stored (`sessions.delete { key }` **[probed]**), keeping OpenClaw's store
+   small. The engine creates `runs/<run_id>/` in the workspace before the first turn.
 6. **Turns.** `chat.send { sessionKey, agentId, message, idempotencyKey }` returns
-   `{ runId, status: "started" }` **[probed]**. The engine subscribes with
+   `{ runId, status: "started" }`, where `runId` equals the idempotency key; a repeated
+   key returns `status: "ok"` and the engine reads the outcome from `chat.history`
+   **[probed]**. `chat.abort { sessionKey, runId }` returns `{ ok, aborted, runIds }` and
+   the turn reaches `aborted` within about 300 ms **[probed]**. Tool results are not
+   broadcast as `session.message`; they come back from `chat.history` as
+   `{ role: "toolResult", toolCallId, toolName, content }`, so the engine fills tool
+   outputs from history when a visit ends; tool calls in transcript entries are parts
+   `{ type: "toolCall", id, name, arguments }` **[probed]**. The engine subscribes with
    `sessions.messages.subscribe { key, agentId, includeApprovals: true }` **[probed]** and
    demuxes by `runId`: `chat` (`status` with `phase`, `delta`, `final` with `stopReason`
    and `message`, `error`, `aborted`), `agent` streams `run_status`, `lifecycle`
@@ -420,10 +457,16 @@ Rules:
    node visit; MCP calls present it (5.7 rule 3). It is not a secret from the agent, only a
    binding; it is revoked when the visit ends.
 8. **Model proxy.** `/model-proxy/anthropic/v1/*` reverse-proxies to the Anthropic API,
-   injecting `x-api-key` from api's environment, forcing `thinking: {type: "adaptive"}`
-   with no `display`, forwarding `anthropic-beta` headers, recording a span with the
-   upstream `request-id`, and enforcing `MODEL_PROXY_RATE_PER_MINUTE` (default 60) with
-   429 beyond it. The gateway container never holds the key.
+   injecting `x-api-key` from api's environment, rewriting any non-null `thinking` to
+   `{type: "adaptive"}` (dropping `display` and `budget_tokens`) and leaving a body
+   without `thinking` untouched, forwarding `anthropic-beta` headers, logging one line
+   per upstream response with the upstream `request-id` and duration, and enforcing
+   `MODEL_PROXY_RATE_PER_MINUTE` (default 60) with 429 and `Retry-After` beyond it. Both
+   proxy mounts accept loopback callers only (403 otherwise): the gateway shares the
+   api's network namespace, while every other container reaches the api as
+   `openclaw:8080` and must not be able to spend the key. The gateway container never
+   holds the key. The MCP endpoint is stateless, so an api restart needs no session
+   recovery from OpenClaw's MCP client.
 9. **Scripted provider.** `/model-proxy/scripted/v1/chat/completions` implements the
    OpenAI chat completions shape OpenClaw sends (streaming SSE with `tool_calls` deltas and
    a final usage chunk) **[probed]**; it reads the run token from the request messages,
@@ -471,6 +514,12 @@ counts. T5.14.5 abort ends the turn within 10 s. T5.14.6 proxy injects the key, 
 a tool call OpenClaw executes (compose integration). T5.14.8 reasoning events are dropped.
 
 ## 6. HTTP API summary
+
+Errors: `{error: {code, message, details?}}`; validation failures are 422 with
+`details: [{path, message}]` (path-qualified, e.g. `tool_allowlist[2]`), including
+malformed or unknown-field bodies, since 400 is not part of the contract. Not found is
+404; a decision on a non-pending approval or a cancel of a finished run is 409; a
+materialisation failure after a successful write is 502 with the row id in details.
 
 As revision 1 plus: `GET/POST /skills`, `GET/PUT/DELETE /skills/{id}`;
 `GET /agents/{id}/runtime` (materialised OpenClaw state: config entry, exec policy, files);

@@ -191,6 +191,18 @@ paths:
         "200": { description: trace, content: { application/json: { schema: { $ref: "#/components/schemas/Trace" } } } }
         "404": { $ref: "#/components/responses/Error" }
 
+  /api/evals/scripts:
+    post:
+      tags: [runs]
+      summary: Register a script for the deterministic scripted provider
+      description: Used by the eval runner and tests. Replaces any script with the same id.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ScriptRegistration" } } }
+      responses:
+        "204": { description: registered }
+        "422": { $ref: "#/components/responses/Error" }
+
 components:
   parameters:
     Id:
@@ -282,7 +294,7 @@ components:
         name: { type: string, minLength: 1, maxLength: 80 }
         role: { type: string }
         system_prompt: { type: string }
-        model: { type: string, description: Anthropic model id, e.g. claude-opus-5-5 }
+        model: { type: string, description: "Anthropic model id, e.g. claude-opus-5-5" }
         effort: { type: string, enum: [low, medium, high, xhigh, max] }
         thinking: { type: string, enum: [off, minimal, low, medium, high, xhigh, adaptive, max] }
         max_tokens: { type: integer }
@@ -338,6 +350,30 @@ components:
         agent_id: { type: string }
         task: { type: string }
         limits: { $ref: "#/components/schemas/Limits" }
+        model: { type: string, description: "OpenClaw model ref override for this run, e.g. scripted/scripted-1 (evals and tests)" }
+        script_id: { type: string, description: "Script registered via /api/evals/scripts that the scripted provider replays for this run" }
+    ScriptStep:
+      type: object
+      description: One scripted model response; exactly one of text or tool.
+      properties:
+        text: { type: string }
+        tool:
+          type: object
+          required: [name, args]
+          properties:
+            name: { type: string, description: OpenClaw built-in or platform tool name as the model would call it }
+            args: { type: object }
+        usage:
+          type: object
+          properties:
+            prompt: { type: integer }
+            completion: { type: integer }
+    ScriptRegistration:
+      type: object
+      required: [script_id, steps]
+      properties:
+        script_id: { type: string, pattern: "^[a-zA-Z0-9._-]{1,80}$" }
+        steps: { type: array, items: { $ref: "#/components/schemas/ScriptStep" } }
     Run:
       type: object
       required: [id, workflow_id, workflow_version, trigger, status, input, state, limits, step_count, tool_call_count, cost_usd_micros, created_at]
@@ -378,7 +414,7 @@ components:
         visit: { type: integer }
         iteration: { type: integer }
         status: { type: string, enum: [pending, running, waiting_approval, succeeded, failed, skipped] }
-        messages: { type: array, items: { type: object }, description: transcript entries mirrored from OpenClaw, never reasoning }
+        messages: { type: array, items: { type: object }, description: "transcript entries mirrored from OpenClaw, never reasoning" }
         output: {}
         failure_reason: { type: string }
         session_key: { type: string }

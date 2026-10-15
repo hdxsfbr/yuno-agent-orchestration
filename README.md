@@ -9,9 +9,17 @@ One agent is reachable over Telegram.
 Agents execute on OpenClaw; this repository is the control plane around it (workflow
 engine, approvals, limits, traces, evals, channel, UI). See `docs/adr/0001-runtime.md`.
 
-Status: scaffold. The OpenClaw integration, run engine, agents and UI land in the waves
-described in `docs/DESIGN.md` section 9. This file is kept truthful at every commit;
-sections marked "not yet" are not yet.
+Status: wave 1 of 4 (the tracer bullet) is done. Working end to end: agent configuration
+in the UI and API, materialised into OpenClaw (config entry, exec policy, workspace
+files); single-agent quick runs executed by OpenClaw with `exec` in a Docker sandbox;
+the platform MCP server with the typed `finish` tool; the model proxy that keeps the
+Anthropic key out of the gateway; a deterministic scripted model for offline tests and
+evals; live run traces over SSE with tokens and cost; step, time, cost, tool-call and
+cancellation limits; and `make eval` with three cases and a baseline report. Not yet
+(waves 2 to 4, `docs/DESIGN.md` section 9): multi-agent workflows and the visual
+builder, templates, approvals and the gated side-effect tools, Telegram, memory,
+skills, schedules, the full eval suite and the rubric evaluator. This file is kept
+truthful at every commit; sections marked "not yet" are not yet.
 
 ## Run it
 
@@ -34,8 +42,10 @@ Then open http://localhost:8080. `make help` lists every target. The ones that m
 |---|---|
 | `make run` | Build and start the stack, wait for readiness, print the URL |
 | `make smoke` | Hit every service in the running stack and check the sandbox is isolated |
-| `make test` | Go unit and integration tests (against the `yuno_test` database) and frontend tests |
-| `make eval` | Run the evaluation suite offline with the scripted provider (not yet) |
+| `make test` | Go unit tests (against the `yuno_test` database) and frontend tests |
+| `make test-integration` | Live tests against the running gateway, run serially |
+| `make probe-openclaw` | A real OpenClaw turn with a sandboxed `exec`, the integration canary |
+| `make eval` | Run the evaluation suite offline with the scripted provider; `make eval-baseline` stores the report |
 | `make lint` | `go vet`, `staticcheck`, `eslint`, `tsc` |
 | `make logs` | Follow the api logs |
 | `make tunnel` | Expose the web port via a cloudflared quick tunnel for Telegram webhooks |
@@ -46,6 +56,11 @@ Then open http://localhost:8080. `make help` lists every target. The ones that m
 All settings are environment variables, listed with their defaults in `.env.example`.
 Secrets never go in the repository; the log handler redacts anything shaped like an API
 key, bot token or bearer token (see `internal/obs/redact.go`).
+
+Per-agent model settings: `thinking` is the reasoning control on OpenClaw (the agent's
+`thinkingDefault`), and `max_tokens` reaches OpenClaw as the agent's `params.maxTokens`.
+OpenClaw has no counterpart to `effort`; the API still accepts the field for
+compatibility, but it changes nothing and the agent form no longer offers it.
 
 ## Layout
 

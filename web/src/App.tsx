@@ -1,7 +1,16 @@
 import { NavLink, Navigate, Route, Routes } from "react-router";
+import AgentFormPage from "./pages/AgentFormPage";
+import AgentsPage from "./pages/AgentsPage";
+import NotFoundPage from "./pages/NotFoundPage";
+import RunDetailPage from "./pages/RunDetailPage";
+import RunsPage from "./pages/RunsPage";
 import StatusPage from "./pages/StatusPage";
 
-const nav = [{ to: "/status", label: "Status" }];
+const nav = [
+  { to: "/agents", label: "Agents" },
+  { to: "/runs", label: "Runs" },
+  { to: "/status", label: "Status" },
+];
 
 export default function App() {
   return (
@@ -22,10 +31,16 @@ export default function App() {
           ))}
         </nav>
       </aside>
-      <main className="flex-1 p-6">
+      <main className="min-w-0 flex-1 p-6">
         <Routes>
-          <Route path="/" element={<Navigate to="/status" replace />} />
+          <Route path="/" element={<Navigate to="/agents" replace />} />
+          <Route path="/agents" element={<AgentsPage />} />
+          <Route path="/agents/new" element={<AgentFormPage />} />
+          <Route path="/agents/:id" element={<AgentFormPage />} />
+          <Route path="/runs" element={<RunsPage />} />
+          <Route path="/runs/:id" element={<RunDetailPage />} />
           <Route path="/status" element={<StatusPage />} />
+          <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </main>
     </div>

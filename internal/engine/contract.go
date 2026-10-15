@@ -27,6 +27,13 @@ type TriggerRequest struct {
 	Limits     store.Limits
 	Trigger    string // store.TriggerManual | TriggerSchedule | TriggerChannel | TriggerEval
 	TriggerRef string
+	// Model, when set, overrides the agent's model for this run as an OpenClaw model
+	// ref, e.g. "scripted/scripted-1" (DESIGN 5.14 rule 9). The engine applies it to
+	// the node session before the turn.
+	Model string
+	// ScriptID, when set, is written into the task message as "script_id: <id>" so the
+	// scripted provider can find the registered script for this run.
+	ScriptID string
 }
 
 // RunContext is what a run token resolves to (DESIGN 5.7 rule 3).
@@ -55,8 +62,24 @@ type FinishValidationError struct {
 
 func (e *FinishValidationError) Error() string { return "finish: " + e.Message }
 
+// RuntimeView is what OpenClaw holds for an agent (GET /api/agents/{id}/runtime).
+type RuntimeView struct {
+	OpenClawAgentID string          `json:"openclaw_agent_id"`
+	Materialized    bool            `json:"materialized"`
+	InSync          bool            `json:"in_sync"`
+	Workspace       string          `json:"workspace,omitempty"`
+	ConfigEntry     json.RawMessage `json:"config_entry,omitempty"`
+	ExecPolicy      json.RawMessage `json:"exec_policy,omitempty"`
+	Files           []string        `json:"files"`
+}
+
 // Service is the engine as seen by the HTTP API, the MCP server and the eval runner.
 type Service interface {
+	// MaterializeAgent pushes the agent's current configuration to OpenClaw (DESIGN
+	// 5.14 rule 4) and returns the runtime view. Called after create and update.
+	MaterializeAgent(ctx context.Context, agentID string) (*RuntimeView, error)
+	// AgentRuntime reports what OpenClaw currently holds without writing.
+	AgentRuntime(ctx context.Context, agentID string) (*RuntimeView, error)
 	// Trigger validates and queues a run (422 on bad input, 404 on unknown ids, 429 on
 	// guardrail rate limits are returned as typed errors by the implementation).
 	Trigger(ctx context.Context, req TriggerRequest) (*store.Run, error)

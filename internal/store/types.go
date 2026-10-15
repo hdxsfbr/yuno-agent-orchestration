@@ -172,35 +172,35 @@ type Workflow struct {
 }
 
 type Run struct {
-	ID                 string          `db:"id" json:"id"`
-	WorkflowID         string          `db:"workflow_id" json:"workflow_id"`
-	WorkflowVersion    int             `db:"workflow_version" json:"workflow_version"`
-	WorkflowSnapshot   json.RawMessage `db:"workflow_snapshot" json:"workflow_snapshot,omitempty"`
-	Trigger            string          `db:"trigger" json:"trigger"`
-	TriggerRef         *string         `db:"trigger_ref" json:"trigger_ref,omitempty"`
-	Status             string          `db:"status" json:"status"`
-	Input              json.RawMessage `db:"input" json:"input"`
-	State              json.RawMessage `db:"state" json:"state"`
-	Limits             Limits          `db:"limits" json:"limits"`
-	CurrentNode        *string         `db:"current_node" json:"current_node,omitempty"`
-	ResumeNodeVisitID  *string         `db:"resume_node_visit_id" json:"resume_node_visit_id,omitempty"`
-	StepCount          int             `db:"step_count" json:"step_count"`
-	ToolCallCount      int             `db:"tool_call_count" json:"tool_call_count"`
-	Attempt            int             `db:"attempt" json:"attempt"`
-	CancelRequested    bool            `db:"cancel_requested" json:"cancel_requested"`
-	CancelBy           *string         `db:"cancel_by" json:"cancel_by,omitempty"`
-	FailureReason      *string         `db:"failure_reason" json:"failure_reason,omitempty"`
-	CostUSDMicros      int64           `db:"cost_usd_micros" json:"cost_usd_micros"`
-	InputTokens        int64           `db:"input_tokens" json:"input_tokens"`
-	OutputTokens       int64           `db:"output_tokens" json:"output_tokens"`
-	CacheReadTokens    int64           `db:"cache_read_tokens" json:"cache_read_tokens"`
-	CacheWriteTokens   int64           `db:"cache_write_tokens" json:"cache_write_tokens"`
-	PausedAt           *time.Time      `db:"paused_at" json:"paused_at,omitempty"`
-	PausedTotalMs      int64           `db:"paused_total_ms" json:"paused_total_ms"`
-	CreatedAt          time.Time       `db:"created_at" json:"created_at"`
-	StartedAt          *time.Time      `db:"started_at" json:"started_at,omitempty"`
-	FinishedAt         *time.Time      `db:"finished_at" json:"finished_at,omitempty"`
-	UpdatedAt          time.Time       `db:"updated_at" json:"updated_at"`
+	ID                string          `db:"id" json:"id"`
+	WorkflowID        string          `db:"workflow_id" json:"workflow_id"`
+	WorkflowVersion   int             `db:"workflow_version" json:"workflow_version"`
+	WorkflowSnapshot  json.RawMessage `db:"workflow_snapshot" json:"workflow_snapshot,omitempty"`
+	Trigger           string          `db:"trigger" json:"trigger"`
+	TriggerRef        *string         `db:"trigger_ref" json:"trigger_ref,omitempty"`
+	Status            string          `db:"status" json:"status"`
+	Input             json.RawMessage `db:"input" json:"input"`
+	State             json.RawMessage `db:"state" json:"state"`
+	Limits            Limits          `db:"limits" json:"limits"`
+	CurrentNode       *string         `db:"current_node" json:"current_node,omitempty"`
+	ResumeNodeVisitID *string         `db:"resume_node_visit_id" json:"resume_node_visit_id,omitempty"`
+	StepCount         int             `db:"step_count" json:"step_count"`
+	ToolCallCount     int             `db:"tool_call_count" json:"tool_call_count"`
+	Attempt           int             `db:"attempt" json:"attempt"`
+	CancelRequested   bool            `db:"cancel_requested" json:"cancel_requested"`
+	CancelBy          *string         `db:"cancel_by" json:"cancel_by,omitempty"`
+	FailureReason     *string         `db:"failure_reason" json:"failure_reason,omitempty"`
+	CostUSDMicros     int64           `db:"cost_usd_micros" json:"cost_usd_micros"`
+	InputTokens       int64           `db:"input_tokens" json:"input_tokens"`
+	OutputTokens      int64           `db:"output_tokens" json:"output_tokens"`
+	CacheReadTokens   int64           `db:"cache_read_tokens" json:"cache_read_tokens"`
+	CacheWriteTokens  int64           `db:"cache_write_tokens" json:"cache_write_tokens"`
+	PausedAt          *time.Time      `db:"paused_at" json:"paused_at,omitempty"`
+	PausedTotalMs     int64           `db:"paused_total_ms" json:"paused_total_ms"`
+	CreatedAt         time.Time       `db:"created_at" json:"created_at"`
+	StartedAt         *time.Time      `db:"started_at" json:"started_at,omitempty"`
+	FinishedAt        *time.Time      `db:"finished_at" json:"finished_at,omitempty"`
+	UpdatedAt         time.Time       `db:"updated_at" json:"updated_at"`
 }
 
 type RunNode struct {

@@ -4,11 +4,19 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
+
+	"yuno/internal/obs"
 )
 
 type Risk string
@@ -27,6 +35,8 @@ const (
 	HitsPostgres     Hits = "postgres"
 	HitsLocalService Hits = "local_service"
 	HitsExternal     Hits = "external"
+	// HitsOpenClaw marks the runtime's built-in tools, which OpenClaw executes.
+	HitsOpenClaw Hits = "openclaw"
 )
 
 // Call is one invocation as requested by the model, with run context.
@@ -51,6 +61,23 @@ type Result struct {
 	Transient bool
 }
 
+// ModelText is what the model sees: Output as JSON text when set, else Text.
+func (r Result) ModelText() string {
+	if len(r.Output) > 0 {
+		return string(r.Output)
+	}
+	return r.Text
+}
+
+// ModelError is an executor failure the model can act on, such as a result that does
+// not match the node's output schema or an invalid run token. Run turns it into an
+// error result the model sees instead of a failed call.
+type ModelError struct {
+	Message string
+}
+
+func (e *ModelError) Error() string { return e.Message }
+
 type Executor func(ctx context.Context, call Call) (Result, error)
 
 type Tool struct {
@@ -64,6 +91,11 @@ type Tool struct {
 	MaxAttempts int             `json:"max_attempts"`
 	Untrusted   bool            `json:"untrusted_output"`
 	Exec        Executor        `json:"-"`
+	// OnInvalidInput, when set, is told about a call refused by the input schema before
+	// the refusal goes back to the model (finish counts it as a rejected attempt).
+	OnInvalidInput func(ctx context.Context, call Call, message string) `json:"-"`
+
+	schema *jsonschema.Schema
 }
 
 type Registry struct {
@@ -75,7 +107,16 @@ func NewRegistry() *Registry {
 	return &Registry{tools: map[string]*Tool{}}
 }
 
+// Register adds t, filling in the timeout and retry defaults. It panics when the input
+// schema does not compile: schemas are static, so that is a programming error.
 func (r *Registry) Register(t *Tool) {
+	if len(t.InputSchema) > 0 {
+		sch, err := compileSchema(t.Name, t.InputSchema)
+		if err != nil {
+			panic(err)
+		}
+		t.schema = sch
+	}
 	if t.Timeout == 0 {
 		t.Timeout = 30 * time.Second
 	}
@@ -120,4 +161,96 @@ func (r *Registry) Names() map[string]bool {
 		out[n] = true
 	}
 	return out
+}
+
+// ValidateInput checks input against the tool's input schema. Missing input is
+// validated as an empty object. The error lists every violation with its JSON pointer.
+func (t *Tool) ValidateInput(input json.RawMessage) error {
+	if t.schema == nil {
+		return nil
+	}
+	if len(bytes.TrimSpace(input)) == 0 {
+		input = json.RawMessage(`{}`)
+	}
+	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(input))
+	if err != nil {
+		return fmt.Errorf("invalid input: not valid JSON: %v", err)
+	}
+	err = t.schema.Validate(inst)
+	if err == nil {
+		return nil
+	}
+	var ve *jsonschema.ValidationError
+	if !errors.As(err, &ve) {
+		return fmt.Errorf("invalid input: %v", err)
+	}
+	var msgs []string
+	collectLeaves(ve, &msgs)
+	return errors.New("invalid input: " + strings.Join(msgs, "; "))
+}
+
+// Run executes one call the way every platform tool is executed (DESIGN 5.7 rule 4):
+// the input is validated against the schema, the executor runs under the tool's
+// timeout, and the text for the model is redacted and capped at maxOutputBytes (0 means
+// no cap). The returned Result carries that text in Text and no Output. Schema
+// violations and *ModelError failures come back as error results, sanitised the same
+// way; err is reserved for failures the model cannot fix.
+func (t *Tool) Run(ctx context.Context, call Call, maxOutputBytes int) (Result, error) {
+	if err := t.ValidateInput(call.Input); err != nil {
+		if t.OnInvalidInput != nil {
+			t.OnInvalidInput(ctx, call, err.Error())
+		}
+		return Result{IsError: true, Text: obs.Truncate(obs.Redact(err.Error()), maxOutputBytes)}, nil
+	}
+	if t.Exec == nil {
+		return Result{}, fmt.Errorf("tool %s: no executor", t.Name)
+	}
+	if t.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, t.Timeout)
+		defer cancel()
+	}
+	res, err := t.Exec(ctx, call)
+	if err != nil {
+		var me *ModelError
+		if errors.As(err, &me) {
+			res = Result{IsError: true, Text: me.Message}
+		} else {
+			return Result{}, fmt.Errorf("tool %s: %w", t.Name, err)
+		}
+	}
+	return Result{
+		Text:      obs.Truncate(obs.Redact(res.ModelText()), maxOutputBytes),
+		IsError:   res.IsError,
+		Transient: res.Transient,
+	}, nil
+}
+
+func compileSchema(name string, raw json.RawMessage) (*jsonschema.Schema, error) {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("tool %s: input schema is not JSON: %w", name, err)
+	}
+	loc := "https://yuno.local/tools/" + name + ".json"
+	c := jsonschema.NewCompiler()
+	if err := c.AddResource(loc, doc); err != nil {
+		return nil, fmt.Errorf("tool %s: input schema: %w", name, err)
+	}
+	sch, err := c.Compile(loc)
+	if err != nil {
+		return nil, fmt.Errorf("tool %s: input schema: %w", name, err)
+	}
+	return sch, nil
+}
+
+// collectLeaves renders the innermost validation errors, which name the offending
+// location ("at '/run_token': got number, want string").
+func collectLeaves(e *jsonschema.ValidationError, out *[]string) {
+	if len(e.Causes) == 0 {
+		*out = append(*out, e.Error())
+		return
+	}
+	for _, c := range e.Causes {
+		collectLeaves(c, out)
+	}
 }

@@ -81,13 +81,23 @@ export function createSSEParser(onEvent: (e: SSEEvent) => void) {
   };
 }
 
+export type SubscribeOptions = {
+  /** Resume point for the first connection; later reconnects use the last id received. */
+  lastEventId?: string;
+};
+
 /**
  * Subscribes to an SSE endpoint. Reconnects with Last-Event-ID after a 1 s pause.
  * Returns an unsubscribe function.
  */
-export function subscribe(path: string, onEvent: (e: SSEEvent) => void, onStatus?: (s: "open" | "closed") => void) {
+export function subscribe(
+  path: string,
+  onEvent: (e: SSEEvent) => void,
+  onStatus?: (s: "open" | "closed") => void,
+  options?: SubscribeOptions,
+) {
   const controller = new AbortController();
-  let lastId: string | undefined;
+  let lastId: string | undefined = options?.lastEventId;
   let stopped = false;
 
   const connect = async () => {
@@ -124,3 +134,335 @@ export function subscribe(path: string, onEvent: (e: SSEEvent) => void, onStatus
     controller.abort();
   };
 }
+
+// ---------------------------------------------------------------------------------------
+// Types derived from api/openapi.yaml (version 0.2.0) and the endpoint functions that use
+// them. Optional fields are the ones the API may omit.
+// ---------------------------------------------------------------------------------------
+
+export type Status = {
+  version: string;
+  uptime_s: number;
+  db_ok: boolean;
+  workers: number;
+  sse_clients: number;
+  runs: Record<string, number>;
+};
+
+export type OpenClawStatus = {
+  connected: boolean;
+  version?: string;
+  conn_id?: string;
+  scopes: string[];
+  agents?: number;
+};
+
+export type Limits = {
+  max_steps?: number;
+  max_duration_seconds?: number;
+  max_node_iterations?: number;
+  max_loop_visits?: number;
+  max_cost_usd?: number;
+  max_tool_calls?: number;
+  approval_timeout_seconds?: number;
+};
+
+export type BlockedInputPattern = { name: string; tool: string; regex: string };
+
+export type Guardrails = {
+  max_cost_usd_per_run?: number;
+  max_runs_per_hour?: number;
+  blocked_tools?: string[];
+  blocked_input_patterns?: BlockedInputPattern[];
+};
+
+export type MemoryPolicy = {
+  enabled?: boolean;
+  max_facts?: number;
+  fact_ttl_days?: number;
+  conversation_window?: number;
+  conversation_ttl_days?: number;
+};
+
+export const EXEC_SECURITY = ["deny", "allowlist", "full"] as const;
+export const EXEC_ASK = ["off", "on-miss", "always"] as const;
+export type ExecSecurity = (typeof EXEC_SECURITY)[number];
+export type ExecAsk = (typeof EXEC_ASK)[number];
+
+export type ExecPolicy = {
+  security?: ExecSecurity;
+  ask?: ExecAsk;
+  ask_fallback?: ExecSecurity;
+  allowlist?: string[];
+};
+
+export const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"] as const;
+export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max"] as const;
+export type Effort = (typeof EFFORTS)[number];
+export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+export const TOOL_POLICIES = ["auto", "require_approval", "blocked"] as const;
+export type ToolPolicy = (typeof TOOL_POLICIES)[number];
+
+export type AgentInput = {
+  name: string;
+  role?: string;
+  system_prompt?: string;
+  model: string;
+  effort?: Effort;
+  thinking?: ThinkingLevel;
+  max_tokens?: number;
+  tool_allowlist?: string[];
+  interaction_rules?: Record<string, ToolPolicy>;
+  limits?: Limits;
+  guardrails?: Guardrails;
+  memory_policy?: MemoryPolicy;
+  exec_policy?: ExecPolicy;
+  skills?: string[];
+  channels?: "telegram"[];
+};
+
+export type Agent = AgentInput & {
+  id: string;
+  openclaw_agent_id?: string;
+  materialized_hash?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentRuntime = {
+  openclaw_agent_id: string;
+  materialized: boolean;
+  in_sync: boolean;
+  workspace?: string;
+  config_entry?: Record<string, unknown>;
+  exec_policy?: Record<string, unknown>;
+  files?: string[];
+};
+
+export type ToolRisk = "read_only" | "computational" | "side_effecting";
+export type ToolSource = "platform" | "openclaw";
+
+export type Tool = {
+  name: string;
+  description: string;
+  input_schema?: Record<string, unknown>;
+  risk: ToolRisk;
+  hits: "none" | "postgres" | "local_service" | "external" | "openclaw";
+  timeout_seconds: number;
+  max_attempts?: number;
+  untrusted_output?: boolean;
+  source: ToolSource;
+};
+
+export const RUN_STATUSES = ["queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "timed_out"] as const;
+export type RunStatus = (typeof RUN_STATUSES)[number];
+export type RunTrigger = "manual" | "schedule" | "channel" | "eval";
+
+export type Run = {
+  id: string;
+  workflow_id: string;
+  workflow_version: number;
+  trigger: RunTrigger;
+  trigger_ref?: string;
+  status: RunStatus;
+  input: Record<string, unknown>;
+  state: Record<string, unknown>;
+  limits: Limits;
+  current_node?: string;
+  step_count: number;
+  tool_call_count: number;
+  attempt?: number;
+  cancel_requested?: boolean;
+  failure_reason?: string;
+  cost_usd_micros: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  paused_total_ms?: number;
+  created_at: string;
+  started_at?: string;
+  finished_at?: string;
+  updated_at?: string;
+};
+
+export type RunCreate = {
+  workflow_id?: string;
+  input?: Record<string, unknown>;
+  agent_id?: string;
+  task?: string;
+  limits?: Limits;
+};
+
+export type NodeStatus = "pending" | "running" | "waiting_approval" | "succeeded" | "failed" | "skipped";
+
+export type RunNode = {
+  id: string;
+  run_id: string;
+  node_id: string;
+  agent_id?: string;
+  visit: number;
+  iteration: number;
+  status: NodeStatus;
+  messages?: Record<string, unknown>[];
+  output?: unknown;
+  failure_reason?: string;
+  session_key?: string;
+  openclaw_run_id?: string;
+  started_at?: string;
+  finished_at?: string;
+};
+
+export type ModelCall = {
+  id: string;
+  run_id: string;
+  run_node_id: string;
+  provider: string;
+  model: string;
+  request_id?: string;
+  stop_reason?: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  cost_usd_micros: number;
+  duration_ms: number;
+  attempt: number;
+  error?: string;
+  started_at: string;
+  finished_at?: string;
+};
+
+export type ToolCallStatus = "executed" | "awaiting_approval" | "approved" | "rejected" | "blocked" | "expired" | "failed";
+
+export type ToolCall = {
+  id: string;
+  run_id: string;
+  run_node_id: string;
+  model_call_id?: string;
+  tool_use_id: string;
+  tool_name: string;
+  input: unknown;
+  output?: unknown;
+  is_error: boolean;
+  status: ToolCallStatus;
+  idempotency_key?: string;
+  attempt: number;
+  duration_ms: number;
+  started_at?: string;
+  finished_at?: string;
+};
+
+export type Span = {
+  id: string;
+  run_id: string;
+  parent_id?: string;
+  kind: "run" | "node" | "model_call" | "tool_call" | "approval_wait";
+  name: string;
+  started_at: string;
+  ended_at?: string;
+  attrs: Record<string, unknown>;
+};
+
+export type AgentMessage = {
+  id: string;
+  run_id: string;
+  from_node: string;
+  to_node: string;
+  payload: unknown;
+  created_at: string;
+};
+
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
+
+export type Approval = {
+  id: string;
+  run_id: string;
+  run_node_id: string;
+  tool_call_id?: string;
+  kind: "exec" | "tool" | "node";
+  node_id: string;
+  message: string;
+  status: ApprovalStatus;
+  external_id?: string;
+  requested_at: string;
+  decided_at?: string;
+  decided_by?: string;
+  reason?: string;
+  expires_at: string;
+};
+
+export type Trace = {
+  run: Run;
+  nodes: RunNode[];
+  model_calls: ModelCall[];
+  tool_calls: ToolCall[];
+  spans: Span[];
+  agent_messages: AgentMessage[];
+  approvals: Approval[];
+};
+
+const withBody = (method: string, body?: unknown): RequestInit => ({
+  method,
+  body: body === undefined ? undefined : JSON.stringify(body),
+});
+
+const seg = encodeURIComponent;
+
+// Go encodes nil slices as null; the UI treats every list as possibly null.
+function normalizeAgent(a: Agent): Agent {
+  return {
+    ...a,
+    tool_allowlist: a.tool_allowlist ?? [],
+    interaction_rules: a.interaction_rules ?? {},
+    skills: a.skills ?? [],
+    channels: a.channels ?? [],
+    limits: a.limits ?? {},
+    guardrails: {
+      ...a.guardrails,
+      blocked_tools: a.guardrails?.blocked_tools ?? [],
+      blocked_input_patterns: a.guardrails?.blocked_input_patterns ?? [],
+    },
+    memory_policy: a.memory_policy ?? {},
+    exec_policy: { ...a.exec_policy, allowlist: a.exec_policy?.allowlist ?? [] },
+  };
+}
+
+export function normalizeTrace(t: Trace): Trace {
+  return {
+    ...t,
+    nodes: t.nodes ?? [],
+    model_calls: t.model_calls ?? [],
+    tool_calls: t.tool_calls ?? [],
+    spans: t.spans ?? [],
+    agent_messages: t.agent_messages ?? [],
+    approvals: t.approvals ?? [],
+  };
+}
+
+export const getStatus = () => api<Status>("/api/status");
+export const getOpenClawStatus = () => api<OpenClawStatus>("/api/openclaw/status");
+
+export const listAgents = async () => ((await api<Agent[] | null>("/api/agents")) ?? []).map(normalizeAgent);
+export const getAgent = async (id: string) => normalizeAgent(await api<Agent>(`/api/agents/${seg(id)}`));
+export const createAgent = (input: AgentInput) => api<Agent>("/api/agents", withBody("POST", input));
+export const updateAgent = (id: string, input: AgentInput) => api<Agent>(`/api/agents/${seg(id)}`, withBody("PUT", input));
+export const deleteAgent = (id: string) => api<void>(`/api/agents/${seg(id)}`, withBody("DELETE"));
+export const materializeAgent = (id: string) => api<AgentRuntime>(`/api/agents/${seg(id)}/materialize`, withBody("POST"));
+export const getAgentRuntime = (id: string) => api<AgentRuntime>(`/api/agents/${seg(id)}/runtime`);
+
+export const listTools = async () => (await api<Tool[] | null>("/api/tools")) ?? [];
+
+export async function listRuns(opts: { status?: RunStatus; limit?: number } = {}) {
+  const q = new URLSearchParams();
+  if (opts.status) q.set("status", opts.status);
+  q.set("limit", String(opts.limit ?? 100));
+  return (await api<Run[] | null>(`/api/runs?${q}`)) ?? [];
+}
+export const createRun = (body: RunCreate) => api<Run>("/api/runs", withBody("POST", body));
+export const cancelRun = (id: string) => api<Run>(`/api/runs/${seg(id)}/cancel`, withBody("POST"));
+export const getTrace = async (id: string) => normalizeTrace(await api<Trace>(`/api/runs/${seg(id)}/trace`));
+
+export const isTerminalStatus = (s: RunStatus) => s === "succeeded" || s === "failed" || s === "cancelled" || s === "timed_out";

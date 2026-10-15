@@ -58,6 +58,13 @@ type Config struct {
 	ToolOutputMaxBytes int
 	LogLevel           string
 
+	// Evaluation runner (DESIGN 5.13). The runner is an HTTP client of the api.
+	EvalAPIURL     string
+	EvalProvider   string // scripted | anthropic
+	EvalSplit      string // public | private | all
+	EvalCasesDir   string
+	EvalReportsDir string
+
 	// Platform maximums that clamp per-workflow limits (DESIGN 5.2).
 	MaxSteps              int
 	MaxDurationSeconds    int
@@ -108,6 +115,12 @@ func FromEnv() Config {
 		HTTPFetchAllowlist: envList("HTTP_FETCH_ALLOWLIST", "docs.python.org,pypi.org,raw.githubusercontent.com"),
 		ToolOutputMaxBytes: envInt("TOOL_OUTPUT_MAX_BYTES", 32768),
 		LogLevel:           env("LOG_LEVEL", "info"),
+
+		EvalAPIURL:     strings.TrimRight(env("EVAL_API_URL", "http://127.0.0.1:8080"), "/"),
+		EvalProvider:   env("EVAL_PROVIDER", "scripted"),
+		EvalSplit:      env("EVAL_SPLIT", "public"),
+		EvalCasesDir:   env("EVAL_CASES_DIR", "evals/cases"),
+		EvalReportsDir: env("EVAL_REPORTS_DIR", "evals/reports"),
 
 		MaxSteps:              envInt("MAX_STEPS", 200),
 		MaxDurationSeconds:    envInt("MAX_DURATION_SECONDS", 3600),

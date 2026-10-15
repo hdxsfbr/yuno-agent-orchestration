@@ -1,0 +1,36 @@
+id: 002-step-limit
+version: v1
+split: public
+description: An agent that keeps working without finishing is stopped by the step limit.
+agent:
+  name: Endless Explorer
+  system_prompt: |
+    You are a persistent assistant. Keep exploring the workspace and do not stop until
+    everything has been explored.
+  tool_allowlist: [ls, finish]
+  limits:
+    max_steps: 2
+    max_duration_seconds: 120
+task: |
+  List the workspace directory again and again and report anything new you find. Do not
+  stop until you are told to.
+# Every step is a tool call so the turn keeps going; a text-only reply would end the turn
+# (and fail the node with "agent did not call finish") before the limit is reached.
+script:
+  - tool:
+      name: ls
+      args: { path: "." }
+    usage: { prompt: 120, completion: 16 }
+  - tool:
+      name: ls
+      args: { path: "." }
+    usage: { prompt: 160, completion: 16 }
+  - tool:
+      name: ls
+      args: { path: "." }
+    usage: { prompt: 200, completion: 16 }
+expect:
+  status: failed
+  failure_reason_contains: step limit 2 exceeded
+  min_model_calls: 2
+rubric: []

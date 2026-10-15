@@ -70,8 +70,8 @@ func Baseline(in BaselineInputs) map[string]any {
 		ids = append(ids, id)
 	}
 	telegram := map[string]any{
-		"enabled":  in.TelegramMode == "polling" || in.TelegramMode == "webhook",
-		"dmPolicy": "allowlist",
+		"enabled":   in.TelegramMode == "polling" || in.TelegramMode == "webhook",
+		"dmPolicy":  "allowlist",
 		"allowFrom": ids,
 		"execApprovals": map[string]any{
 			"enabled":   len(ids) > 0,
@@ -85,11 +85,11 @@ func Baseline(in BaselineInputs) map[string]any {
 	}
 
 	return map[string]any{
-		"gateway.mode":       "local",
-		"gateway.auth":       map[string]any{"mode": "token", "token": in.GatewayToken},
-		"gateway.bind":       "lan",
-		"gateway.port":       18789,
-		"models.mode":        "merge",
+		"gateway.mode": "local",
+		"gateway.auth": map[string]any{"mode": "token", "token": in.GatewayToken},
+		"gateway.bind": "lan",
+		"gateway.port": 18789,
+		"models.mode":  "merge",
 		"models.providers." + ProviderID: map[string]any{
 			"baseUrl":        in.APIBase + "/model-proxy/anthropic",
 			"apiKey":         "proxy",
@@ -104,8 +104,8 @@ func Baseline(in BaselineInputs) map[string]any {
 			"timeoutSeconds": 60,
 			"models": []any{map[string]any{
 				"id": "scripted-1", "name": "Scripted (offline)", "reasoning": false,
-				"input": []any{"text"},
-				"cost":  map[string]any{"input": sp.Input, "output": sp.Output, "cacheRead": sp.CacheRead, "cacheWrite": sp.CacheWrite},
+				"input":         []any{"text"},
+				"cost":          map[string]any{"input": sp.Input, "output": sp.Output, "cacheRead": sp.CacheRead, "cacheWrite": sp.CacheWrite},
 				"contextWindow": 200000, "maxTokens": 8192,
 			}},
 		},
@@ -116,19 +116,22 @@ func Baseline(in BaselineInputs) map[string]any {
 			"requestTimeoutMs":    600000,
 			"connectionTimeoutMs": 5000,
 		},
-		"agents.ownership":                "explicit",
+		"agents.ownership": "explicit",
 		// Explicit ownership requires at least one configured agent [probed]; "main" is
 		// the gateway's own default and is hidden from the platform UI.
-		"agents.entries.main":             map[string]any{"name": "Gateway default"},
-		"agents.defaults.workspace":       in.StateDir + "/workspace",
-		"agents.defaults.model":           map[string]any{"primary": ModelRef(in.DefaultModel)},
-		"agents.defaults.thinkingDefault": "medium",
+		"agents.entries.main":              map[string]any{"name": "Gateway default"},
+		"agents.defaults.workspace":        in.StateDir + "/workspace",
+		"agents.defaults.model":            map[string]any{"primary": ModelRef(in.DefaultModel)},
+		"agents.defaults.thinkingDefault":  "medium",
 		"agents.defaults.reasoningDefault": "off",
-		"agents.defaults.userTimezone":    "UTC",
+		"agents.defaults.userTimezone":     "UTC",
 		"agents.defaults.sandbox": map[string]any{
 			"mode":            "all",
 			"scope":           "agent",
 			"workspaceAccess": "rw",
+			// agents.delete leaves an agent's sandbox container behind [probed]; the
+			// gateway prunes idle ones itself. `make prune-sandboxes` is the manual path.
+			"prune": map[string]any{"idleHours": 1, "maxAgeDays": 1},
 			"docker": map[string]any{
 				"image":        in.SandboxImage,
 				"network":      "none",
@@ -141,19 +144,30 @@ func Baseline(in BaselineInputs) map[string]any {
 				"user":         "1000:1000",
 			},
 		},
-		"tools.profile":                  "coding",
+		"tools.profile": "coding",
 		// skill_workshop cannot run in a sandboxed session [probed: doctor warning].
-		"tools.deny":                     []any{"group:web", "group:ui", "group:messaging", "group:nodes", "group:automation", "sessions_spawn", "subagents", "skill_workshop"},
-		"tools.exec.host":                "sandbox",
-		"tools.sandbox.tools.alsoAllow":  []any{"bundle-mcp"},
-		"channels.telegram":              telegram,
-		"commands.ownerAllowFrom":        ids,
+		"tools.deny":                    []any{"group:web", "group:ui", "group:messaging", "group:nodes", "group:automation", "sessions_spawn", "subagents", "skill_workshop"},
+		"tools.exec.host":               "sandbox",
+		"tools.sandbox.tools.alsoAllow": []any{"bundle-mcp"},
+		// Tool Search hides MCP tools behind tool_search/tool_call meta-tools; a direct
+		// call to yuno__finish then fails with "Tool yuno__finish not found" [probed].
+		// Platform agents have small allowlists, so every tool is exposed directly.
+		"tools.toolSearch":        false,
+		"channels.telegram":       telegram,
+		"commands.ownerAllowFrom": ids,
 	}
 }
 
-// InputsHash is a stable digest of the inputs.
+// BaselineVersion is folded into the inputs hash; bump it whenever the managed keys
+// change so an existing install is rewritten at the next start.
+const BaselineVersion = 3
+
+// InputsHash is a stable digest of the inputs and the baseline version.
 func InputsHash(in BaselineInputs) string {
-	b, _ := json.Marshal(in)
+	b, _ := json.Marshal(struct {
+		Version int
+		Inputs  BaselineInputs
+	}{BaselineVersion, in})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }

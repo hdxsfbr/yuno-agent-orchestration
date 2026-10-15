@@ -18,6 +18,7 @@ import (
 
 	"yuno/internal/config"
 	"yuno/internal/deploytarget"
+	"yuno/internal/evals"
 	"yuno/internal/httpapi"
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
@@ -63,7 +64,7 @@ func main() {
 	case "seed":
 		err = errors.New("seed: not implemented yet")
 	case "eval":
-		err = errors.New("eval: not implemented yet")
+		err = evals.Run(ctx, cfg, log)
 	case "version":
 		fmt.Println(config.Version)
 	default:

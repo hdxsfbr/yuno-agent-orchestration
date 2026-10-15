@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"crypto/subtle"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -89,6 +90,31 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(got), want) != 1 {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token", nil)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Model proxy mounts (DESIGN 5.14 rules 8 and 9). The gateway's provider config points
+// its baseUrl at these paths on 127.0.0.1:8080.
+const (
+	anthropicProxyPrefix = "/model-proxy/anthropic"
+	scriptedProxyPrefix  = "/model-proxy/scripted/v1"
+)
+
+// loopbackOnly admits only callers on a loopback address. The model proxy carries no
+// bearer: the gateway shares the api's network namespace and is its only expected
+// caller, while other containers reach the api as openclaw:8080 from a non-loopback
+// address and must not be able to spend the Anthropic key.
+func loopbackOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			writeError(w, http.StatusForbidden, "forbidden", "the model proxy accepts loopback callers only", nil)
 			return
 		}
 		next.ServeHTTP(w, r)

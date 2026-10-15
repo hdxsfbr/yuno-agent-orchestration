@@ -15,7 +15,8 @@ import http from "node:http";
 const TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN;
 const GW = process.env.OPENCLAW_GATEWAY_URL || "ws://127.0.0.1:18789";
 const KEEP = process.argv.includes("--keep");
-const AGENT = "probe";
+// Unique per run: OpenClaw refuses to recreate a name whose deletion cleanup is pending.
+const AGENT = "probe-" + crypto.randomBytes(3).toString("hex");
 const S = (v) => String(JSON.stringify(v ?? null));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;

@@ -54,6 +54,39 @@ those checks: the schema rejects platform keys under `meta`, explicit ownership 
 seeded agent, and the upstream image lacks the docker CLI the gateway needs to inspect
 itself.
 
-Human verification so far: Andre reviewed the design decisions and chose the runtime,
-the sandboxing mode and the channel integration. Code review of the scaffold is pending
-the first wave's review pass.
+**Wave 1, tracer bullet.** Andre approved four written briefs. Four subagents built in
+parallel on disjoint files, each briefed with the design sections, the verified probe
+script and the OpenAPI contract as ground truth, and asked to report every rule they had
+to interpret: A (gateway client, materialiser, engine; Claude Opus 5.5), B (HTTP API, MCP
+server, model proxy, scripted provider; Opus 5.5), C (frontend; Claude Sonnet 5.5), D
+(eval runner and cases; Sonnet 5.5). Their interpretations were folded back into
+`docs/DESIGN.md` (agent id derivation, transition table, limit layering, step-limit
+tolerance, loopback-only proxy). The coordinator re-ran every agent's verification
+rather than trusting the reports, then integrated: aligned agent model validation with
+the models OpenClaw exposes, ran `go mod tidy`, and found and fixed three integration
+problems the unit tests could not see (OpenClaw unsets `agents.ownership` when the roster
+shrinks; it keeps the platform MCP server marked unavailable after an api restart; its
+Tool Search hides MCP tools so a direct `yuno__finish` call fails). With those fixed,
+`make eval` passed all three cases through the real gateway with sandboxed `exec` and
+produced `evals/reports/baseline.md`.
+
+**Wave 1 review.** One independent review by a second model (codex-cli 0.162.1, high
+reasoning, read-only; its sandbox cannot start on this host, so it ran unsandboxed with
+a read-only instruction). 25 findings; the coordinator dropped one with a stated reason
+and sent 24 to a single fix-pass agent (Opus 5.5). The list and dispositions are in
+`docs/reviews/wave1-review.md`.
+
+**Wave 1 fix pass.** One Opus 5.5 agent fixed the 24 surviving findings, each with a
+test, and checked its own coverage by reverting every fix in a scratch copy and
+confirming the covering test failed (26 Go reverts and 2 UI reverts caught). It found that
+the two live integration test packages cannot run in parallel against one gateway
+(concurrent config patches are superseded), so `make test-integration` runs them
+serially. The coordinator then re-ran the full suite, the integration tests, smoke, the
+probe and the eval suite before committing.
+
+Slips disclosed by agents: C ran an `npx` command on the host once (cleaned up); D ran
+`gofmt` as root inside a container and fixed the resulting file ownership.
+
+Human verification so far: Andre reviewed the design decisions, chose the runtime, the
+sandboxing mode and the channel integration, and approved the wave-1 briefs. The UI has
+not yet been exercised in a browser by a human.

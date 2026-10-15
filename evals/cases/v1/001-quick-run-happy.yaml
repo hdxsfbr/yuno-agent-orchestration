@@ -1,0 +1,50 @@
+id: 001-quick-run-happy
+version: v1
+split: public
+description: A coding agent runs a command, records the result in a notes file in its run directory and finishes with a summary.
+agent:
+  name: Quick Coder
+  system_prompt: |
+    You are a careful coding assistant. Use the exec tool to run commands and the write
+    tool to create files. When the task is complete, call yuno__finish with your result.
+  tool_allowlist: [exec, write, finish]
+  limits:
+    max_steps: 10
+    max_duration_seconds: 120
+# $RUN_ID in the task text is replaced by the engine with the id of the run.
+task: |
+  Run `python3 -c 'print(2+2)'` and note its output. Then write a short notes file at
+  runs/$RUN_ID/notes.md that records the command and what it printed, and call
+  yuno__finish with a summary of what you did.
+script:
+  - tool:
+      name: exec
+      args:
+        command: "python3 -c 'print(2+2)'"
+    usage: { prompt: 140, completion: 24 }
+  - tool:
+      name: write
+      args:
+        # $RUN_ID is replaced by the scripted provider with the id of the run.
+        path: "runs/$RUN_ID/notes.md"
+        content: |
+          # Notes
+
+          Command: python3 -c 'print(2+2)'
+          Output: 4
+    usage: { prompt: 190, completion: 46 }
+  - tool:
+      name: yuno__finish
+      args:
+        # $RUN_TOKEN is replaced by the scripted provider with the run token from the task.
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: Ran the command, which printed 4, and saved the result to notes.md in the run directory.
+    usage: { prompt: 260, completion: 38 }
+  - text: The command printed 4 and the notes file is saved. The result has been submitted.
+    usage: { prompt: 310, completion: 18 }
+expect:
+  status: succeeded
+  min_tool_calls: 2
+  min_model_calls: 3
+rubric: []

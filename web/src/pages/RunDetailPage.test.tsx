@@ -1,0 +1,212 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter, Route, Routes } from "react-router";
+import type { ModelCall, Run, RunNode, ToolCall, Trace } from "@/lib/api";
+import RunDetailPage from "./RunDetailPage";
+
+// A fake API: GET /api/runs/r1/trace returns `trace`, GET /api/runs/r1/events is an event
+// stream the test writes to, POST /api/runs/r1/cancel answers 202.
+
+const RUN = "r1";
+const run = (over: Partial<Run> = {}): Run => ({
+  id: RUN,
+  workflow_id: "wf",
+  workflow_version: 1,
+  trigger: "manual",
+  status: "running",
+  input: {},
+  state: {},
+  limits: {},
+  step_count: 1,
+  tool_call_count: 0,
+  cost_usd_micros: 12_345,
+  input_tokens: 1200,
+  output_tokens: 300,
+  created_at: "2026-10-15T10:00:00Z",
+  started_at: "2026-10-15T10:00:01Z",
+  ...over,
+});
+const node: RunNode = { id: "n1", run_id: RUN, node_id: "agent", visit: 1, iteration: 1, status: "running", started_at: "2026-10-15T10:00:01Z" };
+const modelCall: ModelCall = {
+  id: "m1",
+  run_id: RUN,
+  run_node_id: "n1",
+  provider: "anthropic",
+  model: "claude-opus-5-5",
+  stop_reason: "tool_use",
+  input_tokens: 1200,
+  output_tokens: 300,
+  cache_read_tokens: 800,
+  cache_write_tokens: 0,
+  cost_usd_micros: 12_345,
+  duration_ms: 2300,
+  attempt: 1,
+  started_at: "2026-10-15T10:00:02Z",
+};
+const toolCall: ToolCall = {
+  id: "t1",
+  run_id: RUN,
+  run_node_id: "n1",
+  tool_use_id: "toolu_1",
+  tool_name: "read",
+  input: { path: "notes.txt" },
+  output: "file contents",
+  is_error: false,
+  status: "executed",
+  attempt: 1,
+  duration_ms: 15,
+  started_at: "2026-10-15T10:00:03Z",
+};
+
+let trace: Trace;
+let streamController: ReadableStreamDefaultController<Uint8Array>;
+let calls: { url: string; init?: RequestInit }[];
+const encoder = new TextEncoder();
+
+function send(id: number, event: string, data: unknown) {
+  streamController.enqueue(encoder.encode(`id: ${id}\nevent: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+}
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+beforeEach(() => {
+  calls = [];
+  trace = { run: run(), nodes: [node], model_calls: [modelCall], tool_calls: [], spans: [], agent_messages: [], approvals: [] };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url === `/api/runs/${RUN}/trace`) return json(trace);
+      if (url === `/api/runs/${RUN}/events`) {
+        const body = new ReadableStream<Uint8Array>({
+          start(c) {
+            streamController = c;
+            c.enqueue(encoder.encode(": connected\n\n"));
+            init?.signal?.addEventListener("abort", () => {
+              try {
+                c.close();
+              } catch {
+                /* already closed */
+              }
+            });
+          },
+        });
+        return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+      if (url === `/api/runs/${RUN}/cancel` && init?.method === "POST") return json(run({ cancel_requested: true }), 202);
+      return json({ error: { code: "not_found", message: "not found" } }, 404);
+    }),
+  );
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+function renderPage() {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={[`/runs/${RUN}`]}>
+        <Routes>
+          <Route path="/runs/:id" element={<RunDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+describe("RunDetailPage", () => {
+  it("shows the trace once the stream is open, then follows the stream", async () => {
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: /Run/ })).not.toBeNull();
+    expect(await screen.findByText("Live")).not.toBeNull();
+
+    // header
+    const header = screen.getByRole("region", { name: "Run summary" });
+    expect(within(header).getByText("running")).not.toBeNull();
+    expect(within(header).getByText("$0.0123")).not.toBeNull();
+    expect(within(header).getByText("1,200")).not.toBeNull();
+
+    // node card with its model call
+    const card = screen.getByRole("region", { name: "Node agent" });
+    expect(within(card).getByText("claude-opus-5-5")).not.toBeNull();
+    expect(within(card).getByText("tool_use")).not.toBeNull();
+    expect(within(card).getByText("800 / 0")).not.toBeNull();
+
+    // the stream was opened with a replay from the start
+    const streamCall = calls.find((c) => c.url.endsWith("/events"))!;
+    expect((streamCall.init?.headers as Record<string, string>)["Last-Event-ID"]).toBe("1");
+
+    // live events
+    send(7, "tool_call", { tool_call: toolCall });
+    expect(await within(card).findByText("read")).not.toBeNull();
+    send(8, "node.status", { node: { ...node, status: "succeeded", finished_at: "2026-10-15T10:00:09Z", output: { answer: 42 } } });
+    await waitFor(() => expect(within(card).getByText("succeeded")).not.toBeNull());
+    expect(card.textContent).toContain('"answer": 42');
+    send(9, "log", { run_id: RUN, level: "warn", message: "tool was slow" });
+    expect(await screen.findByText("tool was slow")).not.toBeNull();
+    send(10, "run.status", { run: run({ status: "succeeded", finished_at: "2026-10-15T10:00:09Z", step_count: 2 }) });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Cancel/ })).toBeNull());
+  });
+
+  it("updates the run summary from the counters live call events carry", async () => {
+    renderPage();
+    const header = await screen.findByRole("region", { name: "Run summary" });
+    await screen.findByText("Live");
+    send(7, "model_call", { model_call: { ...modelCall, id: "m2" }, run: run({ step_count: 2, input_tokens: 2_500, cost_usd_micros: 54_321 }) });
+    await waitFor(() => expect(within(header).getByText("$0.0543")).not.toBeNull());
+    expect(within(header).getByText("2,500")).not.toBeNull();
+  });
+
+  it("reloads the trace when the run finishes while the trace is still loading", async () => {
+    let release: () => void = () => undefined;
+    let traceLoads = 0;
+    const fetchMock = fetch as unknown as ReturnType<typeof vi.fn>;
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === `/api/runs/${RUN}/trace` && ++traceLoads === 1) {
+        // The first load is slow: the run finishes while it is in flight.
+        const body = trace;
+        await new Promise<void>((r) => (release = r));
+        calls.push({ url, init });
+        return json(body);
+      }
+      return base(url, init);
+    });
+    renderPage();
+    await waitFor(() => expect(traceLoads).toBe(1));
+    send(5, "run.status", { run: run({ status: "succeeded", finished_at: "2026-10-15T10:00:09Z", step_count: 2 }) });
+    trace = { ...trace, run: run({ status: "succeeded", finished_at: "2026-10-15T10:00:09Z", step_count: 2 }), spans: [] };
+    await new Promise((r) => setTimeout(r, 20));
+    release();
+    await waitFor(() => expect(traceLoads).toBe(2), { timeout: 3000 });
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Cancel/ })).toBeNull());
+  });
+
+  it("cancels a running run and disables the button", async () => {
+    renderPage();
+    const cancel = await screen.findByRole("button", { name: "Cancel run" });
+    fireEvent.click(cancel);
+    await waitFor(() => expect((screen.getByRole("button", { name: "Cancel requested" }) as HTMLButtonElement).disabled).toBe(true));
+    expect(calls.some((c) => c.url === `/api/runs/${RUN}/cancel` && c.init?.method === "POST")).toBe(true);
+  });
+
+  it("shows an error with a retry when the trace cannot be loaded", async () => {
+    trace = undefined as unknown as Trace;
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url.endsWith("/events")) return new Response(new ReadableStream<Uint8Array>({ start(c) { streamController = c; } }), { status: 200 });
+      return json({ error: { code: "not_found", message: "run not found" } }, 404);
+    });
+    renderPage();
+    expect(await screen.findByText(/run not found/)).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Retry" })).not.toBeNull();
+  });
+});
