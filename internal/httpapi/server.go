@@ -267,14 +267,24 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 
 	mux.Handle("/mcp", s.mcpHandler())
 
-	proxy, err := model.NewAnthropicProxy(model.AnthropicProxyConfig{
+	proxyCfg := model.AnthropicProxyConfig{
 		Prefix:        anthropicProxyPrefix,
 		BaseURL:       s.cfg.AnthropicBaseURL,
 		APIKey:        s.cfg.AnthropicAPIKey,
 		RatePerMinute: s.cfg.ModelProxyRatePerMinute,
 		Log:           s.log,
 		Transport:     modelTransport,
-	})
+	}
+	if s.cfg.ModelUpstream == "openrouter" {
+		proxyCfg.BaseURL = s.cfg.OpenRouterBaseURL
+		if proxyCfg.BaseURL == "" {
+			proxyCfg.BaseURL = model.DefaultOpenRouterBaseURL
+		}
+		proxyCfg.APIKey = s.cfg.OpenRouterAPIKey
+		proxyCfg.AuthScheme = "bearer"
+		proxyCfg.ModelMap = model.OpenRouterModelID
+	}
+	proxy, err := model.NewAnthropicProxy(proxyCfg)
 	if err != nil {
 		return err
 	}

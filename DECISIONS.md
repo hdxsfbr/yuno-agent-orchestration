@@ -6,6 +6,15 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-15
 
+**D-016 Model upstream is configurable; the demo runs through OpenRouter.** (Andre)
+`MODEL_UPSTREAM=anthropic|openrouter`. OpenRouter serves the same Claude models through
+the Anthropic messages format (verified 2026-10-15: `/api/v1/messages`, streaming and
+tool use), so the proxy only switches the auth header to a bearer token and rewrites
+model ids (`claude-opus-5-5` to `anthropic/claude-opus-5.5`); agents, the UI and the
+price table are unchanged. Why: Andre's key is an OpenRouter key. Cost: OpenRouter's
+usage block carries its own cost figure, which OpenClaw and the platform ignore in
+favour of the price table, identical for these models.
+
 **D-015 OpenClaw Tool Search is off for the platform gateway.** (Claude, from integration)
 `tools.toolSearch: false` in the baseline and re-asserted at every api start. OpenClaw
 otherwise hides MCP tools behind `tool_search` / `tool_call` meta-tools and a direct

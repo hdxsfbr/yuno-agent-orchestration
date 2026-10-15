@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -32,8 +33,15 @@ type AnthropicProxyConfig struct {
 	Prefix string
 	// BaseURL is the upstream API; empty means DefaultAnthropicBaseURL.
 	BaseURL string
-	// APIKey is sent upstream as x-api-key. When empty every request is answered 401.
+	// APIKey is sent upstream as x-api-key, or as a bearer token when AuthScheme is
+	// "bearer". When empty every request is answered 401.
 	APIKey string
+	// AuthScheme is "x-api-key" (default, the Anthropic API) or "bearer" (OpenRouter).
+	AuthScheme string
+	// ModelMap rewrites the model id of Messages requests before forwarding, e.g.
+	// claude-opus-5-5 to anthropic/claude-opus-5.5 for OpenRouter. Unmapped ids pass
+	// through unchanged. Nil means no rewriting.
+	ModelMap func(id string) string
 	// RatePerMinute bounds upstream requests with a token bucket of that size, refilled
 	// evenly over a minute. Zero or negative disables the limit.
 	RatePerMinute int
@@ -71,12 +79,18 @@ func NewAnthropicProxy(cfg AnthropicProxyConfig) (http.Handler, error) {
 	}
 	p := &anthropicProxy{cfg: cfg, bucket: newTokenBucket(cfg.RatePerMinute, cfg.Now)}
 	key := cfg.APIKey
+	bearer := strings.EqualFold(cfg.AuthScheme, "bearer")
 	p.rp = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(upstream)
 			h := pr.Out.Header
 			h.Del("Authorization")
-			h.Set("X-Api-Key", key)
+			h.Del("X-Api-Key")
+			if bearer {
+				h.Set("Authorization", "Bearer "+key)
+			} else {
+				h.Set("X-Api-Key", key)
+			}
 			if h.Get("Anthropic-Version") == "" {
 				h.Set("Anthropic-Version", DefaultAnthropicVersion)
 			}
@@ -106,7 +120,7 @@ type proxyCall struct {
 func (p *anthropicProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.APIKey == "" {
 		writeAnthropicError(w, http.StatusUnauthorized, "authentication_error",
-			"the model proxy has no Anthropic API key; set ANTHROPIC_API_KEY for the api service")
+			"the model proxy has no upstream API key; set ANTHROPIC_API_KEY or OPENROUTER_API_KEY for the api service")
 		return
 	}
 	path, ok := strings.CutPrefix(r.URL.Path, p.cfg.Prefix)
@@ -142,7 +156,7 @@ func (p *anthropicProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "could not read request body")
 			return
 		}
-		body, model, err := ShapeMessagesBody(raw)
+		body, model, err := ShapeMessagesBodyFor(raw, p.cfg.ModelMap)
 		if err != nil {
 			writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
@@ -162,6 +176,12 @@ func (p *anthropicProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // absent one is never added. It also returns the requested model for logging. A body
 // without thinking is returned byte for byte.
 func ShapeMessagesBody(raw []byte) (body []byte, model string, err error) {
+	return ShapeMessagesBodyFor(raw, nil)
+}
+
+// ShapeMessagesBodyFor is ShapeMessagesBody with an optional model rewrite (the
+// upstream's id replaces the requested one and is the model returned for logging).
+func ShapeMessagesBodyFor(raw []byte, modelMap func(string) string) (body []byte, model string, err error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 		return nil, "", errors.New("request body must be a JSON object")
@@ -169,11 +189,23 @@ func ShapeMessagesBody(raw []byte) (body []byte, model string, err error) {
 	if m, ok := fields["model"]; ok {
 		_ = json.Unmarshal(m, &model)
 	}
+	changed := false
+	if modelMap != nil && model != "" {
+		if mapped := modelMap(model); mapped != model {
+			mapped_, _ := json.Marshal(mapped)
+			fields["model"] = mapped_
+			model = mapped
+			changed = true
+		}
+	}
 	th, ok := fields["thinking"]
-	if !ok || string(bytes.TrimSpace(th)) == "null" {
+	if ok && string(bytes.TrimSpace(th)) != "null" {
+		fields["thinking"] = json.RawMessage(`{"type":"adaptive"}`)
+		changed = true
+	}
+	if !changed {
 		return raw, model, nil
 	}
-	fields["thinking"] = json.RawMessage(`{"type":"adaptive"}`)
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -212,7 +244,24 @@ func (p *anthropicProxy) onError(w http.ResponseWriter, r *http.Request, err err
 		model = call.model
 	}
 	p.cfg.Log.Warn("model proxy upstream failed", "model", model, "error", err)
-	writeAnthropicError(w, http.StatusBadGateway, "api_error", "the model proxy could not reach the Anthropic API")
+	writeAnthropicError(w, http.StatusBadGateway, "api_error", "the model proxy could not reach the upstream model API")
+}
+
+// OpenRouter serves the Anthropic messages format at <base>/v1/messages with bearer
+// auth and ids of the form anthropic/claude-opus-5.5 [probed 2026-10-15].
+const DefaultOpenRouterBaseURL = "https://openrouter.ai/api"
+
+var trailingMinor = regexp.MustCompile(`^(.*\d)-(\d+)$`)
+
+// OpenRouterModelID maps an Anthropic model id to OpenRouter's: the trailing minor
+// version separator becomes a dot and the vendor prefix is added (claude-opus-5-5 to
+// anthropic/claude-opus-5.5, claude-opus-5 to anthropic/claude-opus-5). Ids that already
+// carry a vendor prefix are returned unchanged.
+func OpenRouterModelID(id string) string {
+	if strings.Contains(id, "/") {
+		return id
+	}
+	return "anthropic/" + trailingMinor.ReplaceAllString(id, "$1.$2")
 }
 
 // loggedBody runs done once when the proxied body is closed.

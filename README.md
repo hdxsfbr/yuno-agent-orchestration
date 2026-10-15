@@ -54,6 +54,11 @@ Then open http://localhost:8080. `make help` lists every target. The ones that m
 ## Configuration
 
 All settings are environment variables, listed with their defaults in `.env.example`.
+The model upstream is `MODEL_UPSTREAM=anthropic` with `ANTHROPIC_API_KEY`, or
+`MODEL_UPSTREAM=openrouter` with `OPENROUTER_API_KEY`: OpenRouter serves the same Claude
+models through the Anthropic messages format, and the proxy rewrites model ids
+(`claude-opus-5-5` becomes `anthropic/claude-opus-5.5`) and the auth header, so agents
+are configured identically either way.
 Secrets never go in the repository; the log handler redacts anything shaped like an API
 key, bot token or bearer token (see `internal/obs/redact.go`).
 

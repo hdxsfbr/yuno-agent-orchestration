@@ -32,9 +32,15 @@ type Config struct {
 	MCPToken             string
 	MCPToolWait          time.Duration
 
-	// Model provider and proxy.
+	// Model provider and proxy. ModelUpstream selects where the proxy forwards: "anthropic"
+	// (x-api-key auth, Anthropic model ids) or "openrouter" (bearer auth, model ids
+	// rewritten to OpenRouter's "anthropic/claude-x.y" form; OpenRouter serves the
+	// Anthropic messages format at <OpenRouterBaseURL>/v1/messages).
+	ModelUpstream           string
 	AnthropicAPIKey         string
 	AnthropicBaseURL        string
+	OpenRouterAPIKey        string
+	OpenRouterBaseURL       string
 	DefaultModel            string
 	ModelCallTimeout        time.Duration
 	ModelProxyRatePerMinute int
@@ -94,8 +100,11 @@ func FromEnv() Config {
 		MCPToken:             env("YUNO_MCP_TOKEN", ""),
 		MCPToolWait:          time.Duration(envInt("MCP_TOOL_WAIT_SECONDS", 540)) * time.Second,
 
+		ModelUpstream:           strings.ToLower(env("MODEL_UPSTREAM", "anthropic")),
 		AnthropicAPIKey:         env("ANTHROPIC_API_KEY", ""),
 		AnthropicBaseURL:        strings.TrimRight(env("ANTHROPIC_BASE_URL", "https://api.anthropic.com"), "/"),
+		OpenRouterAPIKey:        env("OPENROUTER_API_KEY", ""),
+		OpenRouterBaseURL:       strings.TrimRight(env("OPENROUTER_BASE_URL", "https://openrouter.ai/api"), "/"),
 		DefaultModel:            env("DEFAULT_MODEL", "claude-opus-5-5"),
 		ModelCallTimeout:        envDuration("MODEL_CALL_TIMEOUT", 180*time.Second),
 		ModelProxyRatePerMinute: envInt("MODEL_PROXY_RATE_PER_MINUTE", 60),
