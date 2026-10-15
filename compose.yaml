@@ -1,0 +1,259 @@
+name: yuno
+
+# Topology (docs/DESIGN.md section 8):
+#   openclaw      the agent runtime (gateway). Gets the Docker socket to create sibling
+#                 sandbox containers, and host bind mounts because named volumes cannot be
+#                 re-mounted into siblings.
+#   api           the Go control plane. Shares the gateway's network namespace so it talks
+#                 to the gateway over loopback as a trusted backend client, and so OpenClaw
+#                 reaches the model proxy and MCP server on 127.0.0.1:8080.
+#   web           nginx: static UI, proxies /api and friends to openclaw:8080 (where the
+#                 api listens) and /telegram-webhook to the gateway.
+
+x-api-env: &api-env
+  DATABASE_URL: postgres://yuno:yuno@postgres:5432/yuno?sslmode=disable
+  DEPLOYTARGET_URL: http://deploytarget:8091
+  OPENCLAW_GATEWAY_URL: ws://127.0.0.1:18789
+  OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?set OPENCLAW_GATEWAY_TOKEN in .env (make run generates one)}
+  OPENCLAW_STATE_DIR: /home/node/.openclaw
+  YUNO_MCP_TOKEN: ${YUNO_MCP_TOKEN:?set YUNO_MCP_TOKEN in .env (make run generates one)}
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+  WEB_PORT: ${WEB_PORT:-8080}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+  DEFAULT_MODEL: ${DEFAULT_MODEL:-claude-opus-5-5}
+  MODEL_PROXY_RATE_PER_MINUTE: ${MODEL_PROXY_RATE_PER_MINUTE:-60}
+  MCP_TOOL_WAIT_SECONDS: ${MCP_TOOL_WAIT_SECONDS:-540}
+  TELEGRAM_MODE: ${TELEGRAM_MODE:-off}
+  TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+  TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS:-}
+  GITLAB_BASE_URL: ${GITLAB_BASE_URL:-}
+  GITLAB_PROJECT_ID: ${GITLAB_PROJECT_ID:-}
+  GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+  API_TOKEN: ${API_TOKEN:-}
+  ENGINE_WORKERS: ${ENGINE_WORKERS:-4}
+  HTTP_FETCH_ALLOWLIST: ${HTTP_FETCH_ALLOWLIST:-docs.python.org,pypi.org,raw.githubusercontent.com}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: yuno
+      POSTGRES_PASSWORD: yuno
+      POSTGRES_DB: yuno
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yuno -d yuno"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Writes the baseline openclaw.json (DESIGN 5.14 rule 3) into the bind-mounted state
+  # directory, preserving anything the platform does not own. Runs to completion.
+  openclaw-init:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    command: ["openclaw-init"]
+    environment:
+      <<: *api-env
+    volumes:
+      - ./data/openclaw:/home/node/.openclaw
+    restart: "no"
+
+  openclaw:
+    # Upstream image pinned in docker/openclaw.Dockerfile, plus the docker CLI the
+    # gateway uses to inspect itself and create sibling sandboxes.
+    build:
+      context: .
+      dockerfile: docker/openclaw.Dockerfile
+    image: yuno-openclaw-gateway:2026.10.3
+    container_name: yuno-openclaw
+    depends_on:
+      openclaw-init:
+        condition: service_completed_successfully
+    environment:
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?set OPENCLAW_GATEWAY_TOKEN in .env}
+      OPENCLAW_GATEWAY_BIND: lan
+      OPENCLAW_SANDBOX: "1"
+      OPENCLAW_DOCKER_SOCKET: /var/run/docker.sock
+      OPENCLAW_CONTAINER_HINT: yuno-openclaw
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      YUNO_MCP_TOKEN: ${YUNO_MCP_TOKEN:?set YUNO_MCP_TOKEN in .env}
+      TZ: UTC
+    volumes:
+      # Host bind mounts, not named volumes: the gateway passes these paths to sibling
+      # sandbox containers through the host Docker daemon (DESIGN 5.14 rule 12).
+      - ./data/openclaw:/home/node/.openclaw
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    # The socket is root:docker on the host; make run writes the group id into .env.
+    group_add:
+      - "${DOCKER_GID:-0}"
+    expose:
+      - "18789"
+      - "8080"
+    pids_limit: 1024
+    mem_limit: 2g
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    command: ["api"]
+    # Loopback trust with the gateway (DESIGN 5.14 rule 1). The api's port 8080 is
+    # therefore reachable as openclaw:8080 from the compose network.
+    network_mode: "service:openclaw"
+    environment:
+      <<: *api-env
+    volumes:
+      - ./data/openclaw:/home/node/.openclaw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      openclaw:
+        condition: service_healthy
+      deploytarget:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  deploytarget:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    command: ["deploytarget"]
+    environment:
+      DEPLOYTARGET_DATA_DIR: /data
+    volumes:
+      - releases:/data
+    expose:
+      - "8091"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8091/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # Build-only: produces the image OpenClaw uses for agent sandboxes. Never runs.
+  sandbox-image:
+    build:
+      context: .
+      dockerfile: docker/sandbox.Dockerfile
+    image: yuno-sandbox:latest
+    entrypoint: ["true"]
+    profiles: ["build"]
+
+  # ---- tooling (profiles) ------------------------------------------------
+
+  go:
+    profiles: ["tools"]
+    image: golang:1.26-alpine
+    working_dir: /src
+    # Shares the gateway namespace so integration tests reach it over loopback.
+    network_mode: "service:openclaw"
+    environment:
+      <<: *api-env
+      DATABASE_URL: postgres://yuno:yuno@postgres:5432/yuno_test?sslmode=disable
+      GOFLAGS: -buildvcs=false
+      CGO_ENABLED: "0"
+    volumes:
+      - .:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+      - ./data/openclaw:/home/node/.openclaw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      openclaw:
+        condition: service_healthy
+
+  node:
+    profiles: ["tools"]
+    image: node:24-slim
+    working_dir: /app
+    # Runs as the host user so files it writes into ./web are not root-owned. pnpm keeps
+    # its store in ./web/.pnpm-store (same filesystem, git-ignored).
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+      HOME: /tmp
+      COREPACK_HOME: /tmp/corepack
+      npm_config_cache: /tmp/npm-cache
+    volumes:
+      - ./web:/app
+    entrypoint: ["sh", "-c", "mkdir -p /tmp/corepack-bin /tmp/corepack && corepack enable --install-directory /tmp/corepack-bin && export PATH=/tmp/corepack-bin:$$PATH && exec \"$$@\"", "--"]
+
+  # Integration canary for the OpenClaw contract (scripts/openclaw-probe.mjs).
+  probe:
+    profiles: ["tools"]
+    image: node:24-slim
+    network_mode: "service:openclaw"
+    working_dir: /scripts
+    environment:
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+    volumes:
+      - ./scripts:/scripts:ro
+    depends_on:
+      openclaw:
+        condition: service_healthy
+    entrypoint: ["node", "/scripts/openclaw-probe.mjs"]
+
+  eval:
+    profiles: ["eval"]
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    command: ["eval"]
+    network_mode: "service:openclaw"
+    environment:
+      <<: *api-env
+      EVAL_PROVIDER: ${EVAL_PROVIDER:-scripted}
+      EVAL_SPLIT: ${EVAL_SPLIT:-public}
+      LISTEN_ADDR: ":8081"
+    volumes:
+      - ./evals:/src/evals
+      - ./data/openclaw:/home/node/.openclaw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      openclaw:
+        condition: service_healthy
+      deploytarget:
+        condition: service_healthy
+
+  tunnel:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:latest
+    command: ["tunnel", "--no-autoupdate", "--url", "http://web:80"]
+    depends_on:
+      - web
+
+volumes:
+  pgdata: {}
+  releases: {}
+  gomod: {}
+  gocache: {}

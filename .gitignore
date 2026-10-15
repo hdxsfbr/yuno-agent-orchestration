@@ -1,0 +1,25 @@
+# secrets and local config
+.env
+.env.*
+!.env.example
+
+# build output
+/bin/
+/web/dist/
+/web/node_modules/
+/web/.pnpm-store/
+/evals/reports/*.json
+/evals/reports/*.md
+!/evals/reports/baseline.md
+!/evals/reports/final.md
+!/evals/reports/.gitkeep
+
+# tooling
+/.go-cache/
+/coverage/
+*.test
+*.out
+.DS_Store
+
+# OpenClaw state and workspaces (host bind mounts; secrets and transcripts live here)
+/data/

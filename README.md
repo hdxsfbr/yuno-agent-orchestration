@@ -1,93 +1,83 @@
-# yuno-agent-orchestration
+# Yuno Agent Orchestration Platform
 
+A platform where operators configure AI agents (role, prompt, model, tool allowlist,
+limits, schedules, memory, guardrails, interaction rules) without code changes, connect
+them into multi-agent workflows with branching and feedback loops, and run them on a real
+runtime against real tools, with a human approval gate in front of every side effect.
+One agent is reachable over Telegram.
 
+Agents execute on OpenClaw; this repository is the control plane around it (workflow
+engine, approvals, limits, traces, evals, channel, UI). See `docs/adr/0001-runtime.md`.
 
-## Getting started
+Status: scaffold. The OpenClaw integration, run engine, agents and UI land in the waves
+described in `docs/DESIGN.md` section 9. This file is kept truthful at every commit;
+sections marked "not yet" are not yet.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+## Run it
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+Requirements on the host: Docker (with compose v2) with a usable Docker socket, `make`
+and `curl`. Nothing else is installed on the host; every toolchain runs in a container.
+OpenClaw needs the socket to create agent sandboxes as sibling containers, and keeps its
+state and agent workspaces under `./data/openclaw` (git-ignored).
 
-## Add your files
+```bash
+cp .env.example .env     # fill in ANTHROPIC_API_KEY to use a real model; optional otherwise
+make run                 # generates platform tokens, builds images, starts postgres,
+                         # openclaw, deploytarget, api, web
+make smoke               # every service answers; gateway, socket and sandbox image checked
+make probe-openclaw      # a real OpenClaw turn with a sandboxed exec, through the gateway
+```
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+Then open http://localhost:8080. `make help` lists every target. The ones that matter:
+
+| Target | What it does |
+|---|---|
+| `make run` | Build and start the stack, wait for readiness, print the URL |
+| `make smoke` | Hit every service in the running stack and check the sandbox is isolated |
+| `make test` | Go unit and integration tests (against the `yuno_test` database) and frontend tests |
+| `make eval` | Run the evaluation suite offline with the scripted provider (not yet) |
+| `make lint` | `go vet`, `staticcheck`, `eslint`, `tsc` |
+| `make logs` | Follow the api logs |
+| `make tunnel` | Expose the web port via a cloudflared quick tunnel for Telegram webhooks |
+| `make clean` | Stop everything and drop the database volume |
+
+## Configuration
+
+All settings are environment variables, listed with their defaults in `.env.example`.
+Secrets never go in the repository; the log handler redacts anything shaped like an API
+key, bot token or bearer token (see `internal/obs/redact.go`).
+
+## Layout
 
 ```
-cd existing_repo
-git remote add origin https://labs.gauntletai.com/andrebatista/yuno-agent-orchestration.git
-git branch -M main
-git push -uf origin main
+cmd/yuno/           one binary: api | migrate | seed | openclaw-init | deploytarget | eval
+internal/httpapi/   HTTP routes, middleware, SSE, MCP and model-proxy endpoints
+internal/engine/    run state machine, limits, approvals, resumption
+internal/openclaw/  baseline gateway config (openclaw-init) and the gateway client
+internal/workflow/  graph definition, validation, conditions (not yet)
+internal/tools/     platform tools served over MCP
+internal/model/     model proxy, scripted offline provider, price table
+internal/store/     pgx repositories and embedded SQL migrations
+internal/deploytarget/ local release store the deploy tool publishes to
+internal/events/    in-process event hub behind SSE
+internal/obs/       logging and redaction
+internal/pathcheck/ relative-path validation shared by tools and the deploy target
+api/openapi.yaml    the HTTP contract, served at /openapi.yaml and validated in tests
+web/                React + Vite + TypeScript UI
+docker/             Dockerfiles (api, web, the OpenClaw sandbox image) and nginx config
+scripts/            smoke.sh, openclaw-probe.mjs, ensure-env.sh
+templates/          workflow templates loaded at startup
+evals/              versioned eval cases and reports
+data/openclaw/      OpenClaw state and agent workspaces (created by make run, git-ignored)
+docs/DESIGN.md      the design the code is built from, rule by rule
+docs/adr/           architecture decision records
+DECISIONS.md        assumptions and decisions log
+AI_USAGE.md         how AI was used to build this
 ```
 
-## Integrate with your tools
+## Architecture, runtime choice, threat model, evaluation report, demo
 
-* [Set up project integrations](https://labs.gauntletai.com/andrebatista/yuno-agent-orchestration/-/settings/integrations)
-
-## Collaborate with your team
-
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
-
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Not yet. Each lands with its wave; the final README will carry the architecture diagram,
+the runtime justification (summarised from `docs/adr/0001-runtime.md`), the threat model
+and known limitations, the tool table, and how to add a workflow template or a messaging
+channel.

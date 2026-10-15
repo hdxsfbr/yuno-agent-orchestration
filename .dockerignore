@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+!.env.example
+bin/
+web/node_modules/
+web/dist/
+web/.pnpm-store/
+data/
+docs/
+evals/reports/
+*.md
+!README.md

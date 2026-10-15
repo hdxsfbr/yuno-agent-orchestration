@@ -1,0 +1,478 @@
+openapi: 3.1.0
+info:
+  title: Yuno Agent Orchestration API
+  version: 0.2.0
+  description: |
+    Control plane for configurable AI agents and multi-agent workflows executed on
+    OpenClaw. All endpoints are JSON. When API_TOKEN is set, every /api path except
+    /api/openapi.yaml requires `Authorization: Bearer <token>`. Errors always use the
+    Error schema. `/mcp` (Model Context Protocol, streamable HTTP) and `/model-proxy/*`
+    (model provider proxy) are machine endpoints for the OpenClaw gateway and are not
+    described here beyond their existence.
+servers:
+  - url: /
+tags:
+  - name: ops
+  - name: agents
+  - name: runs
+  - name: tools
+paths:
+  /healthz:
+    get:
+      tags: [ops]
+      summary: Process liveness
+      responses:
+        "200": { description: ok, content: { text/plain: { schema: { type: string } } } }
+  /readyz:
+    get:
+      tags: [ops]
+      summary: Readiness (database reachable, gateway connected and scoped)
+      responses:
+        "200": { description: ready, content: { text/plain: { schema: { type: string } } } }
+        "503": { $ref: "#/components/responses/Error" }
+  /openapi.yaml:
+    get:
+      tags: [ops]
+      summary: This document
+      responses:
+        "200": { description: OpenAPI document, content: { application/yaml: { schema: { type: string } } } }
+  /api/status:
+    get:
+      tags: [ops]
+      summary: Platform status (500 ms server-side budget)
+      responses:
+        "200":
+          description: status
+          content: { application/json: { schema: { $ref: "#/components/schemas/Status" } } }
+  /api/openclaw/status:
+    get:
+      tags: [ops]
+      summary: Gateway connection state
+      responses:
+        "200":
+          description: gateway status
+          content: { application/json: { schema: { $ref: "#/components/schemas/OpenClawStatus" } } }
+  /api/events:
+    get:
+      tags: [ops]
+      summary: Server-sent events for every run
+      description: |
+        `text/event-stream`. Each event has `id` (durable sequence), `event` (type) and JSON
+        `data`. Send `Last-Event-ID` to replay missed events. A comment line is sent every
+        15 seconds as a heartbeat. Event types: run.status, node.status, model_call,
+        tool_call, approval.requested, approval.decided, agent_message, log.
+      responses:
+        "200": { description: event stream, content: { text/event-stream: { schema: { type: string } } } }
+  /api/runs/{id}/events:
+    get:
+      tags: [ops]
+      summary: Server-sent events for one run
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: event stream, content: { text/event-stream: { schema: { type: string } } } }
+
+  /api/agents:
+    get:
+      tags: [agents]
+      summary: List agents
+      responses:
+        "200":
+          description: agents
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Agent" } } } }
+    post:
+      tags: [agents]
+      summary: Create an agent and materialise it in OpenClaw
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AgentInput" } } }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Agent" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+  /api/agents/{id}:
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    get:
+      tags: [agents]
+      summary: Get an agent
+      responses:
+        "200": { description: agent, content: { application/json: { schema: { $ref: "#/components/schemas/Agent" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [agents]
+      summary: Replace an agent's configuration and re-materialise it
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AgentInput" } } }
+      responses:
+        "200": { description: agent, content: { application/json: { schema: { $ref: "#/components/schemas/Agent" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [agents]
+      summary: Soft-delete an agent (existing runs keep their snapshot)
+      responses:
+        "204": { description: deleted }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/agents/{id}/materialize:
+    post:
+      tags: [agents]
+      summary: Push the agent's configuration to OpenClaw now
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: runtime view, content: { application/json: { schema: { $ref: "#/components/schemas/AgentRuntime" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+  /api/agents/{id}/runtime:
+    get:
+      tags: [agents]
+      summary: What OpenClaw currently holds for this agent
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: runtime view, content: { application/json: { schema: { $ref: "#/components/schemas/AgentRuntime" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/tools:
+    get:
+      tags: [tools]
+      summary: Tool registry (platform tools over MCP and the OpenClaw built-ins templates use)
+      responses:
+        "200":
+          description: tools
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Tool" } } } }
+
+  /api/runs:
+    get:
+      tags: [runs]
+      summary: List runs, newest first
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
+      responses:
+        "200":
+          description: runs
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Run" } } } }
+    post:
+      tags: [runs]
+      summary: Trigger a run (manual trigger)
+      description: |
+        Either `workflow_id` with `input`, or `agent_id` with `task` for a one-node
+        "quick run" that wraps the agent in a single-agent workflow.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/RunCreate" } } }
+      responses:
+        "201": { description: queued, content: { application/json: { schema: { $ref: "#/components/schemas/Run" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /api/runs/{id}:
+    get:
+      tags: [runs]
+      summary: Get a run
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: run, content: { application/json: { schema: { $ref: "#/components/schemas/Run" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/runs/{id}/cancel:
+    post:
+      tags: [runs]
+      summary: Request cancellation
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "202": { description: cancel requested, content: { application/json: { schema: { $ref: "#/components/schemas/Run" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/runs/{id}/trace:
+    get:
+      tags: [runs]
+      summary: Correlated trace (nodes, model calls, tool calls, spans, agent messages, approvals)
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: trace, content: { application/json: { schema: { $ref: "#/components/schemas/Trace" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+
+components:
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Error:
+      description: error
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+    Status:
+      type: object
+      required: [version, uptime_s, db_ok, workers, runs, sse_clients]
+      properties:
+        version: { type: string }
+        uptime_s: { type: integer }
+        db_ok: { type: boolean }
+        workers: { type: integer }
+        sse_clients: { type: integer }
+        runs: { type: object, additionalProperties: { type: integer } }
+    OpenClawStatus:
+      type: object
+      required: [connected, scopes]
+      properties:
+        connected: { type: boolean }
+        version: { type: string }
+        conn_id: { type: string }
+        scopes: { type: array, items: { type: string } }
+        agents: { type: integer, description: agents known to the gateway }
+    Limits:
+      type: object
+      description: Zero or absent means the platform default; values are clamped to platform maximums at trigger time.
+      properties:
+        max_steps: { type: integer }
+        max_duration_seconds: { type: integer }
+        max_node_iterations: { type: integer }
+        max_loop_visits: { type: integer }
+        max_cost_usd: { type: number }
+        max_tool_calls: { type: integer }
+        approval_timeout_seconds: { type: integer }
+    Guardrails:
+      type: object
+      properties:
+        max_cost_usd_per_run: { type: number }
+        max_runs_per_hour: { type: integer }
+        blocked_tools: { type: array, items: { type: string } }
+        blocked_input_patterns:
+          type: array
+          items:
+            type: object
+            required: [name, tool, regex]
+            properties:
+              name: { type: string }
+              tool: { type: string }
+              regex: { type: string }
+    MemoryPolicy:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        max_facts: { type: integer }
+        fact_ttl_days: { type: integer }
+        conversation_window: { type: integer }
+        conversation_ttl_days: { type: integer }
+    ExecPolicy:
+      type: object
+      description: OpenClaw exec approvals policy for elevated (host) exec; sandboxed exec needs no approval.
+      properties:
+        security: { type: string, enum: [deny, allowlist, full] }
+        ask: { type: string, enum: [off, on-miss, always] }
+        ask_fallback: { type: string, enum: [deny, allowlist, full] }
+        allowlist: { type: array, items: { type: string } }
+    AgentInput:
+      type: object
+      required: [name, model]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        role: { type: string }
+        system_prompt: { type: string }
+        model: { type: string, description: Anthropic model id, e.g. claude-opus-5-5 }
+        effort: { type: string, enum: [low, medium, high, xhigh, max] }
+        thinking: { type: string, enum: [off, minimal, low, medium, high, xhigh, adaptive, max] }
+        max_tokens: { type: integer }
+        tool_allowlist: { type: array, items: { type: string } }
+        interaction_rules: { type: object, additionalProperties: { type: string, enum: [auto, require_approval, blocked] } }
+        limits: { $ref: "#/components/schemas/Limits" }
+        guardrails: { $ref: "#/components/schemas/Guardrails" }
+        memory_policy: { $ref: "#/components/schemas/MemoryPolicy" }
+        exec_policy: { $ref: "#/components/schemas/ExecPolicy" }
+        skills: { type: array, items: { type: string } }
+        channels: { type: array, items: { type: string, enum: [telegram] } }
+    Agent:
+      allOf:
+        - $ref: "#/components/schemas/AgentInput"
+        - type: object
+          required: [id, created_at, updated_at]
+          properties:
+            id: { type: string }
+            openclaw_agent_id: { type: string }
+            materialized_hash: { type: string }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    AgentRuntime:
+      type: object
+      description: The agent as OpenClaw holds it after materialisation.
+      required: [openclaw_agent_id, materialized, in_sync]
+      properties:
+        openclaw_agent_id: { type: string }
+        materialized: { type: boolean }
+        in_sync: { type: boolean, description: stored config hash equals the agent's current configuration }
+        workspace: { type: string }
+        config_entry: { type: object, description: agents.entries.<id> as returned by config.get }
+        exec_policy: { type: object }
+        files: { type: array, items: { type: string } }
+    Tool:
+      type: object
+      required: [name, description, risk, hits, timeout_seconds, source]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        input_schema: { type: object }
+        risk: { type: string, enum: [read_only, computational, side_effecting] }
+        hits: { type: string, enum: [none, postgres, local_service, external, openclaw] }
+        timeout_seconds: { type: integer }
+        max_attempts: { type: integer }
+        untrusted_output: { type: boolean }
+        source: { type: string, enum: [platform, openclaw], description: platform tools are served over MCP; openclaw tools are the runtime's built-ins }
+    RunCreate:
+      type: object
+      properties:
+        workflow_id: { type: string }
+        input: { type: object }
+        agent_id: { type: string }
+        task: { type: string }
+        limits: { $ref: "#/components/schemas/Limits" }
+    Run:
+      type: object
+      required: [id, workflow_id, workflow_version, trigger, status, input, state, limits, step_count, tool_call_count, cost_usd_micros, created_at]
+      properties:
+        id: { type: string }
+        workflow_id: { type: string }
+        workflow_version: { type: integer }
+        trigger: { type: string, enum: [manual, schedule, channel, eval] }
+        trigger_ref: { type: string }
+        status: { type: string, enum: [queued, running, waiting_approval, succeeded, failed, cancelled, timed_out] }
+        input: { type: object }
+        state: { type: object }
+        limits: { $ref: "#/components/schemas/Limits" }
+        current_node: { type: string }
+        step_count: { type: integer }
+        tool_call_count: { type: integer }
+        attempt: { type: integer }
+        cancel_requested: { type: boolean }
+        failure_reason: { type: string }
+        cost_usd_micros: { type: integer }
+        input_tokens: { type: integer }
+        output_tokens: { type: integer }
+        cache_read_tokens: { type: integer }
+        cache_write_tokens: { type: integer }
+        paused_total_ms: { type: integer }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    RunNode:
+      type: object
+      required: [id, run_id, node_id, visit, iteration, status]
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        node_id: { type: string }
+        agent_id: { type: string }
+        visit: { type: integer }
+        iteration: { type: integer }
+        status: { type: string, enum: [pending, running, waiting_approval, succeeded, failed, skipped] }
+        messages: { type: array, items: { type: object }, description: transcript entries mirrored from OpenClaw, never reasoning }
+        output: {}
+        failure_reason: { type: string }
+        session_key: { type: string }
+        openclaw_run_id: { type: string }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+    ModelCall:
+      type: object
+      required: [id, run_id, run_node_id, provider, model, input_tokens, output_tokens, cost_usd_micros, duration_ms, attempt, started_at]
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        run_node_id: { type: string }
+        provider: { type: string }
+        model: { type: string }
+        request_id: { type: string }
+        stop_reason: { type: string }
+        input_tokens: { type: integer }
+        output_tokens: { type: integer }
+        cache_read_tokens: { type: integer }
+        cache_write_tokens: { type: integer }
+        cost_usd_micros: { type: integer }
+        duration_ms: { type: integer }
+        attempt: { type: integer }
+        error: { type: string }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+    ToolCall:
+      type: object
+      required: [id, run_id, run_node_id, tool_use_id, tool_name, input, is_error, status, attempt, duration_ms]
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        run_node_id: { type: string }
+        model_call_id: { type: string }
+        tool_use_id: { type: string }
+        tool_name: { type: string }
+        input: {}
+        output: {}
+        is_error: { type: boolean }
+        status: { type: string, enum: [executed, awaiting_approval, approved, rejected, blocked, expired, failed] }
+        idempotency_key: { type: string }
+        attempt: { type: integer }
+        duration_ms: { type: integer }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+    Span:
+      type: object
+      required: [id, run_id, kind, name, started_at, attrs]
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        parent_id: { type: string }
+        kind: { type: string, enum: [run, node, model_call, tool_call, approval_wait] }
+        name: { type: string }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+        attrs: { type: object }
+    AgentMessage:
+      type: object
+      required: [id, run_id, from_node, to_node, payload, created_at]
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        from_node: { type: string }
+        to_node: { type: string }
+        payload: {}
+        created_at: { type: string, format: date-time }
+    Approval:
+      type: object
+      required: [id, run_id, run_node_id, kind, node_id, message, status, requested_at, expires_at]
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        run_node_id: { type: string }
+        tool_call_id: { type: string }
+        kind: { type: string, enum: [exec, tool, node] }
+        node_id: { type: string }
+        message: { type: string }
+        status: { type: string, enum: [pending, approved, rejected, expired] }
+        external_id: { type: string, description: OpenClaw approval id when the gateway raised it }
+        requested_at: { type: string, format: date-time }
+        decided_at: { type: string, format: date-time }
+        decided_by: { type: string }
+        reason: { type: string }
+        expires_at: { type: string, format: date-time }
+    Trace:
+      type: object
+      required: [run, nodes, model_calls, tool_calls, spans, agent_messages, approvals]
+      properties:
+        run: { $ref: "#/components/schemas/Run" }
+        nodes: { type: array, items: { $ref: "#/components/schemas/RunNode" } }
+        model_calls: { type: array, items: { $ref: "#/components/schemas/ModelCall" } }
+        tool_calls: { type: array, items: { $ref: "#/components/schemas/ToolCall" } }
+        spans: { type: array, items: { $ref: "#/components/schemas/Span" } }
+        agent_messages: { type: array, items: { $ref: "#/components/schemas/AgentMessage" } }
+        approvals: { type: array, items: { $ref: "#/components/schemas/Approval" } }
