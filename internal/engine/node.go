@@ -65,6 +65,10 @@ type visit struct {
 	token    string
 	schema   *jsonschema.Schema
 	early    *outcome // set when the visit cannot start
+	task     string   // the rendered task; the protocol block is added per message
+	// carryFrom are the workspaces (OpenClaw agent ids) whose runs/<run_id>/ is copied
+	// into this agent's before the turn, oldest first (DESIGN 5.6 rule 13).
+	carryFrom []string
 
 	events <-chan openclaw.Event
 	unsub  func()
@@ -75,7 +79,14 @@ type visit struct {
 	cancelSignal context.CancelFunc
 	stale        []store.RunNode // visits a lost worker left behind, aborted before the first turn
 
+	// calls run closures on the visit goroutine for callers that need the result
+	// (RequestApproval); loopDone closes when the visit stops serving them.
+	calls    chan func()
+	loopDone chan struct{}
+	doneOnce sync.Once
+
 	mu            sync.Mutex
+	posted        []func(context.Context) // run on the visit goroutine at the next signal
 	finishOutput  json.RawMessage
 	finishAt      time.Time
 	closed        bool // the outcome is fixed: no result is accepted any more
@@ -99,8 +110,10 @@ type visit struct {
 	tools          map[string]*toolState
 	inputs         map[string]toolInput
 	pendingOutputs map[string]json.RawMessage
-	approvals      map[string]*store.Approval
+	approvals      map[string]*store.Approval // exec approvals by gateway id
 	approvalSpans  map[string]string
+	toolBlocking   map[string]bool   // tool approval ids whose MCP call is waiting
+	platformSpans  map[string]string // yuno__* tool call id → span (the MCP handler records the row)
 	lastText       string
 	finishLogged   bool
 	aborting       *outcome
@@ -130,6 +143,8 @@ func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.No
 		runIDs: map[string]bool{}, seenMsgs: map[string]bool{}, tools: map[string]*toolState{},
 		inputs: map[string]toolInput{}, pendingOutputs: map[string]json.RawMessage{},
 		approvals: map[string]*store.Approval{}, approvalSpans: map[string]string{},
+		toolBlocking: map[string]bool{}, platformSpans: map[string]string{},
+		calls: make(chan func()), loopDone: make(chan struct{}),
 		lastTouch: time.Now(), lastEventAt: time.Now(),
 	}
 	v.cancelCtx, v.cancelSignal = context.WithCancel(context.Background())
@@ -139,7 +154,7 @@ func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.No
 	}
 	agentID := node.AgentID
 	v.rn = &store.RunNode{RunID: run.ID, NodeID: node.ID, AgentID: &agentID, Visit: prior + 1, Status: store.NodeRunning, StartedAt: &now}
-	a, skills, err := e.loadAgent(ctx, node.AgentID)
+	a, skills, err := e.loadAgentForRun(ctx, node.AgentID)
 	if err != nil {
 		o := failed(store.RunFailed, err.Error())
 		v.early = &o
@@ -154,10 +169,6 @@ func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.No
 	}
 	if err := store.CreateRunNode(ctx, e.deps.Pool, v.rn); err != nil {
 		return nil, failed(store.RunFailed, "create node visit: "+err.Error())
-	}
-	cur := node.ID
-	if err := store.SetRunState(ctx, e.deps.Pool, run.ID, run.State, &cur); err != nil {
-		v.log.Warn("set current node failed", "error", err)
 	}
 	v.nodeSpan = e.startSpan(ctx, run.ID, &rootSpan, "node", node.ID, now, nil,
 		map[string]any{"agent_id": node.AgentID, "visit": v.rn.Visit, "session_key": v.key, "run_node_id": v.rn.ID})
@@ -200,7 +211,9 @@ func (v *visit) execute(ctx context.Context) outcome {
 			v.saveNode(ctx)
 		}
 	}
-	v.prepareRunDir()
+	if err := v.prepareRunDir(); err != nil {
+		return failed(store.RunFailed, "run directory: "+err.Error())
+	}
 
 	v.events, v.unsub = gw.Subscribe(4096)
 	if v.over.Model != "" {
@@ -297,24 +310,33 @@ func (v *visit) abortStale(ctx context.Context) {
 	v.stale = nil
 }
 
-// prepareRunDir creates runs/<run_id>/ in the agent's workspace, best effort.
-func (v *visit) prepareRunDir() {
+// prepareRunDir creates runs/<run_id>/ in the agent's workspace (best effort) and
+// copies into it the run directories of the agents that worked on the run before, in
+// the walk's order so a later visit's file wins (DESIGN 5.6 rule 13). It runs once the
+// agent is materialised, when its workspace id is final; a failed copy fails the node.
+func (v *visit) prepareRunDir() error {
 	if v.e.deps.StateDir == "" {
-		return
+		return nil
 	}
 	if err := openclaw.EnsureRunDir(v.e.deps.StateDir, v.ocID, v.run.ID); err != nil {
 		v.log.Warn("create run directory failed", "error", err)
 	}
+	for _, from := range v.carryFrom {
+		if from == v.ocID {
+			continue
+		}
+		n, err := openclaw.CopyRunDir(v.e.deps.StateDir, from, v.ocID, v.run.ID)
+		if err != nil {
+			return fmt.Errorf("copy from %s: %w", from, err)
+		}
+		v.log.Info("run directory copied forward", "from", from, "files", n)
+	}
+	return nil
 }
 
-// taskMessage is the node task plus the fixed protocol block (DESIGN 5.6).
+// taskMessage is the rendered node task plus the fixed protocol block (DESIGN 5.6
+// rule 5).
 func (v *visit) taskMessage() string {
-	var in struct {
-		Task string `json:"task"`
-	}
-	_ = json.Unmarshal(v.run.Input, &in)
-	task := strings.ReplaceAll(v.node.Task, "{{input.task}}", in.Task)
-	task = strings.ReplaceAll(task, "$RUN_ID", v.run.ID)
 	schema := v.node.OutputSchema
 	var buf bytes.Buffer
 	if err := json.Compact(&buf, schema); err == nil {
@@ -324,7 +346,7 @@ func (v *visit) taskMessage() string {
 		schema = json.RawMessage(`{"type":"object"}`)
 	}
 	var sb strings.Builder
-	sb.WriteString(task)
+	sb.WriteString(v.task)
 	sb.WriteString("\n\n" + runtoken.ProtocolHeader + "\n")
 	sb.WriteString("run_id: " + v.run.ID + "\n")
 	sb.WriteString("run_token: " + v.token + "\n")
@@ -426,7 +448,7 @@ func (v *visit) preflight(ctx context.Context) *outcome {
 		v.run = run
 	}
 	if viol := checkLimits(v.limitState()); viol != nil {
-		o := failed(viol.status, viol.reason)
+		o := violated(viol)
 		return &o
 	}
 	return nil
@@ -488,11 +510,36 @@ func (v *visit) loop(ctx context.Context) outcome {
 			v.handle(ctx, ev)
 		case <-v.signal:
 			v.onSignal(ctx)
+		case fn := <-v.calls:
+			fn()
 		case <-t.C:
 			v.onTick(ctx)
 		}
 	}
 	return *v.result
+}
+
+// do runs fn on the visit goroutine and waits for it. It fails with ErrInvalidRunToken
+// when the visit has stopped.
+func (v *visit) do(ctx context.Context, fn func()) error {
+	done := make(chan struct{})
+	select {
+	case v.calls <- func() { fn(); close(done) }:
+	case <-v.loopDone:
+		return ErrInvalidRunToken
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	<-done
+	return nil
+}
+
+// post queues fn for the visit goroutine without waiting; a stopped visit drops it.
+func (v *visit) post(fn func(context.Context)) {
+	v.mu.Lock()
+	v.posted = append(v.posted, fn)
+	v.mu.Unlock()
+	v.wake()
 }
 
 func (v *visit) handle(ctx context.Context, ev openclaw.Event) {
@@ -615,7 +662,7 @@ func (v *visit) onTranscript(ctx context.Context, raw json.RawMessage, messageID
 // was away, gets its row, span, count and limit check here; a call already ended only
 // gains its output. Replaying the history again changes nothing.
 func (v *visit) toolResult(ctx context.Context, h openclaw.HistoryEntry) {
-	if h.ToolCallID == "" {
+	if h.ToolCallID == "" || isPlatformTool(h.ToolName) {
 		return
 	}
 	out := v.toolOutputJSON(h.Text())
@@ -793,6 +840,10 @@ func (v *visit) onAgent(ctx context.Context, ae openclaw.AgentEvent) {
 		if json.Unmarshal(ae.Data, &it) != nil || it.ToolCallID == "" || (it.Kind != "" && it.Kind != "tool") {
 			return
 		}
+		if isPlatformTool(it.Name) {
+			v.platformToolSpan(ctx, it, ae.TS)
+			return
+		}
 		switch it.Phase {
 		case "start":
 			v.toolStart(ctx, it, ae.TS)
@@ -813,6 +864,36 @@ func (v *visit) onAgent(ctx context.Context, ae openclaw.AgentEvent) {
 		st.row.Output = out
 		if st.ended {
 			v.updateTool(ctx, st)
+		}
+	}
+}
+
+// isPlatformTool reports a platform MCP tool as OpenClaw names it: the MCP handler
+// records those calls with their full input and output, so the item recorder skips them.
+func isPlatformTool(name string) bool { return strings.HasPrefix(name, openclaw.PlatformToolPrefix) }
+
+// platformToolSpan keeps a span per platform tool call so the trace shows its timing.
+func (v *visit) platformToolSpan(ctx context.Context, it openclaw.AgentItem, ts int64) {
+	at := v.e.clock.Now()
+	switch {
+	case it.Phase == "start" && it.StartedAt > 0:
+		at = msTime(it.StartedAt)
+	case it.Phase == "end" && it.EndedAt > 0:
+		at = msTime(it.EndedAt)
+	case ts > 0:
+		at = msTime(ts)
+	}
+	id, open := v.platformSpans[it.ToolCallID]
+	switch it.Phase {
+	case "start":
+		if !open {
+			v.platformSpans[it.ToolCallID] = v.e.startSpan(ctx, v.run.ID, &v.nodeSpan, "tool_call", it.Name, at, nil,
+				map[string]any{"tool": it.Name, "tool_use_id": it.ToolCallID, "attempt": v.turn, "recorded_by": "mcp"})
+		}
+	case "end":
+		if open && id != "" {
+			v.e.endSpan(ctx, id, at, map[string]any{"status": it.Status, "error": it.Error})
+			v.platformSpans[it.ToolCallID] = ""
 		}
 	}
 }
@@ -929,7 +1010,9 @@ var approvalStatus = map[string]string{"allowed": "approved", "approved": "appro
 func (v *visit) onApproval(ctx context.Context, sa openclaw.SessionApprovalEvent) {
 	e := v.e
 	ap := sa.Approval
-	if ap.ID == "" {
+	// Plugin approvals are the platform's own tool approvals, registered by
+	// RequestApproval; the gateway may echo them on the session.
+	if ap.ID == "" || ap.Presentation.Kind == "plugin" || strings.HasPrefix(ap.ID, "plugin:") {
 		return
 	}
 	now := e.clock.Now()
@@ -942,6 +1025,11 @@ func (v *visit) onApproval(ctx context.Context, sa openclaw.SessionApprovalEvent
 		expires := requested.Add(30 * time.Minute)
 		if ap.ExpiresAtMs > 0 {
 			expires = msTime(ap.ExpiresAtMs)
+		}
+		// The platform's approval timeout applies when it is the shorter one: the
+		// sweeper then resolves deny itself (DESIGN 5.3 rule 4).
+		if t := v.limits.ApprovalTimeoutSeconds; t > 0 && requested.Add(secondsDuration(t)).Before(expires) {
+			expires = requested.Add(secondsDuration(t))
 		}
 		id := ap.ID
 		a = &store.Approval{
@@ -957,13 +1045,7 @@ func (v *visit) onApproval(ctx context.Context, sa openclaw.SessionApprovalEvent
 		v.approvalSpans[ap.ID] = e.startSpan(ctx, v.run.ID, &v.nodeSpan, "approval_wait", "exec approval", requested, nil,
 			map[string]any{"approval_id": a.ID, "external_id": ap.ID, "command": ap.Presentation.CommandText})
 		e.emit(ctx, v.run.ID, "approval.requested", map[string]any{"approval": a})
-		if run, err := store.PauseRunAt(ctx, e.deps.Pool, v.run.ID, v.rn.ID, now); err == nil {
-			v.run = run
-			e.emit(ctx, v.run.ID, "run.status", map[string]any{"run": run})
-		}
-		v.rn.Status = store.NodeWaitingApproval
-		v.saveNode(ctx)
-		e.emit(ctx, v.run.ID, "node.status", map[string]any{"node": v.rn})
+		v.pause(ctx)
 	}
 	if sa.Phase != "terminal" || a.Status != "pending" {
 		return
@@ -984,6 +1066,13 @@ func (v *visit) onApproval(ctx context.Context, sa openclaw.SessionApprovalEvent
 		decidedAt = msTime(ap.ResolvedAtMs)
 	}
 	decided, err := store.DecideApprovalAt(ctx, e.deps.Pool, a.ID, status, "openclaw", reason, decidedAt)
+	if errors.Is(err, store.ErrNotFound) {
+		// Decided on the platform already (DecideApproval, the sweeper): keep that.
+		if cur, gerr := store.GetApproval(ctx, e.deps.Pool, a.ID); gerr == nil {
+			v.approvalDecided(ctx, cur)
+		}
+		return
+	}
 	if err != nil {
 		v.log.Warn("decide approval failed", "error", err)
 		return
@@ -994,14 +1083,45 @@ func (v *visit) onApproval(ctx context.Context, sa openclaw.SessionApprovalEvent
 	v.resumeIfClear(ctx)
 }
 
-// resumeIfClear returns the run to running once no exec approval is pending.
+// approvalDecided takes a decision made outside the visit: an exec approval decided on
+// the platform, or a tool approval whose MCP call stopped waiting.
+func (v *visit) approvalDecided(ctx context.Context, a *store.Approval) {
+	for ext, cur := range v.approvals {
+		if cur.ID == a.ID {
+			v.approvals[ext] = a
+		}
+	}
+	if a.Status != store.ApprovalPending {
+		delete(v.toolBlocking, a.ID)
+	}
+	v.resumeIfClear(ctx)
+}
+
+// pause moves the run and the node to waiting_approval (the wait does not count
+// toward the time limit, DESIGN 5.2).
+func (v *visit) pause(ctx context.Context) {
+	if v.rn.Status == store.NodeWaitingApproval {
+		return
+	}
+	e := v.e
+	if run, err := store.PauseRunAt(ctx, e.deps.Pool, v.run.ID, v.rn.ID, e.clock.Now()); err == nil {
+		v.run = run
+		e.emit(ctx, v.run.ID, "run.status", map[string]any{"run": run})
+	}
+	v.rn.Status = store.NodeWaitingApproval
+	v.saveNode(ctx)
+	e.emit(ctx, v.run.ID, "node.status", map[string]any{"node": v.rn})
+}
+
+// resumeIfClear returns the run to running once nothing blocks the turn: no exec
+// approval pending and no MCP call waiting for a tool approval.
 func (v *visit) resumeIfClear(ctx context.Context) {
 	for _, a := range v.approvals {
-		if a.Status == "pending" {
+		if a.Status == store.ApprovalPending {
 			return
 		}
 	}
-	if v.rn.Status != store.NodeWaitingApproval {
+	if len(v.toolBlocking) > 0 || v.rn.Status != store.NodeWaitingApproval {
 		return
 	}
 	e := v.e
@@ -1049,7 +1169,7 @@ func (v *visit) end(ctx context.Context, o outcome) {
 		s := v.limitState()
 		s.finishAccepted = true // only cancellation and time
 		if viol := checkLimits(s); viol != nil {
-			o = failed(viol.status, viol.reason)
+			o = violated(viol)
 		}
 	}
 	v.result = &o
@@ -1090,7 +1210,7 @@ func (v *visit) turnFinal(ctx context.Context, ce openclaw.ChatEvent) {
 	}
 	v.refreshRun(ctx)
 	if viol := checkLimits(v.limitState()); viol != nil {
-		v.end(ctx, failed(viol.status, viol.reason))
+		v.end(ctx, violated(viol))
 		return
 	}
 	if n, msg := v.finishRejections(); n >= maxFinishAttempts {
@@ -1186,7 +1306,7 @@ func (v *visit) checkAndAbort(ctx context.Context) {
 		return
 	}
 	if viol := checkLimits(v.limitState()); viol != nil {
-		v.startAbort(ctx, failed(viol.status, viol.reason))
+		v.startAbort(ctx, violated(viol))
 		return
 	}
 	if n, msg := v.finishRejections(); n >= maxFinishAttempts {
@@ -1253,6 +1373,16 @@ func (v *visit) abortLiveTurn(ctx context.Context) {
 }
 
 func (v *visit) onSignal(ctx context.Context) {
+	v.mu.Lock()
+	posted := v.posted
+	v.posted = nil
+	v.mu.Unlock()
+	for _, fn := range posted {
+		fn(ctx)
+	}
+	if v.result != nil {
+		return
+	}
 	if _, ok := v.finished(); ok && !v.finishLogged {
 		v.finishLogged = true
 		v.e.logEvent(ctx, v.run.ID, "info", "finish accepted")
@@ -1455,6 +1585,7 @@ func (v *visit) release() {
 		v.e.tokens.remove(v.token)
 	}
 	v.cancelSignal()
+	v.doneOnce.Do(func() { close(v.loopDone) })
 }
 
 // finish is the visit's terminal housekeeping: revoke the token, reconcile the
@@ -1482,19 +1613,31 @@ func (v *visit) finish(ctx context.Context, res outcome) {
 		e.endSpan(ctx, st.spanID, now, map[string]any{"status": store.ToolFailed})
 	}
 	for extID, a := range v.approvals {
-		if a.Status != "pending" {
+		if a.Status != store.ApprovalPending {
 			continue
 		}
 		reason := "run ended"
 		if res.runStatus == store.RunCancelled {
 			reason = "run cancelled"
 		}
-		if decided, err := store.DecideApprovalAt(ctx, e.deps.Pool, a.ID, "expired", "platform", reason, now); err == nil {
+		if decided, ok := e.expireApproval(ctx, a, reason); ok {
 			v.approvals[extID] = decided
-			e.endSpan(ctx, v.approvalSpans[extID], now, map[string]any{"status": "expired", "reason": reason})
-			e.emit(ctx, v.run.ID, "approval.decided", map[string]any{"approval": decided})
 		}
 	}
+	// A turn that ended while an MCP call still waited for its approval leaves the run
+	// paused; the walk continues with it running. The approval stays pending. After a
+	// result no turn can use the call's answer any more, so a later grant is executed
+	// by the engine (DESIGN 5.3 rule 5); after a failure the call stays attached, so an
+	// expiry when the run ends still answers it.
+	if v.rn.Status == store.NodeWaitingApproval {
+		if run, err := store.ResumeRunAt(ctx, e.deps.Pool, v.run.ID, now); err == nil {
+			v.run = run
+		}
+	}
+	if res.nodeStatus == store.NodeSucceeded {
+		e.detachWaiters(v)
+	}
+	clear(v.toolBlocking)
 	v.rn.Status = res.nodeStatus
 	v.rn.FinishedAt = &now
 	if res.reason != "" {

@@ -39,7 +39,7 @@ func goodTrace() store.Trace {
 func baseCase() Case {
 	return Case{
 		ID: "c1", Version: "v1", Split: SplitPublic,
-		Agent:  AgentSpec{Limits: Limits{MaxSteps: 10, MaxDurationSeconds: 120}},
+		Agent:  AgentSpec{ToolAllowlist: []string{"exec", "write", "finish"}, Limits: Limits{MaxSteps: 10, MaxDurationSeconds: 120}},
 		Expect: Expect{Status: store.RunSucceeded},
 	}
 }
@@ -326,7 +326,7 @@ func TestEvaluateRunsAllInOrder(t *testing.T) {
 			t.Errorf("%s failed on a good trace: %s", r.Name, r.Detail)
 		}
 	}
-	want := []string{EvalTermination, EvalTraceIntegrity, EvalExpectation}
+	want := []string{EvalTermination, EvalTraceIntegrity, EvalExpectation, EvalApprovalGate, EvalIdempotency, EvalSchema, EvalAllowlist}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("evaluators = %v, want %v", names, want)
 	}
@@ -337,7 +337,7 @@ func TestEvaluateRunsAllInOrder(t *testing.T) {
 
 func TestEvaluateOnAnEmptyTraceFailsWithoutPanicking(t *testing.T) {
 	got := Evaluate(baseCase(), store.Trace{})
-	if len(got) != 3 {
+	if len(got) != len(EvaluatorNames()) {
 		t.Fatalf("got %d results", len(got))
 	}
 	for _, r := range got {
@@ -357,7 +357,7 @@ func TestSafeEvaluateTurnsAPanicIntoAFailure(t *testing.T) {
 
 func TestFailedResults(t *testing.T) {
 	got := failedResults("api down")
-	if len(got) != 3 {
+	if len(got) != len(EvaluatorNames()) {
 		t.Fatalf("got %d results", len(got))
 	}
 	for i, r := range got {
@@ -376,5 +376,23 @@ func TestScoreRubric(t *testing.T) {
 	got := ScoreRubric(c, goodTrace())
 	if got.Score != 0 || got.Criteria != 2 || got.Detail == "" {
 		t.Fatalf("non-empty rubric = %+v, want unscored with a reason", got)
+	}
+}
+
+// A workflow case has no agent block: the limits it asks for are the definition's.
+func TestEvalTerminationFallsBackToTheWorkflowLimits(t *testing.T) {
+	c, err := loadOne(t, minimalWorkflowCase) // limits: max_steps 5
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := goodTrace()
+	tr.Run.Limits = store.Limits{}
+	tr.Run.StepCount = 6
+	if got := evalTermination(c, tr); got.Passed || !strings.Contains(got.Detail, "step_count 6 exceeds max_steps 5") {
+		t.Fatalf("got %+v", got)
+	}
+	tr.Run.StepCount = 5
+	if got := evalTermination(c, tr); !got.Passed {
+		t.Fatalf("got %+v", got)
 	}
 }

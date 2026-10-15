@@ -47,8 +47,15 @@ type Call struct {
 	AgentID     string
 	ToolUseID   string
 	Input       json.RawMessage
-	// IdempotencyKey is set by the engine for side-effecting tools (DESIGN 5.4).
+	// IdempotencyKey is set for side-effecting tools before the approval gate (DESIGN
+	// 5.4 rule 1) and travels with the external request.
 	IdempotencyKey string
+	// ToolCallID is the tool_calls row recording this call.
+	ToolCallID string
+	// OpenClawAgentID and Workspace locate the agent's OpenClaw workspace, where run
+	// artifacts live under runs/<run_id>/ (DESIGN section 4).
+	OpenClawAgentID string
+	Workspace       string
 }
 
 // Result is what goes back to the model. Output is JSON; Text is a convenience for
@@ -94,6 +101,9 @@ type Tool struct {
 	// OnInvalidInput, when set, is told about a call refused by the input schema before
 	// the refusal goes back to the model (finish counts it as a rejected attempt).
 	OnInvalidInput func(ctx context.Context, call Call, message string) `json:"-"`
+	// Describe, when set, renders the sentence a human reads when the call waits for an
+	// approval (DESIGN 5.3 rule 5). The input has already passed the schema.
+	Describe func(input json.RawMessage) string `json:"-"`
 
 	schema *jsonschema.Schema
 }
@@ -202,6 +212,18 @@ func (t *Tool) Run(ctx context.Context, call Call, maxOutputBytes int) (Result, 
 		}
 		return Result{IsError: true, Text: obs.Truncate(obs.Redact(err.Error()), maxOutputBytes)}, nil
 	}
+	res, err := t.Invoke(ctx, call)
+	if err != nil {
+		return Result{}, err
+	}
+	text, _ := Render(res, maxOutputBytes)
+	return Result{Text: text, IsError: res.IsError, Transient: res.Transient}, nil
+}
+
+// Invoke runs the executor once under the tool's timeout, without validation, retries
+// or output shaping. A *ModelError becomes an error result; any other error is an
+// internal failure.
+func (t *Tool) Invoke(ctx context.Context, call Call) (Result, error) {
 	if t.Exec == nil {
 		return Result{}, fmt.Errorf("tool %s: no executor", t.Name)
 	}
@@ -214,16 +236,21 @@ func (t *Tool) Run(ctx context.Context, call Call, maxOutputBytes int) (Result, 
 	if err != nil {
 		var me *ModelError
 		if errors.As(err, &me) {
-			res = Result{IsError: true, Text: me.Message}
-		} else {
-			return Result{}, fmt.Errorf("tool %s: %w", t.Name, err)
+			return Result{IsError: true, Text: me.Message}, nil
+		}
+		return Result{}, fmt.Errorf("tool %s: %w", t.Name, err)
+	}
+	return res, nil
+}
+
+// Message is the approval sentence for a call (Describe, or a generic one).
+func (t *Tool) Message(input json.RawMessage) string {
+	if t.Describe != nil {
+		if m := t.Describe(input); m != "" {
+			return m
 		}
 	}
-	return Result{
-		Text:      obs.Truncate(obs.Redact(res.ModelText()), maxOutputBytes),
-		IsError:   res.IsError,
-		Transient: res.Transient,
-	}, nil
+	return "Run " + t.Name
 }
 
 func compileSchema(name string, raw json.RawMessage) (*jsonschema.Schema, error) {

@@ -49,7 +49,7 @@
         "id": "coder",
         "kind": "agent",
         "agent_name": "Coder",
-        "task": "Implement the following in the directory runs/$RUN_ID/ of your workspace, with tests you run yourself:\n\n{{.input.task}}\n{{with .state.reviewer}}\nThe reviewer asked for changes. Address every point before finishing:\n{{.feedback}}\n{{end}}\nWhen done, finish with a summary, the list of files you created or changed (paths relative to the workspace) and whether the tests passed.",
+        "task": "Implement the following in the directory runs/$RUN_ID/ of your workspace, with tests you run yourself:\n\n{{.input.task}}\n{{with .state.reviewer}}\nThe reviewer asked for changes. Address every point before finishing:\n{{.feedback}}\n{{end}}\nWhen done, finish with a summary, the list of files you created or changed (paths relative to runs/$RUN_ID/) and whether the tests passed.",
         "output_schema": {
           "type": "object",
           "properties": {

@@ -113,3 +113,36 @@ and API (Opus 5.5), C builder and inbox (Sonnet 5.5), D evaluators and cases
 platform tool calls; the engine skips them in its item recorder) are in
 `docs/briefs/wave2/common.md`.
 
+**Wave 2 agents (2026-10-15).** All four finished within 45 minutes of wall clock: A
+(engine, Opus 5.5, 107 tool uses), B (tools and API, Opus 5.5, 122), C (frontend,
+Sonnet 5.5, 96), D (evaluators, Sonnet 5.5, 256). Each reported the rules it had to
+interpret, which the coordinator turned into decisions D-020 to D-024 and design text.
+Two findings came from the agents rather than the reviewer: D found that every agent's
+OpenClaw workspace is separate, so a Reviewer could not read the Coder's files (now
+DESIGN 5.6 rule 13, D-019); B found the memory rules were among the revision 1 text the
+design had dropped, which the coordinator restored for sections 5.9 to 5.13. B also
+asked A for a shared default rejection text mid-wave, relayed by the coordinator.
+
+**Wave 2 verification by the coordinator.** Full Go suite (12 packages), web suite (196
+tests), lint, the serial live integration tests, both gateway probes, a rebuilt stack,
+smoke, then `make eval`: the first eval ran a stale image (`make eval` now rebuilds),
+the second passed 11 of 12 public cases with end-to-end success 12 of 12; the one
+failure was a case expectation (a tool OpenClaw refuses itself records no model call),
+corrected by the coordinator.
+
+**Wave 2 review.** One independent review (codex-cli 0.162.1, high reasoning,
+unsandboxed read-only) of the uncommitted tree: eight findings, four P1 (a symlink
+escape in deploy packaging, the run-directory hand-off, two approval-recovery races),
+four P2; all kept, none contradicted a decision. The list and dispositions are in
+`docs/reviews/wave2-review.md`; one Opus 5.5 fix-pass agent took them plus the memory
+defaults from B's report, briefed in `docs/briefs/wave2/fix-pass.md`.
+
+**Wave 2 fix pass.** The fix-pass agent applied all seven fixes with a test each,
+mutation-checked, and left one disagreement for the coordinator: the live run of the
+blocked-tool case recorded three model calls where the offline simulation of the engine
+rules counted four. The live run is the truth (OpenClaw refuses a denied tool itself and
+records no assistant message for the attempt), so the coordinator aligned the simulation
+and kept the corrected case. The agent also added `scripts/mutation-check.sh`, under the
+rule that a command run twice becomes a script, and `make test-race` was added for the
+race run it did by hand.
+

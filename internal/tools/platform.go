@@ -1,6 +1,10 @@
 package tools
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
 
 // Source says who executes a tool: platform tools are served by the api over MCP,
 // openclaw tools are the runtime's built-ins.
@@ -11,20 +15,33 @@ const (
 	SourceOpenClaw Source = "openclaw"
 )
 
-// PlatformDeps are the engine entry points the platform tools call.
+// PlatformDeps are what the platform tools call: the engine's finish entry points, the
+// database, and the external services of the DESIGN 5.7 table.
 type PlatformDeps struct {
 	// AcceptFinish is the engine's AcceptFinish with its model-facing failures
 	// translated to *ModelError (see NewFinish).
 	AcceptFinish AcceptFinishFunc
 	// RejectFinish counts a finish call the input schema refused; nil skips counting.
 	RejectFinish RejectFinishFunc
+	// Pool backs the memory tools; nil leaves them unable to run.
+	Pool   *pgxpool.Pool
+	Deploy DeployConfig
+	Fetch  FetchConfig
+	// GitLab registers gitlab_create_mr when set (D-010).
+	GitLab *GitLabConfig
 }
 
-// NewPlatformRegistry returns the platform tools served over MCP (DESIGN 5.7). This
-// wave has only finish; approval gating arrives with the side-effecting tools.
+// NewPlatformRegistry returns the platform tools served over MCP (DESIGN 5.7).
 func NewPlatformRegistry(d PlatformDeps) *Registry {
 	r := NewRegistry()
 	r.Register(NewFinish(d.AcceptFinish, d.RejectFinish))
+	r.Register(NewDeployRelease(d.Deploy))
+	r.Register(NewHTTPFetch(d.Fetch))
+	r.Register(NewMemorySave(d.Pool))
+	r.Register(NewMemoryRecall(d.Pool))
+	if d.GitLab != nil {
+		r.Register(NewGitLabCreateMR(*d.GitLab))
+	}
 	return r
 }
 

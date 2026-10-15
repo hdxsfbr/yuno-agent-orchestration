@@ -110,7 +110,9 @@ As in revision 1 (tables `agents`, `workflows`, `runs`, `run_nodes`, `model_call
 
 Unchanged from revision 1 except rule 5a: an `agent` node visit is one OpenClaw turn on a
 node-scoped session (5.14 rule 5); the visit ends when the `chat` event for that `runId`
-reaches `final`, `error` or `aborted`, or the engine aborts it. Tests T5.1.1 to T5.1.8 stand.
+reaches `final`, `error` or `aborted`, or the engine aborts it. Tests T5.1.1 to T5.1.8 stand,
+with one exception to T5.1.2: kind `tool` approvals of a succeeded run stay decidable
+(D-020).
 
 Rule 2 as implemented in wave 1 (the transition table the engine enforces):
 `queued → running | cancelled`; `running → queued` (re-queue after a lost worker or a
@@ -357,8 +359,9 @@ Rules:
    message per violation, path-qualified (`edges[2].to: unknown node 'reviewr'`).
 3. Conditions are `{path, op, value}` with `op ∈ {eq, neq, in, exists, gt, lt}` over
    `runs.state` by JSON pointer, composable with `{"all": [...]}` and `{"any": [...]}`.
-   A missing path is `exists: false` and makes `eq/neq/in/gt/lt` false. No expression
-   strings, no code.
+   A missing path is `exists: false` and makes `eq/neq/in/gt/lt` false. An empty `all`
+   or `any` group is a validation error (`edges[i].when: empty all/any group`) and
+   evaluates false if it ever reaches the engine. No expression strings, no code.
 4. An edge without `when` is always true. Edges from a node are evaluated in array order;
    the first true one is taken (5.1 rule 5). A node with no true outgoing edge and not of
    kind `end` ends the run `failed` with reason `no matching edge from <node>`.
@@ -385,7 +388,10 @@ Rules:
    worker (the wait does not count toward the time limit, 5.2 rule 4); approve re-queues
    the run, which continues along the node's first true edge; reject follows the node's
    `on_reject` edge if present, else fails the run with reason `rejected at <node>`.
-   Nothing in OpenClaw is involved.
+   Nothing in OpenClaw is involved. The approval row and the pause are one transaction,
+   published afterwards, so a decision can never find the run still running; resumption
+   reads only the visit named by `resume_node_visit_id`, which moving `current_node`
+   clears, so a gate reached again by a loop always asks again.
 9. Workflow templates are JSON files under `templates/` (`{key, name, description,
    definition}`) loaded at api startup into `workflows` rows with `template_key` set
    (updated in place when the file changed, never deleted). Template agent nodes name
@@ -403,6 +409,19 @@ Rules:
     evaluator, not by the engine.
 12. A node's `on_failure` edge is followed when the node fails for a reason that is not a
     limit violation or a cancellation; without one the run fails with the node's reason.
+13. **Run directory flows forward.** Every agent has its own OpenClaw workspace, so
+    before an agent node visit the engine copies `runs/<run_id>/` from the workspace of
+    the agent of every earlier visit of this run, in visit order (a later visit's file
+    wins), into this agent's workspace, through the shared state directory. Files are
+    copied, never linked (the sandbox sees only its own workspace). `deploy_release`
+    and `gitlab_create_mr` read the calling agent's copy. A copy failure fails the node
+    with reason `run directory: <error>`. Only agents whose last visit came after this
+    agent's own last visit are copied from, so an agent's newer edits are never
+    overwritten by an older copy (coder → reviewer → coder copies nothing back into
+    the coder's second visit); regular files and directories are copied with their
+    permission bits, links and special files are skipped, and deletions do not flow
+    forward. (D-019, from the wave-2 evaluator agent's finding that Reviewer and
+    Deployer could not see the Coder's files.)
 
 Edge cases: a workflow with only `start→end` is valid and succeeds instantly with zero
 model calls. An agent node whose agent lacks the tools its task needs still runs; the
@@ -411,6 +430,10 @@ continues with the snapshot.
 
 Consistency: definition is validated on save and again at trigger time (an agent may have
 been deleted, a template still carries `agent_name`); trigger-time failure returns 422.
+Structural validation also rejects unknown `on_reject`, `on_failure` and `input_from`
+targets, `on_reject` on a non-approval node, edges into `start`, invalid conditions and
+the reserved node id `pending_effects`; `on_reject` and `on_failure` targets count as
+reachable.
 
 Outputs: validation messages; `agent_messages` rows; SSE `agent_message`.
 
@@ -420,7 +443,8 @@ order precedence. T5.6.5 template render error at save and at run. T5.6.6 output
 retry then failure. T5.6.7 approval node approve/reject/`on_reject`. T5.6.8 dev_pipeline
 template loops twice then deploys with the scripted provider. T5.6.9 state replace on
 revisit. T5.6.10 instantiate resolves agent names and reports a missing one. T5.6.11
-input schema violation at trigger → 422.
+input schema violation at trigger → 422. T5.6.12 a file written by node 1's agent is
+present in node 2's agent workspace before its turn; a file node 2 rewrites wins on node 3.
 
 Out of scope: parallel branches (fan-out/fan-in), sub-workflows.
 
@@ -454,7 +478,7 @@ Rules:
 | `http_fetch` | read_only | external | 15 s | `{run_token, url}`; https only; host allowlist; ≤ 1 MiB; ≤ 3 redirects on-list |
 | `memory_save` | computational | postgres | 5 s | `{run_token, key, value, ttl_days?}` |
 | `memory_recall` | read_only | postgres | 5 s | `{run_token, query}` |
-| `deploy_release` | side_effecting | local_service | 30 s + approval wait | `{run_token, version, notes, paths[]}`; packages `<workspace>/runs/<run_id>/<paths>` |
+| `deploy_release` | side_effecting | local_service | 30 s + approval wait | `{run_token, version, notes, paths[]}`; packages `<workspace>/runs/<run_id>/<paths>` through the workspace root; links anywhere on the way are refused, links inside a named directory skipped |
 | `gitlab_create_mr` | side_effecting | external | 30 s + approval wait | `{run_token, title, description, paths[]}`; registered only when `GITLAB_*` are set |
 
 OpenClaw built-ins used by the templates: `read`, `write`, `edit`, `apply_patch`, `ls`,
@@ -521,9 +545,259 @@ binding toggle produces the `bindings[]` patch and refuses a duplicate. T5.8.4 a
 
 Out of scope: our own webhook adapter (revision 1), group chats, media.
 
-### 5.9 Scheduler, 5.10 Memory, 5.11 Guardrails, 5.12 Observability, 5.13 Eval runner
+### 5.9 Scheduler
 
-Unchanged in rules and tests, with these implementation notes:
+Purpose: fire workflow runs on a cron cadence or once after a delay, durably, exactly once
+per tick.
+
+Inputs: `schedules` rows; `SCHEDULER_TICK` (default 10 s).
+
+Units: cron expressions are 5-field standard (`robfig/cron` `ParseStandard`), interpreted
+in the schedule's `tz` (IANA name, default `UTC`); `run_at` is an absolute UTC timestamp.
+
+Rules:
+
+1. On create or update, `next_run_at` = next cron occurrence after now in `tz`, or
+   `run_at` for `delay`. Invalid cron or unknown tz → 422 with the parser's message.
+2. Every tick, one transaction selects `enabled AND next_run_at <= now` with
+   `FOR UPDATE SKIP LOCKED`, creates a run per row with `trigger=schedule`,
+   `input=schedules.input`, sets `last_run_at`, `last_run_id`, and advances `next_run_at`
+   (cron) or sets `enabled=false` (delay).
+3. If the process was down across several cron occurrences, exactly one run is created on
+   restart (no catch-up backlog) and `next_run_at` is computed from now.
+4. A schedule whose workflow is deleted is disabled at the next tick with
+   `last_error = "workflow deleted"`.
+5. Minimum cron interval is 1 minute (standard cron has no seconds field).
+
+Edge cases: DST transitions follow `time.LoadLocation` semantics; a 02:30 daily schedule in
+a zone that skips 02:30 fires at the next valid instant per the cron library. Two API
+processes would both be safe because of rule 2, though only one is run.
+
+Time: injected clock; tests pin the clock and tz.
+
+Failure handling: run creation failure (422 from trigger-time validation) sets
+`last_error` and still advances `next_run_at` so a broken workflow does not fire every
+tick.
+
+Consistency: rule 2 is one transaction.
+
+Outputs: `schedules.next_run_at`, `last_run_id`, SSE `schedule.fired`.
+
+Tests: T5.9.1 cron next-run at both sides of a boundary. T5.9.2 delay fires once and
+disables. T5.9.3 downtime across 3 occurrences → one run. T5.9.4 invalid cron → 422.
+T5.9.5 deleted workflow → disabled with error. T5.9.6 tz `America/Sao_Paulo` vs UTC give
+different `next_run_at` for the same expression.
+
+Out of scope: per-second schedules, schedule pausing UI beyond the enabled toggle.
+
+### 5.10 Memory and retention
+
+Purpose: give agents facts that persist across runs and conversations, bounded by an
+explicit retention policy, and keep run-scoped state isolated per run.
+
+Inputs: agent `memory_policy` `{enabled, max_facts (default 200), fact_ttl_days (default
+30), conversation_window (default 20), conversation_ttl_days (default 7)}`.
+
+Units: days for TTLs, converted to seconds at write time (`expires_at = now + ttl`).
+
+Rules:
+
+1. Run-scoped memory is `runs.state` plus `run_nodes.messages`; it is never read by another
+   run.
+2. Agent memory is `memory_facts(scope=agent)`; conversation memory is
+   `memory_facts(scope=conversation, scope_id=conversation_id)` plus the
+   `conversation_messages` window (5.8 rule 7).
+3. `memory_save{key, value, ttl_days?}` upserts by `(agent_id, scope, scope_id, key)`;
+   `expires_at = now + (ttl_days or fact_ttl_days)`; value ≤ 2 KiB; when the agent has
+   `max_facts` facts the oldest by `created_at` is deleted first.
+4. `memory_recall{query}` returns up to 20 non-expired facts whose key or value contains
+   the query case-insensitively, ordered newest first; empty query returns the 20 newest.
+5. The prompt's memory block (5.7 rule 1) contains the 20 newest non-expired agent facts
+   plus the 10 newest conversation facts when conversation-triggered.
+6. A sweeper deletes expired facts and conversation messages older than
+   `conversation_ttl_days` every 10 minutes; expired rows are also excluded from reads so
+   the sweep timing is invisible.
+7. The UI lists and deletes facts per agent.
+
+Edge cases: a fact with `ttl_days: 0` expires immediately and is never returned. Memory
+disabled → the tools are not offered and the block is omitted.
+
+Time: UTC, injected clock.
+
+Failure handling: a memory write error is a tool error result.
+
+Consistency: upsert in one statement (`ON CONFLICT DO UPDATE`).
+
+Outputs: `memory_facts`; UI memory tab.
+
+Tests: T5.10.1 expired fact not returned before the sweep runs. T5.10.2 cap evicts oldest.
+T5.10.3 run A's state not visible to run B's prompt. T5.10.4 conversation window and TTL
+both bound the history. T5.10.5 disabled policy offers no memory tools.
+
+Out of scope: vector search, cross-agent shared memory.
+
+### 5.11 Guardrails
+
+Purpose: bound what an agent can spend and do, independently of the workflow's limits.
+
+Inputs: agent `guardrails` `{max_cost_usd_per_run, max_runs_per_hour, blocked_tools [],
+blocked_input_patterns [{tool, regex}]}`.
+
+Units: micro-USD; runs per rolling 3600 s window.
+
+Rules:
+
+1. The run's effective `max_cost_usd` is the minimum of the workflow limit and every
+   participating agent's `max_cost_usd_per_run` (clamped by the platform max).
+2. A manual, scheduled or channel trigger for a workflow that includes agent A is rejected
+   with 429 `rate limit: <n> runs/hour for agent <name>` when A has `max_runs_per_hour`
+   runs created in the last 3600 s. Scheduled triggers record the rejection in
+   `last_error` and advance.
+3. `blocked_tools` are removed from the offered tool set (so the model never sees them);
+   a call anyway is `blocked` (5.7 rule 2).
+4. `blocked_input_patterns` are RE2 regexes tested against the canonical JSON of the tool
+   input; a match returns `tool_result{is_error: true, text: "input blocked by guardrail
+   <pattern name>"}` and status `blocked`. Patterns are compiled at save time; a bad regex
+   is 422.
+
+Edge cases: a guardrail added after a run started does not affect that run (limits are
+snapshotted).
+
+Time: rolling window from the injected clock.
+
+Failure handling: n/a.
+
+Consistency: rate check and run insert in one transaction.
+
+Outputs: 429 body, `tool_calls.status = blocked`, SSE `tool_call`.
+
+Tests: T5.11.1 min-of cost rule across two agents. T5.11.2 rate limit at exactly n and
+n-1. T5.11.3 blocked tool absent from the API request's tool list (captured request).
+T5.11.4 pattern blocks `rm -rf` in `sandbox_exec.command`. T5.11.5 bad regex → 422.
+
+Out of scope: org-level budgets.
+
+### 5.12 Observability
+
+Purpose: every run can be reconstructed from the DB; the UI shows it live; logs never leak
+secrets.
+
+Inputs: engine events, HTTP requests.
+
+Units: tokens as integers; cost micro-USD; durations ms.
+
+Rules:
+
+1. Every run has a root span; node, model call, tool call and approval wait spans are
+   children with `parent_id`; `spans.attrs` carries tokens, cost, status, attempt.
+2. Cost per model call = `input_tokens × in_price + output_tokens × out_price +
+   cache_read_tokens × cache_read_price + cache_write_tokens × cache_write_price`, prices
+   in micro-USD per token derived from the per-MTok table in `config/prices.yaml`
+   (Opus 5.5: 4.00/20.00/0.20 cache read, Sonnet 5.5: 2.00/10.00/0.20, Haiku 5.5:
+   0.10/0.50, cache write = 1.25 × input unless listed). Unknown model → cost 0 and a
+   `warn` log once per model.
+3. SSE: `GET /api/events` (all runs) and `GET /api/runs/{id}/events`; each event has `id`
+   (monotonic per process), `event` type, JSON `data`; the handler honours
+   `Last-Event-ID` by replaying from the DB-backed event log for that run; heartbeat
+   comment every 15 s.
+4. The slog handler redacts values of keys named `*token*`, `*secret*`, `*key*`,
+   `authorization` and any string matching `sk-ant-[A-Za-z0-9_-]{10,}`, `sk-or-v1-[A-Za-z0-9]{10,}` or
+   `\d{6,}:[A-Za-z0-9_-]{30,}` (Telegram bot tokens) with `[redacted]`. The same function
+   runs on tool outputs before storage.
+5. `GET /healthz` (process up), `GET /readyz` (DB ping ≤ 1 s), `GET /api/status`
+   (`{version, uptime_s, db_ok, workers, runs: {queued, running, waiting_approval}}`) with
+   a 500 ms server-side budget; `/api/status` is measured in the integration suite at p95.
+6. Every request log line has `request_id`, method, path, status, `duration_ms`; every
+   engine log line has `run_id` and, when applicable, `node_id`.
+
+Edge cases: SSE clients that disconnect mid-run reconnect with `Last-Event-ID` and miss
+nothing (rule 3).
+
+Time: n/a.
+
+Failure handling: an SSE publish failure is logged at `debug` and dropped.
+
+Consistency: 5.1 rule 6.
+
+Outputs: spans, SSE, logs, `/api/status`.
+
+Tests: T5.12.1 span tree for a two-node run has the expected parent links. T5.12.2 cost
+arithmetic for each priced model from a usage fixture. T5.12.3 `Last-Event-ID` replay
+returns the missed events in order. T5.12.4 redactor table test (API key, bot token, key
+names, nested JSON). T5.12.5 `/api/status` p95 < 500 ms over 200 requests in compose.
+
+Out of scope: OpenTelemetry export (the span table is shaped so an exporter is a small
+addition; the README says so).
+
+### 5.13 Eval runner
+
+Purpose: a reproducible, offline-capable measurement of whether the platform behaves as
+specified, reported as baseline and final.
+
+Inputs: `evals/cases/<version>/*.yaml`, each `{id, version, split: public|private,
+workflow: <template key or inline>, input, provider: scripted|anthropic, script:
+<scripted provider fixture>, expect: {...}}`; `EVAL_PROVIDER` (default `scripted`);
+`EVAL_SPLIT` (default `public`).
+
+Units: pass rate as a fraction with 3 decimals; score 0..1.
+
+Rules:
+
+1. `make eval` runs every case of the selected split against a fresh database schema
+   (`eval_<timestamp>`), with the `scripted` provider by default, and writes
+   `evals/reports/<timestamp>.md` and `.json`; `make eval-baseline` and `make eval-final`
+   copy the result to `evals/reports/baseline.md` / `final.md`.
+2. The `scripted` provider is deterministic: for each model call it takes the next
+   response from the case's `script` list, matched by node id; running out of script is a
+   case failure with reason `script exhausted at <node> call <n>`. Usage tokens in the
+   script are used for cost arithmetic so cost evaluators are testable offline.
+3. Deterministic evaluators, each a pure function over the run's DB rows:
+   `termination` (status terminal and `step_count ≤ max_steps` and duration ≤ limit),
+   `approval_gate` (no `side_effecting` tool call has `started_at` before an `approved`
+   approval for it), `idempotency` (per case, duplicate side-effect inputs produced one
+   `side_effects` row), `schema` (every node output validates; final state validates
+   against `state_schema`), `allowlist` (no executed tool outside the agent allowlist),
+   `trace_integrity` (every `tool_use` id has exactly one `tool_result`).
+4. The rubric evaluator grades the final state against the case's `rubric` (3 to 6
+   criteria, each 0/1) using `claude-opus-5-5` with structured output when
+   `EVAL_PROVIDER=anthropic`; with `scripted` it runs the **heuristic** mode: each
+   criterion has a `check` (`contains`, `regex`, `json_path_eq`) evaluated locally.
+   The report labels which mode produced every rubric score. **[decision]**
+5. A case passes when all its deterministic evaluators pass and rubric score ≥ 0.75.
+   The report shows per-evaluator pass rate, overall pass rate, end-to-end success rate,
+   mean cost and duration, and a per-case table; the summary line is
+   `public split: N cases, deterministic pass <x>, e2e success <y>`.
+6. At least 20 cases ship in `v1`: 12 public, 8 private, covering: happy path dev
+   pipeline, feedback loop ×2, approval approve, approval reject, approval expiry, step
+   limit, time limit, cost limit, cancellation, idempotent replay, blocked tool, prompt
+   injection in `http_fetch` content (expect: no `deploy_release` call), prompt injection
+   in sandbox stdout, output schema repair, research pipeline happy path, schedule-
+   triggered run, channel-triggered reply, rate limit, loop limit.
+7. Cases are versioned by directory; a case's `version` must equal its directory.
+
+Edge cases: a case expecting `failed` with a reason passes `termination` (terminal) and its
+own `expect.status`. A rubric with zero criteria scores 1.
+
+Time: the runner uses the real clock but every case's limits are small (≤ 30 s).
+
+Failure handling: a runner crash on one case records it as failed with the panic text and
+continues.
+
+Consistency: one DB schema per eval run.
+
+Outputs: markdown and JSON reports; exit code 1 when overall pass rate < 0.9 on the
+public split (so CI can gate).
+
+Tests: T5.13.1 scripted provider exhaustion. T5.13.2 each deterministic evaluator on a
+positive and a negative fixture. T5.13.3 heuristic rubric checks. T5.13.4 report summary
+line format. T5.13.5 `make eval` against the shipped cases passes ≥ 0.9 (this is the
+metric).
+
+Out of scope: hill-climbing automation.
+
+#### Implementation notes for 5.9 to 5.13 (OpenClaw runtime, waves 1 and 2)
+
+The rules and tests above stand; the runtime changes how they are met:
 
 - 5.10: facts are additionally materialised into the agent's `MEMORY.md` (newest 20
   non-expired facts, bounded to 4000 chars) before each turn so OpenClaw's own memory
@@ -554,8 +828,10 @@ Unchanged in rules and tests, with these implementation notes:
   in order to the run's pending approvals as the runner sees them
   (`GET /api/approvals?run_id=&status=pending`, then `POST /api/approvals/{id}/approve`
   or `/reject`); `actions.approval_wait_seconds` leaves one pending to test expiry.
-  `expect` gains `state` (JSON pointer → expected value, one entry per check) and
-  `tool_statuses` (tool name → list of statuses the run must have recorded). The
+  `expect` gains `state` (JSON pointer → expected value, one entry per check),
+  `tool_statuses` (tool name → ordered subsequence of statuses across that tool's rows;
+  an empty list means no row), `never_tool_statuses`, `approval_statuses` (`[]` means
+  no approval) and `min_agent_messages`. The
   `approval_gate`, `idempotency`, `schema` and `allowlist` evaluators read the trace,
   which carries `side_effects[]` from wave 2.
 
@@ -708,6 +984,17 @@ loopback only); `GET /openclaw/status` (gateway connection, scopes, version).
 
 As revision 1 plus a Skills page, an Exec policy editor on the agent form (security, ask,
 allowlist patterns), and an OpenClaw panel on Status.
+
+Wave 2 as built: the Workflows page (list, "From template", delete) and the builder (a
+React Flow canvas plus an outline list for keyboard use; node panel with agent picker,
+task, output schema, `input_from`, `on_failure`/`on_reject`; edge panel with the
+condition builder and edge ordering; limits, input and state schema editors; Validate
+maps 422 details onto the node or edge they name; Save; Run builds the input form from
+`input_schema`; node positions persist under a `ui` key the backend ignores); the
+Approvals inbox (pending by default, kind labels Command/Tool call/Workflow step,
+approve, reject, approve-always for exec, a pending-count badge in the nav); and on the
+run page an Approvals section, Agent messages and the live State, with visit numbers on
+repeated nodes.
 
 ## 8. Docker and Makefile
 

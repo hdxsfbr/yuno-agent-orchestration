@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -40,7 +41,9 @@ func connectMCP(t *testing.T, url, token string) (*mcp.ClientSession, error) {
 	return client.Connect(ctx, transport, nil)
 }
 
-func TestMCPListsFinish(t *testing.T) {
+// The registry served over MCP: every platform tool of the DESIGN 5.7 table, with
+// gitlab_create_mr only when GitLab is configured.
+func TestMCPListsTools(t *testing.T) {
 	_, ts := newTestServer(t, nil, &fakeEngine{}, nil)
 	cs, err := connectMCP(t, ts.URL, testMCPToken)
 	if err != nil {
@@ -51,19 +54,27 @@ func TestMCPListsFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Tools) != 1 || res.Tools[0].Name != "finish" || res.Tools[0].Description == "" {
-		t.Fatalf("tools = %+v", res.Tools)
+	var names []string
+	for _, tool := range res.Tools {
+		names = append(names, tool.Name)
+		if tool.Description == "" {
+			t.Errorf("%s has no description", tool.Name)
+		}
+		schema, _ := json.Marshal(tool.InputSchema)
+		var s struct {
+			Type                 string         `json:"type"`
+			Required             []string       `json:"required"`
+			AdditionalProperties bool           `json:"additionalProperties"`
+			Properties           map[string]any `json:"properties"`
+		}
+		if err := json.Unmarshal(schema, &s); err != nil || s.Type != "object" || s.AdditionalProperties ||
+			s.Properties["run_token"] == nil || !slices.Contains(s.Required, "run_token") {
+			t.Errorf("%s input schema = %s", tool.Name, schema)
+		}
 	}
-	schema, _ := json.Marshal(res.Tools[0].InputSchema)
-	var s struct {
-		Type                 string         `json:"type"`
-		Required             []string       `json:"required"`
-		AdditionalProperties bool           `json:"additionalProperties"`
-		Properties           map[string]any `json:"properties"`
-	}
-	if err := json.Unmarshal(schema, &s); err != nil || s.Type != "object" || s.AdditionalProperties ||
-		len(s.Required) != 2 || s.Properties["run_token"] == nil || s.Properties["result"] == nil {
-		t.Fatalf("input schema = %s", schema)
+	slices.Sort(names)
+	if want := []string{"deploy_release", "finish", "http_fetch", "memory_recall", "memory_save"}; !slices.Equal(names, want) {
+		t.Fatalf("tools = %v, want %v", names, want)
 	}
 }
 
@@ -82,10 +93,12 @@ func TestMCPFinish(t *testing.T) {
 		{name: "schema failure goes back to the model", args: map[string]any{"run_token": "r_tok", "result": map[string]any{}},
 			engineErr: &engine.FinishValidationError{Message: "result: missing property 'summary'"},
 			wantText:  "result: missing property 'summary'", wantIsErr: true, wantCall: true},
-		{name: "invalid run token", args: map[string]any{"run_token": "r_old", "result": map[string]any{}},
+		{name: "token revoked between resolve and accept", args: map[string]any{"run_token": "r_old", "result": map[string]any{}},
 			engineErr: engine.ErrInvalidRunToken, wantText: "invalid run token", wantIsErr: true, wantCall: true},
 		{name: "wrapped invalid run token", args: map[string]any{"run_token": "r_old", "result": map[string]any{}},
 			engineErr: errors.Join(errors.New("lookup"), engine.ErrInvalidRunToken), wantText: "invalid run token", wantIsErr: true, wantCall: true},
+		{name: "unknown run token is refused before the engine (T5.7.1)", args: map[string]any{"run_token": "r_nope", "result": map[string]any{}},
+			wantText: "invalid run token", wantIsErr: true},
 		{name: "input violates the tool schema", args: map[string]any{"result": map[string]any{}},
 			wantText: "missing property 'run_token'", wantIsErr: true},
 		{name: "schema refusal with a token counts as an attempt", args: map[string]any{"run_token": "r_tok", "result": "done"},
@@ -95,7 +108,10 @@ func TestMCPFinish(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fe := &fakeEngine{finishErr: tc.engineErr}
+			fe := &fakeEngine{finishErr: tc.engineErr, tokens: map[string]engine.RunContext{
+				"r_tok": {RunID: "run-1", RunNodeID: "visit-1", NodeID: "agent"},
+				"r_old": {RunID: "run-1", RunNodeID: "visit-1", NodeID: "agent"},
+			}}
 			_, ts := newTestServer(t, nil, fe, nil)
 			cs, err := connectMCP(t, ts.URL, testMCPToken)
 			if err != nil {

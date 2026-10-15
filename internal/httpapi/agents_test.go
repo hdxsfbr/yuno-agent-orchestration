@@ -27,6 +27,9 @@ func TestCreateAgentValidation(t *testing.T) {
 		{name: "enums", body: `{"name":"a","model":"claude-opus-5-5","effort":"huge","thinking":"ultra"}`, wantPaths: []string{"effort", "thinking"}},
 		{name: "unknown tool", body: `{"name":"a","model":"claude-opus-5-5","tool_allowlist":["exec","finish","browser"]}`, wantPaths: []string{"tool_allowlist[2]"}},
 		{name: "interaction rule value", body: `{"name":"a","model":"claude-opus-5-5","interaction_rules":{"finish":"auto","deploy_release":"maybe"}}`, wantPaths: []string{"interaction_rules.deploy_release"}},
+		{name: "interaction rule for an unknown tool", body: `{"name":"a","model":"claude-opus-5-5","interaction_rules":{"rm_rf":"auto","gitlab_create_mr":"auto"}}`, wantPaths: []string{"interaction_rules.gitlab_create_mr", "interaction_rules.rm_rf"}},
+		{name: "finish is always auto", body: `{"name":"a","model":"claude-opus-5-5","interaction_rules":{"finish":"blocked"}}`, wantPaths: []string{"interaction_rules.finish"}},
+		{name: "require_approval is for platform tools", body: `{"name":"a","model":"claude-opus-5-5","interaction_rules":{"exec":"require_approval","write":"blocked"}}`, wantPaths: []string{"interaction_rules.exec"}},
 		{name: "exec policy enums", body: `{"name":"a","model":"claude-opus-5-5","exec_policy":{"security":"open","ask":"never","ask_fallback":"full"}}`, wantPaths: []string{"exec_policy.security", "exec_policy.ask"}},
 		{name: "channel", body: `{"name":"a","model":"claude-opus-5-5","channels":["telegram","slack"]}`, wantPaths: []string{"channels[1]"}},
 		{name: "max tokens", body: `{"name":"a","model":"claude-opus-5-5","max_tokens":0}`, wantPaths: []string{"max_tokens"}},
@@ -148,5 +151,20 @@ func TestCreateAgentMaterializeFailure(t *testing.T) {
 	fe.runtimeErr = errors.New("gateway disconnected")
 	if code, _ = do(t, ts, http.MethodGet, "/api/agents/"+details.ID+"/runtime", ""); code != http.StatusBadGateway {
 		t.Fatalf("runtime with gateway down: %d", code)
+	}
+}
+
+// The new platform tools may be allowlisted and given rules; a side-effecting tool may
+// be set to auto (D-009).
+func TestAgentAcceptsPlatformToolRules(t *testing.T) {
+	pool := needDB(t)
+	_, ts := newTestServer(t, pool, &fakeEngine{pool: pool}, nil)
+	body := `{"name":"Deployer","model":"claude-opus-5-5",
+		"tool_allowlist":["read","deploy_release","http_fetch","memory_save","memory_recall","finish"],
+		"interaction_rules":{"deploy_release":"auto","http_fetch":"require_approval","memory_save":"blocked","exec":"blocked","finish":"auto"}}`
+	code, resp := do(t, ts, http.MethodPost, "/api/agents", body)
+	var a store.Agent
+	if code != http.StatusCreated || json.Unmarshal(resp, &a) != nil || a.InteractionRules["deploy_release"] != "auto" {
+		t.Fatalf("status %d: %s", code, resp)
 	}
 }

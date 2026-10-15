@@ -6,6 +6,57 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-15
 
+**D-024 Task templates render missing values as empty; earlier outputs arrive as a context
+block.** (Claude, from agent A) `{{.state.reviewer.feedback}}` before the reviewer has run
+renders as an empty string rather than `<no value>` or an error, so one template serves
+the first and the looped visit; `input_from` appends `Context from earlier nodes:` with
+each named node's output as compact JSON (`start` is the run input). Why: Go
+`text/template`'s `missingkey=zero` does not cover decoded JSON maps (verified). Cost: a
+typo in a state path is silent at save time; the save-time render still catches syntax.
+
+**D-023 Template rows are read-only and hidden from the workflow list.** (Claude, from
+agents B and C) The rows `templates/*.json` load into carry `template_key`; the list
+endpoint leaves them out, PUT and DELETE on them answer 409, and the builder opens one
+with a banner and a "Create editable copy" action (instantiate). Why: a template must
+stay what the file says so `make run` on a fresh machine behaves the same. Cost: an
+operator cannot tweak the shipped template in place; the copy is one click.
+
+**D-022 Idempotency and gating details.** (Claude, from agents B and D) The idempotency
+key excludes `run_token` from the canonical input (the key already carries the node
+visit, and stored inputs have the token redacted); `finish` is always permitted and
+always `auto`; a read-only tool set to `require_approval` is gated without a key; a
+`blocked` platform tool is removed from the agent's OpenClaw tool list, so OpenClaw
+refuses the call before it reaches the MCP gate and no `tool_calls` row exists for it
+(the gate still refuses it when reached). Why: keys must be reproducible from the row;
+finish is the protocol, not a side effect. Cost: a blocked attempt is visible only in
+OpenClaw's own log, not in the trace.
+
+**D-021 Workflow runs layer limits as request, workflow, defaults, clamp.** (Claude, from
+agent A) Agent-level limits are not applied to workflow runs this wave; the min-of rule
+across participating agents is the guardrails work of wave 3 (DESIGN 5.11 rule 1). Why:
+one place to read a run's limits. Cost: an agent's own `max_cost_usd` is not yet a cap
+inside a workflow.
+
+**D-020 A run waits only while a tool call waits; tool approvals outlive a successful
+run.** (Claude, from agent A) The run is `waiting_approval` only while an MCP call is
+blocked on the decision; once the wait ends the run is `running` again with the approval
+still pending, and a pending tool approval stays decidable after the run succeeded so the
+late grant of D-014 can execute the effect. On a failed, cancelled or timed-out run every
+pending approval expires. This supersedes the revision 1 test T5.1.2 ("terminal runs
+reject approval") for kind `tool`. Why: D-014's block-then-fall-back needs it. Cost: an
+inbox may show a pending approval for a run that already succeeded; the card shows the
+run status.
+
+**D-019 The run directory is copied forward between agents.** (Claude, from agent D's
+finding) OpenClaw gives every agent its own workspace and its sandbox sees only that, so
+the Reviewer could not read the Coder's files. Before each agent node visit the engine
+copies `runs/<run_id>/` from the earlier visits' agent workspaces into the next agent's
+workspace (later visit wins); the deploy tools read the calling agent's copy. Why: a
+copy through the shared state directory needs no gateway configuration and keeps the
+sandbox isolation; a shared bind mount would need a probe of how OpenClaw's file tools
+resolve paths. Cost: large run directories are copied once per node visit. DESIGN 5.6
+rule 13.
+
 **D-018 Templates name agents; `make seed` creates them.** (Claude, unobjected) A template's
 agent node carries `agent_name` ("Coder") instead of an id, and instantiating a template
 resolves names to the agents of that name, failing with a path-qualified 422 when one is

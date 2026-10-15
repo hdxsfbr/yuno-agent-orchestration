@@ -10,27 +10,32 @@ type Props = { view: RunView; active: boolean; now: number };
 
 export default function Timeline({ view, active, now }: Props) {
   const groups = buildTimeline(view);
+  // A node that ran more than once (a loop) says which visit each card is.
+  const visits = new Map<string, number>();
+  for (const g of groups) if (g.node) visits.set(g.node.node_id, (visits.get(g.node.node_id) ?? 0) + 1);
   if (groups.length === 0) {
     return <EmptyState>{active ? "Waiting for the first step…" : "This run recorded no steps."}</EmptyState>;
   }
   return (
     <ol className="space-y-3">
       {groups.map((g) => (
-        <li key={g.node?.id ?? "other"}>{g.node ? <NodeCard node={g.node} items={g.items} now={now} /> : <OtherActivity items={g.items} />}</li>
+        <li key={g.node?.id ?? "other"}>
+          {g.node ? <NodeCard node={g.node} items={g.items} now={now} repeated={(visits.get(g.node.node_id) ?? 0) > 1} /> : <OtherActivity items={g.items} />}
+        </li>
       ))}
     </ol>
   );
 }
 
-function NodeCard({ node, items, now }: { node: RunNode; items: TimelineItem[]; now: number }) {
+function NodeCard({ node, items, now, repeated }: { node: RunNode; items: TimelineItem[]; now: number; repeated: boolean }) {
   const running = node.status === "running" || node.status === "waiting_approval";
   const duration = node.finished_at ? elapsedMs(node.started_at, node.finished_at) : running ? elapsedMs(node.started_at, undefined, now) : undefined;
   return (
-    <section className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" aria-label={`Node ${node.node_id}`}>
+    <section className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" aria-label={repeated ? `Node ${node.node_id}, visit ${node.visit}` : `Node ${node.node_id}`}>
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-zinc-200 px-4 py-2.5 dark:border-zinc-800">
         <h3 className="font-mono text-sm font-semibold">{node.node_id}</h3>
         <StatusBadge kind="node" status={node.status} />
-        {node.visit > 1 ? <span className="text-xs text-zinc-500">visit {node.visit}</span> : null}
+        {repeated || node.visit > 1 ? <span className="text-xs text-zinc-500">visit {node.visit}</span> : null}
         {node.iteration > 0 ? (
           <span className="text-xs text-zinc-500">
             {formatCount(node.iteration)} {node.iteration === 1 ? "turn" : "turns"}
@@ -59,7 +64,7 @@ function NodeCard({ node, items, now }: { node: RunNode; items: TimelineItem[]; 
         ) : null}
         <JsonView label="Output" value={node.output} defaultOpen />
         {items.length === 0 && !node.failure_reason && (node.output === undefined || node.output === null) ? (
-          <p className="text-sm text-zinc-500">{running ? "Working…" : "No activity recorded."}</p>
+          <p className="text-sm text-zinc-500">{node.status === "waiting_approval" ? "Waiting for an approval." : running ? "Working…" : "No activity recorded."}</p>
         ) : null}
       </div>
     </section>

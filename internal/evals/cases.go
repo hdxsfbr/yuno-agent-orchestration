@@ -24,36 +24,65 @@ const (
 	SplitAll     = "all"
 )
 
+// Approval decisions an action can take, as the approvals endpoints name them.
+const (
+	DecisionApprove = "approve"
+	DecisionReject  = "reject"
+)
+
 // caseIDPattern keeps ids safe for agent names, script ids and file names; the longest
 // id plus the runner's "-<6 hex>" suffix stays within the 80 characters script ids allow.
 var caseIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,60}$`)
 
 // Case is one versioned evaluation case. The YAML format is documented in
-// evals/README.md.
+// evals/README.md. A case is either a quick run (Agent and Task: one temporary agent
+// runs one task) or a workflow run (Workflow, Input and Agents: an inline definition
+// whose agent nodes name the agents of the Agents map).
 type Case struct {
-	ID          string           `yaml:"id"`
-	Version     string           `yaml:"version"`
-	Split       string           `yaml:"split"`
-	Description string           `yaml:"description"`
-	Agent       AgentSpec        `yaml:"agent"`
-	Task        string           `yaml:"task"`
-	Script      []ScriptStep     `yaml:"script"`
-	Actions     Actions          `yaml:"actions"`
-	Expect      Expect           `yaml:"expect"`
-	Rubric      []map[string]any `yaml:"rubric"`
+	ID          string `yaml:"id"`
+	Version     string `yaml:"version"`
+	Split       string `yaml:"split"`
+	Description string `yaml:"description"`
+
+	Agent AgentSpec `yaml:"agent"`
+	Task  string    `yaml:"task"`
+
+	// Workflow is a workflow.Definition in its JSON shape, held as a generic mapping
+	// because the definition's fields carry JSON tags only. Definition decodes it.
+	Workflow map[string]any       `yaml:"workflow"`
+	Input    map[string]any       `yaml:"input"`
+	Agents   map[string]AgentSpec `yaml:"agents"`
+
+	Script  []ScriptStep     `yaml:"script"`
+	Actions Actions          `yaml:"actions"`
+	Expect  Expect           `yaml:"expect"`
+	Rubric  []map[string]any `yaml:"rubric"`
 
 	// Path is the file the case was loaded from.
 	Path string `yaml:"-"`
 }
 
-// AgentSpec describes the temporary agent created for the case. Name is a label for
-// the case's agent and is sent as the agent's role; the created agent is always named
-// "eval-<id>-<random>".
+// IsWorkflow reports whether the case runs an inline workflow rather than one agent.
+func (c Case) IsWorkflow() bool { return c.Workflow != nil }
+
+// AgentSpec describes a temporary agent created for the case. In a quick run Name is a
+// label sent as the agent's role; in a workflow case the key of the agents map is the
+// label and Name is optional. Created agents are always named
+// "eval-<id>[-<key>]-<random>".
 type AgentSpec struct {
 	Name          string   `yaml:"name"`
 	SystemPrompt  string   `yaml:"system_prompt"`
 	ToolAllowlist []string `yaml:"tool_allowlist"`
 	Limits        Limits   `yaml:"limits"`
+	// InteractionRules maps a tool name to auto, require_approval or blocked
+	// (DESIGN 5.3 rule 6). The approval_gate evaluator reads it to know which side
+	// effects were allowed to run without a human decision.
+	InteractionRules map[string]string `yaml:"interaction_rules"`
+}
+
+func (a AgentSpec) isZero() bool {
+	return a.Name == "" && a.SystemPrompt == "" && len(a.ToolAllowlist) == 0 &&
+		a.Limits == (Limits{}) && len(a.InteractionRules) == 0
 }
 
 // Limits mirrors store.Limits with YAML tags. Zero means the platform default.
@@ -80,6 +109,19 @@ func (l Limits) Store() store.Limits {
 	}
 }
 
+// RunLimits are the limits the case asks the run to use: the workflow definition's for
+// a workflow case, the agent's for a quick run. Evaluators fall back to them when the
+// run does not carry its own snapshot.
+func (c Case) RunLimits() store.Limits {
+	if c.IsWorkflow() {
+		if def, err := c.Definition(); err == nil {
+			return def.Limits
+		}
+		return store.Limits{}
+	}
+	return c.Agent.Limits.Store()
+}
+
 // ScriptStep is one scripted model response: exactly one of Text or Tool.
 type ScriptStep struct {
 	Text  string       `yaml:"text"`
@@ -104,6 +146,18 @@ type Actions struct {
 	// CancelAfterSteps cancels the run once its step_count reaches this value. Zero
 	// means never.
 	CancelAfterSteps int `yaml:"cancel_after_steps"`
+	// Approvals are applied in order to the run's pending approvals as the runner sees
+	// them, whatever their kind. A pending approval with no action left is a case error.
+	Approvals []ApprovalAction `yaml:"approvals"`
+	// ApprovalWaitSeconds makes the runner leave the first pending approval alone for
+	// that long before it applies any action; an expiry case waits past the timeout.
+	ApprovalWaitSeconds int `yaml:"approval_wait_seconds"`
+}
+
+// ApprovalAction is one human decision the runner makes on a pending approval.
+type ApprovalAction struct {
+	Decision string `yaml:"decision"` // approve | reject
+	Reason   string `yaml:"reason"`
 }
 
 // Expect is what the expectation evaluator checks. Zero values mean "not checked",
@@ -113,6 +167,22 @@ type Expect struct {
 	FailureReasonContains string `yaml:"failure_reason_contains"`
 	MinToolCalls          int    `yaml:"min_tool_calls"`
 	MinModelCalls         int    `yaml:"min_model_calls"`
+	MinAgentMessages      int    `yaml:"min_agent_messages"`
+	// State maps a JSON pointer into the run's final state to the value it must have;
+	// every entry is checked.
+	State map[string]any `yaml:"state"`
+	// ToolStatuses maps a tool name to the statuses its tool call rows must show, in
+	// order: each listed status must be matched by a distinct row of that tool, earlier
+	// rows first, other rows may sit in between. An empty list means the run must have
+	// no row for the tool at all.
+	ToolStatuses map[string][]string `yaml:"tool_statuses"`
+	// NeverToolStatuses maps a tool name to statuses none of its rows may have. It states
+	// what must not happen without requiring a row, for a call the runtime may refuse
+	// before the platform records it.
+	NeverToolStatuses map[string][]string `yaml:"never_tool_statuses"`
+	// ApprovalStatuses, when set, is the exact list of the run's approval statuses in
+	// the order they were requested. An empty list means the run raised no approval.
+	ApprovalStatuses *[]string `yaml:"approval_statuses"`
 }
 
 // ModelSteps converts the script to the API's registration shape.
@@ -140,65 +210,6 @@ func (c Case) ModelSteps() ([]model.ScriptStep, error) {
 		steps = append(steps, ms)
 	}
 	return steps, nil
-}
-
-// Validate checks the case against the format rules. dirVersion is the name of the
-// version directory the file lives in, which must equal the case's version.
-func (c Case) Validate(dirVersion string) error {
-	var p []string
-	add := func(format string, args ...any) { p = append(p, fmt.Sprintf(format, args...)) }
-
-	if !caseIDPattern.MatchString(c.ID) {
-		add("id %q must match %s", c.ID, caseIDPattern)
-	}
-	switch {
-	case c.Version == "":
-		add("version is required")
-	case c.Version != dirVersion:
-		add("version %q does not match its directory %q", c.Version, dirVersion)
-	}
-	if c.Split != SplitPublic && c.Split != SplitPrivate {
-		add("split %q must be %q or %q", c.Split, SplitPublic, SplitPrivate)
-	}
-	if strings.TrimSpace(c.Task) == "" {
-		add("task is required")
-	}
-	if len(c.Script) == 0 {
-		add("script is required and must have at least one step")
-	}
-	for i, s := range c.Script {
-		n := i + 1
-		hasText := strings.TrimSpace(s.Text) != ""
-		switch {
-		case s.Tool != nil && hasText:
-			add("script step %d has both text and tool", n)
-		case s.Tool == nil && !hasText:
-			add("script step %d has neither text nor tool", n)
-		case s.Tool != nil && strings.TrimSpace(s.Tool.Name) == "":
-			add("script step %d: tool name is required", n)
-		}
-		if s.Tool != nil {
-			if _, err := json.Marshal(s.Tool.Args); err != nil {
-				add("script step %d: tool args are not JSON-encodable: %v", n, err)
-			}
-		}
-		if s.Usage != nil && (s.Usage.Prompt < 0 || s.Usage.Completion < 0) {
-			add("script step %d: usage must not be negative", n)
-		}
-	}
-	if c.Actions.CancelAfterSteps < 0 {
-		add("actions.cancel_after_steps must not be negative")
-	}
-	if !store.IsTerminal(c.Expect.Status) {
-		add("expect.status %q must be a terminal run status (succeeded, failed, cancelled, timed_out)", c.Expect.Status)
-	}
-	if c.Expect.MinToolCalls < 0 || c.Expect.MinModelCalls < 0 {
-		add("expect.min_tool_calls and expect.min_model_calls must not be negative")
-	}
-	if len(p) == 0 {
-		return nil
-	}
-	return errors.New(strings.Join(p, "; "))
 }
 
 // LoadCases reads every *.yaml and *.yml file under dir recursively, validates each

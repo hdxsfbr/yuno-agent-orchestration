@@ -82,6 +82,9 @@ test: test-go test-web ## Run all tests
 test-go: ## Go unit tests (uses the yuno_test database)
 	$(GO) go test ./... -count=1
 
+test-race: ## Engine package under the race detector (cgo: gcc installed in the throwaway container)
+	$(COMPOSE) --profile tools run --rm --no-deps go sh -c 'apk add --no-cache gcc musl-dev >/dev/null 2>&1; CGO_ENABLED=1 go test -race ./internal/engine/ -count=1'
+
 test-integration: ## Live tests against the running gateway (serial: the packages patch gateway config)
 	$(GO) go test -tags integration -p 1 ./internal/openclaw/ ./internal/engine/ -run TestIntegration -count=1
 
@@ -100,7 +103,8 @@ seed: ## Create the demo agents the workflow templates name (templates load at a
 	$(COMPOSE) run --rm api seed
 
 eval: ## Run the evaluation suite (offline by default: EVAL_PROVIDER=scripted)
-	$(COMPOSE) --profile eval run --rm eval
+	$(COMPOSE) --profile eval build eval
+	$(COMPOSE) --profile eval run --rm --no-deps eval
 
 eval-baseline: eval ## Run evals and store the report as the baseline
 	@cp "$$(ls -t evals/reports/*.md | head -1)" evals/reports/baseline.md && echo "wrote evals/reports/baseline.md"

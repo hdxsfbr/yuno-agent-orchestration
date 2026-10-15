@@ -36,6 +36,15 @@ type fakeClient struct {
 	block map[string]bool
 	// fail answers these methods with the given error.
 	fail map[string]error
+
+	// Plugin approvals the gateway holds (DESIGN 5.3 rule 5a): id → decision, "" while
+	// pending. A resolve broadcasts plugin.approval.resolved like the gateway does.
+	plugin   map[string]string
+	pluginN  int
+	resolver string // resolvedBy of the events this client's own resolves produce
+	// onExecResolve runs after exec.approval.resolve, e.g. to push the terminal
+	// session.approval event the gateway sends.
+	onExecResolve func(id, decision string)
 }
 
 type fakeCall struct {
@@ -45,7 +54,7 @@ type fakeCall struct {
 
 func newFakeClient() *fakeClient {
 	return &fakeClient{subs: map[chan openclaw.Event]struct{}{}, connected: true, abortEmits: true, history: map[string][]json.RawMessage{},
-		block: map[string]bool{}, fail: map[string]error{}}
+		block: map[string]bool{}, fail: map[string]error{}, plugin: map[string]string{}, resolver: "operator:yuno-api"}
 }
 
 func (f *fakeClient) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
@@ -117,6 +126,47 @@ func (f *fakeClient) handle(method string, p json.RawMessage) (any, error) {
 			go f.push("chat", map[string]any{"runId": in.RunID, "sessionKey": in.SessionKey, "state": "aborted", "stopReason": "rpc"})
 		}
 		return openclaw.ChatAbortResult{OK: true, Aborted: true, RunIDs: []string{in.RunID}}, nil
+	case "plugin.approval.request":
+		var in openclaw.PluginApprovalRequestParams
+		_ = json.Unmarshal(p, &in)
+		if !in.TwoPhase {
+			return nil, &openclaw.RPCError{Code: "INVALID_REQUEST", Message: "fake: the engine must request two-phase approvals"}
+		}
+		f.mu.Lock()
+		f.pluginN++
+		id := fmt.Sprintf("plugin:%04d", f.pluginN)
+		f.plugin[id] = ""
+		f.mu.Unlock()
+		now := time.Now().UnixMilli()
+		return openclaw.PluginApprovalRequestResult{Status: "accepted", ID: id, CreatedAtMs: now, ExpiresAtMs: now + in.TimeoutMs}, nil
+	case "plugin.approval.resolve":
+		var in struct{ ID, Decision string }
+		_ = json.Unmarshal(p, &in)
+		f.mu.Lock()
+		cur, known := f.plugin[in.ID]
+		if known && cur == "" {
+			f.plugin[in.ID] = in.Decision
+		}
+		resolver := f.resolver
+		f.mu.Unlock()
+		switch {
+		case !known:
+			return nil, &openclaw.RPCError{Code: openclaw.CodeApprovalNotFound, Message: "unknown or expired approval id"}
+		case cur != "":
+			return nil, &openclaw.RPCError{Code: openclaw.CodeApprovalAlreadyResolved, Message: "approval already resolved"}
+		}
+		go f.push(openclaw.EventPluginApprovalResolved, map[string]any{"id": in.ID, "decision": in.Decision, "resolvedBy": resolver, "ts": time.Now().UnixMilli()})
+		return map[string]any{"ok": true}, nil
+	case "exec.approval.resolve":
+		var in openclaw.ExecApprovalResolveParams
+		_ = json.Unmarshal(p, &in)
+		f.mu.Lock()
+		hook := f.onExecResolve
+		f.mu.Unlock()
+		if hook != nil {
+			go hook(in.ID, in.Decision)
+		}
+		return map[string]any{"ok": true}, nil
 	case "chat.history":
 		var in struct{ SessionKey string }
 		_ = json.Unmarshal(p, &in)
@@ -352,4 +402,21 @@ func rewrite(v any, field string, exact map[string]string, agentID string) any {
 		}
 	}
 	return v
+}
+
+// gatewayResolves decides a plugin approval on the gateway's side: another approval
+// client (resolvedBy set) or the gateway's own timeout (resolvedBy nil).
+func (f *fakeClient) gatewayResolves(id, decision string, resolvedBy any) {
+	f.mu.Lock()
+	if _, ok := f.plugin[id]; ok {
+		f.plugin[id] = decision
+	}
+	f.mu.Unlock()
+	f.push(openclaw.EventPluginApprovalResolved, map[string]any{"id": id, "decision": decision, "resolvedBy": resolvedBy, "ts": time.Now().UnixMilli()})
+}
+
+func (f *fakeClient) pluginDecision(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.plugin[id]
 }

@@ -56,10 +56,16 @@ func (e *ValidationError) Error() string {
 // resolveLimits fills zero limits from the request, then the agent's own limits, then
 // store.DefaultLimits, and clamps the result to the platform maximums (DESIGN 5.2).
 func resolveLimits(req, agent store.Limits, cfg config.Config) (store.Limits, error) {
+	return resolveLayeredLimits("agent limits.", req, agent, cfg)
+}
+
+// resolveLayeredLimits is resolveLimits with the second layer named by prefix: the
+// agent's limits for a quick run, the workflow definition's for a workflow run.
+func resolveLayeredLimits(prefix string, req, agent store.Limits, cfg config.Config) (store.Limits, error) {
 	msgs := negativeLimits("limits.", req)
-	// The agent's own limits are validated on write; one stored before that rule (or
-	// written around the API) is refused here rather than silently replaced.
-	msgs = append(msgs, negativeLimits("agent limits.", agent)...)
+	// The second layer is validated on write; one stored before that rule (or written
+	// around the API) is refused here rather than silently replaced.
+	msgs = append(msgs, negativeLimits(prefix, agent)...)
 	if len(msgs) > 0 {
 		return store.Limits{}, &ValidationError{Messages: msgs}
 	}

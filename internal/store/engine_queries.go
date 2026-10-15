@@ -184,3 +184,202 @@ func EndSpanAt(ctx context.Context, q Querier, id string, at time.Time, attrs js
 	_, err := q.Exec(ctx, `UPDATE spans SET ended_at=$2, attrs = attrs || $3::jsonb WHERE id=$1`, id, at.UTC(), attrs)
 	return err
 }
+
+// ---- wave 2: graph walk, approvals, pending effects -----------------------------------
+
+func collectRun(rows pgx.Rows, err error) (*Run, error) {
+	if err != nil {
+		return nil, err
+	}
+	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
+}
+
+// SetRunCurrentNode records the node the walk is at without touching the state. It also
+// drops resume_node_visit_id: the walk moves off a decided approval node only through
+// here, so once it has, that visit's decision is spent and the node, reached again, is
+// a new entry.
+func SetRunCurrentNode(ctx context.Context, q Querier, id, node string) error {
+	_, err := q.Exec(ctx, `UPDATE runs SET current_node=$2, resume_node_visit_id=NULL, updated_at=now() WHERE id=$1`, id, node)
+	return err
+}
+
+// SetRunStateNode replaces state[<nodeID>] with output and moves current_node in one
+// statement (DESIGN 5.6 rule 6). It changes only that key, so a concurrent append to
+// state.pending_effects is never lost.
+func SetRunStateNode(ctx context.Context, q Querier, id, nodeID string, output json.RawMessage, currentNode string) (*Run, error) {
+	if len(output) == 0 {
+		output = json.RawMessage(`null`)
+	}
+	return collectRun(q.Query(ctx, `UPDATE runs SET state = jsonb_set(CASE WHEN jsonb_typeof(state) = 'object' THEN state ELSE '{}'::jsonb END,
+		ARRAY[$2::text], $3::jsonb, true), current_node=$4, updated_at=now() WHERE id=$1 RETURNING `+runColumns,
+		id, nodeID, output, currentNode))
+}
+
+// InsertApprovalAndPause stores a pending approval and moves its running run to
+// waiting_approval at the approval's node visit in one transaction (DESIGN 5.6 rule 8):
+// a decision, which re-queues only a paused run, can never see the approval while the
+// run is still running. ErrNotFound means the run was not running; nothing is stored.
+func InsertApprovalAndPause(ctx context.Context, db interface {
+	Begin(context.Context) (pgx.Tx, error)
+}, a *Approval, at time.Time) (*Run, error) {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // no-op after commit
+	if err := InsertApproval(ctx, tx, a); err != nil {
+		return nil, err
+	}
+	run, err := PauseRunAt(ctx, tx, a.RunID, a.RunNodeID, at)
+	if err != nil {
+		return nil, err
+	}
+	return run, tx.Commit(ctx)
+}
+
+// AppendPendingEffect appends one entry to state.pending_effects (DESIGN 5.3 rule 5).
+func AppendPendingEffect(ctx context.Context, q Querier, id string, entry json.RawMessage) (*Run, error) {
+	return collectRun(q.Query(ctx, `UPDATE runs SET state = jsonb_set(
+		CASE WHEN jsonb_typeof(state) = 'object' THEN state ELSE '{}'::jsonb END, '{pending_effects}',
+		COALESCE(state->'pending_effects', '[]'::jsonb) || jsonb_build_array($2::jsonb), true), updated_at=now()
+		WHERE id=$1 RETURNING `+runColumns, id, entry))
+}
+
+// RequeuePausedRunAt moves a waiting_approval run back to queued (an approval node was
+// decided) and adds the paused interval to paused_total_ms.
+func RequeuePausedRunAt(ctx context.Context, q Querier, id string, at time.Time) (*Run, error) {
+	return collectRun(q.Query(ctx, `UPDATE runs SET status=$2,
+		paused_total_ms = paused_total_ms + GREATEST(0, COALESCE(EXTRACT(EPOCH FROM ($3::timestamptz - paused_at)) * 1000, 0))::bigint,
+		paused_at=NULL, updated_at=now() WHERE id=$1 AND status=$4 RETURNING `+runColumns,
+		id, RunQueued, at.UTC(), RunWaitingApproval))
+}
+
+// SetApprovalExternalID stores the gateway's id for an approval registered with it.
+func SetApprovalExternalID(ctx context.Context, q Querier, id, externalID string) error {
+	_, err := q.Exec(ctx, `UPDATE approvals SET external_id=$2 WHERE id=$1`, id, externalID)
+	return err
+}
+
+// ListExpiredApprovals returns pending approvals whose expires_at is not after `at`.
+func ListExpiredApprovals(ctx context.Context, q Querier, at time.Time) ([]Approval, error) {
+	rows, err := q.Query(ctx, `SELECT `+approvalColumns+` FROM approvals WHERE status='pending' AND expires_at <= $1
+		ORDER BY expires_at`, at.UTC())
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[Approval])
+}
+
+// GetApprovalForRunNode returns the newest approval of a kind raised by a node visit.
+func GetApprovalForRunNode(ctx context.Context, q Querier, runNodeID, kind string) (*Approval, error) {
+	rows, err := q.Query(ctx, `SELECT `+approvalColumns+` FROM approvals WHERE run_node_id=$1 AND kind=$2
+		ORDER BY requested_at DESC, id DESC LIMIT 1`, runNodeID, kind)
+	if err != nil {
+		return nil, err
+	}
+	a, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Approval])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return a, err
+}
+
+// LatestNodeVisit returns the newest visit of a node in a run.
+func LatestNodeVisit(ctx context.Context, q Querier, runID, nodeID string) (*RunNode, error) {
+	rows, err := q.Query(ctx, `SELECT `+runNodeColumns+` FROM run_nodes WHERE run_id=$1 AND node_id=$2
+		ORDER BY visit DESC LIMIT 1`, runID, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	n, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[RunNode])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return n, err
+}
+
+// FinishRunNode sets a node visit's terminal status (approval node visits, which no
+// visit goroutine owns) unless it is already terminal, and returns the row.
+func FinishRunNode(ctx context.Context, q Querier, id, status string, reason *string, at time.Time) (*RunNode, error) {
+	rows, err := q.Query(ctx, `UPDATE run_nodes SET status=$2, failure_reason=COALESCE($3, failure_reason), finished_at=$4
+		WHERE id=$1 AND status IN ($5, $6, $7) RETURNING `+runNodeColumns,
+		id, status, reason, at.UTC(), NodePending, NodeRunning, NodeWaitingApproval)
+	if err != nil {
+		return nil, err
+	}
+	n, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[RunNode])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return n, err
+}
+
+// SetToolCallOutcome records the outcome of a gated tool call the engine settled after
+// its MCP request had stopped waiting (rejected or expired approval).
+func SetToolCallOutcome(ctx context.Context, q Querier, id, status string, output json.RawMessage, at time.Time) error {
+	if len(output) == 0 {
+		output = json.RawMessage(`null`)
+	}
+	_, err := q.Exec(ctx, `UPDATE tool_calls SET status=$2, output=$3, finished_at=COALESCE(finished_at, $4)
+		WHERE id=$1 AND status=$5`, id, status, output, at.UTC(), ToolAwaitingApproval)
+	return err
+}
+
+// EndApprovalSpan closes the approval_wait span of an approval, wherever it was opened.
+func EndApprovalSpan(ctx context.Context, q Querier, runID, approvalID string, at time.Time, attrs json.RawMessage) error {
+	if len(attrs) == 0 {
+		attrs = json.RawMessage(`{}`)
+	}
+	_, err := q.Exec(ctx, `UPDATE spans SET ended_at=$3, attrs = attrs || $4::jsonb
+		WHERE run_id=$1 AND kind='approval_wait' AND attrs->>'approval_id'=$2 AND ended_at IS NULL`,
+		runID, approvalID, at.UTC(), attrs)
+	return err
+}
+
+// OpenRootSpan returns the run's open root span, which a run paused at an approval node
+// keeps open across workers; ErrNotFound when there is none.
+func OpenRootSpan(ctx context.Context, q Querier, runID string) (string, error) {
+	var id string
+	err := q.QueryRow(ctx, `SELECT id FROM spans WHERE run_id=$1 AND kind='run' AND parent_id IS NULL AND ended_at IS NULL
+		ORDER BY started_at DESC, id DESC LIMIT 1`, runID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return id, err
+}
+
+// GetAgentForRun loads an agent even when it was deleted after the run started: a
+// run continues with the agents its snapshot names (DESIGN 5.6 edge cases).
+func GetAgentForRun(ctx context.Context, q Querier, id string) (*Agent, error) {
+	rows, err := q.Query(ctx, `SELECT `+agentColumns+` FROM agents WHERE id = $1`, id)
+	if err != nil {
+		return nil, err
+	}
+	a, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Agent])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return a, err
+}
+
+// AddExecAllowlistPattern appends a command pattern to an agent's exec allowlist
+// unless it is there already (DESIGN 5.3 rule 3, allow-always).
+func AddExecAllowlistPattern(ctx context.Context, q Querier, agentID, pattern string) error {
+	_, err := q.Exec(ctx, `UPDATE agents SET exec_policy = jsonb_set(
+		CASE WHEN jsonb_typeof(exec_policy) = 'object' THEN exec_policy ELSE '{}'::jsonb END, '{allowlist}',
+		COALESCE(exec_policy->'allowlist', '[]'::jsonb) || to_jsonb($2::text), true), updated_at=now()
+		WHERE id=$1 AND NOT (COALESCE(exec_policy->'allowlist', '[]'::jsonb) ? $2)`, agentID, pattern)
+	return err
+}
+
+// ReopenApproval undoes a decision the gateway could not be told about, so the
+// approval can be decided again.
+func ReopenApproval(ctx context.Context, q Querier, id, decidedStatus string) error {
+	_, err := q.Exec(ctx, `UPDATE approvals SET status='pending', decided_at=NULL, decided_by=NULL, reason=NULL
+		WHERE id=$1 AND status=$2`, id, decidedStatus)
+	return err
+}

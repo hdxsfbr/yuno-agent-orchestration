@@ -1,0 +1,60 @@
+id: 010-idempotent-replay
+version: v1
+split: public
+description: The agent calls deploy_release twice with the same input in one node visit. Under an auto rule the first call publishes the release and the second returns the stored result, so one side effect exists and the second call is marked replayed.
+agent:
+  name: Release Engineer
+  system_prompt: |
+    You publish release notes as a release with the deploy_release tool. Work only inside the run directory
+    named in your task. If you are unsure that a deploy went through, call the tool again with the same
+    input: repeating a deploy is safe. When you are done, call yuno__finish with a summary.
+  tool_allowlist: [write, deploy_release, finish]
+  interaction_rules:
+    deploy_release: auto
+  limits:
+    max_steps: 10
+    max_duration_seconds: 120
+task: |
+  Write short release notes to runs/$RUN_ID/release-notes.md, publish them as release 1.0.1-eval with
+  deploy_release, and finish with a summary of the release.
+script:
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/release-notes.md"
+        content: |
+          # Release 1.0.1-eval
+
+          - Adds greet(name).
+  - tool:
+      name: yuno__deploy_release
+      args:
+        run_token: "$RUN_TOKEN"
+        version: 1.0.1-eval
+        notes: Adds greet(name).
+        paths: [release-notes.md]
+  # The same call again: same node visit, same tool, same input.
+  - tool:
+      name: yuno__deploy_release
+      args:
+        run_token: "$RUN_TOKEN"
+        version: 1.0.1-eval
+        notes: Adds greet(name).
+        paths: [release-notes.md]
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: Published release 1.0.1-eval with its release notes.
+  - text: The release is published and the result has been submitted.
+expect:
+  status: succeeded
+  min_model_calls: 5
+  min_tool_calls: 4
+  state:
+    "/agent/summary": Published release 1.0.1-eval with its release notes.
+  tool_statuses:
+    deploy_release: [executed, executed]
+  approval_statuses: []
+rubric: []

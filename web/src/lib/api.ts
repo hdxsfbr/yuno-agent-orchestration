@@ -408,6 +408,76 @@ export type Trace = {
   approvals: Approval[];
 };
 
+// ---------------------------------------------------------------------------------------
+// Workflows (DESIGN 5.6) and approvals (DESIGN 5.3). The definition shapes mirror
+// internal/workflow/def.go; members the UI does not know about travel through every
+// edit untouched because the helpers in lib/workflow.ts always spread the object they
+// change.
+// ---------------------------------------------------------------------------------------
+
+export type NodeKind = "start" | "agent" | "approval" | "end";
+export const NODE_KINDS: readonly NodeKind[] = ["start", "agent", "approval", "end"];
+
+export const CONDITION_OPS = ["eq", "neq", "in", "exists", "gt", "lt"] as const;
+export type ConditionOp = (typeof CONDITION_OPS)[number];
+
+/** {path, op, value}, or {all: [...]} / {any: [...]} combining other conditions. */
+export type Condition = {
+  path?: string;
+  op?: ConditionOp;
+  value?: unknown;
+  all?: Condition[];
+  any?: Condition[];
+};
+
+export type WorkflowNode = {
+  id: string;
+  kind: NodeKind;
+  agent_id?: string;
+  /** How a template names its agent; instantiating resolves it to agent_id. */
+  agent_name?: string;
+  task?: string;
+  output_schema?: unknown;
+  input_from?: string[];
+  message?: string;
+  on_reject?: string;
+  on_failure?: string;
+};
+
+export type WorkflowEdge = { from: string; to: string; when?: Condition };
+
+export type Position = { x: number; y: number };
+
+export type WorkflowDefinition = {
+  input_schema?: unknown;
+  state_schema?: unknown;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  limits?: Limits;
+  /** Where the builder drew each node; the backend keeps it with the definition. */
+  ui?: { positions?: Record<string, Position> };
+};
+
+export type WorkflowInput = { name: string; description: string; definition: WorkflowDefinition };
+
+export type Workflow = WorkflowInput & {
+  id: string;
+  version: number;
+  template_key?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkflowTemplate = { key: string; name: string; description: string; definition: WorkflowDefinition };
+
+/** One entry of a 422 `details` list. */
+export type ValidationDetail = { path: string; message: string };
+
+/** An approval as the inbox lists it: the tool call is joined for tool approvals. */
+export type ApprovalItem = Approval & { tool_call?: ToolCall };
+
+export type ApprovalDecision = { reason?: string; always?: boolean };
+
 const withBody = (method: string, body?: unknown): RequestInit => ({
   method,
   body: body === undefined ? undefined : JSON.stringify(body),
@@ -470,3 +540,38 @@ export const cancelRun = (id: string) => api<Run>(`/api/runs/${seg(id)}/cancel`,
 export const getTrace = async (id: string) => normalizeTrace(await api<Trace>(`/api/runs/${seg(id)}/trace`));
 
 export const isTerminalStatus = (s: RunStatus) => s === "succeeded" || s === "failed" || s === "cancelled" || s === "timed_out";
+
+// Go encodes nil slices as null; the builder treats nodes and edges as always present.
+function normalizeDefinition(d: Partial<WorkflowDefinition> | null | undefined): WorkflowDefinition {
+  return { ...d, nodes: d?.nodes ?? [], edges: d?.edges ?? [] };
+}
+
+export function normalizeWorkflow(w: Workflow): Workflow {
+  return { ...w, description: w.description ?? "", definition: normalizeDefinition(w.definition) };
+}
+
+export const listWorkflows = async () => ((await api<Workflow[] | null>("/api/workflows")) ?? []).map(normalizeWorkflow);
+export const getWorkflow = async (id: string) => normalizeWorkflow(await api<Workflow>(`/api/workflows/${seg(id)}`));
+export const createWorkflow = async (input: WorkflowInput) => normalizeWorkflow(await api<Workflow>("/api/workflows", withBody("POST", input)));
+export const updateWorkflow = async (id: string, input: WorkflowInput) =>
+  normalizeWorkflow(await api<Workflow>(`/api/workflows/${seg(id)}`, withBody("PUT", input)));
+export const deleteWorkflow = (id: string) => api<void>(`/api/workflows/${seg(id)}`, withBody("DELETE"));
+/** Resolves for a valid definition; a 422 ApiError carries the path-qualified details. */
+export const validateWorkflow = (definition: WorkflowDefinition) =>
+  api<{ valid: boolean }>("/api/workflows/validate", withBody("POST", { definition }));
+
+export const listWorkflowTemplates = async () =>
+  ((await api<WorkflowTemplate[] | null>("/api/workflow-templates")) ?? []).map((t) => ({ ...t, definition: normalizeDefinition(t.definition) }));
+export const instantiateTemplate = async (key: string, name?: string) =>
+  normalizeWorkflow(await api<Workflow>(`/api/workflow-templates/${seg(key)}/instantiate`, withBody("POST", name ? { name } : {})));
+
+export async function listApprovals(opts: { status?: ApprovalStatus; runId?: string } = {}) {
+  const q = new URLSearchParams();
+  if (opts.status) q.set("status", opts.status);
+  if (opts.runId) q.set("run_id", opts.runId);
+  const qs = q.toString();
+  return (await api<ApprovalItem[] | null>(`/api/approvals${qs ? `?${qs}` : ""}`)) ?? [];
+}
+export const approveApproval = (id: string, body: ApprovalDecision = {}) => api<Approval>(`/api/approvals/${seg(id)}/approve`, withBody("POST", body));
+export const rejectApproval = (id: string, body: Pick<ApprovalDecision, "reason"> = {}) =>
+  api<Approval>(`/api/approvals/${seg(id)}/reject`, withBody("POST", body));

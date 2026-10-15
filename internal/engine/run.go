@@ -10,7 +10,6 @@ import (
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
 	"yuno/internal/store"
-	"yuno/internal/workflow"
 )
 
 // outcome is how a node visit, and with it the run, ended.
@@ -19,9 +18,15 @@ type outcome struct {
 	nodeStatus string // succeeded | failed
 	reason     string
 	output     json.RawMessage
+	// limit marks a limit violation or a cancellation: a node's on_failure edge does not
+	// apply to those (DESIGN 5.6 rule 12).
+	limit bool
 	// interrupted means the engine is shutting down: the run is left for the stale-run
 	// sweeper to re-queue and nothing terminal is written.
 	interrupted bool
+	// paused means the run waits at an approval node: the worker lets it go and a
+	// decision re-queues it (DESIGN 5.6 rule 8).
+	paused bool
 }
 
 func succeeded(output json.RawMessage) outcome {
@@ -29,59 +34,75 @@ func succeeded(output json.RawMessage) outcome {
 }
 
 // failed is a failure outcome; the reason is stored and published, so credentials in
-// an error text are redacted here.
+// an error text are redacted here. A timeout or a cancellation is never a node error.
 func failed(status, reason string) outcome {
-	return outcome{runStatus: status, nodeStatus: store.NodeFailed, reason: obs.Redact(reason)}
+	return outcome{runStatus: status, nodeStatus: store.NodeFailed, reason: obs.Redact(reason), limit: status != store.RunFailed}
 }
 
-// runRun executes one claimed run to a terminal state (DESIGN 5.1).
+// violated is the outcome of a limit violation (DESIGN 5.2).
+func violated(v *violation) outcome {
+	o := failed(v.status, v.reason)
+	o.limit = true
+	return o
+}
+
+// runRun executes one claimed run until it is terminal or waits at an approval node
+// (DESIGN 5.1, 5.6).
 func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 	wctx := context.WithoutCancel(ctx)
 	now := e.clock.Now()
-	if run.Attempt <= 1 || run.StartedAt == nil {
+	resumed := run.CurrentNode != nil && *run.CurrentNode != ""
+	if run.StartedAt == nil || (run.Attempt <= 1 && !resumed) {
 		if err := store.SetRunStartedAt(wctx, e.deps.Pool, run.ID, now); err != nil {
 			e.log.Warn("set started_at failed", "run_id", run.ID, "error", err)
 		}
 		run.StartedAt = &now
 	}
-	var stale []store.RunNode
-	if run.Attempt > 1 {
-		// The lost worker's turns may still run in OpenClaw: the replacement visit aborts
-		// them by their recorded run ids before it starts its own turn.
-		stale = unfinishedVisits(wctx, e, run.ID)
+	// Visits left unfinished by a lost worker (a re-queue, or a decision on a run whose
+	// worker is gone) may still have turns in OpenClaw: the next agent visit aborts them
+	// by their recorded run ids before it starts its own turn.
+	stale := unfinishedVisits(wctx, e, run.ID)
+	if len(stale) > 0 {
 		if n, err := store.FailRunningNodes(wctx, e.deps.Pool, run.ID, "worker lost", now); err == nil && n > 0 {
 			e.logEvent(ctx, run.ID, "warn", fmt.Sprintf("attempt %d: %d unfinished node visit(s) marked failed", run.Attempt, n))
 		}
 	}
-	rootSpan := e.startSpan(ctx, run.ID, nil, "run", "run", now, nil, map[string]any{"attempt": run.Attempt, "trigger": run.Trigger})
+	rootSpan := ""
+	if resumed {
+		rootSpan, _ = store.OpenRootSpan(wctx, e.deps.Pool, run.ID)
+	}
+	if rootSpan == "" {
+		rootSpan = e.startSpan(ctx, run.ID, nil, "run", "run", now, nil, map[string]any{"attempt": run.Attempt, "trigger": run.Trigger})
+	}
 	if fresh, err := store.GetRun(wctx, e.deps.Pool, run.ID); err == nil {
 		run = fresh
 	}
 	e.emit(ctx, run.ID, "run.status", map[string]any{"run": run})
 
 	var snap runSnapshot
-	var node *workflow.Node
-	err := json.Unmarshal(run.WorkflowSnapshot, &snap)
-	if err == nil {
-		node, err = singleAgentNode(&snap.Definition)
-	}
 	var res outcome
-	sessionKey := ""
-	if err != nil {
-		res = failed(store.RunFailed, err.Error())
+	w := &walk{e: e, run: run, rootSpan: rootSpan, stale: stale}
+	if err := json.Unmarshal(run.WorkflowSnapshot, &snap); err != nil {
+		res = failed(store.RunFailed, "workflow snapshot: "+err.Error())
 	} else {
-		over := runOverrides{}
+		w.def = &snap.Definition
 		if snap.RunOverrides != nil {
-			over = *snap.RunOverrides
+			w.over = *snap.RunOverrides
 		}
-		res, sessionKey = e.runAgentNode(ctx, run, node, over, rootSpan, stale)
+		res = w.execute(ctx)
 	}
-	if res.interrupted {
+	switch {
+	case res.interrupted:
 		e.endSpan(ctx, rootSpan, e.clock.Now(), map[string]any{"interrupted": true})
 		return
+	case res.paused:
+		// The root span stays open: the worker that resumes the run continues it.
+	default:
+		e.finishRun(wctx, run.ID, res, rootSpan)
 	}
-	e.finishRun(wctx, run.ID, node, res, rootSpan)
-	e.deleteSession(wctx, sessionKey)
+	for _, key := range w.sessions {
+		e.deleteSession(wctx, key)
+	}
 }
 
 // unfinishedVisits lists a run's node visits that never reached a terminal status.
@@ -101,35 +122,10 @@ func unfinishedVisits(ctx context.Context, e *Engine, runID string) []store.RunN
 	return out
 }
 
-// singleAgentNode returns the one agent node of a definition. Multi-node workflows are
-// not executed by this engine version.
-func singleAgentNode(d *workflow.Definition) (*workflow.Node, error) {
-	var found *workflow.Node
-	for i := range d.Nodes {
-		if d.Nodes[i].Kind == workflow.KindAgent {
-			if found != nil {
-				return nil, errors.New("workflow has more than one agent node")
-			}
-			found = &d.Nodes[i]
-		}
-	}
-	if found == nil {
-		return nil, errors.New("workflow has no agent node")
-	}
-	return found, nil
-}
-
-// finishRun writes the run's terminal state: typed state, status, SSE, root span.
-func (e *Engine) finishRun(ctx context.Context, runID string, node *workflow.Node, res outcome, rootSpan string) {
+// finishRun writes the run's terminal state: status, approvals it leaves behind, SSE,
+// root span.
+func (e *Engine) finishRun(ctx context.Context, runID string, res outcome, rootSpan string) {
 	now := e.clock.Now()
-	if res.runStatus == store.RunSucceeded && node != nil {
-		state := map[string]json.RawMessage{node.ID: res.output}
-		b, _ := json.Marshal(state)
-		end := "end"
-		if err := store.SetRunState(ctx, e.deps.Pool, runID, b, &end); err != nil {
-			e.log.Warn("set run state failed", "run_id", runID, "error", err)
-		}
-	}
 	var reason *string
 	if res.reason != "" {
 		r := res.reason
@@ -141,6 +137,13 @@ func (e *Engine) finishRun(ctx context.Context, runID string, node *workflow.Nod
 		if run, err = store.GetRun(ctx, e.deps.Pool, runID); err != nil {
 			return
 		}
+	}
+	if run.Status != store.RunSucceeded {
+		why := "run ended"
+		if run.Status == store.RunCancelled {
+			why = "run cancelled"
+		}
+		e.expireRunApprovals(ctx, runID, why)
 	}
 	e.endSpan(ctx, rootSpan, now, map[string]any{"status": run.Status, "steps": run.StepCount,
 		"tool_calls": run.ToolCallCount, "cost_usd_micros": run.CostUSDMicros, "reason": res.reason})
@@ -181,38 +184,6 @@ func (e *Engine) transition(ctx context.Context, runID, to string, reason *strin
 		return run, err
 	}
 	return nil, fmt.Errorf("run %s: status kept changing", runID)
-}
-
-// runAgentNode executes one visit of an agent node and returns its outcome and the
-// session to delete once the run's terminal state is stored.
-func (e *Engine) runAgentNode(ctx context.Context, run *store.Run, node *workflow.Node, over runOverrides, rootSpan string, stale []store.RunNode) (outcome, string) {
-	v, res := e.newVisit(ctx, run, node, over, rootSpan, stale)
-	if v == nil {
-		return res, ""
-	}
-	e.mu.Lock()
-	e.active[run.ID] = v
-	e.mu.Unlock()
-	defer func() {
-		e.mu.Lock()
-		delete(e.active, run.ID)
-		e.mu.Unlock()
-	}()
-	res = v.execute(ctx)
-	wctx := context.WithoutCancel(ctx)
-	if res.interrupted {
-		// Shutting down: OpenClaw must not keep executing a turn nobody mirrors. The run
-		// stays for recovery, whose replacement visit starts a session of its own.
-		v.abortLiveTurn(wctx)
-		v.release()
-		return res, ""
-	}
-	v.abortLiveTurn(wctx) // a turn whose chat.send answer was lost, or an unconfirmed abort
-	v.finish(wctx, res)
-	if !v.sessionCreated {
-		return res, "" // nothing reached the gateway that could have created the session
-	}
-	return res, v.key
 }
 
 // deleteSession removes a finished node session from OpenClaw, best effort (DESIGN

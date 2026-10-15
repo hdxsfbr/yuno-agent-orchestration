@@ -1,0 +1,168 @@
+id: 006-feedback-loop-limit
+version: v1
+split: public
+description: A reviewer who never approves cannot keep the loop going. With max_loop_visits 2 the run fails when the reviewer sends the work back to the coder for a third visit.
+workflow:
+  input_schema:
+    type: object
+    properties:
+      task: { type: string }
+    required: [task]
+    additionalProperties: true
+  nodes:
+    - { id: start, kind: start }
+    - id: coder
+      kind: agent
+      agent_name: coder
+      task: |
+        Implement the following in the directory runs/$RUN_ID/ of your workspace, with tests you run yourself:
+
+        {{.input.task}}
+        {{with .state.reviewer}}
+        The reviewer asked for changes. Address every point before finishing:
+        {{.feedback}}
+        {{end}}
+        When done, finish with a summary, the list of files you created or changed (paths relative to runs/$RUN_ID/) and whether the tests passed.
+      output_schema:
+        type: object
+        properties:
+          summary: { type: string }
+          files: { type: array, items: { type: string } }
+          tests_passed: { type: boolean }
+        required: [summary, files]
+        additionalProperties: true
+      input_from: [start, reviewer]
+    - id: reviewer
+      kind: agent
+      agent_name: reviewer
+      task: |
+        Review the work in runs/$RUN_ID/ for this task:
+
+        {{.input.task}}
+
+        The coder reports: {{.state.coder.summary}}
+        Files: {{range .state.coder.files}}{{.}} {{end}}
+
+        Read the files and run the tests yourself. Finish with verdict "approved" when the code does what the task asks and the tests pass, otherwise "changes_requested" with specific, actionable feedback.
+      output_schema:
+        type: object
+        properties:
+          verdict: { type: string, enum: [approved, changes_requested] }
+          feedback: { type: string }
+        required: [verdict, feedback]
+        additionalProperties: true
+      input_from: [coder]
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: coder }
+    - { from: coder, to: reviewer }
+    - { from: reviewer, to: coder, when: { path: /reviewer/verdict, op: eq, value: changes_requested } }
+    - { from: reviewer, to: end, when: { path: /reviewer/verdict, op: eq, value: approved } }
+  limits:
+    max_steps: 40
+    max_duration_seconds: 300
+    max_node_iterations: 12
+    max_loop_visits: 2
+    max_cost_usd: 2
+    max_tool_calls: 80
+input:
+  task: >-
+    Write a Python function greet(name) that returns "Hello, <name>!" and "Hello, stranger!"
+    when the name is blank, with a test.
+agents:
+  coder:
+    name: Software engineer
+    system_prompt: |
+      You are a careful software engineer. Implement exactly what the task asks, in small readable code.
+      Work only inside the run directory named in your task. When a reviewer sends feedback, address every
+      point, and call yuno__finish with the result.
+    tool_allowlist: [read, write, edit, ls, exec, finish]
+  reviewer:
+    name: Code reviewer
+    system_prompt: |
+      You are a demanding code reviewer. Read the code and send it back with specific feedback unless it is
+      complete in every respect. Keep your review notes in review.md in your run directory, then call
+      yuno__finish with your verdict.
+    tool_allowlist: [read, write, ls, exec, finish]
+script:
+  # coder, first visit
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/greet.py"
+        content: |
+          def greet(name):
+              return f"Hello, {name}!"
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: First draft of greet(name).
+          files: [greet.py]
+          tests_passed: false
+  - text: The first draft is written and the result has been submitted.
+  # reviewer, first visit
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/review.md"
+        content: |
+          # Review
+
+          Changes requested: handle a blank name and add a test.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          verdict: changes_requested
+          feedback: Handle a blank name and add a test.
+  - text: The review is complete and the requested changes have been submitted.
+  # coder, second visit
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/greet.py"
+        content: |
+          def greet(name):
+              name = name.strip()
+              if not name:
+                  return "Hello, stranger!"
+              return f"Hello, {name}!"
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: Blank names are handled; a test is still to come.
+          files: [greet.py]
+          tests_passed: false
+  - text: The revision is written and the result has been submitted.
+  # reviewer, second visit: still not satisfied, so the loop would need a third coder visit
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/review.md"
+        content: |
+          # Review
+
+          Changes requested: there is still no test for greet.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          verdict: changes_requested
+          feedback: There is still no test for greet.
+  - text: The review is complete and the requested changes have been submitted.
+expect:
+  status: failed
+  failure_reason_contains: loop limit 2 exceeded for coder
+  min_model_calls: 12
+  min_tool_calls: 8
+  min_agent_messages: 3
+  state:
+    "/reviewer/verdict": changes_requested
+    "/coder/summary": Blank names are handled; a test is still to come.
+rubric: []

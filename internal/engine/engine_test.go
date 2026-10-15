@@ -191,9 +191,18 @@ func TestValidateOutputAndTextFallback(t *testing.T) {
 }
 
 func TestTaskMessage(t *testing.T) {
+	run := &store.Run{ID: "0199f0a2-0000-7000-8000-000000000001", Input: json.RawMessage(`{"task":"Count to 3."}`)}
+	// A wave 1 snapshot's task ("{{input.task}}") still renders.
+	node := &workflow.Node{Task: "{{input.task}} Save runs/$RUN_ID/notes.md.", OutputSchema: json.RawMessage("{\n  \"type\": \"object\"\n}")}
+	w := &walk{run: run, def: &workflow.Definition{Nodes: []workflow.Node{{ID: "start", Kind: workflow.KindStart}}}}
+	task, err := w.renderTask(node)
+	if err != nil {
+		t.Fatal(err)
+	}
 	v := &visit{
-		run:   &store.Run{ID: "0199f0a2-0000-7000-8000-000000000001", Input: json.RawMessage(`{"task":"Count to 3."}`)},
-		node:  &workflow.Node{Task: "{{input.task}} Save runs/$RUN_ID/notes.md.", OutputSchema: json.RawMessage("{\n  \"type\": \"object\"\n}")},
+		run:   run,
+		node:  node,
+		task:  task,
 		token: "r_abcdefghijklmnopqrstuvwx",
 		over:  runOverrides{ScriptID: "001-quick-run-happy"},
 	}
@@ -349,9 +358,9 @@ func TestTrigger(t *testing.T) {
 	if err := json.Unmarshal(run.WorkflowSnapshot, &snap); err != nil {
 		t.Fatal(err)
 	}
-	node, err := singleAgentNode(&snap.Definition)
-	if err != nil || node.AgentID != a.ID || node.Task != "{{input.task}}" || len(node.OutputSchema) == 0 {
-		t.Fatalf("snapshot node = %+v, %v", node, err)
+	node, ok := snap.Definition.Node("agent")
+	if !ok || node.AgentID != a.ID || node.Task != "{{.input.task}}" || len(node.OutputSchema) == 0 {
+		t.Fatalf("snapshot node = %+v, %v", node, ok)
 	}
 	if snap.RunOverrides == nil || snap.RunOverrides.Model != "scripted/scripted-1" || snap.RunOverrides.ScriptID != "case-1" || snap.Limits != run.Limits {
 		t.Fatalf("snapshot = %s", run.WorkflowSnapshot)
@@ -685,6 +694,8 @@ func TestCostOvershootByOneCall(t *testing.T) {
 	}
 }
 
+// T5.5.2: chat.send RPC failure twice then success → one run, one node, the same
+// idempotency key, backoff 1 s then 2 s, a span per failed attempt.
 func TestChatSendRetryThenSuccess(t *testing.T) {
 	env := newEnv(t)
 	a := env.agent(nil)
@@ -768,6 +779,7 @@ func TestNonRetryableModelError(t *testing.T) {
 	}
 }
 
+// T5.5.3: provider 529 twice then success → three turns ("Continue."), one node.
 func TestRetryableModelErrorContinues(t *testing.T) {
 	env := newEnv(t)
 	a := env.agent(nil)
@@ -1521,5 +1533,31 @@ func TestRunTokenOutlivesApprovalPause(t *testing.T) {
 	go finishThenFinal(t, env, p, `{"summary":"after approval"}`)
 	if r := env.wait(done, run.ID); r.Status != store.RunSucceeded {
 		t.Fatalf("run = %s %v", r.Status, r.FailureReason)
+	}
+}
+
+// T5.5.3, the bound: a retryable provider error is retried as a new turn three times,
+// then the node fails with the error kind.
+func TestRetryableModelErrorGivesUp(t *testing.T) {
+	env := newEnv(t)
+	a := env.agent(nil)
+	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
+		go env.fc.push("chat", chatEvent(p.SessionKey, p.IdempotencyKey, "error", map[string]any{
+			"errorKind": "rate_limited", "errorMessage": "slow down", "errorDetail": map[string]any{"httpStatus": 429}}))
+		return startedTurn(p)
+	}
+	run, done := env.start(TriggerRequest{AgentID: a.ID, Task: "x"})
+	r := env.wait(done, run.ID)
+	if r.Status != store.RunFailed || deref(r.FailureReason) != "model error: rate_limited" || len(env.fc.sendParams()) != 4 {
+		t.Fatalf("run = %s %q sends=%d", r.Status, deref(r.FailureReason), len(env.fc.sendParams()))
+	}
+	if !slices.Equal(env.clock.Sleeps, []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}) {
+		t.Fatalf("backoff = %v", env.clock.Sleeps)
+	}
+	if n := env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='model_call' AND attrs->>'status'='error'`, run.ID); n != 4 {
+		t.Fatalf("failed attempt spans = %d", n)
+	}
+	if n := env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='log' AND data->>'level'='warn' AND data->>'message' LIKE 'model error (rate_limited)%'`, run.ID); n != 3 {
+		t.Fatalf("retry warnings = %d", n)
 	}
 }

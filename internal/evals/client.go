@@ -38,19 +38,23 @@ func NewClient(base, token string) *Client {
 }
 
 // APIError is a non-2xx answer from the api, decoded from the Error schema when the
-// body has one.
+// body has one. Details are the path-qualified messages of a 422.
 type APIError struct {
 	Method  string
 	Path    string
 	Status  int
 	Code    string
 	Message string
+	Details []string
 }
 
 func (e *APIError) Error() string {
 	msg := e.Message
 	if msg == "" {
 		msg = http.StatusText(e.Status)
+	}
+	if len(e.Details) > 0 {
+		msg += " (" + strings.Join(e.Details, "; ") + ")"
 	}
 	if e.Code != "" {
 		return fmt.Sprintf("%s %s: %d %s: %s", e.Method, e.Path, e.Status, e.Code, msg)
@@ -69,21 +73,44 @@ func statusOf(err error) int {
 
 // AgentRequest is the body of POST /api/agents the runner sends.
 type AgentRequest struct {
-	Name          string       `json:"name"`
-	Role          string       `json:"role,omitempty"`
-	SystemPrompt  string       `json:"system_prompt,omitempty"`
-	Model         string       `json:"model"`
-	ToolAllowlist []string     `json:"tool_allowlist"`
-	Limits        store.Limits `json:"limits"`
+	Name             string            `json:"name"`
+	Role             string            `json:"role,omitempty"`
+	SystemPrompt     string            `json:"system_prompt,omitempty"`
+	Model            string            `json:"model"`
+	ToolAllowlist    []string          `json:"tool_allowlist"`
+	InteractionRules map[string]string `json:"interaction_rules,omitempty"`
+	Limits           store.Limits      `json:"limits"`
 }
 
-// RunRequest is the body of POST /api/runs the runner sends (a one-node quick run).
+// RunRequest is the body of POST /api/runs the runner sends: a one-node quick run
+// (AgentID and Task) or a workflow run (WorkflowID and Input).
 type RunRequest struct {
-	AgentID  string       `json:"agent_id"`
-	Task     string       `json:"task"`
-	Model    string       `json:"model,omitempty"`
-	ScriptID string       `json:"script_id,omitempty"`
-	Limits   store.Limits `json:"limits"`
+	AgentID    string          `json:"agent_id,omitempty"`
+	Task       string          `json:"task,omitempty"`
+	WorkflowID string          `json:"workflow_id,omitempty"`
+	Input      json.RawMessage `json:"input,omitempty"`
+	Model      string          `json:"model,omitempty"`
+	ScriptID   string          `json:"script_id,omitempty"`
+	Limits     store.Limits    `json:"limits"`
+}
+
+// WorkflowRequest is the body of POST /api/workflows the runner sends.
+type WorkflowRequest struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Definition  json.RawMessage `json:"definition"`
+}
+
+// ApprovalItem is one entry of GET /api/approvals: the approval with its tool call
+// joined when it gates one.
+type ApprovalItem struct {
+	store.Approval
+	ToolCall *store.ToolCall `json:"tool_call,omitempty"`
+}
+
+// decisionRequest is the body of POST /api/approvals/{id}/approve and /reject.
+type decisionRequest struct {
+	Reason string `json:"reason,omitempty"`
 }
 
 // scriptRegistration is the body of POST /api/evals/scripts.
@@ -130,6 +157,56 @@ func (c *Client) DeleteAgent(ctx context.Context, id string) error {
 		return nil
 	}
 	return err
+}
+
+// CreateWorkflow stores a workflow definition.
+func (c *Client) CreateWorkflow(ctx context.Context, req WorkflowRequest) (*store.Workflow, error) {
+	var out store.Workflow
+	if err := c.do(ctx, http.MethodPost, "/api/workflows", req, &out); err != nil {
+		return nil, err
+	}
+	if out.ID == "" {
+		return nil, errors.New("POST /api/workflows: response has no id")
+	}
+	return &out, nil
+}
+
+// DeleteWorkflow deletes a workflow. One that is already gone is not an error.
+func (c *Client) DeleteWorkflow(ctx context.Context, id string) error {
+	err := c.do(ctx, http.MethodDelete, "/api/workflows/"+url.PathEscape(id), nil, nil)
+	if statusOf(err) == http.StatusNotFound {
+		return nil
+	}
+	return err
+}
+
+// ListApprovals returns the run's approvals with the given status (all of them when
+// status is empty).
+func (c *Client) ListApprovals(ctx context.Context, runID, status string) ([]ApprovalItem, error) {
+	q := url.Values{"run_id": {runID}}
+	if status != "" {
+		q.Set("status", status)
+	}
+	var out []ApprovalItem
+	if err := c.do(ctx, http.MethodGet, "/api/approvals?"+q.Encode(), nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DecideApproval approves or rejects a pending approval (DecisionApprove or
+// DecisionReject). An approval that is no longer pending answers 409, returned as an
+// *APIError the caller can recognise with statusOf.
+func (c *Client) DecideApproval(ctx context.Context, id, decision, reason string) (*store.Approval, error) {
+	if decision != DecisionApprove && decision != DecisionReject {
+		return nil, fmt.Errorf("unknown approval decision %q", decision)
+	}
+	var out store.Approval
+	path := "/api/approvals/" + url.PathEscape(id) + "/" + decision
+	if err := c.do(ctx, http.MethodPost, path, decisionRequest{Reason: reason}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // RegisterScript registers (or replaces) a script for the scripted provider.
@@ -226,10 +303,21 @@ func decodeAPIError(method, path string, status int, raw []byte) *APIError {
 		Error struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
+			Details []struct {
+				Path    string `json:"path"`
+				Message string `json:"message"`
+			} `json:"details"`
 		} `json:"error"`
 	}
 	if json.Unmarshal(raw, &env) == nil {
 		ae.Code, ae.Message = env.Error.Code, env.Error.Message
+		for _, d := range env.Error.Details {
+			if d.Path != "" {
+				ae.Details = append(ae.Details, d.Path+": "+d.Message)
+			} else {
+				ae.Details = append(ae.Details, d.Message)
+			}
+		}
 	}
 	return ae
 }

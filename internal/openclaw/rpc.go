@@ -3,6 +3,7 @@ package openclaw
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 )
 
@@ -227,4 +228,101 @@ func (t TranscriptEntry) Text() string {
 func IsReasoningPart(typ string) bool {
 	t := strings.ToLower(typ)
 	return strings.Contains(t, "thinking") || strings.Contains(t, "reasoning")
+}
+
+// ---- approvals (DESIGN 5.3 rules 3 and 5a) ---------------------------------------------
+
+// Error codes the gateway answers a resolve with when its side is already settled
+// [probed 2026-10-15]: the decision was made elsewhere, the approval timed out or the
+// gateway restarted. The platform's own decision stands either way.
+const (
+	CodeApprovalAlreadyResolved = "APPROVAL_ALREADY_RESOLVED"
+	CodeApprovalNotFound        = "APPROVAL_NOT_FOUND"
+)
+
+// PluginApprovalRequestParams are the params of plugin.approval.request [probed]. The
+// platform always sets TwoPhase: without it the call blocks until the decision.
+type PluginApprovalRequestParams struct {
+	Title            string        `json:"title"`
+	Description      string        `json:"description"`
+	Detail           string        `json:"detail,omitempty"`
+	Severity         string        `json:"severity"` // info | warning | critical
+	ToolName         string        `json:"toolName"`
+	ToolCallID       string        `json:"toolCallId"`
+	MCPTool          PluginMCPTool `json:"mcpTool"`
+	AllowedDecisions []string      `json:"allowedDecisions"`
+	AgentID          string        `json:"agentId,omitempty"`
+	SessionKey       string        `json:"sessionKey,omitempty"`
+	TimeoutMs        int64         `json:"timeoutMs"` // at most MaxPluginApprovalTimeoutMs
+	TwoPhase         bool          `json:"twoPhase"`
+}
+
+// PluginMCPTool names the MCP tool a plugin approval gates.
+type PluginMCPTool struct {
+	Server string `json:"server"`
+	Tool   string `json:"tool"`
+}
+
+// MaxPluginApprovalTimeoutMs is the gateway's ceiling for timeoutMs [probed].
+const MaxPluginApprovalTimeoutMs = 600_000
+
+// PluginApprovalRequestResult is the two-phase answer [probed]: status "accepted" and
+// the gateway's id ("plugin:<uuid>").
+type PluginApprovalRequestResult struct {
+	Status        string          `json:"status"`
+	ID            string          `json:"id"`
+	DeliveryRoute json.RawMessage `json:"deliveryRoute,omitempty"`
+	CreatedAtMs   int64           `json:"createdAtMs"`
+	ExpiresAtMs   int64           `json:"expiresAtMs"`
+}
+
+// PluginApprovalRequest registers a plugin approval with the gateway's approval clients.
+func PluginApprovalRequest(ctx context.Context, c Client, p PluginApprovalRequestParams) (PluginApprovalRequestResult, error) {
+	var out PluginApprovalRequestResult
+	err := CallAs(ctx, c, "plugin.approval.request", p, &out)
+	return out, err
+}
+
+// PluginApprovalResolve decides a plugin approval (allow-once | allow-always | deny);
+// the gateway answers {ok: true} and broadcasts plugin.approval.resolved [probed].
+func PluginApprovalResolve(ctx context.Context, c Client, id, decision string) error {
+	_, err := c.Call(ctx, "plugin.approval.resolve", map[string]any{"id": id, "decision": decision})
+	return err
+}
+
+// ExecApprovalResolve decides an exec approval (allow-once | allow-always | deny) [docs].
+func ExecApprovalResolve(ctx context.Context, c Client, id, decision string) error {
+	_, err := c.Call(ctx, "exec.approval.resolve", ExecApprovalResolveParams{ID: id, Decision: decision})
+	return err
+}
+
+// EventPluginApprovalResolved is broadcast to every approval client on any decision,
+// and on the gateway's own timeout with ResolvedBy null [probed].
+const EventPluginApprovalResolved = "plugin.approval.resolved"
+
+// PluginApprovalResolvedEvent is the payload of plugin.approval.resolved [probed].
+type PluginApprovalResolvedEvent struct {
+	ID         string          `json:"id"`
+	Decision   string          `json:"decision"` // allow-once | allow-always | deny
+	ResolvedBy json.RawMessage `json:"resolvedBy"`
+	TS         int64           `json:"ts"`
+	Request    json.RawMessage `json:"request,omitempty"`
+}
+
+// Decided reports whether someone decided: the gateway's own timeout sends the same
+// event with resolvedBy null, which is no decision (DESIGN 5.3 rule 5a).
+func (e PluginApprovalResolvedEvent) Decided() bool {
+	s := strings.TrimSpace(string(e.ResolvedBy))
+	return s != "" && s != "null"
+}
+
+// IsSettledApprovalError reports whether a resolve failed because the gateway's side
+// of the approval is already settled (decided, timed out, or forgotten on restart).
+func IsSettledApprovalError(err error) bool {
+	var re *RPCError
+	if !errors.As(err, &re) || re == nil {
+		return false
+	}
+	all := re.Code + " " + re.Message + " " + string(re.Details)
+	return strings.Contains(all, CodeApprovalAlreadyResolved) || strings.Contains(all, CodeApprovalNotFound)
 }

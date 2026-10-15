@@ -9,16 +9,21 @@ import (
 	"time"
 )
 
+// allPassing is a passing result for every evaluator, in report order.
+func allPassing() []EvalResult {
+	var out []EvalResult
+	for _, name := range EvaluatorNames() {
+		out = append(out, EvalResult{Name: name, Passed: true})
+	}
+	return out
+}
+
 func passing(id, split string) CaseResult {
 	return CaseResult{
 		ID: id, Version: "v1", Split: split, Status: "succeeded", E2E: true,
 		StepCount: 3, CostUSDMicros: 2000, DurationMs: 3000,
-		Evaluators: []EvalResult{
-			{Name: EvalTermination, Passed: true},
-			{Name: EvalTraceIntegrity, Passed: true},
-			{Name: EvalExpectation, Passed: true},
-		},
-		Rubric: RubricResult{Score: 1},
+		Evaluators: allPassing(),
+		Rubric:     RubricResult{Score: 1},
 	}
 }
 
@@ -71,14 +76,17 @@ func TestBuildReportAggregates(t *testing.T) {
 	if s.DeterministicPass != 0.75 || s.E2ESuccess != 0.75 {
 		t.Fatalf("rates = %v, %v", s.DeterministicPass, s.E2ESuccess)
 	}
-	wantEval := map[string][2]int{EvalTermination: {4, 4}, EvalTraceIntegrity: {4, 4}, EvalExpectation: {3, 4}}
-	if len(s.Evaluators) != 3 {
+	if len(s.Evaluators) != len(EvaluatorNames()) {
 		t.Fatalf("evaluators = %+v", s.Evaluators)
 	}
 	for i, name := range EvaluatorNames() {
+		want := [2]int{4, 4}
+		if name == EvalExpectation {
+			want = [2]int{3, 4}
+		}
 		e := s.Evaluators[i]
-		if e.Name != name || e.Passed != wantEval[name][0] || e.Total != wantEval[name][1] {
-			t.Errorf("evaluator %d = %+v, want %s %v", i, e, name, wantEval[name])
+		if e.Name != name || e.Passed != want[0] || e.Total != want[1] {
+			t.Errorf("evaluator %d = %+v, want %s %v", i, e, name, want)
 		}
 	}
 	if s.Evaluators[2].Rate != 0.75 {
@@ -206,8 +214,8 @@ func TestMarkdown(t *testing.T) {
 		"# Eval report 2026-10-15T12:00:00Z",
 		"| termination | 2 | 2 | 1.000 |",
 		"| expectation | 1 | 2 | 0.500 |",
-		"| a | public | succeeded |  | 3/3 | 0.002000 | 3.0s |",
-		`| c\|pipe | public | failed | line one line two \| with a pipe | 2/3 (expectation) |`,
+		"| a | public | succeeded |  | 7/7 | 0.002000 | 3.0s |",
+		`| c\|pipe | public | failed | line one line two \| with a pipe | 6/7 (expectation) |`,
 		"## Failures",
 		"- c|pipe (run run-9)",
 		`  - expectation: status "failed", want "succeeded"`,
@@ -215,6 +223,39 @@ func TestMarkdown(t *testing.T) {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown missing %q:\n%s", want, md)
 		}
+	}
+}
+
+func TestMarkdownShowsEveryEvaluatorPerCase(t *testing.T) {
+	bad := failing("b")
+	bad.Evaluators = append(bad.Evaluators[:3:3],
+		EvalResult{Name: EvalApprovalGate, Detail: "tool call t2 (deploy_release) executed without an approval"},
+		EvalResult{Name: EvalIdempotency, Passed: true},
+		EvalResult{Name: EvalSchema, Passed: true},
+		EvalResult{Name: EvalAllowlist, Detail: "agent coder executed exec"})
+	old := passing("old", SplitPublic)
+	old.Evaluators = old.Evaluators[:3] // a result recorded before the newer evaluators existed
+	md := BuildReport(ReportMeta{GeneratedAt: t0}, []CaseResult{passing("a", SplitPublic), bad, old}).Markdown()
+
+	for _, want := range []string{
+		"## Evaluators by case",
+		"| Case | termination | trace_integrity | expectation | approval_gate | idempotency | schema | allowlist |",
+		"| a | pass | pass | pass | pass | pass | pass | pass |",
+		"| b | pass | pass | FAIL | FAIL | pass | pass | FAIL |",
+		"| old | pass | pass | pass | - | - | - | - |",
+		"| approval_gate | 1 | 2 | 0.500 |",
+		"  - approval_gate: tool call t2 (deploy_release) executed without an approval",
+		"  - allowlist: agent coder executed exec",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown missing %q:\n%s", want, md)
+		}
+	}
+}
+
+func TestMarkdownHasNoMatrixForAnEmptyReport(t *testing.T) {
+	if md := BuildReport(ReportMeta{GeneratedAt: t0}, nil).Markdown(); strings.Contains(md, "Evaluators by case") {
+		t.Errorf("unexpected matrix:\n%s", md)
 	}
 }
 

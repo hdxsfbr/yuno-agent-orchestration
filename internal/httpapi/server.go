@@ -16,6 +16,7 @@ import (
 
 	"yuno/api"
 	"yuno/internal/config"
+	"yuno/internal/deploytarget"
 	"yuno/internal/engine"
 	"yuno/internal/events"
 	"yuno/internal/model"
@@ -37,19 +38,30 @@ type Deps struct {
 	Scripts model.ScriptStore
 	// ModelTransport is the model proxy's upstream round tripper; nil means the default.
 	ModelTransport http.RoundTripper
+	// Recorder writes SSE events durably; nil builds one on Pool and Hub when there is a
+	// pool.
+	Recorder *events.Recorder
+	// FetchTransport is http_fetch's transport; nil means the default.
+	FetchTransport http.RoundTripper
+	// TemplatesDir holds the workflow templates loaded at start (DESIGN 5.6 rule 9).
+	TemplatesDir string
 }
 
 type Server struct {
-	cfg       config.Config
-	log       *slog.Logger
-	pool      *pgxpool.Pool
-	hub       *events.Hub
-	engine    engine.Service
-	gateway   openclaw.Client
-	scripts   model.ScriptStore
-	tools     *tools.Registry
-	startedAt time.Time
-	mux       *http.ServeMux
+	cfg     config.Config
+	log     *slog.Logger
+	pool    *pgxpool.Pool
+	hub     *events.Hub
+	engine  engine.Service
+	gateway openclaw.Client
+	scripts model.ScriptStore
+	tools   *tools.Registry
+	effects *tools.Service
+	rec     *events.Recorder
+	// templatesDir is where LoadTemplates reads workflow templates.
+	templatesDir string
+	startedAt    time.Time
+	mux          *http.ServeMux
 }
 
 // Gateway dial policy for Run: transport failures are retried every 2 s for up to 60 s.
@@ -97,6 +109,21 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 	stopDialOnShutdown()
 
+	// The server comes first: it owns the platform tools, whose executor is the engine's
+	// fallback for side effects approved after the MCP wait (DESIGN 5.3 rule 5).
+	s, err := New(Deps{
+		Cfg:          cfg,
+		Log:          log,
+		Pool:         pool,
+		Hub:          hub,
+		Gateway:      gw,
+		Scripts:      model.NewMemoryScriptStore(),
+		Recorder:     rec,
+		TemplatesDir: "templates",
+	})
+	if err != nil {
+		return err
+	}
 	eng := engine.New(engine.Deps{
 		Cfg:      cfg,
 		Log:      log,
@@ -105,21 +132,14 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		Hub:      hub,
 		Recorder: rec,
 		StateDir: cfg.OpenClawStateDir,
+		Effects:  s.effects,
 	})
+	s.engine = eng
 	engineDone := make(chan error, 1)
 	go func() { engineDone <- eng.Start(ctx) }()
 
-	s, err := New(Deps{
-		Cfg:     cfg,
-		Log:     log,
-		Pool:    pool,
-		Hub:     hub,
-		Engine:  eng,
-		Gateway: gw,
-		Scripts: model.NewMemoryScriptStore(),
-	})
-	if err != nil {
-		return err
+	if err := s.LoadTemplates(ctx); err != nil {
+		log.Warn("workflow templates not loaded", "error", err)
 	}
 	if cfg.MCPToken == "" {
 		log.Warn("YUNO_MCP_TOKEN is empty; every MCP request will be refused")
@@ -225,7 +245,23 @@ func New(d Deps) (*Server, error) {
 		scripts:   d.Scripts,
 		startedAt: time.Now(),
 	}
-	s.tools = tools.NewPlatformRegistry(tools.PlatformDeps{AcceptFinish: s.acceptFinish, RejectFinish: s.rejectFinish})
+	s.rec = d.Recorder
+	if s.rec == nil && d.Pool != nil {
+		pool := d.Pool
+		s.rec = &events.Recorder{Hub: d.Hub, Append: func(ctx context.Context, runID, typ string, data json.RawMessage) (int64, error) {
+			return store.AppendRunEvent(ctx, pool, runID, typ, data)
+		}}
+	}
+	s.templatesDir = d.TemplatesDir
+	s.tools = tools.NewPlatformRegistry(s.platformDeps(d))
+	s.effects = &tools.Service{
+		Pool:           d.Pool,
+		Registry:       s.tools,
+		Log:            d.Log,
+		Workspace:      s.workspace,
+		MaxOutputBytes: d.Cfg.ToolOutputMaxBytes,
+		Emit:           s.emit,
+	}
 	if err := s.routes(d.ModelTransport); err != nil {
 		return nil, err
 	}
@@ -256,6 +292,19 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/agents/{id}/runtime", s.agentRuntime)
 
 	mux.HandleFunc("GET /api/tools", s.listTools)
+
+	mux.HandleFunc("GET /api/approvals", s.listApprovals)
+	mux.HandleFunc("POST /api/approvals/{id}/approve", s.approveApproval)
+	mux.HandleFunc("POST /api/approvals/{id}/reject", s.rejectApproval)
+
+	mux.HandleFunc("GET /api/workflows", s.listWorkflows)
+	mux.HandleFunc("POST /api/workflows", s.createWorkflow)
+	mux.HandleFunc("POST /api/workflows/validate", s.validateWorkflow)
+	mux.HandleFunc("GET /api/workflows/{id}", s.getWorkflow)
+	mux.HandleFunc("PUT /api/workflows/{id}", s.updateWorkflow)
+	mux.HandleFunc("DELETE /api/workflows/{id}", s.deleteWorkflow)
+	mux.HandleFunc("GET /api/workflow-templates", s.listTemplates)
+	mux.HandleFunc("POST /api/workflow-templates/{key}/instantiate", s.instantiateTemplate)
 
 	mux.HandleFunc("GET /api/runs", s.listRuns)
 	mux.HandleFunc("POST /api/runs", s.createRun)
@@ -387,4 +436,51 @@ func refreshMCPAfterStart(ctx context.Context, cfg config.Config, gw openclaw.Cl
 		return
 	}
 	log.Info("openclaw mcp server refreshed", "server", openclaw.MCPServerName)
+}
+
+// platformDeps configures the platform tools from the environment (DESIGN 5.7 table).
+func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
+	cfg := d.Cfg
+	pd := tools.PlatformDeps{
+		AcceptFinish: s.acceptFinish,
+		RejectFinish: s.rejectFinish,
+		Pool:         d.Pool,
+		Deploy: tools.DeployConfig{
+			TargetURL:       cfg.DeployTargetURL,
+			MaxBytes:        int64(cfg.DeployTargetMaxMB) << 20,
+			MaxRequestBytes: deploytarget.MaxBodyBytes,
+			PublicBaseURL:   cfg.PublicBaseURL,
+		},
+		Fetch: tools.FetchConfig{
+			Allowlist:      cfg.HTTPFetchAllowlist,
+			MaxOutputBytes: cfg.ToolOutputMaxBytes,
+			Transport:      d.FetchTransport,
+		},
+	}
+	if cfg.GitLabEnabled() {
+		pd.GitLab = &tools.GitLabConfig{
+			BaseURL: cfg.GitLabBaseURL, ProjectID: cfg.GitLabProjectID, Token: cfg.GitLabToken,
+			MaxBytes: int64(cfg.DeployTargetMaxMB) << 20,
+		}
+	}
+	return pd
+}
+
+// workspace is an agent's OpenClaw workspace as the api sees it (the state directory
+// is mounted at the same path in both containers).
+func (s *Server) workspace(openclawAgentID string) string {
+	if openclawAgentID == "" {
+		return ""
+	}
+	return openclaw.WorkspaceDir(s.cfg.OpenClawStateDir, openclawAgentID)
+}
+
+// emit records an SSE event durably and fans it out; failures are logged.
+func (s *Server) emit(ctx context.Context, runID, typ string, v any) {
+	if s.rec == nil {
+		return
+	}
+	if _, err := s.rec.Emit(context.WithoutCancel(ctx), runID, typ, v); err != nil {
+		s.log.Warn("emit event failed", "run_id", runID, "event", typ, "error", err)
+	}
 }

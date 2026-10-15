@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -46,6 +47,9 @@ type fakeRun struct {
 	total     int // steps in the registered script
 	started   time.Time
 	finished  *time.Time
+
+	approvals []*fakeApproval
+	raised    int // approvals raised so far
 }
 
 // fakeAPI answers the endpoints the runner uses with canned bodies and advances each run
@@ -68,6 +72,20 @@ type fakeAPI struct {
 	cancelLag     int                // polls a cancelled run stays non-terminal for
 	alwaysPollErr bool
 	readyFailures int
+
+	// Workflow runs and approvals (see runner_workflow_test.go).
+	workflows        map[string]WorkflowRequest
+	deletedWorkflows []string
+	workflowErrors   map[string]*fakeAPIError // by case id: POST /api/workflows fails
+	failAgentMatch   string                   // an agent whose name contains this fails to create
+	plans            map[string]approvalPlan  // by case id
+	decisions        []fakeDecision
+	approvalSeq      int
+	listErrors       int // leading approval lists that return 500
+	decideErrors     int // leading decisions that return 500
+	decideConflicts  int // leading decisions that find the approval expired (409)
+	stickyConflicts  int // leading decisions answered 409 although the approval stays pending
+	decideAttempts   int // decision requests received, failed ones included
 }
 
 func newFakeAPI() *fakeAPI {
@@ -80,6 +98,7 @@ func newFakeAPI() *fakeAPI {
 			"003-cancel":          {status: store.RunSucceeded, steps: 4},
 		},
 		stuck: map[string]bool{}, failAgentFor: map[string]bool{},
+		workflows: map[string]WorkflowRequest{}, workflowErrors: map[string]*fakeAPIError{}, plans: map[string]approvalPlan{},
 	}
 }
 
@@ -122,6 +141,10 @@ func (f *fakeAPI) handler() http.Handler {
 				writeErr(w, 500, "internal", "materialise failed")
 				return
 			}
+		}
+		if f.failAgentMatch != "" && strings.Contains(req.Name, f.failAgentMatch) {
+			writeErr(w, 500, "internal", "materialise failed")
+			return
 		}
 		f.nextID++
 		id := fmt.Sprintf("agent-%d", f.nextID)
@@ -214,6 +237,7 @@ func (f *fakeAPI) handler() http.Handler {
 		}
 		writeJSON(w, 200, f.traceFor(run))
 	})
+	f.workflowRoutes(mux)
 	return f.auth(mux)
 }
 
@@ -243,10 +267,16 @@ func (f *fakeAPI) advance(run *fakeRun) {
 		}
 		return
 	}
+	if f.advanceApprovals(run) {
+		return
+	}
 	run.polls++
 	run.status = store.RunRunning
 	if f.stuck[run.caseID] {
 		run.steps = 1
+		return
+	}
+	if f.raiseApproval(run) {
 		return
 	}
 	out := f.outcomes[run.caseID]
@@ -274,6 +304,9 @@ func (f *fakeAPI) runBody(run *fakeRun) store.Run {
 func (f *fakeAPI) traceFor(run *fakeRun) store.Trace {
 	body := f.runBody(run)
 	tr := store.Trace{Run: &body, Spans: []store.Span{{ID: "s-" + run.id, RunID: run.id, Kind: "run", Name: "run"}}}
+	for _, a := range run.approvals {
+		tr.Approvals = append(tr.Approvals, a.Approval)
+	}
 	for i := 0; i < run.steps; i++ {
 		tr.ModelCalls = append(tr.ModelCalls, store.ModelCall{
 			ID: fmt.Sprintf("m%d", i), RunID: run.id, Provider: "scripted", Model: "scripted-1", InputTokens: 100, OutputTokens: 10,
@@ -281,7 +314,7 @@ func (f *fakeAPI) traceFor(run *fakeRun) store.Trace {
 		if i < run.steps-1 {
 			done := run.started.Add(time.Second)
 			tr.ToolCalls = append(tr.ToolCalls, store.ToolCall{
-				ID: fmt.Sprintf("t%d", i), RunID: run.id, ToolName: "exec", Status: store.ToolExecuted, FinishedAt: &done,
+				ID: fmt.Sprintf("t%d", i), RunID: run.id, ToolName: f.firstTool(run), Status: store.ToolExecuted, FinishedAt: &done,
 			})
 		}
 	}
@@ -329,13 +362,33 @@ func startFake(t *testing.T) (*fakeAPI, *httptest.Server) {
 	return f, srv
 }
 
+// shippedCases are all the committed cases, whatever their split.
 func shippedCases(t *testing.T) []Case {
 	t.Helper()
-	cases, err := LoadCases(shippedCasesDir, SplitPublic)
+	cases, err := LoadCases(shippedCasesDir, SplitAll)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return cases
+}
+
+// legacyIDs are the wave 1 quick-run cases the generic fake api can run to completion.
+var legacyIDs = []string{"001-quick-run-happy", "002-step-limit", "003-cancel"}
+
+// legacyCases are the wave 1 cases; the runner tests that count results use them so
+// that adding a case to the suite does not change their arithmetic.
+func legacyCases(t *testing.T) []Case {
+	t.Helper()
+	var out []Case
+	for _, c := range shippedCases(t) {
+		if slices.Contains(legacyIDs, c.ID) {
+			out = append(out, c)
+		}
+	}
+	if len(out) != len(legacyIDs) {
+		t.Fatalf("found %d of the %d wave 1 cases", len(out), len(legacyIDs))
+	}
+	return out
 }
 
 func byID(results []CaseResult) map[string]CaseResult {
@@ -348,7 +401,7 @@ func byID(results []CaseResult) map[string]CaseResult {
 
 func TestRunnerRunsTheShippedCasesEndToEnd(t *testing.T) {
 	f, srv := startFake(t)
-	cases := shippedCases(t)
+	cases := legacyCases(t)
 	results, err := fastRunner(testConfig(srv.URL)).Execute(context.Background(), cases)
 	if err != nil {
 		t.Fatal(err)
@@ -442,7 +495,7 @@ func TestRunnerRunsTheShippedCasesEndToEnd(t *testing.T) {
 func TestRunnerCancelsOnceWhenTheStepThresholdIsReached(t *testing.T) {
 	f, srv := startFake(t)
 	var c Case
-	for _, cc := range shippedCases(t) {
+	for _, cc := range legacyCases(t) {
 		if cc.ID == "003-cancel" {
 			c = cc
 		}
@@ -468,7 +521,7 @@ func TestRunnerCancelsOnceWhenTheStepThresholdIsReached(t *testing.T) {
 
 func TestRunnerDoesNotCancelCasesWithoutTheAction(t *testing.T) {
 	f, srv := startFake(t)
-	for _, c := range shippedCases(t) {
+	for _, c := range legacyCases(t) {
 		if c.ID == "001-quick-run-happy" {
 			fastRunner(testConfig(srv.URL)).runCase(context.Background(), c)
 		}
@@ -482,7 +535,7 @@ func TestRunnerTimeoutIsAFailureWithAReason(t *testing.T) {
 	f, srv := startFake(t)
 	f.stuck["001-quick-run-happy"] = true
 	var c Case
-	for _, cc := range shippedCases(t) {
+	for _, cc := range legacyCases(t) {
 		if cc.ID == "001-quick-run-happy" {
 			c = cc
 		}
@@ -514,7 +567,7 @@ func TestRunnerTimeoutIsAFailureWithAReason(t *testing.T) {
 func TestRunnerContinuesAfterAnError(t *testing.T) {
 	f, srv := startFake(t)
 	f.failAgentFor["002-step-limit"] = true
-	results, err := fastRunner(testConfig(srv.URL)).Execute(context.Background(), shippedCases(t))
+	results, err := fastRunner(testConfig(srv.URL)).Execute(context.Background(), legacyCases(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +579,7 @@ func TestRunnerContinuesAfterAnError(t *testing.T) {
 	if bad.Passed() || bad.E2E || !strings.Contains(bad.Error, "create agent") || !strings.Contains(bad.Error, "500") {
 		t.Fatalf("002 = %+v", bad)
 	}
-	if len(bad.Evaluators) != 3 {
+	if len(bad.Evaluators) != len(EvaluatorNames()) {
 		t.Fatalf("a failed case still reports every evaluator: %+v", bad.Evaluators)
 	}
 	for _, e := range bad.Evaluators {
@@ -548,7 +601,7 @@ func TestRunnerRecoversFromPanics(t *testing.T) {
 		}
 		return Evaluate(c, tr)
 	}
-	results, err := r.Execute(context.Background(), shippedCases(t))
+	results, err := r.Execute(context.Background(), legacyCases(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +610,7 @@ func TestRunnerRecoversFromPanics(t *testing.T) {
 		t.Fatalf("the suite should continue after a panic: %+v", results)
 	}
 	bad := res["001-quick-run-happy"]
-	if bad.Passed() || !strings.Contains(bad.Error, "runner panic: evaluator exploded") || len(bad.Evaluators) != 3 {
+	if bad.Passed() || !strings.Contains(bad.Error, "runner panic: evaluator exploded") || len(bad.Evaluators) != len(EvaluatorNames()) {
 		t.Fatalf("001 = %+v", bad)
 	}
 	if f.deletedCount() != 3 {
@@ -568,7 +621,7 @@ func TestRunnerRecoversFromPanics(t *testing.T) {
 func TestRunnerToleratesTransientPollErrors(t *testing.T) {
 	f, srv := startFake(t)
 	f.pollErrors = maxPollFailures - 1
-	c := shippedCases(t)[0]
+	c := legacyCases(t)[0]
 	if res := fastRunner(testConfig(srv.URL)).runCase(context.Background(), c); !res.Passed() {
 		t.Fatalf("a few failed polls should not fail the case: %+v", res)
 	}
@@ -577,7 +630,7 @@ func TestRunnerToleratesTransientPollErrors(t *testing.T) {
 func TestRunnerGivesUpOnPersistentPollErrors(t *testing.T) {
 	f, srv := startFake(t)
 	f.alwaysPollErr = true
-	c := shippedCases(t)[0]
+	c := legacyCases(t)[0]
 	res := fastRunner(testConfig(srv.URL)).runCase(context.Background(), c)
 	if res.Passed() || !strings.Contains(res.Error, "poll run") {
 		t.Fatalf("result = %+v", res)
@@ -598,7 +651,7 @@ func TestRunnerStopsWhenTheContextEnds(t *testing.T) {
 		time.Sleep(60 * time.Millisecond)
 		cancel()
 	}()
-	results, err := fastRunner(testConfig(srv.URL)).Execute(ctx, shippedCases(t))
+	results, err := fastRunner(testConfig(srv.URL)).Execute(ctx, legacyCases(t))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
@@ -675,10 +728,18 @@ func TestClientErrors(t *testing.T) {
 
 // ---- Run: the whole suite, report and exit status ----
 
+// suiteConfig points the suite at a copy of the three wave 1 cases.
 func suiteConfig(t *testing.T, url string) config.Config {
 	cfg := testConfig(url)
 	cfg.EvalSplit = "public"
-	cfg.EvalCasesDir = shippedCasesDir
+	cfg.EvalCasesDir = filepath.Join(t.TempDir(), "cases")
+	for _, c := range legacyCases(t) {
+		body, err := os.ReadFile(c.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeCase(t, cfg.EvalCasesDir, "v1/"+filepath.Base(c.Path), string(body))
+	}
 	cfg.EvalReportsDir = filepath.Join(t.TempDir(), "reports")
 	return cfg
 }

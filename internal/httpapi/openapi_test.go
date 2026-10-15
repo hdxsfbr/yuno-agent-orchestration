@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,7 +94,9 @@ func TestOpenAPIConformance(t *testing.T) {
 	ctx := context.Background()
 	router := contract(t)
 	fe := &fakeEngine{pool: pool}
-	_, ts := newTestServer(t, pool, fe, adminGateway())
+	tplDir := t.TempDir()
+	srv, ts := newTestServerDeps(t, Deps{Cfg: testConfig(), Pool: pool, Gateway: adminGateway(), TemplatesDir: tplDir}, fe)
+	conformanceTemplates(t, srv, tplDir)
 
 	// A run with one of every trace row, so the trace exercises every schema.
 	run, err := createTestRun(ctx, pool, store.TriggerManual, json.RawMessage(`{"repo":"demo"}`), store.Limits{MaxSteps: 10})
@@ -102,10 +105,7 @@ func TestOpenAPIConformance(t *testing.T) {
 	}
 	seedTrace(t, run.ID)
 
-	steps := []struct {
-		method, path, body string
-		want               int
-	}{
+	steps := []conformanceStep{
 		{http.MethodPost, "/api/agents", `{"name":"Conformance","model":"claude-opus-5-5","effort":"high","thinking":"adaptive",
 			"tool_allowlist":["exec","finish"],"interaction_rules":{"finish":"auto"},"limits":{"max_steps":20},
 			"guardrails":{"max_runs_per_hour":5,"blocked_input_patterns":[{"name":"rm","tool":"exec","regex":"rm -rf"}]},
@@ -125,6 +125,7 @@ func TestOpenAPIConformance(t *testing.T) {
 		{http.MethodPost, "/api/runs/" + run.ID + "/cancel", "", http.StatusAccepted},
 		{http.MethodPost, "/api/evals/scripts", `{"script_id":"conf-1","steps":[{"text":"hi"}]}`, http.StatusNoContent},
 	}
+	steps = append(steps, workflowConformanceSteps(t, run.ID)...)
 	var agentID string
 	for _, st := range steps {
 		code, body := checkConformance(t, router, ts.URL, st.method, st.path, st.body, st.want < 300)
@@ -175,6 +176,85 @@ func seedTrace(t *testing.T, runID string) {
 		Payload: json.RawMessage(`{"diff":"+1"}`)}))
 	mustDo(t, store.InsertApproval(ctx, pool, &store.Approval{RunID: runID, RunNodeID: node.ID, Kind: "exec", NodeID: "coder",
 		Message: "run rm", ExpiresAt: now.Add(time.Hour)}))
+	key := strings.Repeat("c", 48) + store.ShortID(store.NewID()) + store.ShortID(store.NewID())
+	gated := &store.ToolCall{RunID: runID, RunNodeID: node.ID, ToolUseID: "mcp-1", ToolName: "deploy_release",
+		Input: json.RawMessage(`{"version":"1.0.0","paths":["app.py"]}`), Status: store.ToolAwaitingApproval, IdempotencyKey: &key, StartedAt: &now}
+	mustDo(t, store.InsertToolCall(ctx, pool, gated))
+	mustDo(t, store.InsertApproval(ctx, pool, &store.Approval{RunID: runID, RunNodeID: node.ID, ToolCallID: &gated.ID, Kind: "tool",
+		NodeID: "coder", Message: "Deploy release 1.0.0 (app.py)", ExpiresAt: now.Add(time.Hour)}))
+	_, _, err := store.RunSideEffect(ctx, pool, key+"-done", "deploy_release", runID, gated.ID, func(context.Context) (json.RawMessage, error) {
+		return json.RawMessage(`{"release_id":"r1","version":"1.0.0","url":"/deploy/releases/r1/"}`), nil
+	})
+	mustDo(t, err)
+}
+
+// conformanceTemplates loads one template naming an existing agent and one naming a
+// missing agent.
+func conformanceTemplates(t *testing.T, s *Server, dir string) {
+	t.Helper()
+	sfx := uniqueSuffix()
+	testAgent(t, "Conformer-"+sfx)
+	writeTemplate(t, dir, "conf_ok_"+sfx, "Conformance", "conformer-"+sfx)
+	writeTemplate(t, dir, "conf_missing_"+sfx, "Conformance missing", "Absent-"+sfx)
+	mustDo(t, s.LoadTemplates(context.Background()))
+}
+
+type conformanceStep struct {
+	method, path, body string
+	want               int
+}
+
+// workflowConformanceSteps exercises the approvals, workflows and templates endpoints.
+func workflowConformanceSteps(t *testing.T, runID string) []conformanceStep {
+	t.Helper()
+	ctx := context.Background()
+	apprs, err := store.ListApprovals(ctx, testPool, "", runID, 10)
+	mustDo(t, err)
+	var toolAppr, execAppr string
+	for _, a := range apprs {
+		switch a.Kind {
+		case "tool":
+			toolAppr = a.ID
+		case "exec":
+			execAppr = a.ID
+		}
+	}
+	agentID := testAgent(t, "wf-conformance")
+	wf := &store.Workflow{Name: "conformance", Definition: json.RawMessage(validDefinition(agentID))}
+	mustDo(t, store.CreateWorkflow(ctx, testPool, wf))
+	keys := map[string]string{}
+	tpls, _ := store.ListWorkflows(ctx, testPool)
+	for _, w := range tpls {
+		if w.TemplateKey != nil && strings.HasPrefix(*w.TemplateKey, "conf_ok_") {
+			keys["ok"] = *w.TemplateKey
+		}
+		if w.TemplateKey != nil && strings.HasPrefix(*w.TemplateKey, "conf_missing_") {
+			keys["missing"] = *w.TemplateKey
+		}
+	}
+	return []conformanceStep{
+		{http.MethodGet, "/api/approvals?run_id=" + runID, "", http.StatusOK},
+		{http.MethodGet, "/api/approvals?status=pending&limit=5", "", http.StatusOK},
+		{http.MethodGet, "/api/approvals?status=maybe", "", http.StatusUnprocessableEntity},
+		{http.MethodPost, "/api/approvals/" + toolAppr + "/approve", `{"always":true}`, http.StatusUnprocessableEntity},
+		{http.MethodPost, "/api/approvals/" + toolAppr + "/approve", `{"reason":"ship it"}`, http.StatusOK},
+		{http.MethodPost, "/api/approvals/" + toolAppr + "/reject", `{"reason":"too late"}`, http.StatusConflict},
+		{http.MethodPost, "/api/approvals/" + execAppr + "/reject", "", http.StatusOK},
+		{http.MethodPost, "/api/approvals/no-such-approval/approve", "", http.StatusNotFound},
+		{http.MethodGet, "/api/workflows", "", http.StatusOK},
+		{http.MethodPost, "/api/workflows", `{"name":"Conformance flow","description":"d","definition":` + validDefinition(agentID) + `}`, http.StatusCreated},
+		{http.MethodPost, "/api/workflows", `{"name":"","definition":{"nodes":[],"edges":[]}}`, http.StatusUnprocessableEntity},
+		{http.MethodGet, "/api/workflows/" + wf.ID, "", http.StatusOK},
+		{http.MethodGet, "/api/workflows/no-such-workflow", "", http.StatusNotFound},
+		{http.MethodPut, "/api/workflows/" + wf.ID, `{"name":"conformance 2","definition":` + validDefinition(agentID) + `}`, http.StatusOK},
+		{http.MethodPost, "/api/workflows/validate", `{"definition":` + validDefinition(agentID) + `}`, http.StatusOK},
+		{http.MethodPost, "/api/workflows/validate", `{"definition":{"nodes":[{"id":"start","kind":"start"}],"edges":[]}}`, http.StatusUnprocessableEntity},
+		{http.MethodGet, "/api/workflow-templates", "", http.StatusOK},
+		{http.MethodPost, "/api/workflow-templates/" + keys["ok"] + "/instantiate", `{"name":"From template"}`, http.StatusCreated},
+		{http.MethodPost, "/api/workflow-templates/" + keys["missing"] + "/instantiate", "", http.StatusUnprocessableEntity},
+		{http.MethodPost, "/api/workflow-templates/no_such_template/instantiate", "", http.StatusNotFound},
+		{http.MethodDelete, "/api/workflows/" + wf.ID, "", http.StatusNoContent},
+	}
 }
 
 func mustDo(t *testing.T, err error) {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -70,7 +71,12 @@ func testConfig() config.Config {
 // newTestServer builds a server around the fakes and serves it over httptest.
 func newTestServer(t *testing.T, pool *pgxpool.Pool, eng engine.Service, gw openclaw.Client) (*Server, *httptest.Server) {
 	t.Helper()
-	d := Deps{Cfg: testConfig(), Pool: pool, Gateway: gw}
+	return newTestServerDeps(t, Deps{Cfg: testConfig(), Pool: pool, Gateway: gw}, eng)
+}
+
+// newTestServerDeps is newTestServer with every dependency spelled out.
+func newTestServerDeps(t *testing.T, d Deps, eng engine.Service) (*Server, *httptest.Server) {
+	t.Helper()
 	if eng != nil {
 		d.Engine = eng
 	}
@@ -154,6 +160,18 @@ type fakeEngine struct {
 	cancels        []string
 	finishes       []string
 	rejections     []string
+
+	// tokens are the live run tokens ResolveRunToken knows.
+	tokens map[string]engine.RunContext
+	// Approvals: requestErr fails RequestApproval; waitOutcome scripts WaitApproval
+	// ("approve", "reject", "expire", "timeout"; "" answers ErrNotImplemented) with
+	// waitReason; decideErr overrides DecideApproval.
+	approvalReqs []engine.ApprovalRequest
+	requestErr   error
+	waitOutcome  string
+	waitReason   string
+	decideErr    error
+	decisions    []string
 }
 
 func (f *fakeEngine) MaterializeAgent(ctx context.Context, agentID string) (*engine.RuntimeView, error) {
@@ -222,8 +240,11 @@ func (f *fakeEngine) Cancel(ctx context.Context, runID, by string) (*store.Run, 
 	return store.GetRun(ctx, f.pool, runID)
 }
 
-func (f *fakeEngine) ResolveRunToken(string) (engine.RunContext, bool) {
-	return engine.RunContext{}, false
+func (f *fakeEngine) ResolveRunToken(token string) (engine.RunContext, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rc, ok := f.tokens[token]
+	return rc, ok
 }
 
 func (f *fakeEngine) AcceptFinish(_ context.Context, token string, result json.RawMessage) error {
@@ -289,14 +310,68 @@ func adminGateway() *fakeGateway {
 	}}
 }
 
-func (f *fakeEngine) RequestApproval(context.Context, engine.ApprovalRequest) (*store.Approval, error) {
-	return nil, engine.ErrNotImplemented
+// RequestApproval stores a pending tool approval for the token's visit, as the engine
+// does (without the gateway).
+func (f *fakeEngine) RequestApproval(ctx context.Context, req engine.ApprovalRequest) (*store.Approval, error) {
+	f.mu.Lock()
+	f.approvalReqs = append(f.approvalReqs, req)
+	err := f.requestErr
+	rc, ok := f.tokens[req.Token]
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, engine.ErrInvalidRunToken
+	}
+	toolCallID := req.ToolCallID
+	a := &store.Approval{RunID: rc.RunID, RunNodeID: rc.RunNodeID, ToolCallID: &toolCallID, Kind: store.ApprovalKindTool,
+		NodeID: rc.NodeID, Message: req.Message, ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	if err := store.InsertApproval(ctx, f.pool, a); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
-func (f *fakeEngine) WaitApproval(context.Context, string) (*store.Approval, error) {
-	return nil, engine.ErrNotImplemented
+// WaitApproval plays the scripted outcome: a decision made while the caller waits.
+func (f *fakeEngine) WaitApproval(ctx context.Context, id string) (*store.Approval, error) {
+	f.mu.Lock()
+	outcome, reason := f.waitOutcome, f.waitReason
+	f.mu.Unlock()
+	status := map[string]string{"approve": store.ApprovalApproved, "reject": store.ApprovalRejected, "expire": store.ApprovalExpired}[outcome]
+	switch {
+	case outcome == "timeout":
+		<-ctx.Done()
+		return nil, ctx.Err()
+	case status == "":
+		return nil, engine.ErrNotImplemented
+	}
+	by := "api"
+	if outcome == "expire" {
+		by = "engine"
+	}
+	return store.DecideApprovalAt(ctx, f.pool, id, status, by, reason, time.Now())
 }
 
-func (f *fakeEngine) DecideApproval(context.Context, string, string, string, string) (*store.Approval, error) {
-	return nil, engine.ErrNotImplemented
+// DecideApproval applies a decision to the row with the engine's 404/409 semantics.
+func (f *fakeEngine) DecideApproval(ctx context.Context, id, decision, by, reason string) (*store.Approval, error) {
+	f.mu.Lock()
+	f.decisions = append(f.decisions, id+"/"+decision+"/"+by+"/"+reason)
+	err := f.decideErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	a, err := store.GetApproval(ctx, f.pool, id)
+	if err != nil {
+		return nil, err
+	}
+	if a.Status != store.ApprovalPending {
+		return nil, engine.ErrNotPending
+	}
+	status := store.ApprovalApproved
+	if decision == engine.DecisionReject {
+		status = store.ApprovalRejected
+	}
+	return store.DecideApprovalAt(ctx, f.pool, id, status, by, reason, time.Now())
 }

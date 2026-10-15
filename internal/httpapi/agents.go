@@ -102,7 +102,7 @@ func (in *agentInput) validate(registry *tools.Registry) fieldErrors {
 		}
 	}
 	for _, key := range sortedKeys(in.InteractionRules) {
-		checkEnum(&fe, "interaction_rules."+key, in.InteractionRules[key], interactionModes)
+		checkInteractionRule(&fe, registry, key, in.InteractionRules[key])
 	}
 	checkEnum(&fe, "exec_policy.security", in.ExecPolicy.Security, execSecurity)
 	checkEnum(&fe, "exec_policy.ask", in.ExecPolicy.Ask, execAsk)
@@ -133,6 +133,26 @@ func (in *agentInput) apply(a *store.Agent) {
 	a.ExecPolicy = in.ExecPolicy
 	a.Skills = in.Skills
 	a.Channels = in.Channels
+}
+
+// checkInteractionRule validates one interaction rule (DESIGN 5.3 rules 6 and 7):
+// the key names a known tool, the value is auto, require_approval or blocked (a
+// side-effecting tool may be auto, D-009), require_approval only gates platform tools
+// (built-ins follow the exec policy), and finish, the run protocol itself, stays auto.
+func checkInteractionRule(fe *fieldErrors, registry *tools.Registry, key, value string) {
+	path := "interaction_rules." + key
+	name := tools.PlainName(key)
+	_, platform := registry.Get(name)
+	switch {
+	case !platform && !tools.IsOpenClawBuiltin(name):
+		fe.add(path, "unknown tool %q", key)
+	case !slices.Contains(interactionModes, value):
+		fe.add(path, "must be one of %s", strings.Join(interactionModes, ", "))
+	case name == tools.FinishName && value != tools.PolicyAuto:
+		fe.add(path, "finish is how a node reports its result and is always auto")
+	case !platform && value == tools.PolicyRequireApproval:
+		fe.add(path, "require_approval applies to platform tools; built-in tools follow the exec policy")
+	}
 }
 
 func checkEnum(fe *fieldErrors, path, v string, allowed []string) {

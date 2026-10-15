@@ -30,8 +30,12 @@ type CaseResult struct {
 	Description string `json:"description,omitempty"`
 
 	RunID    string `json:"run_id,omitempty"`
-	AgentID  string `json:"agent_id,omitempty"`
 	ScriptID string `json:"script_id,omitempty"`
+	// AgentID is the temporary agent of a quick run; a workflow case has WorkflowID
+	// and one agent id per agent of the case instead.
+	AgentID    string   `json:"agent_id,omitempty"`
+	AgentIDs   []string `json:"agent_ids,omitempty"`
+	WorkflowID string   `json:"workflow_id,omitempty"`
 
 	// Status and FailureReason are the run's final state as the api reports it.
 	Status        string `json:"status"`
@@ -254,6 +258,8 @@ func (r *Report) Markdown() string {
 			float64(c.CostUSDMicros)/1e6, formatDuration(c.DurationMs))
 	}
 
+	r.writeEvaluatorMatrix(&b)
+
 	var failures []CaseResult
 	for _, c := range r.Cases {
 		if !c.Passed() {
@@ -279,6 +285,41 @@ func (r *Report) Markdown() string {
 		}
 	}
 	return b.String()
+}
+
+// writeEvaluatorMatrix renders one row per case and one column per evaluator, so a
+// reader sees which evaluator judged which case ("pass", "FAIL", or "-" when the
+// evaluator did not run for the case).
+func (r *Report) writeEvaluatorMatrix(b *strings.Builder) {
+	names := make([]string, 0, len(r.Summary.Evaluators))
+	for _, e := range r.Summary.Evaluators {
+		names = append(names, e.Name)
+	}
+	if len(names) == 0 || len(r.Cases) == 0 {
+		return
+	}
+	b.WriteString("\n## Evaluators by case\n\n| Case |")
+	for _, n := range names {
+		fmt.Fprintf(b, " %s |", n)
+	}
+	b.WriteString("\n|---|")
+	b.WriteString(strings.Repeat("---|", len(names)))
+	b.WriteString("\n")
+	for _, c := range r.Cases {
+		got := map[string]EvalResult{}
+		for _, e := range c.Evaluators {
+			got[e.Name] = e
+		}
+		fmt.Fprintf(b, "| %s |", cell(c.ID))
+		for _, n := range names {
+			mark := "-"
+			if e, ok := got[n]; ok {
+				mark = map[bool]string{true: "pass", false: "FAIL"}[e.Passed]
+			}
+			fmt.Fprintf(b, " %s |", mark)
+		}
+		b.WriteString("\n")
+	}
 }
 
 // evaluatorsCell renders "3/3" or "2/3 (expectation)" naming the failed evaluators.

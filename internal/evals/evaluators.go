@@ -13,6 +13,10 @@ const (
 	EvalTermination    = "termination"
 	EvalTraceIntegrity = "trace_integrity"
 	EvalExpectation    = "expectation"
+	EvalApprovalGate   = "approval_gate"
+	EvalIdempotency    = "idempotency"
+	EvalSchema         = "schema"
+	EvalAllowlist      = "allowlist"
 )
 
 // EvalResult is the outcome of one deterministic evaluator on one case.
@@ -32,6 +36,10 @@ var deterministic = []namedEvaluator{
 	{EvalTermination, evalTermination},
 	{EvalTraceIntegrity, evalTraceIntegrity},
 	{EvalExpectation, evalExpectation},
+	{EvalApprovalGate, evalApprovalGate},
+	{EvalIdempotency, evalIdempotency},
+	{EvalSchema, evalSchema},
+	{EvalAllowlist, evalAllowlist},
 }
 
 // EvaluatorNames lists the deterministic evaluators in report order.
@@ -89,10 +97,11 @@ func ScoreRubric(c Case, _ store.Trace) RubricResult {
 }
 
 // effectiveLimits resolves the limits a run is judged against: the run's own snapshot
-// (already defaulted and clamped by the api) first, then the case's agent limits, then
-// the platform defaults, field by field.
+// (already defaulted and clamped by the api) first, then the limits the case asked for
+// (the agent's, or the workflow definition's), then the platform defaults, field by
+// field.
 func effectiveLimits(c Case, run *store.Run) store.Limits {
-	caseLimits := c.Agent.Limits.Store()
+	caseLimits := c.RunLimits()
 	pickInt := func(runV, caseV, defV int) int {
 		switch {
 		case runV > 0:
@@ -258,6 +267,13 @@ func evalExpectation(c Case, t store.Trace) EvalResult {
 	if exp.MinModelCalls > 0 && len(t.ModelCalls) < exp.MinModelCalls {
 		problems = append(problems, fmt.Sprintf("%d model calls, want at least %d", len(t.ModelCalls), exp.MinModelCalls))
 	}
+	if exp.MinAgentMessages > 0 && len(t.AgentMessages) < exp.MinAgentMessages {
+		problems = append(problems, fmt.Sprintf("%d agent messages, want at least %d", len(t.AgentMessages), exp.MinAgentMessages))
+	}
+	problems = append(problems, checkFinalState(exp.State, t.Run.State)...)
+	problems = append(problems, checkToolStatuses(exp.ToolStatuses, t.ToolCalls)...)
+	problems = append(problems, checkNeverToolStatuses(exp.NeverToolStatuses, t.ToolCalls)...)
+	problems = append(problems, checkApprovalStatuses(exp.ApprovalStatuses, t.Approvals)...)
 
 	if len(problems) > 0 {
 		res.Detail = strings.Join(problems, "; ")

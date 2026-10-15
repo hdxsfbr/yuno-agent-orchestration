@@ -134,6 +134,8 @@ func TestOpenClawStatus(t *testing.T) {
 	}
 }
 
+// GET /api/tools lists every platform tool with its risk class (DESIGN 5.7 table),
+// then the OpenClaw built-ins.
 func TestListTools(t *testing.T) {
 	_, ts := newTestServer(t, nil, nil, nil)
 	code, body := do(t, ts, http.MethodGet, "/api/tools", "")
@@ -148,16 +150,33 @@ func TestListTools(t *testing.T) {
 	for _, tv := range got {
 		names = append(names, string(tv.Source)+":"+tv.Name)
 	}
-	want := "platform:finish openclaw:apply_patch openclaw:edit openclaw:exec openclaw:ls openclaw:process openclaw:read openclaw:write"
+	want := "platform:deploy_release platform:finish platform:http_fetch platform:memory_recall platform:memory_save " +
+		"openclaw:apply_patch openclaw:edit openclaw:exec openclaw:ls openclaw:process openclaw:read openclaw:write"
 	if strings.Join(names, " ") != want {
 		t.Fatalf("tools = %v", names)
 	}
-	if f := got[0]; f.TimeoutSeconds != 5 || f.Risk != "computational" || f.Hits != "postgres" || len(f.InputSchema) == 0 {
-		t.Fatalf("finish = %+v", f)
+	table := map[string]struct {
+		risk, hits string
+		timeout    int
+		untrusted  bool
+	}{
+		"deploy_release": {"side_effecting", "local_service", 30, false},
+		"finish":         {"computational", "postgres", 5, false},
+		"http_fetch":     {"read_only", "external", 15, true},
+		"memory_recall":  {"read_only", "postgres", 5, false},
+		"memory_save":    {"computational", "postgres", 5, false},
 	}
-	for _, tv := range got[1:] {
-		if tv.Hits != "openclaw" || tv.Description == "" {
-			t.Fatalf("built-in = %+v", tv)
+	for _, tv := range got {
+		if tv.Source == "openclaw" {
+			if tv.Hits != "openclaw" || tv.Description == "" {
+				t.Fatalf("built-in = %+v", tv)
+			}
+			continue
+		}
+		w := table[tv.Name]
+		if string(tv.Risk) != w.risk || string(tv.Hits) != w.hits || tv.TimeoutSeconds != w.timeout ||
+			tv.UntrustedOutput != w.untrusted || len(tv.InputSchema) == 0 {
+			t.Errorf("%s = %+v", tv.Name, tv)
 		}
 	}
 }

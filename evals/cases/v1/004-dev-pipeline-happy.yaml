@@ -1,0 +1,244 @@
+id: 004-dev-pipeline-happy
+version: v1
+split: public
+description: The dev pipeline from start to finish. The coder writes and tests a function, the reviewer approves it, a human approves the deploy at the gate, and the deployer publishes the release once a second approval lets deploy_release run.
+workflow:
+  input_schema:
+    type: object
+    properties:
+      task: { type: string, description: What to build }
+      version: { type: string, description: "Release version, default 1.0.0" }
+    required: [task]
+    additionalProperties: true
+  state_schema:
+    type: object
+    properties:
+      coder:
+        type: object
+        properties:
+          summary: { type: string }
+          files: { type: array, items: { type: string } }
+          tests_passed: { type: boolean }
+        required: [summary, files]
+      reviewer:
+        type: object
+        properties:
+          verdict: { type: string, enum: [approved, changes_requested] }
+          feedback: { type: string }
+        required: [verdict, feedback]
+      deployer:
+        type: object
+        properties:
+          release_id: { type: string }
+          version: { type: string }
+          status: { type: string }
+        required: [status]
+  nodes:
+    - { id: start, kind: start }
+    - id: coder
+      kind: agent
+      agent_name: coder
+      task: |
+        Implement the following in the directory runs/$RUN_ID/ of your workspace, with tests you run yourself:
+
+        {{.input.task}}
+        {{with .state.reviewer}}
+        The reviewer asked for changes. Address every point before finishing:
+        {{.feedback}}
+        {{end}}
+        When done, finish with a summary, the list of files you created or changed (paths relative to runs/$RUN_ID/) and whether the tests passed.
+      output_schema:
+        type: object
+        properties:
+          summary: { type: string }
+          files: { type: array, items: { type: string } }
+          tests_passed: { type: boolean }
+        required: [summary, files]
+        additionalProperties: true
+      input_from: [start, reviewer]
+    - id: reviewer
+      kind: agent
+      agent_name: reviewer
+      task: |
+        Review the work in runs/$RUN_ID/ for this task:
+
+        {{.input.task}}
+
+        The coder reports: {{.state.coder.summary}}
+        Files: {{range .state.coder.files}}{{.}} {{end}}
+
+        Read the files and run the tests yourself. Finish with verdict "approved" when the code does what the task asks and the tests pass, otherwise "changes_requested" with specific, actionable feedback.
+      output_schema:
+        type: object
+        properties:
+          verdict: { type: string, enum: [approved, changes_requested] }
+          feedback: { type: string }
+        required: [verdict, feedback]
+        additionalProperties: true
+      input_from: [coder]
+    - id: gate
+      kind: approval
+      message: 'Deploy release {{or .input.version "1.0.0"}}? Coder: {{.state.coder.summary}} Reviewer: {{.state.reviewer.feedback}}'
+    - id: deployer
+      kind: agent
+      agent_name: deployer
+      task: |
+        Publish the reviewed work as release version {{or .input.version "1.0.0"}} with the deploy_release tool. The coder reports: {{.state.coder.summary}} (files: {{range .state.coder.files}}{{.}} {{end}})
+
+        deploy_release publishes files from your own run directory runs/$RUN_ID/: write the release notes to runs/$RUN_ID/RELEASE.md with the file tools, then publish that file (paths are relative to runs/$RUN_ID/).
+
+        Finish with the release id and version the tool returned and a status of "deployed"; if the tool result says the deploy was rejected or is pending approval, finish with that status and no release id.
+      output_schema:
+        type: object
+        properties:
+          release_id: { type: string }
+          version: { type: string }
+          status: { type: string }
+        required: [status]
+        additionalProperties: true
+      input_from: [coder, reviewer]
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: coder }
+    - { from: coder, to: reviewer }
+    - { from: reviewer, to: coder, when: { path: /reviewer/verdict, op: eq, value: changes_requested } }
+    - { from: reviewer, to: gate, when: { path: /reviewer/verdict, op: eq, value: approved } }
+    - { from: gate, to: deployer }
+    - { from: deployer, to: end }
+  limits:
+    max_steps: 40
+    max_duration_seconds: 300
+    max_node_iterations: 12
+    max_loop_visits: 3
+    max_cost_usd: 2
+    max_tool_calls: 80
+input:
+  task: >-
+    Write a Python function greet(name) that returns "Hello, <name>!" and "Hello, stranger!"
+    when the name is blank, with a test.
+  version: 1.0.0-eval
+agents:
+  coder:
+    name: Software engineer
+    system_prompt: |
+      You are a careful software engineer. Implement exactly what the task asks, in small readable code,
+      with tests you run yourself. Work only inside the run directory named in your task: create and change
+      files with the file tools and use exec only to run programs. When you are done, call yuno__finish
+      with the result.
+    tool_allowlist: [read, write, edit, ls, exec, finish]
+  reviewer:
+    name: Code reviewer
+    system_prompt: |
+      You are a demanding but fair code reviewer. Read the code, run the tests yourself and judge whether
+      the work does what the task asks. Approve only working, tested code; otherwise give specific,
+      actionable feedback. Keep your review notes in review.md in your run directory, then call yuno__finish
+      with your verdict.
+    tool_allowlist: [read, write, ls, exec, finish]
+  deployer:
+    name: Release engineer
+    system_prompt: |
+      You publish reviewed work as releases with the deploy_release tool, exactly once per task, with the
+      version and files you were given. Never change code. If the tool answers that the deploy was rejected
+      or is pending approval, report that status and stop.
+    tool_allowlist: [read, write, ls, deploy_release, finish]
+script:
+  # coder
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/greet.py"
+        content: |
+          def greet(name):
+              name = name.strip()
+              if not name:
+                  return "Hello, stranger!"
+              return f"Hello, {name}!"
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/test_greet.py"
+        content: |
+          from greet import greet
+
+
+          def test_greet():
+              assert greet("Ada") == "Hello, Ada!"
+              assert greet("  ") == "Hello, stranger!"
+
+
+          if __name__ == "__main__":
+              test_greet()
+              print("ok")
+  - tool:
+      name: exec
+      args: { command: "python3 runs/$RUN_ID/test_greet.py" }
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: Added greet(name) with a test for a named and a blank greeting; the test passes.
+          files: [greet.py, test_greet.py]
+          tests_passed: true
+  - text: The function and its test are written and the result has been submitted.
+  # reviewer
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/review.md"
+        content: |
+          # Review
+
+          greet handles a name and a blank name, and the test passes. Approved.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          verdict: approved
+          feedback: greet handles a name and a blank name, and the test passes.
+  - text: The review is complete and the verdict has been submitted.
+  # deployer, after the gate is approved. Each agent has a workspace of its own, so the
+  # deployer publishes a file it writes itself rather than the coder's.
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/RELEASE.md"
+        content: |
+          # Release 1.0.0-eval
+
+          - Adds greet(name), with a test for a named and a blank greeting.
+  - tool:
+      name: yuno__deploy_release
+      args:
+        run_token: "$RUN_TOKEN"
+        version: 1.0.0-eval
+        notes: greet(name) with its test, reviewed and approved.
+        paths: [RELEASE.md]
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          version: 1.0.0-eval
+          status: deployed
+  - text: The release is published and the result has been submitted.
+actions:
+  approvals:
+    # The gate node, then the deploy_release call the deployer makes after it.
+    - { decision: approve, reason: The reviewer approved the change and the release notes read well. }
+    - { decision: approve, reason: Publish version 1.0.0-eval. }
+expect:
+  status: succeeded
+  min_model_calls: 12
+  min_tool_calls: 9
+  min_agent_messages: 2
+  state:
+    "/coder/tests_passed": true
+    "/reviewer/verdict": approved
+    "/deployer/status": deployed
+    "/deployer/version": 1.0.0-eval
+  tool_statuses:
+    deploy_release: [executed]
+  approval_statuses: [approved, approved]
+rubric: []

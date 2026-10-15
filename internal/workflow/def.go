@@ -1,6 +1,5 @@
 // Package workflow holds the graph definition (DESIGN 5.6): nodes, edges, conditions,
-// typed state. Validation and condition evaluation are wave 2; this file is the shape
-// every other package compiles against.
+// typed state, structural validation, condition evaluation and task rendering.
 package workflow
 
 import (
@@ -19,6 +18,11 @@ const (
 )
 
 var nodeIDPattern = regexp.MustCompile(`^[a-z0-9_]{1,40}$`)
+
+// StatePendingEffects is the runs.state key where the engine records side effects
+// executed after their approval outlived the tool call (DESIGN 5.3 rule 5). Node
+// outputs live next to it under their node ids, so no node may take this id.
+const StatePendingEffects = "pending_effects"
 
 type Node struct {
 	ID      string `json:"id"`
@@ -121,6 +125,9 @@ func (d *Definition) ValidateStructure() error {
 		if ids[n.ID] {
 			msgs = append(msgs, fmt.Sprintf("nodes[%d].id: duplicate '%s'", i, n.ID))
 		}
+		if n.ID == StatePendingEffects {
+			msgs = append(msgs, fmt.Sprintf("nodes[%d].id: '%s' is reserved", i, n.ID))
+		}
 		ids[n.ID] = true
 		switch n.Kind {
 		case KindStart:
@@ -153,24 +160,49 @@ func (d *Definition) ValidateStructure() error {
 		if !ids[e.To] {
 			msgs = append(msgs, fmt.Sprintf("edges[%d].to: unknown node '%s'", i, e.To))
 		}
+		if n, ok := d.Node(e.To); ok && n.Kind == KindStart {
+			msgs = append(msgs, fmt.Sprintf("edges[%d].to: the start node cannot be an edge target", i))
+		}
 		outgoing[e.From]++
+		msgs = append(msgs, validateCondition(fmt.Sprintf("edges[%d].when", i), e.When)...)
 	}
 	for i, n := range d.Nodes {
 		if n.Kind != KindEnd && outgoing[n.ID] == 0 {
 			msgs = append(msgs, fmt.Sprintf("nodes[%d]: '%s' has no outgoing edge", i, n.ID))
 		}
+		if n.OnReject != "" && !ids[n.OnReject] {
+			msgs = append(msgs, fmt.Sprintf("nodes[%d].on_reject: unknown node '%s'", i, n.OnReject))
+		}
+		if n.OnReject != "" && n.Kind != KindApproval {
+			msgs = append(msgs, fmt.Sprintf("nodes[%d].on_reject: only approval nodes have one", i))
+		}
+		if n.OnFailure != "" && !ids[n.OnFailure] {
+			msgs = append(msgs, fmt.Sprintf("nodes[%d].on_failure: unknown node '%s'", i, n.OnFailure))
+		}
+		for j, from := range n.InputFrom {
+			if !ids[from] {
+				msgs = append(msgs, fmt.Sprintf("nodes[%d].input_from[%d]: unknown node '%s'", i, j, from))
+			}
+		}
 	}
-	// reachability from start
+	// Reachability from start, through edges and the on_reject / on_failure targets.
 	if start, ok := d.Start(); ok {
 		seen := map[string]bool{start: true}
 		stack := []string{start}
 		for len(stack) > 0 {
 			cur := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
+			next := []string{}
 			for _, e := range d.OutgoingEdges(cur) {
-				if !seen[e.To] {
-					seen[e.To] = true
-					stack = append(stack, e.To)
+				next = append(next, e.To)
+			}
+			if n, ok := d.Node(cur); ok {
+				next = append(next, n.OnReject, n.OnFailure)
+			}
+			for _, to := range next {
+				if to != "" && !seen[to] {
+					seen[to] = true
+					stack = append(stack, to)
 				}
 			}
 		}
@@ -187,7 +219,8 @@ func (d *Definition) ValidateStructure() error {
 }
 
 // SingleAgent builds the one-node workflow behind "quick run" on the agent page
-// (DESIGN section 9, wave 1) and behind conversation runs.
+// (DESIGN section 9, wave 1) and behind conversation runs. Its task template already
+// carries the input, so it has no input_from.
 func SingleAgent(agentID, task string, outputSchema json.RawMessage, limits store.Limits) *Definition {
 	if len(outputSchema) == 0 {
 		outputSchema = json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":true}`)
@@ -195,7 +228,7 @@ func SingleAgent(agentID, task string, outputSchema json.RawMessage, limits stor
 	return &Definition{
 		Nodes: []Node{
 			{ID: "start", Kind: KindStart},
-			{ID: "agent", Kind: KindAgent, AgentID: agentID, Task: task, OutputSchema: outputSchema, InputFrom: []string{"start"}},
+			{ID: "agent", Kind: KindAgent, AgentID: agentID, Task: task, OutputSchema: outputSchema},
 			{ID: "end", Kind: KindEnd},
 		},
 		Edges:  []Edge{{From: "start", To: "agent"}, {From: "agent", To: "end"}},

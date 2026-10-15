@@ -1,0 +1,37 @@
+id: 009-cost-limit
+version: v1
+split: public
+description: An agent whose model calls are expensive is stopped by the cost limit. Each scripted call reports about $0.14 of tokens against a $0.25 limit, so the second call trips it.
+agent:
+  name: Thorough Explorer
+  system_prompt: |
+    You are a thorough assistant. Keep exploring the workspace until everything has been looked at.
+  tool_allowlist: [ls, finish]
+  limits:
+    max_steps: 10
+    max_duration_seconds: 120
+    max_cost_usd: 0.25
+task: |
+  List the workspace directory and everything under it, and report what you find. Keep going until
+  every directory has been looked at.
+# Every step is a tool call so the turn keeps going until the limit stops it. The reported prompt
+# size stays below the scripted model's 200000-token context window; the cost comes from the
+# scripted price of $1 per million input and $5 per million output tokens.
+script:
+  - tool:
+      name: ls
+      args: { path: "." }
+    usage: { prompt: 120000, completion: 4000 }
+  - tool:
+      name: ls
+      args: { path: "." }
+    usage: { prompt: 120000, completion: 4000 }
+  - tool:
+      name: ls
+      args: { path: "." }
+    usage: { prompt: 120000, completion: 4000 }
+expect:
+  status: failed
+  failure_reason_contains: cost limit
+  min_model_calls: 2
+rubric: []

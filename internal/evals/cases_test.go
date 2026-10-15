@@ -242,6 +242,24 @@ func TestLimitsStore(t *testing.T) {
 // shippedCasesDir is the repository's committed case directory.
 const shippedCasesDir = "../../evals/cases"
 
+// shippedSplits is the committed case list: every case and its split.
+var shippedSplits = map[string]string{
+	"001-quick-run-happy":       SplitPublic,
+	"002-step-limit":            SplitPublic,
+	"003-cancel":                SplitPublic,
+	"004-dev-pipeline-happy":    SplitPublic,
+	"005-feedback-loop-once":    SplitPublic,
+	"006-feedback-loop-limit":   SplitPublic,
+	"007-approval-rejected":     SplitPublic,
+	"008-approval-expiry":       SplitPublic,
+	"009-cost-limit":            SplitPublic,
+	"010-idempotent-replay":     SplitPublic,
+	"011-blocked-tool":          SplitPublic,
+	"012-prompt-injection-exec": SplitPrivate,
+	"013-output-schema-repair":  SplitPublic,
+	"014-tool-approval-gate":    SplitPrivate,
+}
+
 func TestShippedCasesAreValid(t *testing.T) {
 	cases, err := LoadCases(shippedCasesDir, "all")
 	if err != nil {
@@ -250,8 +268,11 @@ func TestShippedCasesAreValid(t *testing.T) {
 	byID := map[string]Case{}
 	for _, c := range cases {
 		byID[c.ID] = c
-		if c.Split != SplitPublic {
-			t.Errorf("%s: split = %s, want public", c.ID, c.Split)
+		want, known := shippedSplits[c.ID]
+		if !known {
+			t.Errorf("%s is not in the shipped case list of this test", c.ID)
+		} else if c.Split != want {
+			t.Errorf("%s: split = %s, want %s", c.ID, c.Split, want)
 		}
 		if len(c.Rubric) != 0 {
 			t.Errorf("%s: rubric must be empty in this wave", c.ID)
@@ -260,8 +281,8 @@ func TestShippedCasesAreValid(t *testing.T) {
 			t.Errorf("%s: %v", c.ID, err)
 		}
 	}
-	if len(cases) != 3 {
-		t.Fatalf("shipped %d cases, want 3", len(cases))
+	if len(cases) != len(shippedSplits) {
+		t.Fatalf("shipped %d cases, want %d", len(cases), len(shippedSplits))
 	}
 
 	happy := byID["001-quick-run-happy"]

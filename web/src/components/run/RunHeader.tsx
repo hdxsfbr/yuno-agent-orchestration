@@ -71,6 +71,11 @@ export default function RunHeader({ run, connection, now, onRunChange }: Props) 
             {run.trigger}
             {run.trigger_ref ? <span className="ml-1.5 font-mono text-xs font-normal text-zinc-500">{run.trigger_ref}</span> : null}
           </Item>
+          {run.current_node && !terminal ? (
+            <Item label="Current node">
+              <span className="font-mono">{run.current_node}</span>
+            </Item>
+          ) : null}
           <Item label="Created">{formatDateTime(run.created_at)}</Item>
           <Item label="Started">{formatDateTime(run.started_at)}</Item>
           <Item label="Finished">{formatDateTime(run.finished_at)}</Item>

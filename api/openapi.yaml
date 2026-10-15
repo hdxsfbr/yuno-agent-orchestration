@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Yuno Agent Orchestration API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     Control plane for configurable AI agents and multi-agent workflows executed on
     OpenClaw. All endpoints are JSON. When API_TOKEN is set, every /api path except
@@ -16,6 +16,8 @@ tags:
   - name: agents
   - name: runs
   - name: tools
+  - name: approvals
+  - name: workflows
 paths:
   /healthz:
     get:
@@ -185,11 +187,140 @@ paths:
   /api/runs/{id}/trace:
     get:
       tags: [runs]
-      summary: Correlated trace (nodes, model calls, tool calls, spans, agent messages, approvals)
+      summary: Correlated trace (nodes, model calls, tool calls, spans, agent messages, approvals, side effects)
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       responses:
         "200": { description: trace, content: { application/json: { schema: { $ref: "#/components/schemas/Trace" } } } }
         "404": { $ref: "#/components/responses/Error" }
+
+  /api/approvals:
+    get:
+      tags: [approvals]
+      summary: Approvals inbox, newest first, each with the tool call it gates
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, approved, rejected, expired] } }
+        - { name: run_id, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, minimum: 1, maximum: 500 } }
+      responses:
+        "200":
+          description: approvals
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ApprovalItem" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/approvals/{id}/approve:
+    post:
+      tags: [approvals]
+      summary: Approve a pending approval
+      description: |
+        `always` (exec approvals only) also adds the command to the agent's exec allowlist.
+        A tool approval decided while the agent's tool call still waits returns the result
+        to the agent in the same turn; after that, the platform executes the side effect
+        itself under the same idempotency key.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      requestBody:
+        required: false
+        content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalDecision" } } }
+      responses:
+        "200": { description: decided, content: { application/json: { schema: { $ref: "#/components/schemas/Approval" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/approvals/{id}/reject:
+    post:
+      tags: [approvals]
+      summary: Reject a pending approval
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      requestBody:
+        required: false
+        content: { application/json: { schema: { $ref: "#/components/schemas/RejectDecision" } } }
+      responses:
+        "200": { description: decided, content: { application/json: { schema: { $ref: "#/components/schemas/Approval" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+
+  /api/workflows:
+    get:
+      tags: [workflows]
+      summary: List the operator's workflows (templates are listed under /api/workflow-templates)
+      responses:
+        "200":
+          description: workflows
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Workflow" } } } }
+    post:
+      tags: [workflows]
+      summary: Create a workflow (validated as /api/workflows/validate does)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/WorkflowInput" } } }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Workflow" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/workflows/validate:
+    post:
+      tags: [workflows]
+      summary: Validate a definition without saving it
+      description: |
+        422 details carry one entry per problem, with paths relative to the definition
+        (`nodes[1].task`, `edges[2].to`, `nodes[0].agent_id`, `input_schema`).
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/WorkflowValidateRequest" } } }
+      responses:
+        "200": { description: valid, content: { application/json: { schema: { $ref: "#/components/schemas/WorkflowValidation" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/workflows/{id}:
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    get:
+      tags: [workflows]
+      summary: Get a workflow
+      responses:
+        "200": { description: workflow, content: { application/json: { schema: { $ref: "#/components/schemas/Workflow" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [workflows]
+      summary: Replace a workflow; the version goes up by one (runs keep the version they started with)
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/WorkflowInput" } } }
+      responses:
+        "200": { description: workflow, content: { application/json: { schema: { $ref: "#/components/schemas/Workflow" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [workflows]
+      summary: Soft-delete a workflow (existing runs keep their snapshot)
+      responses:
+        "204": { description: deleted }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/workflow-templates:
+    get:
+      tags: [workflows]
+      summary: Workflow templates loaded from templates/*.json at start
+      responses:
+        "200":
+          description: templates
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/WorkflowTemplate" } } } }
+  /api/workflow-templates/{key}/instantiate:
+    post:
+      tags: [workflows]
+      summary: Copy a template into a new editable workflow
+      description: |
+        Every agent node's `agent_name` is resolved, case-insensitively, to the id of the
+        agent with that name (the oldest when several share it). A missing agent is a 422
+        with `nodes[i].agent_name: no agent named 'X'`.
+      parameters:
+        - { name: key, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content: { application/json: { schema: { $ref: "#/components/schemas/InstantiateRequest" } } }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Workflow" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
 
   /api/evals/scripts:
     post:
@@ -299,7 +430,13 @@ components:
         thinking: { type: string, enum: [off, minimal, low, medium, high, xhigh, adaptive, max] }
         max_tokens: { type: integer }
         tool_allowlist: { type: array, items: { type: string } }
-        interaction_rules: { type: object, additionalProperties: { type: string, enum: [auto, require_approval, blocked] } }
+        interaction_rules:
+          type: object
+          description: |
+            Tool name to policy. Without a rule a side-effecting platform tool requires
+            approval and every other tool runs automatically. require_approval applies to
+            platform tools only; finish is always auto.
+          additionalProperties: { type: string, enum: [auto, require_approval, blocked] }
         limits: { $ref: "#/components/schemas/Limits" }
         guardrails: { $ref: "#/components/schemas/Guardrails" }
         memory_policy: { $ref: "#/components/schemas/MemoryPolicy" }
@@ -520,3 +657,104 @@ components:
         spans: { type: array, items: { $ref: "#/components/schemas/Span" } }
         agent_messages: { type: array, items: { $ref: "#/components/schemas/AgentMessage" } }
         approvals: { type: array, items: { $ref: "#/components/schemas/Approval" } }
+        side_effects: { type: array, items: { $ref: "#/components/schemas/SideEffect" } }
+    SideEffect:
+      type: object
+      description: One executed side effect, keyed by its idempotency key; a repeated call replays the stored result.
+      required: [idempotency_key, tool_name, run_id, tool_call_id, created_at]
+      properties:
+        idempotency_key: { type: string }
+        tool_name: { type: string }
+        run_id: { type: string }
+        tool_call_id: { type: string, description: the tool call that executed it }
+        result: {}
+        created_at: { type: string, format: date-time }
+    ApprovalItem:
+      allOf:
+        - $ref: "#/components/schemas/Approval"
+        - type: object
+          properties:
+            tool_call: { $ref: "#/components/schemas/ToolCall" }
+    ApprovalDecision:
+      type: object
+      additionalProperties: false
+      properties:
+        reason: { type: string, maxLength: 2000 }
+        always: { type: boolean, description: exec approvals only }
+    RejectDecision:
+      type: object
+      additionalProperties: false
+      properties:
+        reason: { type: string, maxLength: 2000 }
+    WorkflowNode:
+      type: object
+      properties:
+        id: { type: string, description: "^[a-z0-9_]{1,40}$, unique in the workflow" }
+        kind: { type: string, description: "start | agent | approval | end" }
+        agent_id: { type: string }
+        agent_name: { type: string, description: templates only; resolved to agent_id on instantiate }
+        task: { type: string, description: "Go text/template over {input, state}, e.g. {{.input.task}}" }
+        output_schema: { type: object }
+        input_from: { type: array, items: { type: string } }
+        message: { type: string, description: approval nodes }
+        on_reject: { type: string, description: approval nodes }
+        on_failure: { type: string }
+    WorkflowEdge:
+      type: object
+      properties:
+        from: { type: string }
+        to: { type: string }
+        when:
+          type: object
+          description: "{path, op, value} with op in eq, neq, in, exists, gt, lt over the run state by JSON pointer, or {all: [...]} / {any: [...]}"
+    WorkflowDefinition:
+      type: object
+      description: The graph (DESIGN 5.6). Keys the platform does not know, such as the builder's layout, are kept.
+      properties:
+        input_schema: { type: object }
+        state_schema: { type: object }
+        nodes: { type: array, items: { $ref: "#/components/schemas/WorkflowNode" } }
+        edges: { type: array, items: { $ref: "#/components/schemas/WorkflowEdge" } }
+        limits: { $ref: "#/components/schemas/Limits" }
+    WorkflowInput:
+      type: object
+      required: [name, definition]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string }
+        definition: { $ref: "#/components/schemas/WorkflowDefinition" }
+    Workflow:
+      type: object
+      required: [id, name, description, definition, version, created_at, updated_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        definition: { $ref: "#/components/schemas/WorkflowDefinition" }
+        version: { type: integer }
+        template_key: { type: string, description: set on template rows and the hidden quick-run workflows }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    WorkflowValidateRequest:
+      type: object
+      required: [definition]
+      properties:
+        definition: { $ref: "#/components/schemas/WorkflowDefinition" }
+    WorkflowValidation:
+      type: object
+      required: [valid]
+      properties:
+        valid: { type: boolean }
+    WorkflowTemplate:
+      type: object
+      required: [key, name, description, definition]
+      properties:
+        key: { type: string }
+        name: { type: string }
+        description: { type: string }
+        definition: { $ref: "#/components/schemas/WorkflowDefinition" }
+    InstantiateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, maxLength: 120, description: defaults to the template's name }

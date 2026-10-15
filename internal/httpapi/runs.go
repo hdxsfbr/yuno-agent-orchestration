@@ -178,7 +178,62 @@ func (s *Server) getTrace(w http.ResponseWriter, r *http.Request) {
 	for i := range t.ToolCalls {
 		t.ToolCalls[i].Output = omitNull(t.ToolCalls[i].Output)
 	}
+	for i := range t.Nodes {
+		t.Nodes[i].Messages = stripReasoning(t.Nodes[i].Messages)
+	}
+	if t.SideEffects, err = store.ListSideEffects(r.Context(), s.pool, t.Run.ID); err != nil {
+		s.internalError(w, r, "list side effects", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, t)
+}
+
+// reasoningParts are transcript part types that carry a model's reasoning.
+var reasoningParts = map[string]bool{"thinking": true, "redacted_thinking": true, "reasoning": true}
+
+// stripReasoning drops reasoning parts from a node's transcript. The engine never
+// stores them (DESIGN 5.14 rule 11); the trace does not serve them either, whatever a
+// row holds.
+func stripReasoning(messages json.RawMessage) json.RawMessage {
+	var list []map[string]json.RawMessage
+	if json.Unmarshal(messages, &list) != nil {
+		return messages
+	}
+	changed := false
+	kept := list[:0]
+	for _, m := range list {
+		var role string
+		_ = json.Unmarshal(m["role"], &role)
+		if reasoningParts[role] {
+			changed = true
+			continue
+		}
+		var parts []map[string]json.RawMessage
+		if json.Unmarshal(m["content"], &parts) == nil {
+			out := parts[:0]
+			for _, p := range parts {
+				var typ string
+				_ = json.Unmarshal(p["type"], &typ)
+				if !reasoningParts[typ] {
+					out = append(out, p)
+				}
+			}
+			if len(out) != len(parts) {
+				changed = true
+				b, _ := json.Marshal(out)
+				m["content"] = b
+			}
+		}
+		kept = append(kept, m)
+	}
+	if !changed {
+		return messages
+	}
+	b, err := json.Marshal(kept)
+	if err != nil {
+		return messages
+	}
+	return b
 }
 
 // omitNull turns a JSON null into an absent value for omitempty fields.

@@ -2,6 +2,7 @@ package evals
 
 import (
 	"encoding/json"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -81,11 +82,14 @@ func TestRequestBodiesMatchTheOpenAPIDocument(t *testing.T) {
 	fullLimits := store.Limits{MaxSteps: 1, MaxDurationSeconds: 1, MaxNodeIterations: 1, MaxLoopVisits: 1, MaxCostUSD: 1, MaxToolCalls: 1, ApprovalTimeoutSeconds: 1}
 	checkBody(t, "Limits", fullLimits, schemas("Limits"))
 
-	agent := AgentRequest{Name: "n", Role: "r", SystemPrompt: "p", Model: "m", ToolAllowlist: []string{"exec"}, Limits: fullLimits}
+	agent := AgentRequest{Name: "n", Role: "r", SystemPrompt: "p", Model: "m", ToolAllowlist: []string{"exec"}, Limits: fullLimits,
+		InteractionRules: map[string]string{"deploy_release": "auto"}}
 	checkBody(t, "POST /api/agents", agent, schemas("AgentInput"))
 
 	run := RunRequest{AgentID: "a", Task: "t", Model: ScriptedModel, ScriptID: "s", Limits: fullLimits}
 	checkBody(t, "POST /api/runs", run, schemas("RunCreate"))
+	wfRun := RunRequest{WorkflowID: "w", Input: json.RawMessage(`{"task":"t"}`), Model: ScriptedModel, ScriptID: "s", Limits: fullLimits}
+	checkBody(t, "POST /api/runs (workflow)", wfRun, schemas("RunCreate"))
 
 	cases := shippedCases(t)
 	for _, c := range cases {
@@ -145,13 +149,92 @@ func TestEndpointsExistInTheOpenAPIDocument(t *testing.T) {
 // evaluators read.
 func TestTraceSchemaFieldsAreDecodedByStoreTrace(t *testing.T) {
 	doc := loadSpec(t)
-	raw, _ := json.Marshal(store.Trace{})
-	var keys map[string]any
-	_ = json.Unmarshal(raw, &keys)
+	// The JSON names of the struct's fields, not of a marshalled zero value: omitempty
+	// fields such as side_effects are absent from that.
+	keys := map[string]bool{}
+	rt := reflect.TypeOf(store.Trace{})
+	for i := 0; i < rt.NumField(); i++ {
+		keys[strings.Split(rt.Field(i).Tag.Get("json"), ",")[0]] = true
+	}
 	trace := dig(t, doc, "components", "schemas", "Trace", "properties")
 	for k := range trace {
-		if _, ok := keys[k]; !ok {
+		if !keys[k] {
 			t.Errorf("Trace schema property %q is not a field of store.Trace", k)
+		}
+	}
+	for _, want := range []string{"nodes", "model_calls", "tool_calls", "spans", "agent_messages", "approvals"} {
+		if _, ok := trace[want]; !ok {
+			t.Errorf("Trace schema lacks %q, which the evaluators read", want)
+		}
+	}
+}
+
+// refSchema follows a #/components/schemas reference one level.
+func refSchema(t *testing.T, doc map[string]any, node map[string]any) map[string]any {
+	t.Helper()
+	ref, ok := node["$ref"].(string)
+	if !ok {
+		return node
+	}
+	name, found := strings.CutPrefix(ref, "#/components/schemas/")
+	if !found {
+		t.Fatalf("unsupported reference %q", ref)
+	}
+	return dig(t, doc, "components", "schemas", name)
+}
+
+// The workflow and approval endpoints arrive with the wave 2 backend. Until the api
+// documents them this test is skipped; once it documents any of them, all must match.
+func TestWaveTwoEndpointsMatchTheOpenAPIDocument(t *testing.T) {
+	doc := loadSpec(t)
+	paths := dig(t, doc, "paths")
+	used := []struct{ method, path string }{
+		{"post", "/api/workflows"},
+		{"delete", "/api/workflows/{id}"},
+		{"get", "/api/approvals"},
+		{"post", "/api/approvals/{id}/approve"},
+		{"post", "/api/approvals/{id}/reject"},
+	}
+	var missing []string
+	for _, u := range used {
+		if p, ok := paths[u.path].(map[string]any); !ok || p[u.method] == nil {
+			missing = append(missing, strings.ToUpper(u.method)+" "+u.path)
+		}
+	}
+	if len(missing) == len(used) {
+		t.Skipf("api/openapi.yaml does not document the workflow and approval endpoints yet: %v", missing)
+	}
+	if len(missing) > 0 {
+		t.Fatalf("api/openapi.yaml lacks endpoints the runner calls: %v", missing)
+	}
+
+	body := func(method, path string) map[string]any {
+		op := dig(t, paths, path, method, "requestBody", "content", "application/json", "schema")
+		return refSchema(t, doc, op)
+	}
+	checkBody(t, "POST /api/workflows", WorkflowRequest{Name: "n", Description: "d", Definition: json.RawMessage(`{"nodes":[],"edges":[]}`)},
+		body("post", "/api/workflows"))
+	checkBody(t, "POST /api/approvals/{id}/approve", decisionRequest{Reason: "r"}, body("post", "/api/approvals/{id}/approve"))
+	checkBody(t, "POST /api/approvals/{id}/reject", decisionRequest{Reason: "r"}, body("post", "/api/approvals/{id}/reject"))
+
+	// GET /api/approvals takes the run id and the status as query parameters.
+	list := dig(t, paths, "/api/approvals", "get")
+	params, _ := list["parameters"].([]any)
+	got := map[string]bool{}
+	for _, p := range params {
+		m, _ := p.(map[string]any)
+		if ref, ok := m["$ref"].(string); ok {
+			if name, found := strings.CutPrefix(ref, "#/components/parameters/"); found {
+				m = dig(t, doc, "components", "parameters", name)
+			}
+		}
+		if m["in"] == "query" {
+			got[m["name"].(string)] = true
+		}
+	}
+	for _, want := range []string{"run_id", "status"} {
+		if !got[want] {
+			t.Errorf("GET /api/approvals does not declare the %q query parameter (declared: %v)", want, got)
 		}
 	}
 }

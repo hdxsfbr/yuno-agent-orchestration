@@ -1,0 +1,47 @@
+id: 013-output-schema-repair
+version: v1
+split: public
+description: The agent's first finish call does not match the output schema. The platform answers with the validation message, the agent corrects the result and finishes, and the run keeps only the valid result.
+agent:
+  name: Note Taker
+  system_prompt: |
+    You write short notes. Work only inside the run directory named in your task. Finish by calling
+    yuno__finish with a result that has a summary; if the platform says the result is invalid, fix it
+    and call yuno__finish again.
+  tool_allowlist: [write, finish]
+  limits:
+    max_steps: 10
+    max_duration_seconds: 120
+task: |
+  Write a one-line note to runs/$RUN_ID/note.md saying that the setup is complete, then finish with a
+  summary of the note.
+script:
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/note.md"
+        content: |
+          Setup complete.
+  # The result has no summary, which the output schema requires.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          details: The note is written.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: Wrote note.md saying that the setup is complete.
+  - text: The note is written and the corrected result has been submitted.
+expect:
+  status: succeeded
+  min_model_calls: 4
+  min_tool_calls: 2
+  state:
+    "/agent/summary": Wrote note.md saying that the setup is complete.
+  tool_statuses:
+    finish: [executed]
+rubric: []

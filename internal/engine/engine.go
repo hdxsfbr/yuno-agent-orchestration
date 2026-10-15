@@ -26,11 +26,16 @@ type Engine struct {
 	mu     sync.Mutex
 	active map[string]*visit // run id → node visit in progress
 
+	waitMu  sync.Mutex
+	waiters map[string]*approvalWaiter // tool approval id → the MCP call waiting for it
+	bg      sync.WaitGroup             // side effects executed after a late approval
+
 	// execute runs one claimed run; tests replace it to observe claims.
 	execute func(ctx context.Context, run *store.Run)
 
 	pollInterval  time.Duration // worker claim cadence
 	sweepInterval time.Duration // stale-run sweeper cadence
+	approvalSweep time.Duration // approval expiry sweeper cadence (DESIGN 5.2 rule 10)
 	tickInterval  time.Duration // limit checks while a turn runs
 	abortWait     time.Duration // how long to wait for "aborted" after chat.abort
 	finishGrace   time.Duration // how long a turn may continue after finish was accepted
@@ -52,8 +57,10 @@ func New(d Deps) *Engine {
 		log:           d.Log.With("component", "engine"),
 		tokens:        newTokenRegistry(d.Clock),
 		active:        map[string]*visit{},
+		waiters:       map[string]*approvalWaiter{},
 		pollInterval:  500 * time.Millisecond,
 		sweepInterval: 60 * time.Second,
+		approvalSweep: 30 * time.Second,
 		tickInterval:  2 * time.Second,
 		abortWait:     10 * time.Second,
 		finishGrace:   20 * time.Second,
@@ -66,7 +73,8 @@ func New(d Deps) *Engine {
 
 var _ Service = (*Engine)(nil)
 
-// Start runs the worker pool and the stale-run sweeper until ctx is done.
+// Start runs the worker pool, the stale-run and approval sweepers and the gateway
+// approval listener until ctx is done.
 func (e *Engine) Start(ctx context.Context) error {
 	workers := e.deps.Cfg.EngineWorkers
 	if workers <= 0 {
@@ -80,14 +88,35 @@ func (e *Engine) Start(ctx context.Context) error {
 			e.worker(ctx, n)
 		}(i)
 	}
-	wg.Add(1)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		e.sweeper(ctx)
 	}()
+	go func() {
+		defer wg.Done()
+		e.approvalSweeper(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		e.listenGateway(ctx)
+	}()
 	e.log.Info("engine started", "workers", workers)
 	wg.Wait()
 	return nil
+}
+
+func (e *Engine) approvalSweeper(ctx context.Context) {
+	t := time.NewTicker(e.approvalSweep)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		e.sweepApprovals(ctx)
+	}
 }
 
 func (e *Engine) worker(ctx context.Context, n int) {
@@ -141,6 +170,20 @@ func (e *Engine) sweeper(ctx context.Context) {
 
 func (e *Engine) loadAgent(ctx context.Context, agentID string) (*store.Agent, []store.Skill, error) {
 	a, err := store.GetAgent(ctx, e.deps.Pool, agentID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("agent %s: %w", agentID, err)
+	}
+	skills, err := store.ListSkillsByName(ctx, e.deps.Pool, a.Skills)
+	if err != nil {
+		return nil, nil, fmt.Errorf("agent %s: skills: %w", agentID, err)
+	}
+	return a, skills, nil
+}
+
+// loadAgentForRun is loadAgent for a node visit: an agent deleted after the run started
+// still runs (DESIGN 5.6 edge cases).
+func (e *Engine) loadAgentForRun(ctx context.Context, agentID string) (*store.Agent, []store.Skill, error) {
+	a, err := store.GetAgentForRun(ctx, e.deps.Pool, agentID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("agent %s: %w", agentID, err)
 	}
@@ -233,7 +276,7 @@ func QuickRunTemplateKey(agentID string) string { return "quickrun:" + agentID }
 // is a *ValidationError.
 func (e *Engine) Trigger(ctx context.Context, req TriggerRequest) (*store.Run, error) {
 	if req.WorkflowID != "" {
-		return nil, &ValidationError{Messages: []string{"workflow_id: workflow runs are not available; use agent_id and task"}}
+		return e.triggerWorkflow(ctx, req)
 	}
 	var msgs []string
 	if strings.TrimSpace(req.AgentID) == "" {
@@ -253,11 +296,18 @@ func (e *Engine) Trigger(ctx context.Context, req TriggerRequest) (*store.Run, e
 	if err != nil {
 		return nil, err
 	}
-	def := workflow.SingleAgent(a.ID, "{{input.task}}", nil, limits)
+	def := workflow.SingleAgent(a.ID, "{{.input.task}}", nil, limits)
 	wf, err := e.quickRunWorkflow(ctx, a, def)
 	if err != nil {
 		return nil, err
 	}
+	input, _ := json.Marshal(map[string]string{"task": req.Task})
+	return e.queueRun(ctx, wf, def, input, req, "agent_id", a.ID)
+}
+
+// queueRun stores a run with its snapshot (the definition as run, limits resolved, plus
+// the run overrides) and publishes it.
+func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow.Definition, input json.RawMessage, req TriggerRequest, logAttrs ...any) (*store.Run, error) {
 	snap := runSnapshot{Definition: *def}
 	if req.Model != "" || req.ScriptID != "" {
 		snap.RunOverrides = &runOverrides{Model: req.Model, ScriptID: req.ScriptID}
@@ -266,7 +316,6 @@ func (e *Engine) Trigger(ctx context.Context, req TriggerRequest) (*store.Run, e
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: %w", err)
 	}
-	input, _ := json.Marshal(map[string]string{"task": req.Task})
 	trigger := req.Trigger
 	if trigger == "" {
 		trigger = store.TriggerManual
@@ -278,7 +327,7 @@ func (e *Engine) Trigger(ctx context.Context, req TriggerRequest) (*store.Run, e
 		Trigger:          trigger,
 		Status:           store.RunQueued,
 		Input:            input,
-		Limits:           limits,
+		Limits:           def.Limits,
 	}
 	if req.TriggerRef != "" {
 		ref := req.TriggerRef
@@ -292,7 +341,7 @@ func (e *Engine) Trigger(ctx context.Context, req TriggerRequest) (*store.Run, e
 		return nil, fmt.Errorf("read run: %w", err)
 	}
 	e.emit(ctx, created.ID, "run.status", map[string]any{"run": created})
-	e.log.Info("run queued", "run_id", created.ID, "agent_id", a.ID, "trigger", trigger)
+	e.log.Info("run queued", append([]any{"run_id", created.ID, "workflow_id", wf.ID, "trigger", trigger}, logAttrs...)...)
 	return created, nil
 }
 
@@ -355,6 +404,12 @@ func (e *Engine) Cancel(ctx context.Context, runID, by string) (*store.Run, erro
 	e.mu.Unlock()
 	if v != nil {
 		v.requestCancel()
+	} else if run.Status == store.RunWaitingApproval {
+		// Paused with no worker (an approval node): nothing else would see the flag.
+		if done, ok := e.cancelWaitingRun(context.WithoutCancel(ctx), runID, "cancelled by "+by); ok {
+			e.log.Info("run cancelled while waiting for approval", "run_id", runID, "by", by)
+			return done, nil
+		}
 	}
 	run, err = store.GetRun(ctx, e.deps.Pool, runID)
 	if err != nil {
@@ -443,18 +498,4 @@ func (e *Engine) endSpan(ctx context.Context, id string, at time.Time, attrs map
 	if err := store.EndSpanAt(context.WithoutCancel(ctx), e.deps.Pool, id, at, obs.RedactJSON(b)); err != nil {
 		e.log.Warn("end span failed", "span_id", id, "error", err)
 	}
-}
-
-// ---- approvals (DESIGN 5.3): implemented in wave 2 ------------------------------------
-
-func (e *Engine) RequestApproval(context.Context, ApprovalRequest) (*store.Approval, error) {
-	return nil, ErrNotImplemented
-}
-
-func (e *Engine) WaitApproval(context.Context, string) (*store.Approval, error) {
-	return nil, ErrNotImplemented
-}
-
-func (e *Engine) DecideApproval(context.Context, string, string, string, string) (*store.Approval, error) {
-	return nil, ErrNotImplemented
 }

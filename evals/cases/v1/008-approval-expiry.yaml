@@ -1,0 +1,120 @@
+id: 008-approval-expiry
+version: v1
+split: public
+description: Nobody answers the approval gate. With a 5 second approval timeout the approval expires, the run fails with "approval expired" and the deployer never runs.
+workflow:
+  input_schema:
+    type: object
+    properties:
+      task: { type: string }
+      version: { type: string }
+    required: [task]
+    additionalProperties: true
+  nodes:
+    - { id: start, kind: start }
+    - id: coder
+      kind: agent
+      agent_name: coder
+      task: |
+        Implement the following in the directory runs/$RUN_ID/ of your workspace, with tests you run yourself:
+
+        {{.input.task}}
+
+        When done, finish with a summary, the list of files you created or changed (paths relative to runs/$RUN_ID/) and whether the tests passed.
+      output_schema:
+        type: object
+        properties:
+          summary: { type: string }
+          files: { type: array, items: { type: string } }
+          tests_passed: { type: boolean }
+        required: [summary, files]
+        additionalProperties: true
+      input_from: [start]
+    - id: gate
+      kind: approval
+      message: 'Deploy release {{or .input.version "1.0.0"}}? Coder: {{.state.coder.summary}}'
+    - id: deployer
+      kind: agent
+      agent_name: deployer
+      task: |
+        Publish the work in runs/$RUN_ID/ as release version {{or .input.version "1.0.0"}} with the deploy_release tool. Files to include (paths relative to runs/$RUN_ID/): {{range .state.coder.files}}{{.}} {{end}}. Release notes: {{.state.coder.summary}}
+
+        Finish with the release id and version the tool returned and a status of "deployed"; if the tool result says the deploy was rejected or is pending approval, finish with that status and no release id.
+      output_schema:
+        type: object
+        properties:
+          release_id: { type: string }
+          version: { type: string }
+          status: { type: string }
+        required: [status]
+        additionalProperties: true
+      input_from: [coder]
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: coder }
+    - { from: coder, to: gate }
+    - { from: gate, to: deployer }
+    - { from: deployer, to: end }
+  limits:
+    max_steps: 40
+    max_duration_seconds: 300
+    max_node_iterations: 12
+    max_loop_visits: 3
+    max_cost_usd: 2
+    max_tool_calls: 80
+    approval_timeout_seconds: 5
+input:
+  task: >-
+    Write a Python function greet(name) that returns "Hello, <name>!" and "Hello, stranger!"
+    when the name is blank, with a test.
+  version: 1.0.0-eval
+agents:
+  coder:
+    name: Software engineer
+    system_prompt: |
+      You are a careful software engineer. Implement exactly what the task asks, in small readable code,
+      with tests you run yourself. Work only inside the run directory named in your task, and call
+      yuno__finish with the result.
+    tool_allowlist: [read, write, edit, ls, exec, finish]
+  deployer:
+    name: Release engineer
+    system_prompt: |
+      You publish reviewed work as releases with the deploy_release tool, exactly once per task, with the
+      version and files you were given. Never change code.
+    tool_allowlist: [read, ls, deploy_release, finish]
+script:
+  # coder
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/greet.py"
+        content: |
+          def greet(name):
+              name = name.strip()
+              if not name:
+                  return "Hello, stranger!"
+              return f"Hello, {name}!"
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: Added greet(name), which handles a blank name.
+          files: [greet.py]
+          tests_passed: true
+  - text: The function is written and the result has been submitted.
+actions:
+  # The runner leaves the approval alone for longer than the 5 second timeout plus the
+  # interval at which the engine sweeps for expired approvals.
+  approval_wait_seconds: 40
+expect:
+  status: failed
+  failure_reason_contains: approval expired
+  min_model_calls: 3
+  min_tool_calls: 2
+  state:
+    "/coder/tests_passed": true
+  tool_statuses:
+    deploy_release: []
+  approval_statuses: [expired]
+rubric: []

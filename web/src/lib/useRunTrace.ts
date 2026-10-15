@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { getTrace, isTerminalStatus, subscribe, type Run, type SSEEvent } from "./api";
+import { getTrace, isTerminalStatus, subscribe, type Approval, type Run, type SSEEvent } from "./api";
 import type { Connection } from "./useEventStream";
 import { applyEvent, applyEvents, toRunView, type RunView } from "./trace";
 
@@ -18,6 +18,8 @@ export type RunTraceState = {
   retry: () => void;
   /** Applies a run returned by the API (for example after a cancel request). */
   applyRun: (run: Run) => void;
+  /** Applies an approval returned by the API after a decision, ahead of the stream's event. */
+  applyApproval: (approval: Approval) => void;
 };
 
 /**
@@ -132,5 +134,9 @@ export function useRunTrace(runId: string): RunTraceState {
     setView((v) => (v && v.run.id === run.id ? applyEvent(v, { event: "run.status", data: { run } }) : v));
   }, []);
 
-  return { view, error, connection, retry, applyRun };
+  const applyApproval = useCallback((approval: Approval) => {
+    setView((v) => (v && v.run.id === approval.run_id ? applyEvent(v, { event: "approval.decided", data: { approval } }) : v));
+  }, []);
+
+  return { view, error, connection, retry, applyRun, applyApproval };
 }
