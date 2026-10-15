@@ -399,6 +399,14 @@ components:
         cache_read_tokens: { type: integer }
         cache_write_tokens: { type: integer }
         paused_total_ms: { type: integer }
+        agent_names:
+          type: array
+          items: { type: string }
+          description: "Agents the run's nodes ran, first appearance first; the list endpoint fills it."
+        models:
+          type: array
+          items: { type: string }
+          description: "Models the run's model calls used, first appearance first; the list endpoint fills it."
         created_at: { type: string, format: date-time }
         started_at: { type: string, format: date-time }
         finished_at: { type: string, format: date-time }

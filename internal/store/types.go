@@ -201,6 +201,9 @@ type Run struct {
 	StartedAt         *time.Time      `db:"started_at" json:"started_at,omitempty"`
 	FinishedAt        *time.Time      `db:"finished_at" json:"finished_at,omitempty"`
 	UpdatedAt         time.Time       `db:"updated_at" json:"updated_at"`
+	// AgentNames and Models are not columns; FillRunParticipants sets them for list views.
+	AgentNames []string `db:"-" json:"agent_names,omitempty"`
+	Models     []string `db:"-" json:"models,omitempty"`
 }
 
 type RunNode struct {

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"yuno/internal/engine"
 	"yuno/internal/store"
@@ -151,5 +152,100 @@ func TestRunEndpoints(t *testing.T) {
 	}
 	if code, _ := do(t, ts, http.MethodPost, "/api/runs/does-not-exist/cancel", ""); code != http.StatusNotFound {
 		t.Fatalf("cancel unknown: %d", code)
+	}
+}
+
+// The list carries each run's agents and models: from its nodes and model calls once it
+// ran, first appearance first; from the snapshot's agent nodes (and the model override)
+// while it is still queued.
+func TestListRunsParticipants(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	_, ts := newTestServer(t, pool, &fakeEngine{pool: pool}, nil)
+
+	coder := &store.Agent{Name: "Coder " + store.NewID(), Role: "coder", SystemPrompt: "x", Model: "claude-sonnet-5-5", ToolAllowlist: []string{"exec"}}
+	reviewer := &store.Agent{Name: "Reviewer " + store.NewID(), Role: "reviewer", SystemPrompt: "x", Model: "claude-opus-5-5", ToolAllowlist: []string{"read"}}
+	for _, a := range []*store.Agent{coder, reviewer} {
+		if err := store.CreateAgent(ctx, pool, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := func(override string) json.RawMessage {
+		snap := map[string]any{
+			"nodes": []map[string]any{
+				{"id": "start", "kind": "start"},
+				{"id": "code", "kind": "agent", "agent_id": coder.ID},
+				{"id": "review", "kind": "agent", "agent_id": reviewer.ID},
+				{"id": "end", "kind": "end"},
+			},
+			"edges": []any{},
+		}
+		if override != "" {
+			snap["run_overrides"] = map[string]any{"model": override}
+		}
+		b, _ := json.Marshal(snap)
+		return b
+	}
+	newRun := func(snap json.RawMessage) *store.Run {
+		t.Helper()
+		w := &store.Workflow{Name: "participants", Definition: snap}
+		if err := store.CreateWorkflow(ctx, pool, w); err != nil {
+			t.Fatal(err)
+		}
+		run := &store.Run{WorkflowID: w.ID, WorkflowVersion: 1, WorkflowSnapshot: snap, Trigger: store.TriggerManual, Limits: store.Limits{MaxSteps: 3}}
+		if err := store.CreateRun(ctx, pool, run); err != nil {
+			t.Fatal(err)
+		}
+		return run
+	}
+
+	ran := newRun(snapshot(""))
+	n1 := &store.RunNode{RunID: ran.ID, NodeID: "code", AgentID: &coder.ID}
+	n2 := &store.RunNode{RunID: ran.ID, NodeID: "review", AgentID: &reviewer.ID}
+	for _, n := range []*store.RunNode{n1, n2} {
+		if err := store.CreateRunNode(ctx, pool, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t0 := time.Now().Add(-time.Minute)
+	for i, mc := range []struct {
+		node  string
+		model string
+	}{{n1.ID, "claude-sonnet-5-5"}, {n2.ID, "claude-opus-5-5"}, {n2.ID, "claude-sonnet-5-5"}} {
+		m := &store.ModelCall{RunID: ran.ID, RunNodeID: mc.node, Provider: "anthropic", Model: mc.model, StartedAt: t0.Add(time.Duration(i) * time.Second)}
+		if err := store.InsertModelCall(ctx, pool, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	overridden := newRun(snapshot("scripted/scripted-1"))
+	plain := newRun(snapshot(""))
+
+	code, body := do(t, ts, http.MethodGet, "/api/runs?limit=500", "")
+	if code != http.StatusOK {
+		t.Fatalf("list: %d %s", code, body)
+	}
+	var runs []store.Run
+	if err := json.Unmarshal(body, &runs); err != nil {
+		t.Fatal(err)
+	}
+	find := func(id string) store.Run {
+		t.Helper()
+		for _, r := range runs {
+			if r.ID == id {
+				return r
+			}
+		}
+		t.Fatalf("run %s not listed", id)
+		return store.Run{}
+	}
+	names := []string{coder.Name, reviewer.Name}
+	if r := find(ran.ID); !slices.Equal(r.AgentNames, names) || !slices.Equal(r.Models, []string{"claude-sonnet-5-5", "claude-opus-5-5"}) {
+		t.Fatalf("ran: agents %v models %v", r.AgentNames, r.Models)
+	}
+	if r := find(overridden.ID); !slices.Equal(r.AgentNames, names) || !slices.Equal(r.Models, []string{"scripted/scripted-1"}) {
+		t.Fatalf("overridden: agents %v models %v", r.AgentNames, r.Models)
+	}
+	if r := find(plain.ID); !slices.Equal(r.AgentNames, names) || !slices.Equal(r.Models, []string{"claude-sonnet-5-5", "claude-opus-5-5"}) {
+		t.Fatalf("plain: agents %v models %v", r.AgentNames, r.Models)
 	}
 }

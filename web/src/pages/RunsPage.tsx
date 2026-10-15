@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useSearchParams } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { RUN_STATUSES, isTerminalStatus, listRuns, type RunStatus } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, humanize, shortId } from "@/lib/format";
 import { useEventStream } from "@/lib/useEventStream";
@@ -23,6 +23,7 @@ function parseStatus(value: string | null): RunStatus | undefined {
 export default function RunsPage() {
   const qc = useQueryClient();
   const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
   const status = parseStatus(params.get("status"));
 
   const q = useQuery({
@@ -80,10 +81,12 @@ export default function RunsPage() {
       ) : null}
       {q.data && q.data.length > 0 ? (
         <div className={`${cardClass} overflow-x-auto`}>
-          <table className="w-full min-w-[44rem] text-left text-sm">
+          <table className="w-full min-w-[60rem] text-left text-sm">
             <thead className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
               <tr>
                 <th className="px-4 py-2.5 font-medium">Run</th>
+                <th className="px-4 py-2.5 font-medium">Agent</th>
+                <th className="px-4 py-2.5 font-medium">Model</th>
                 <th className="px-4 py-2.5 font-medium">Status</th>
                 <th className="px-4 py-2.5 font-medium">Trigger</th>
                 <th className="px-4 py-2.5 font-medium">Created</th>
@@ -94,12 +97,22 @@ export default function RunsPage() {
             </thead>
             <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
               {q.data.map((r) => (
-                <tr key={r.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40">
+                <tr
+                  key={r.id}
+                  className="cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/40"
+                  onClick={(e) => {
+                    // The id is a real link; let it navigate on its own.
+                    if ((e.target as HTMLElement).closest("a")) return;
+                    void navigate(`/runs/${r.id}`);
+                  }}
+                >
                   <td className="px-4 py-2.5">
                     <Link to={`/runs/${r.id}`} className="font-mono hover:underline" title={r.id}>
                       {shortId(r.id)}
                     </Link>
                   </td>
+                  <td className="px-4 py-2.5">{r.agent_names?.length ? r.agent_names.join(", ") : "—"}</td>
+                  <td className="px-4 py-2.5 font-mono text-xs">{r.models?.length ? r.models.join(", ") : "—"}</td>
                   <td className="px-4 py-2.5">
                     <RunStatusBadge status={r.status} />
                   </td>

@@ -281,6 +281,10 @@ export type Run = {
   output_tokens?: number;
   cache_read_tokens?: number;
   cache_write_tokens?: number;
+  /** Agents the run's nodes ran, first appearance first; the list endpoint fills it. */
+  agent_names?: string[];
+  /** Models the run's model calls used, first appearance first; the list endpoint fills it. */
+  models?: string[];
   paused_total_ms?: number;
   created_at: string;
   started_at?: string;

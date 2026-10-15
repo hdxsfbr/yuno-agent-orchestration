@@ -82,6 +82,10 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "list runs", err)
 		return
 	}
+	if err := store.FillRunParticipants(r.Context(), s.pool, runs); err != nil {
+		s.internalError(w, r, "list run participants", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, runs)
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -465,4 +466,126 @@ func GetTrace(ctx context.Context, q Querier, runID string) (*Trace, error) {
 		return nil, err
 	}
 	return t, nil
+}
+
+// FillRunParticipants sets AgentNames and Models on each run for list views: the agents
+// its nodes ran and the models its model calls used, first appearance first. A run that
+// has no nodes or no model calls yet falls back to the agent nodes of its workflow
+// snapshot and their configured models, or the run's model override when it has one.
+func FillRunParticipants(ctx context.Context, q Querier, runs []Run) error {
+	if len(runs) == 0 {
+		return nil
+	}
+	ids := make([]string, len(runs))
+	for i := range runs {
+		ids[i] = runs[i].ID
+	}
+	names, err := collectAggregates(ctx, q, `SELECT x.run_id, array_agg(x.name ORDER BY x.first) FROM (
+		SELECT rn.run_id, a.name, min(rn.id) AS first FROM run_nodes rn JOIN agents a ON a.id = rn.agent_id
+		WHERE rn.run_id = ANY($1) GROUP BY rn.run_id, a.name) x GROUP BY x.run_id`, ids)
+	if err != nil {
+		return err
+	}
+	models, err := collectAggregates(ctx, q, `SELECT x.run_id, array_agg(x.model ORDER BY x.first) FROM (
+		SELECT run_id, model, min(started_at) AS first FROM model_calls WHERE run_id = ANY($1)
+		GROUP BY run_id, model) x GROUP BY x.run_id`, ids)
+	if err != nil {
+		return err
+	}
+
+	// Fallback for runs that have not produced either yet: the snapshot's agent nodes.
+	type snapshot struct {
+		Nodes []struct {
+			Kind    string `json:"kind"`
+			AgentID string `json:"agent_id"`
+		} `json:"nodes"`
+		RunOverrides *struct {
+			Model string `json:"model"`
+		} `json:"run_overrides"`
+	}
+	snaps := make([]snapshot, len(runs))
+	var need []string
+	for i := range runs {
+		if len(names[runs[i].ID]) > 0 && len(models[runs[i].ID]) > 0 {
+			continue
+		}
+		_ = json.Unmarshal(runs[i].WorkflowSnapshot, &snaps[i])
+		for _, n := range snaps[i].Nodes {
+			if n.Kind == "agent" && n.AgentID != "" {
+				need = append(need, n.AgentID)
+			}
+		}
+	}
+	type nameModel struct{ name, model string }
+	agents := map[string]nameModel{}
+	if len(need) > 0 {
+		rows, err := q.Query(ctx, `SELECT id, name, model FROM agents WHERE id = ANY($1)`, need)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, name, model string
+			if err := rows.Scan(&id, &name, &model); err != nil {
+				return err
+			}
+			agents[id] = nameModel{name, model}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	}
+	for i := range runs {
+		r := &runs[i]
+		r.AgentNames, r.Models = names[r.ID], models[r.ID]
+		if len(r.AgentNames) > 0 && len(r.Models) > 0 {
+			continue
+		}
+		var fallbackNames, fallbackModels []string
+		for _, n := range snaps[i].Nodes {
+			a, ok := agents[n.AgentID]
+			if n.Kind != "agent" || !ok {
+				continue
+			}
+			fallbackNames = appendDistinct(fallbackNames, a.name)
+			model := a.model
+			if o := snaps[i].RunOverrides; o != nil && o.Model != "" {
+				model = o.Model
+			}
+			fallbackModels = appendDistinct(fallbackModels, model)
+		}
+		if len(r.AgentNames) == 0 {
+			r.AgentNames = fallbackNames
+		}
+		if len(r.Models) == 0 {
+			r.Models = fallbackModels
+		}
+	}
+	return nil
+}
+
+// collectAggregates runs a query returning (run_id text, values text[]) rows into a map.
+func collectAggregates(ctx context.Context, q Querier, sql string, ids []string) (map[string][]string, error) {
+	rows, err := q.Query(ctx, sql, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var id string
+		var values []string
+		if err := rows.Scan(&id, &values); err != nil {
+			return nil, err
+		}
+		out[id] = values
+	}
+	return out, rows.Err()
+}
+
+func appendDistinct(list []string, v string) []string {
+	if slices.Contains(list, v) {
+		return list
+	}
+	return append(list, v)
 }
