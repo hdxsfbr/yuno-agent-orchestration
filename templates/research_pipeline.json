@@ -1,0 +1,115 @@
+{
+  "key": "research_pipeline",
+  "name": "Research pipeline",
+  "description": "Researcher gathers notes on a topic, Critic accepts them or sends them back with questions (a loop bounded by max_loop_visits), Writer turns the accepted notes into a report.",
+  "definition": {
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "topic": { "type": "string", "description": "What to research" },
+        "audience": { "type": "string", "description": "Who the report is for, default a technical lead" }
+      },
+      "required": ["topic"],
+      "additionalProperties": true
+    },
+    "state_schema": {
+      "type": "object",
+      "properties": {
+        "researcher": {
+          "type": "object",
+          "properties": {
+            "summary": { "type": "string" },
+            "notes_path": { "type": "string" },
+            "sources": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["summary", "notes_path"]
+        },
+        "critic": {
+          "type": "object",
+          "properties": {
+            "verdict": { "type": "string", "enum": ["approved", "changes_requested"] },
+            "feedback": { "type": "string" }
+          },
+          "required": ["verdict", "feedback"]
+        },
+        "writer": {
+          "type": "object",
+          "properties": {
+            "summary": { "type": "string" },
+            "report_path": { "type": "string" }
+          },
+          "required": ["summary", "report_path"]
+        }
+      }
+    },
+    "nodes": [
+      { "id": "start", "kind": "start" },
+      {
+        "id": "researcher",
+        "kind": "agent",
+        "agent_name": "Researcher",
+        "task": "Research this topic and write structured notes to runs/$RUN_ID/notes.md: key facts, trade-offs, open questions, and a list of sources (URLs when you fetched them, otherwise say the fact comes from your own knowledge).\n\nTopic: {{.input.topic}}\n{{with .state.critic}}\nThe critic was not satisfied with the previous notes. Address every point:\n{{.feedback}}\n{{end}}\nFinish with a summary, the notes path and the sources.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "summary": { "type": "string" },
+            "notes_path": { "type": "string" },
+            "sources": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["summary", "notes_path"],
+          "additionalProperties": true
+        },
+        "input_from": ["start", "critic"]
+      },
+      {
+        "id": "critic",
+        "kind": "agent",
+        "agent_name": "Critic",
+        "task": "Read the notes at {{.state.researcher.notes_path}} on the topic: {{.input.topic}}\n\nCheck them for unsupported claims, missing trade-offs and gaps a {{or .input.audience \"technical lead\"}} would notice. Finish with verdict \"approved\" when the notes are sound and complete enough to write from, otherwise \"changes_requested\" with specific questions for the researcher.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "verdict": { "type": "string", "enum": ["approved", "changes_requested"] },
+            "feedback": { "type": "string" }
+          },
+          "required": ["verdict", "feedback"],
+          "additionalProperties": true
+        },
+        "input_from": ["researcher"]
+      },
+      {
+        "id": "writer",
+        "kind": "agent",
+        "agent_name": "Writer",
+        "task": "Write a report for a {{or .input.audience \"technical lead\"}} on: {{.input.topic}}\n\nUse the approved notes at {{.state.researcher.notes_path}} and nothing the notes do not support. The critic's assessment: {{.state.critic.feedback}}\n\nWrite the report to runs/$RUN_ID/report.md with a one-paragraph summary, the findings, the trade-offs and a recommendation. Finish with the summary and the report path.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "summary": { "type": "string" },
+            "report_path": { "type": "string" }
+          },
+          "required": ["summary", "report_path"],
+          "additionalProperties": true
+        },
+        "input_from": ["researcher", "critic"]
+      },
+      { "id": "end", "kind": "end" }
+    ],
+    "edges": [
+      { "from": "start", "to": "researcher" },
+      { "from": "researcher", "to": "critic" },
+      { "from": "critic", "to": "researcher", "when": { "path": "/critic/verdict", "op": "eq", "value": "changes_requested" } },
+      { "from": "critic", "to": "writer", "when": { "path": "/critic/verdict", "op": "eq", "value": "approved" } },
+      { "from": "writer", "to": "end" }
+    ],
+    "limits": {
+      "max_steps": 40,
+      "max_duration_seconds": 900,
+      "max_node_iterations": 12,
+      "max_loop_visits": 3,
+      "max_cost_usd": 2,
+      "max_tool_calls": 80,
+      "approval_timeout_seconds": 86400
+    }
+  }
+}

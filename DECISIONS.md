@@ -6,6 +6,24 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-15
 
+**D-018 Templates name agents; `make seed` creates them.** (Claude, unobjected) A template's
+agent node carries `agent_name` ("Coder") instead of an id, and instantiating a template
+resolves names to the agents of that name, failing with a path-qualified 422 when one is
+missing. `yuno seed` creates the six demo agents once and never overwrites an edited one.
+Why: templates are files in the repository and cannot know database ids; the alternative,
+embedding agent definitions in templates, would duplicate the agent model. Cost: a
+renamed agent breaks instantiation until the template is edited; the error names it.
+
+**D-017 Side-effect approvals register with the gateway two-phase; the gateway's own
+timeout is not a decision.** (Claude, from the probe) `plugin.approval.request` blocks
+until a decision unless `twoPhase` is set, and its timeout (at most 10 minutes) ends in a
+`deny` event with `resolvedBy: null`. The engine registers two-phase, treats that event
+as no decision, and keeps the approval pending until the platform's own expiry, decidable
+from the web UI. Why: approval timeouts are a product setting (default 24 h), not a
+gateway constant. Cost: after the gateway's window only the platform's surfaces can
+decide; chat-side decisions are verified with the Telegram channel in wave 3. Details in
+`docs/DESIGN.md` 5.3 rule 5a; `make probe-approval` re-verifies.
+
 **D-016 Model upstream is configurable; the demo runs through OpenRouter.** (Andre)
 `MODEL_UPSTREAM=anthropic|openrouter`. OpenRouter serves the same Claude models through
 the Anthropic messages format (verified 2026-10-15: `/api/v1/messages`, streaming and

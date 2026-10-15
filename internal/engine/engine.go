@@ -444,3 +444,17 @@ func (e *Engine) endSpan(ctx context.Context, id string, at time.Time, attrs map
 		e.log.Warn("end span failed", "span_id", id, "error", err)
 	}
 }
+
+// ---- approvals (DESIGN 5.3): implemented in wave 2 ------------------------------------
+
+func (e *Engine) RequestApproval(context.Context, ApprovalRequest) (*store.Approval, error) {
+	return nil, ErrNotImplemented
+}
+
+func (e *Engine) WaitApproval(context.Context, string) (*store.Approval, error) {
+	return nil, ErrNotImplemented
+}
+
+func (e *Engine) DecideApproval(context.Context, string, string, string, string) (*store.Approval, error) {
+	return nil, ErrNotImplemented
+}

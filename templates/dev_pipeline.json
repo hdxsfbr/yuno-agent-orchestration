@@ -1,0 +1,123 @@
+{
+  "key": "dev_pipeline",
+  "name": "Dev pipeline",
+  "description": "Coder writes the code, Reviewer approves it or sends it back with feedback (a loop bounded by max_loop_visits), a human approves the deploy, Deployer publishes a release.",
+  "definition": {
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "task": { "type": "string", "description": "What to build" },
+        "version": { "type": "string", "description": "Release version, default 1.0.0" }
+      },
+      "required": ["task"],
+      "additionalProperties": true
+    },
+    "state_schema": {
+      "type": "object",
+      "properties": {
+        "coder": {
+          "type": "object",
+          "properties": {
+            "summary": { "type": "string" },
+            "files": { "type": "array", "items": { "type": "string" } },
+            "tests_passed": { "type": "boolean" }
+          },
+          "required": ["summary", "files"]
+        },
+        "reviewer": {
+          "type": "object",
+          "properties": {
+            "verdict": { "type": "string", "enum": ["approved", "changes_requested"] },
+            "feedback": { "type": "string" }
+          },
+          "required": ["verdict", "feedback"]
+        },
+        "deployer": {
+          "type": "object",
+          "properties": {
+            "release_id": { "type": "string" },
+            "version": { "type": "string" },
+            "status": { "type": "string" }
+          },
+          "required": ["status"]
+        }
+      }
+    },
+    "nodes": [
+      { "id": "start", "kind": "start" },
+      {
+        "id": "coder",
+        "kind": "agent",
+        "agent_name": "Coder",
+        "task": "Implement the following in the directory runs/$RUN_ID/ of your workspace, with tests you run yourself:\n\n{{.input.task}}\n{{with .state.reviewer}}\nThe reviewer asked for changes. Address every point before finishing:\n{{.feedback}}\n{{end}}\nWhen done, finish with a summary, the list of files you created or changed (paths relative to the workspace) and whether the tests passed.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "summary": { "type": "string" },
+            "files": { "type": "array", "items": { "type": "string" } },
+            "tests_passed": { "type": "boolean" }
+          },
+          "required": ["summary", "files"],
+          "additionalProperties": true
+        },
+        "input_from": ["start", "reviewer"]
+      },
+      {
+        "id": "reviewer",
+        "kind": "agent",
+        "agent_name": "Reviewer",
+        "task": "Review the work in runs/$RUN_ID/ for this task:\n\n{{.input.task}}\n\nThe coder reports: {{.state.coder.summary}}\nFiles: {{range .state.coder.files}}{{.}} {{end}}\n\nRead the files and run the tests yourself. Finish with verdict \"approved\" when the code does what the task asks and the tests pass, otherwise \"changes_requested\" with specific, actionable feedback.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "verdict": { "type": "string", "enum": ["approved", "changes_requested"] },
+            "feedback": { "type": "string" }
+          },
+          "required": ["verdict", "feedback"],
+          "additionalProperties": true
+        },
+        "input_from": ["coder"]
+      },
+      {
+        "id": "gate",
+        "kind": "approval",
+        "message": "Deploy release {{or .input.version \"1.0.0\"}}? Coder: {{.state.coder.summary}} Reviewer: {{.state.reviewer.feedback}}"
+      },
+      {
+        "id": "deployer",
+        "kind": "agent",
+        "agent_name": "Deployer",
+        "task": "Publish the reviewed work in runs/$RUN_ID/ as release version {{or .input.version \"1.0.0\"}} with the deploy_release tool. Files to include: {{range .state.coder.files}}{{.}} {{end}}. Release notes: {{.state.coder.summary}}\n\nFinish with the release id and version the tool returned and a status of \"deployed\"; if the tool result says the deploy was rejected or is pending approval, finish with that status and no release id.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "release_id": { "type": "string" },
+            "version": { "type": "string" },
+            "status": { "type": "string" }
+          },
+          "required": ["status"],
+          "additionalProperties": true
+        },
+        "input_from": ["coder", "reviewer"]
+      },
+      { "id": "end", "kind": "end" }
+    ],
+    "edges": [
+      { "from": "start", "to": "coder" },
+      { "from": "coder", "to": "reviewer" },
+      { "from": "reviewer", "to": "coder", "when": { "path": "/reviewer/verdict", "op": "eq", "value": "changes_requested" } },
+      { "from": "reviewer", "to": "gate", "when": { "path": "/reviewer/verdict", "op": "eq", "value": "approved" } },
+      { "from": "gate", "to": "deployer" },
+      { "from": "deployer", "to": "end" }
+    ],
+    "limits": {
+      "max_steps": 40,
+      "max_duration_seconds": 900,
+      "max_node_iterations": 12,
+      "max_loop_visits": 3,
+      "max_cost_usd": 2,
+      "max_tool_calls": 80,
+      "approval_timeout_seconds": 86400
+    }
+  }
+}

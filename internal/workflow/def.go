@@ -21,9 +21,13 @@ const (
 var nodeIDPattern = regexp.MustCompile(`^[a-z0-9_]{1,40}$`)
 
 type Node struct {
-	ID           string          `json:"id"`
-	Kind         string          `json:"kind"`
-	AgentID      string          `json:"agent_id,omitempty"`
+	ID      string `json:"id"`
+	Kind    string `json:"kind"`
+	AgentID string `json:"agent_id,omitempty"`
+	// AgentName is how a template names its agent before it is instantiated; the
+	// instantiate endpoint resolves it to AgentID (DESIGN 5.6 rule 9). A runnable
+	// workflow always has AgentID.
+	AgentName    string          `json:"agent_name,omitempty"`
 	Task         string          `json:"task,omitempty"`
 	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
 	InputFrom    []string        `json:"input_from,omitempty"`
@@ -124,7 +128,7 @@ func (d *Definition) ValidateStructure() error {
 		case KindEnd:
 			ends++
 		case KindAgent:
-			if n.AgentID == "" {
+			if n.AgentID == "" && n.AgentName == "" {
 				msgs = append(msgs, fmt.Sprintf("nodes[%d].agent_id: required for agent nodes", i))
 			}
 			if n.Task == "" {

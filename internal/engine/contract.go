@@ -54,6 +54,44 @@ var ErrInvalidRunToken = errors.New("invalid run token")
 // ErrNotPending is returned by decisions on approvals that are not pending (409).
 var ErrNotPending = errors.New("approval is not pending")
 
+// ErrNotImplemented marks a contract method a later wave fills in.
+var ErrNotImplemented = errors.New("not implemented in this wave")
+
+// Decisions a human can make on an approval (DESIGN 5.3). ApproveAlways is only
+// meaningful for exec approvals, where it also extends the agent's allowlist.
+const (
+	DecisionApprove       = "approve"
+	DecisionApproveAlways = "approve_always"
+	DecisionReject        = "reject"
+)
+
+// ApprovalRequest asks the engine to gate a platform side effect on a human decision
+// (DESIGN 5.3 rule 5). Exec approvals come from gateway events and node approvals from
+// the workflow, so callers only ever request kind store.ApprovalKindTool.
+type ApprovalRequest struct {
+	// Token is the run token of the calling visit: it identifies run, node visit and
+	// agent, and the approval is refused with ErrInvalidRunToken when it is not live.
+	Token string
+	// ToolName and ToolCallID name the gated call. ToolCallID is the tool_calls row the
+	// caller recorded (status awaiting_approval, with its idempotency key) so the
+	// engine's fallback execution can find it.
+	ToolName   string
+	ToolCallID string
+	// Message is what the human reads; Input is the full tool input for the inbox.
+	Message string
+	Input   json.RawMessage
+}
+
+// SideEffectExecutor executes an approved side-effecting tool call outside the MCP
+// request that asked for it: the fallback of DESIGN 5.3 rule 5, used when the approval
+// is granted after the MCP wait gave up. Implemented by the tools package; the engine
+// records the outcome in runs.state.pending_effects[].
+type SideEffectExecutor interface {
+	// ExecuteApproved loads the tool_calls row, runs the effect under its idempotency
+	// key and updates the row. It returns the result the model would have seen.
+	ExecuteApproved(ctx context.Context, toolCallID string) (output json.RawMessage, isError bool, err error)
+}
+
 // FinishValidationError carries the schema message the model should see as a tool
 // result (DESIGN 5.6: the turn continues).
 type FinishValidationError struct {
@@ -91,6 +129,24 @@ type Service interface {
 	// tells the engine the node is done. Returns *FinishValidationError on schema
 	// failure (the caller returns the message to the model) or ErrInvalidRunToken.
 	AcceptFinish(ctx context.Context, token string, result json.RawMessage) error
+
+	// RequestApproval records a pending approval of kind tool for the token's visit,
+	// registers it with the gateway as a plugin approval (external_id, two-phase), moves
+	// the run and node to waiting_approval, publishes approval.requested and returns at
+	// once. The approval expires at requested_at + approval_timeout_seconds.
+	RequestApproval(ctx context.Context, req ApprovalRequest) (*store.Approval, error)
+	// WaitApproval blocks until the approval is decided or ctx ends, and returns the
+	// decided approval or ctx.Err(). While a caller waits, the decision is delivered to
+	// it and the engine does not execute the effect itself; once no caller waits, a
+	// later grant triggers Deps.Effects.ExecuteApproved (DESIGN 5.3 rule 5).
+	WaitApproval(ctx context.Context, approvalID string) (*store.Approval, error)
+	// DecideApproval applies a human decision (DecisionApprove, DecisionApproveAlways or
+	// DecisionReject) by the principal `by` with an optional reason. Exec approvals are
+	// resolved on the gateway (exec.approval.resolve), tool approvals on the gateway's
+	// plugin approval too (plugin.approval.resolve), node approvals resume the run.
+	// Returns ErrNotPending when the approval is not pending (409) and store.ErrNotFound
+	// when it does not exist.
+	DecideApproval(ctx context.Context, approvalID, decision, by, reason string) (*store.Approval, error)
 }
 
 // Deps is everything the engine needs. The HTTP layer builds it in httpapi.Run.
@@ -105,4 +161,7 @@ type Deps struct {
 	// StateDir is the gateway state directory as mounted in the api container
 	// (workspace files are written under it).
 	StateDir string
+	// Effects executes approved side effects outside the MCP request that asked for
+	// them (DESIGN 5.3 rule 5). nil disables that fallback.
+	Effects SideEffectExecutor
 }

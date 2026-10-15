@@ -170,21 +170,45 @@ Rules:
    our `approval_timeout_seconds`; the engine resolves `deny` itself when our timeout is
    shorter, and treats an OpenClaw expiry as a rejection with reason `expired`.
 5. **Side-effect approvals.** Platform tools with `risk: side_effecting` are served over
-   MCP (5.7). With policy `require_approval` the MCP handler creates an `approvals` row of
-   kind `tool`, registers it with the gateway as a plugin approval
-   (`plugin.approval.request`, verified in wave 2; the id is stored in `external_id`) so
-   OpenClaw's Control UI and the Telegram `/approve` command can answer it, sets the run
-   to `waiting_approval`, emits SSE, and **blocks the MCP call** until a decision or
-   `MCP_TOOL_WAIT` (default 540 s, below OpenClaw's `requestTimeoutMs` of 600 s). A
-   decision from our UI calls `plugin.approval.resolve`; a decision from Telegram arrives
-   as `plugin.approval.resolved`. On approval within the wait, the effect executes and the
-   result returns to the model in the same turn. On rejection, the tool result is
-   `{"status":"rejected","reason":...}`, not an error, so the agent can finish cleanly.
-   On timeout, the tool result is `{"status":"pending_approval","approval_id":...}`; the
-   node continues, and when the approval is later granted the engine executes the effect
-   itself with the same idempotency key and records the outcome in
-   `runs.state.pending_effects[]`. If `plugin.approval.request` turns out not to route to
-   chat, the fallback is web-UI-only decisions and the README says so. **[decision]**
+   MCP (5.7). With policy `require_approval` the MCP handler records the tool call
+   (`awaiting_approval`, with its idempotency key), asks the engine for an approval of
+   kind `tool` (`RequestApproval`), which stores the row, registers it with the gateway
+   as a plugin approval (rule 5a, id in `external_id`), sets the run and node to
+   `waiting_approval` and emits SSE `approval.requested`; the handler then **blocks the
+   MCP call** (`WaitApproval`) until a decision or `MCP_TOOL_WAIT` (default 540 s, below
+   OpenClaw's MCP `requestTimeoutMs` of 600 s). On approval within the wait, the effect
+   executes and the result returns to the model in the same turn. On rejection, the
+   tool result is `{"status":"rejected","reason":...}`, not an error, so the agent can
+   finish cleanly. On timeout, the tool result is
+   `{"status":"pending_approval","approval_id":...}`; the node continues, and when the
+   approval is later granted the engine executes the effect itself through
+   `Deps.Effects.ExecuteApproved` with the same idempotency key and records the outcome
+   in `runs.state.pending_effects[]` (a later rejection is recorded there too). A
+   decision made while a handler still waits is delivered to that handler and never also
+   executed by the engine. **[decision]**
+5a. **Gateway registration, verified 2026-10-15 on 2026.10.3 (`make probe-approval`).**
+   `plugin.approval.request { title, description, detail?, severity: info|warning|critical,
+   toolName, toolCallId, mcpTool: {server: "yuno", tool}, allowedDecisions:
+   ["allow-once", "deny"], agentId?, sessionKey?, timeoutMs, twoPhase: true }` returns at
+   once with `{status: "accepted", id: "plugin:<uuid>", deliveryRoute, createdAtMs,
+   expiresAtMs}`. Without `twoPhase` the call itself blocks until the decision or the
+   timeout, so the engine always sets it. `timeoutMs` is at most 600 000 (default
+   120 000); the engine passes `MCP_TOOL_WAIT` in milliseconds. Other approval clients
+   receive `plugin.approval.requested {approvalKind: "plugin", id, request, createdAtMs,
+   expiresAtMs}` and `plugin.approval.list {}` lists the pending ones. Any decision
+   produces `plugin.approval.resolved {id, decision: allow-once|allow-always|deny,
+   resolvedBy, ts, request}` on every client; the gateway's own timeout produces the
+   same event with `decision: "deny"` and `resolvedBy: null`, which the engine
+   **ignores**: our approval stays pending until our own expiry (5.2 rule 10) and can
+   still be decided from the web UI, which then skips the gateway call.
+   `plugin.approval.resolve { id, decision }` returns `{ok: true}`; a second decision
+   fails with `APPROVAL_ALREADY_RESOLVED` and an unknown or expired id with
+   `APPROVAL_NOT_FOUND`; both mean the gateway side is already settled and our row is
+   decided anyway. `plugin.approval.waitDecision { id, timeoutMs }` returns `{id,
+   decision|null, terminalReason: user|timeout}`; the engine relies on the event, not on
+   this call. Pending plugin approvals do not survive a gateway restart. Whether a plugin
+   approval reaches a Telegram chat is verified with the channel in wave 3; until then
+   decisions come from the web UI and the gateway's own clients. **[probed]**
 6. Effective policy for a platform tool = agent `interaction_rules[tool]`, else
    `require_approval` for `side_effecting`, else `auto`. Operators may set a
    side-effecting tool to `auto` (D-009); the UI warns; templates never do.
@@ -197,8 +221,9 @@ Rules:
 
 Edge cases: an exec approval raised by a session the engine is not tracking (manual
 OpenClaw use) is recorded with `run_id = NULL` and shown in the inbox. Two MCP calls from
-one turn that both need approval are two approvals; OpenClaw runs tool calls
-sequentially per turn **[docs]**, so they arrive in order.
+one turn that both need approval are two approvals; OpenClaw runs the tool calls of one
+turn concurrently (**[probed]** 2026-10-15: a `write` and an `exec` issued together
+started 4 ms apart), so both MCP calls block at once and either may be decided first.
 
 Tests: T5.3.1 allowlisted command runs without an approval row (scripted provider
 requests `python3 -m pytest`). T5.3.2 non-allowlisted command raises an approval; approve
@@ -206,15 +231,53 @@ requests `python3 -m pytest`). T5.3.2 non-allowlisted command raises an approval
 blocks, approve within wait → executed once, result in same turn. T5.3.4 reject → status
 rejected result. T5.3.5 wait timeout → pending result, later approval → executed by
 engine once, state updated. T5.3.6 `auto` policy executes without approval and the audit
-row says so. T5.3.7 cancel while waiting → approval expired, exec resolved deny. T5.3.8
-double decision → 409.
+row says so. T5.3.7 cancel while waiting → approval expired, exec resolved deny. T5.3.8 double decision → 409. T5.3.9 gateway timeout event (resolvedBy null)
+leaves the approval pending; a later web decision still applies.
 
 ### 5.4 Idempotent side effects
 
-Unchanged. The key is `sha256(run_id || node_visit_id || tool_name || canonical_json(input))`
-computed by the MCP handler; `side_effects` is written in the same transaction as the
-effect result; the deploy target and GitLab paths enforce their own keys (branch name for
-GitLab). Tests T5.4.1 to T5.4.5 stand.
+Purpose: a repeated request for the same side effect produces at most one effect, across
+retries, re-queues, duplicate approvals and the engine's fallback execution.
+
+Inputs: tool call input (JSON), run id, node visit id (`run_nodes.id`), tool name.
+
+Rules:
+
+1. `idempotency_key = sha256(run_id || node_visit_id || tool_name || canonical_json(input))`,
+   hex, computed by the MCP handler before the approval gate. Canonical JSON: keys sorted,
+   no insignificant whitespace, UTF-8. The key is stored on the `tool_calls` row when the
+   call is recorded (`awaiting_approval` or `executed`).
+2. Before executing a `side_effecting` tool, the executor inserts
+   `side_effects(idempotency_key)` in a transaction. On unique violation it returns the
+   stored `result` and records the tool call with `output.replayed = true`.
+3. The side effect's external request carries the key (`Idempotency-Key` header for the
+   deploy target and any HTTP tool; GitLab uses a branch name derived from the key).
+   Outbound channel messages (wave 3) are deduped by `(conversation_id, run_id,
+   node_visit_id, sha256(text))`.
+4. The deploy target enforces the same key server side: a second `POST /releases` with a
+   known key returns `200` with the original release, never creates a second one.
+5. The stored `result` is written in the same transaction as the key only after the
+   external call succeeds. If the external call fails, the key row is deleted so a retry
+   can try again (the external service's own key handles the double-send case).
+6. The engine's fallback execution (5.3 rule 5) and an MCP retry of the same call share
+   the key, so whichever runs second replays.
+
+Edge cases: the same input in a later node visit (a loop) is a new effect by design (the
+key includes the visit). A retry after a network timeout where the first request did
+land: the external service returns the original by key (rule 4); the platform stores it.
+
+Consistency: rules 2 and 5 are one transaction with `SELECT ... FOR UPDATE` on the key.
+
+Outputs: `tool_calls.idempotency_key`, `output.replayed`, `side_effects` rows in the
+run's trace (`side_effects[]`).
+
+Tests: T5.4.1 same input twice in one visit → one external call (counting fake), second
+result replayed. T5.4.2 different visit → two effects. T5.4.3 external failure deletes the
+key and a retry succeeds with one effect. T5.4.4 deploy target: two POSTs same key → one
+release, same id. T5.4.5 canonical JSON: key order and whitespace differences produce the
+same key. T5.4.6 fallback execution after an MCP replay of the same call → one effect.
+
+Out of scope: cross-run dedupe.
 
 ### 5.5 Retry and backoff
 
@@ -231,35 +294,135 @@ Rules:
    up to 30 s, indefinitely; in-flight runs are re-attached by `runId` through
    `chat.history` and `sessions.messages.subscribe` replay, not restarted.
 2. `chat.send` transport failures (RPC error, timeout 15 s) retry up to 5 times with the
-   same `idempotencyKey` (OpenClaw dedupes by it **[probed]**); backoff as revision 1.
+   same `idempotencyKey` (OpenClaw dedupes by it **[probed]**); backoff per 5.2 (1, 2,
+   4, 8 … s capped at 30 s, no jitter).
 3. A turn that ends in `chat` state `error` with a provider HTTP status in
    {408, 409, 429, 500, 502, 503, 529} or a transport error is retried as a new turn on
    the same session with the message `Continue.` up to 3 times (OpenClaw already applies
    its own provider failover and retries first **[docs]**). Other errors fail the node with
    reason `model error: <errorKind>`.
-4. Platform tool retries as revision 1 rule 4 (read-only and computational 3 attempts on
-   transient errors; side-effecting 2, only after the idempotency key is recorded).
+4. Platform tool retries per the registry entry: `read_only` and `computational` tools
+   default `max_attempts: 3` on errors the executor classifies as transient (timeout,
+   5xx, connection refused); `side_effecting` tools default `max_attempts: 2` and are
+   only retried after the idempotency key is recorded (5.4), never before approval. A
+   non-JSON body from an external service is a permanent error, not transient.
 5. Every attempt is a span and a `warn` log line.
 
-Edge cases and failure handling as revision 1. Tests: T5.5.1 disconnect mid-run →
+Edge cases: a wait longer than the time remaining times the run out (5.2). Failure
+handling: after the last attempt a model failure fails the node with reason
+`model error: <errorKind>` and a tool failure returns an error result to the model,
+which may try something else. Tests: T5.5.1 disconnect mid-run →
 reattach, no duplicate turn. T5.5.2 `chat.send` RPC failure twice then success → one run.
 T5.5.3 provider 529 twice then success → three turns, one node. T5.5.4 non-retryable error
 → node failed with reason. T5.5.5 deadline nearer than backoff → timed_out.
 
 ### 5.6 Workflow graph, conditions and typed state
 
-Unchanged (rules 1 to 10, tests T5.6.1 to T5.6.9) except how an agent produces typed
-output:
+Purpose: let an operator define, in the UI, which agents run in what order, with branching
+and feedback loops, and have the engine enforce typed state between them.
 
-- The node task message ends with a fixed protocol block: the run token (5.14 rule 7), the
-  output schema, and the instruction to call `yuno__finish` with the result when done.
-- The MCP `finish` tool validates the input against the node's `output_schema`; on failure
-  it returns the validation message as a tool result and the turn continues (counts
-  toward rule 7's three attempts). On success it stores the output and returns
-  `{"status":"accepted"}`; the engine then aborts the turn if the model keeps going.
-- If the turn ends without a `finish` call, the engine looks for one JSON object in the
-  final assistant text that validates; otherwise the node fails with reason
-  `agent did not call finish`.
+Inputs: `workflows.definition` JSON (the shipped `templates/dev_pipeline.json` is the
+reference example):
+
+```json
+{
+  "input_schema": { "type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"] },
+  "state_schema": { "type": "object", "properties": {...} },
+  "nodes": [
+    {"id": "start", "kind": "start"},
+    {"id": "coder", "kind": "agent", "agent_id": "...", "task": "...template...",
+     "output_schema": {...}, "input_from": ["start", "reviewer"]},
+    {"id": "reviewer", "kind": "agent", ...},
+    {"id": "gate", "kind": "approval", "message": "Deploy {{.state.coder.summary}}?"},
+    {"id": "deployer", "kind": "agent", ...},
+    {"id": "end", "kind": "end"}
+  ],
+  "edges": [
+    {"from": "start", "to": "coder"},
+    {"from": "coder", "to": "reviewer"},
+    {"from": "reviewer", "to": "coder", "when": {"path": "/reviewer/verdict", "op": "eq", "value": "changes_requested"}},
+    {"from": "reviewer", "to": "gate", "when": {"path": "/reviewer/verdict", "op": "eq", "value": "approved"}},
+    {"from": "gate", "to": "deployer"},
+    {"from": "deployer", "to": "end"}
+  ],
+  "limits": {...}
+}
+```
+
+Rules:
+
+1. Exactly one `start` node and at least one `end` node. Node ids unique, `[a-z0-9_]{1,40}`.
+2. Every edge references existing nodes; every non-`end` node has at least one outgoing
+   edge; every node is reachable from `start`. Violations return HTTP 422 with one
+   message per violation, path-qualified (`edges[2].to: unknown node 'reviewr'`).
+3. Conditions are `{path, op, value}` with `op ∈ {eq, neq, in, exists, gt, lt}` over
+   `runs.state` by JSON pointer, composable with `{"all": [...]}` and `{"any": [...]}`.
+   A missing path is `exists: false` and makes `eq/neq/in/gt/lt` false. No expression
+   strings, no code.
+4. An edge without `when` is always true. Edges from a node are evaluated in array order;
+   the first true one is taken (5.1 rule 5). A node with no true outgoing edge and not of
+   kind `end` ends the run `failed` with reason `no matching edge from <node>`.
+5. An `agent` node runs the referenced agent as one OpenClaw turn on a node-scoped
+   session (5.14 rule 5) with `task` rendered by Go `text/template` over `{input, state}`
+   (`{{.input.task}}`, `{{with .state.reviewer}}{{.feedback}}{{end}}`); the literal
+   `$RUN_ID` in the rendered task is replaced by the run id and the fixed protocol block
+   (run token, output schema, finish instruction) is appended. Template errors fail the
+   node at run time and are also reported at save time by rendering against an empty
+   input and state.
+6. The agent's `finish` tool input must validate against `output_schema`; the validated
+   object is written to `state[<node_id>]` (replace, never deep merge, so a revisit
+   replaces the previous output) and an `agent_messages` row records `from=<node>`
+   `to=<next node>` with the output payload once the next edge is chosen (SSE
+   `agent_message`).
+7. The MCP `finish` tool validates the input against the node's `output_schema`; on
+   failure it returns the validation message as a tool result and the turn continues;
+   the third consecutive failure fails the node with reason `output schema: <first
+   error>`. If the turn ends without a `finish` call, the engine looks for one JSON
+   object in the final assistant text that validates; otherwise the node fails with
+   reason `agent did not call finish`.
+8. An `approval` node is a human gate without a tool: it creates an approval of kind
+   `node` with the rendered message, sets the run to `waiting_approval` and releases the
+   worker (the wait does not count toward the time limit, 5.2 rule 4); approve re-queues
+   the run, which continues along the node's first true edge; reject follows the node's
+   `on_reject` edge if present, else fails the run with reason `rejected at <node>`.
+   Nothing in OpenClaw is involved.
+9. Workflow templates are JSON files under `templates/` (`{key, name, description,
+   definition}`) loaded at api startup into `workflows` rows with `template_key` set
+   (updated in place when the file changed, never deleted). Template agent nodes name
+   their agent with `agent_name` instead of `agent_id`, so a template is not runnable as
+   stored; `POST /workflow-templates/{key}/instantiate` copies it into a new editable
+   workflow with every `agent_name` resolved to the id of the agent of that name
+   (case-insensitive; 422 `nodes[i].agent_name: no agent named 'X'` when missing; `make
+   seed` creates the six demo agents). Shipped: `dev_pipeline` (Coder → Reviewer ⇄
+   feedback → approval → Deployer) and `research_pipeline` (Researcher → Critic ⇄
+   feedback → Writer).
+10. The loop in `dev_pipeline` is data: the `reviewer→coder` edge and `max_loop_visits`.
+    Nothing in Go knows the words coder or reviewer.
+11. `input` is validated against `input_schema` at trigger time (422 with the schema
+    message); the final state is checked against `state_schema` by the `schema`
+    evaluator, not by the engine.
+12. A node's `on_failure` edge is followed when the node fails for a reason that is not a
+    limit violation or a cancellation; without one the run fails with the node's reason.
+
+Edge cases: a workflow with only `start→end` is valid and succeeds instantly with zero
+model calls. An agent node whose agent lacks the tools its task needs still runs; the
+model gets only allowed tools. A run whose agent was deleted after the run started
+continues with the snapshot.
+
+Consistency: definition is validated on save and again at trigger time (an agent may have
+been deleted, a template still carries `agent_name`); trigger-time failure returns 422.
+
+Outputs: validation messages; `agent_messages` rows; SSE `agent_message`.
+
+Tests: T5.6.1 each structural rule produces its path-qualified message. T5.6.2 condition
+table test for every op including missing path. T5.6.3 `all`/`any` nesting. T5.6.4 edge
+order precedence. T5.6.5 template render error at save and at run. T5.6.6 output schema
+retry then failure. T5.6.7 approval node approve/reject/`on_reject`. T5.6.8 dev_pipeline
+template loops twice then deploys with the scripted provider. T5.6.9 state replace on
+revisit. T5.6.10 instantiate resolves agent names and reports a missing one. T5.6.11
+input schema violation at trigger → 422.
+
+Out of scope: parallel branches (fan-out/fan-in), sub-workflows.
 
 ### 5.7 Platform tools over MCP
 
@@ -381,6 +544,20 @@ Unchanged in rules and tests, with these implementation notes:
   public cases where every evaluator passed; end-to-end success is the share whose
   final status equals `expect.status`. A text-only scripted reply ends the turn, so
   cases that must exceed a step limit use tool-call steps.
+- 5.13, wave 2 case schema: a case has either `agent` + `task` (a quick run) or
+  `workflow` + `input`, where `workflow` is an inline definition whose agent nodes use
+  `agent_name` resolved against the case's own `agents: {<name>: {system_prompt,
+  tool_allowlist, limits}}` map; the runner creates those agents (named
+  `eval-<case>-<name>-<suffix>`), creates the workflow, triggers it with the scripted
+  model override and deletes both afterwards. The script is consumed across nodes in
+  execution order. `actions.approvals: [{decision: approve|reject, reason?}]` are applied
+  in order to the run's pending approvals as the runner sees them
+  (`GET /api/approvals?run_id=&status=pending`, then `POST /api/approvals/{id}/approve`
+  or `/reject`); `actions.approval_wait_seconds` leaves one pending to test expiry.
+  `expect` gains `state` (JSON pointer → expected value, one entry per check) and
+  `tool_statuses` (tool name → list of statuses the run must have recorded). The
+  `approval_gate`, `idempotency`, `schema` and `allowlist` evaluators read the trace,
+  which carries `side_effects[]` from wave 2.
 
 ### 5.14 OpenClaw integration contract
 

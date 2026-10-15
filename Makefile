@@ -36,6 +36,9 @@ smoke: ## Hit every service in the running stack and check isolation (scripts/sm
 probe-openclaw: ## Run the OpenClaw integration canary against the running gateway
 	$(COMPOSE) --profile tools run --rm probe
 
+probe-approval: ## Verify the gateway's plugin approval RPCs the side-effect gate uses (DESIGN 5.3 rule 5)
+	$(COMPOSE) --profile tools run --rm --entrypoint node probe /scripts/openclaw-probe-approval.mjs
+
 build: ## Build images without starting
 	$(COMPOSE) --profile build build
 
@@ -93,7 +96,7 @@ lint: ## go vet, staticcheck, eslint, tsc
 migrate: ## Apply database migrations
 	$(COMPOSE) run --rm api migrate
 
-seed: ## Load templates and the demo agents
+seed: ## Create the demo agents the workflow templates name (templates load at api start)
 	$(COMPOSE) run --rm api seed
 
 eval: ## Run the evaluation suite (offline by default: EVAL_PROVIDER=scripted)

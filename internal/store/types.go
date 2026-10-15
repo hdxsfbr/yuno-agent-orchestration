@@ -291,4 +291,28 @@ type Trace struct {
 	Spans         []Span         `json:"spans"`
 	AgentMessages []AgentMessage `json:"agent_messages"`
 	Approvals     []Approval     `json:"approvals"`
+	// SideEffects are the run's idempotency records (DESIGN 5.4), filled from wave 2.
+	SideEffects []SideEffect `json:"side_effects,omitempty"`
+}
+
+// Approval kinds (DESIGN 5.3, section 4) and statuses.
+const (
+	ApprovalKindExec = "exec" // an OpenClaw exec approval, external_id = the gateway's id
+	ApprovalKindTool = "tool" // a platform side-effecting tool call gated over MCP
+	ApprovalKindNode = "node" // a workflow approval node
+
+	ApprovalPending  = "pending"
+	ApprovalApproved = "approved"
+	ApprovalRejected = "rejected"
+	ApprovalExpired  = "expired"
+)
+
+// SideEffect is one executed side effect keyed by its idempotency key (DESIGN 5.4).
+type SideEffect struct {
+	IdempotencyKey string          `db:"idempotency_key" json:"idempotency_key"`
+	ToolName       string          `db:"tool_name" json:"tool_name"`
+	RunID          string          `db:"run_id" json:"run_id"`
+	ToolCallID     string          `db:"tool_call_id" json:"tool_call_id"`
+	Result         json.RawMessage `db:"result" json:"result"`
+	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
 }

@@ -45,6 +45,8 @@ Then open http://localhost:8080. `make help` lists every target. The ones that m
 | `make test` | Go unit tests (against the `yuno_test` database) and frontend tests |
 | `make test-integration` | Live tests against the running gateway, run serially |
 | `make probe-openclaw` | A real OpenClaw turn with a sandboxed `exec`, the integration canary |
+| `make probe-approval` | Verifies the gateway's plugin approval calls the side-effect gate relies on |
+| `make seed` | Creates the six demo agents the workflow templates name (Coder, Reviewer, Deployer, Researcher, Critic, Writer); idempotent |
 | `make eval` | Run the evaluation suite offline with the scripted provider; `make eval-baseline` stores the report |
 | `make lint` | `go vet`, `staticcheck`, `eslint`, `tsc` |
 | `make logs` | Follow the api logs |

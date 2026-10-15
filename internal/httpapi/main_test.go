@@ -288,3 +288,15 @@ func adminGateway() *fakeGateway {
 		Scopes: []string{"operator.read", "operator.write", "operator.admin", "operator.approvals"},
 	}}
 }
+
+func (f *fakeEngine) RequestApproval(context.Context, engine.ApprovalRequest) (*store.Approval, error) {
+	return nil, engine.ErrNotImplemented
+}
+
+func (f *fakeEngine) WaitApproval(context.Context, string) (*store.Approval, error) {
+	return nil, engine.ErrNotImplemented
+}
+
+func (f *fakeEngine) DecideApproval(context.Context, string, string, string, string) (*store.Approval, error) {
+	return nil, engine.ErrNotImplemented
+}

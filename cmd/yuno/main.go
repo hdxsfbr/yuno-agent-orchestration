@@ -2,7 +2,7 @@
 //
 //	yuno api            HTTP API, run engine, scheduler, OpenClaw client, MCP server, model proxy
 //	yuno migrate        apply database migrations and exit
-//	yuno seed           load workflow templates and demo agents
+//	yuno seed           create the demo agents the workflow templates name (idempotent)
 //	yuno openclaw-init  write the baseline openclaw.json into the state directory and exit
 //	yuno deploytarget   local release store the deploy tool publishes to
 //	yuno eval           run the evaluation suite and write a report
@@ -22,6 +22,7 @@ import (
 	"yuno/internal/httpapi"
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
+	"yuno/internal/seed"
 	"yuno/internal/store"
 )
 
@@ -62,7 +63,7 @@ func main() {
 	case "deploytarget":
 		err = deploytarget.Run(ctx, cfg, log)
 	case "seed":
-		err = errors.New("seed: not implemented yet")
+		err = seed.Run(ctx, cfg, log)
 	case "eval":
 		err = evals.Run(ctx, cfg, log)
 	case "version":
