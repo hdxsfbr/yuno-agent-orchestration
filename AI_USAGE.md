@@ -90,3 +90,26 @@ Slips disclosed by agents: C ran an `npx` command on the host once (cleaned up);
 Human verification so far: Andre reviewed the design decisions, chose the runtime, the
 sandboxing mode and the channel integration, and approved the wave-1 briefs. The UI has
 not yet been exercised in a browser by a human.
+
+**Wave 2 prep (2026-10-15, coordinator).** Before briefing the four wave-2 agents the
+coordinator wrote the shared seams so no two agents would touch the same one: the
+approval methods on the engine contract and the `SideEffectExecutor` fallback, the
+approval and side-effect store types, `agent_name` on template nodes, the two shipped
+templates, the `seed` command for the six demo agents, and a second gateway probe
+(`make probe-approval`) for the plugin-approval RPCs. The probe found that
+`plugin.approval.request` blocks until the decision unless `twoPhase` is set and that the
+gateway's own timeout arrives as a `deny` with `resolvedBy: null`; both went into the
+design (5.3 rule 5a) and the decision log (D-017) before any agent started. The
+revision 1 rules for idempotency, retries and the workflow graph, which revision 2 had
+referenced without carrying, were folded back into `docs/DESIGN.md` with the wave-2
+additions, so every brief points at text that exists in the repository. Andre's first
+hands-on UI session (three findings: wasted exec turns, two misleading labels, a Runs
+list without agent, model or a clickable row) was fixed and committed first.
+
+**Wave 2 launch.** Four agents in parallel, briefs in `docs/briefs/wave2/` (approved
+by Andre as summarised in chat): A engine and approvals (Opus 5.5), B tools, MCP gate
+and API (Opus 5.5), C builder and inbox (Sonnet 5.5), D evaluators and cases
+(Sonnet 5.5). File ownership and the one cross-cutting rule (the MCP handler records
+platform tool calls; the engine skips them in its item recorder) are in
+`docs/briefs/wave2/common.md`.
+
