@@ -39,7 +39,10 @@ const AgentsMD = "You run on the Yuno platform. Work only inside the directory r
 	"the tool yuno__finish exactly once with the run_token from your task and a result object that " +
 	"matches the schema in your task. If yuno__finish answers with a validation error, correct the " +
 	"result and call it again. Use only the tools you were given. Do not ask questions; decide, act, " +
-	"and finish.\n"
+	"and finish. Create and change files with the file tools (write, edit), never with exec: the " +
+	"runtime refuses heredocs and inline interpreter scripts in exec commands, so use exec only " +
+	"to run programs. Tool calls made in the same turn run at the same time; when a call needs " +
+	"another's result, such as running a file you just wrote, make it in the next turn.\n"
 
 // MemoryMD is the MEMORY.md written in wave 1 (facts arrive in wave 3, DESIGN 5.10).
 const MemoryMD = "# Memory\n"

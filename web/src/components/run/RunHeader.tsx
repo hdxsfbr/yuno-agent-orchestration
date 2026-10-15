@@ -31,7 +31,6 @@ export default function RunHeader({ run, connection, now, onRunChange }: Props) 
   const terminal = isTerminalStatus(run.status);
   const requested = cancel.isSuccess || !!run.cancel_requested;
   const duration = elapsedMs(run.started_at, run.finished_at, now);
-  const cache = (run.cache_read_tokens ?? 0) + (run.cache_write_tokens ?? 0);
 
   return (
     <section aria-label="Run summary">
@@ -67,7 +66,7 @@ export default function RunHeader({ run, connection, now, onRunChange }: Props) 
           </p>
         ) : null}
 
-        <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-5">
+        <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-6">
           <Item label="Trigger">
             {run.trigger}
             {run.trigger_ref ? <span className="ml-1.5 font-mono text-xs font-normal text-zinc-500">{run.trigger_ref}</span> : null}
@@ -80,8 +79,9 @@ export default function RunHeader({ run, connection, now, onRunChange }: Props) 
           </Item>
           <Item label="Steps">{formatCount(run.step_count)}</Item>
           <Item label="Tool calls">{formatCount(run.tool_call_count)}</Item>
-          <Item label="Tokens in" title={cache > 0 ? `Cache read ${formatCount(run.cache_read_tokens)}, cache write ${formatCount(run.cache_write_tokens)}` : undefined}>
-            {formatCount(run.input_tokens)}
+          <Item label="Tokens in">{formatCount(run.input_tokens)}</Item>
+          <Item label="Cache read / write">
+            {formatCount(run.cache_read_tokens ?? 0)} / {formatCount(run.cache_write_tokens ?? 0)}
           </Item>
           <Item label="Tokens out">{formatCount(run.output_tokens)}</Item>
           <Item label="Cost">{formatMicros(run.cost_usd_micros)}</Item>

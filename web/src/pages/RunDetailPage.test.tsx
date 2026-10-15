@@ -24,6 +24,8 @@ const run = (over: Partial<Run> = {}): Run => ({
   cost_usd_micros: 12_345,
   input_tokens: 1200,
   output_tokens: 300,
+  cache_read_tokens: 800,
+  cache_write_tokens: 50,
   created_at: "2026-10-15T10:00:00Z",
   started_at: "2026-10-15T10:00:01Z",
   ...over,
@@ -133,12 +135,14 @@ describe("RunDetailPage", () => {
     expect(within(header).getByText("running")).not.toBeNull();
     expect(within(header).getByText("$0.0123")).not.toBeNull();
     expect(within(header).getByText("1,200")).not.toBeNull();
+    expect(within(header).getByText("800 / 50")).not.toBeNull();
 
     // node card with its model call
     const card = screen.getByRole("region", { name: "Node agent" });
     expect(within(card).getByText("claude-opus-5-5")).not.toBeNull();
     expect(within(card).getByText("tool_use")).not.toBeNull();
     expect(within(card).getByText("800 / 0")).not.toBeNull();
+    expect(within(card).getByText("1 turn")).not.toBeNull();
 
     // the stream was opened with a replay from the start
     const streamCall = calls.find((c) => c.url.endsWith("/events"))!;

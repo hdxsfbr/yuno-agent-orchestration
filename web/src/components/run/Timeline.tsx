@@ -31,7 +31,11 @@ function NodeCard({ node, items, now }: { node: RunNode; items: TimelineItem[]; 
         <h3 className="font-mono text-sm font-semibold">{node.node_id}</h3>
         <StatusBadge kind="node" status={node.status} />
         {node.visit > 1 ? <span className="text-xs text-zinc-500">visit {node.visit}</span> : null}
-        {node.iteration > 1 ? <span className="text-xs text-zinc-500">iteration {node.iteration}</span> : null}
+        {node.iteration > 0 ? (
+          <span className="text-xs text-zinc-500">
+            {formatCount(node.iteration)} {node.iteration === 1 ? "turn" : "turns"}
+          </span>
+        ) : null}
         <span className="ml-auto text-xs text-zinc-500">
           {node.started_at ? `Started ${formatDateTime(node.started_at)}` : "Not started"}
           {node.finished_at ? ` · Finished ${formatDateTime(node.finished_at)}` : ""}

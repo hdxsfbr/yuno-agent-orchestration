@@ -423,7 +423,8 @@ Rules:
    `tools.{profile,allow,deny}`, `skills`, `identity`); `exec.approvals.set` with the
    agent's policy and `baseHash` **[probed]**; workspace files `SOUL.md` (role and system
    prompt), `AGENTS.md` (platform operating rules: finish protocol, untrusted content,
-   run directory), `MEMORY.md`, and `skills/<name>/SKILL.md` written through the shared
+   run directory, files through the file tools rather than exec, dependent tool calls in
+   separate turns), `MEMORY.md`, and `skills/<name>/SKILL.md` written through the shared
    workspace volume (`agents.files.set` is used for the bootstrap files it accepts; the
    rest go through the volume). `models.providers` and `agents.defaults.model` patches
    reload hot **[probed]**; the engine checks `config.schema.lookup` `reloadKind` for any
