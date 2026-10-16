@@ -4,6 +4,16 @@ Newest first. Each entry says what was decided, by whom, and why. Design rules t
 refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR under
 `docs/adr/`.
 
+## 2026-10-16
+
+**D-025 The Telegram channel never answers from OpenClaw's default agent.** (Claude,
+from the first live probe) With Telegram enabled and no binding, the gateway routed
+Andre's first two messages to its built-in `main` agent, which replied on Opus. The
+platform must make that impossible: a message is answered only by the platform agent
+bound to the channel, otherwise dropped and logged. Why: an unbound channel talking to
+an unmanaged agent on a paid model is both a cost and a trust problem. Cost: before the
+first binding the bot stays silent. Mechanism chosen in wave 3 (DESIGN 5.8 rule 7).
+
 ## 2026-10-15
 
 **D-024 Task templates render missing values as empty; earlier outputs arrive as a context

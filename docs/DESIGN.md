@@ -518,8 +518,22 @@ Rules:
    **[docs]**. `scripts/smoke.sh` sends a request with a wrong secret through nginx and
    asserts a non-200 response, so the behaviour is demonstrated, not assumed.
 3. Binding: the agent form's "Telegram" toggle writes `bindings[]` with
-   `{ agentId, match: { channel: "telegram" } }` through `config.patch` **[docs]**; the
-   UI shows which agent is bound and refuses a second binding while one exists.
+   `{ agentId, match: { channel: "telegram" }, session: { dmScope: "per-channel-peer" } }`
+   through `config.patch`; the UI shows which agent is bound and refuses a second
+   binding while one exists. **[probed 2026-10-16]** The binding schema is
+   `{type?: "route", agentId, comment?, match: {channel, accountId?, peer?: {kind:
+   direct|group|channel, id}}, session?: {dmScope: main|per-peer|per-channel-peer|
+   per-account-channel-peer, groupScope: main|per-group}}`. A `bindings` patch is
+   accepted but **not hot-reloaded** (the gateway logs `evaluating reload (bindings)`
+   with no `hot reload applied`, unlike `mcp.servers.*`): a DM sent after the patch was
+   still routed to the default agent; the binding takes effect after a gateway restart.
+   The platform therefore writes the binding into `openclaw.json` through the baseline
+   (from the `channel_bindings` table at api start, via `openclaw-init`'s inputs or the
+   api's own write) and tells the operator a gateway restart (`make run`) applies it;
+   agent A verifies whether the gateway offers an RPC that applies it live. Also
+   **[probed]**: `sessions.messages.subscribe` and `plugin.approval.request` refuse an
+   `agentId` that does not match the session key's agent (`agent "X" does not match
+   session key agent "main"`), so the engine must use the bound agent's session key.
 4. The conversation is the OpenClaw session for that chat. The engine subscribes to the
    session roster (`sessions.subscribe`) and to each Telegram session
    (`sessions.messages.subscribe`) and mirrors `session.message` entries into
@@ -531,6 +545,14 @@ Rules:
    mirrors their lifecycle like any other approval (5.3).
 6. The bot token never appears in logs or the UI; `config.get` already redacts it
    **[probed]** and our redactor covers the Telegram token shape.
+7. **Only a bound, platform-managed agent answers the channel.** With no binding,
+   OpenClaw routes a DM to its default agent `main` and replies on the default model
+   (**[probed]** 2026-10-16: two DMs were answered by `main` on Opus before any agent
+   was bound). The platform therefore keeps the channel from reaching `main`: the
+   baseline gives `main` no model access for channel turns, or keeps
+   `channels.telegram.enabled` false until a binding exists, whichever the gateway
+   applies without a restart (agent A verifies and records which); an inbound message
+   while nothing is bound is dropped and logged. (D-025)
 
 Edge cases: a message from a non-allowlisted user is dropped by OpenClaw and never
 reaches the agent; the UI shows the allowlist. Polling and webhook modes are mutually
