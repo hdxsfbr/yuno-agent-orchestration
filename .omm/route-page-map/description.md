@@ -1,0 +1,1 @@
+The UI's routes and how they lead into each other: configuration pages (agents, workflows, schedules, skills, channels) feed runs, runs feed approvals, and every list is live over SSE. The sidebar carries the pending approvals badge and the sign-in state.

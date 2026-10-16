@@ -1,0 +1,1 @@
+Agents (soft-deleted so runs keep their snapshot), skills (materialised as SKILL.md), workflows with version and template_key, schedules with next_run_at and last_error, channel_bindings (one row per channel). ListRuns fills agent names and models per run for the Runs page without new columns.

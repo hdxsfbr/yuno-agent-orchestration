@@ -1,0 +1,1 @@
+Reasoning streams are never stored or shown. Tool inputs and transcripts are redacted before storage (provider keys, bot tokens, run tokens). Platform tool calls are recorded once, by the MCP gate, not from the gateway's item events.

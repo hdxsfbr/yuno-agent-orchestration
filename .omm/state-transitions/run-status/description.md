@@ -1,0 +1,1 @@
+queued, running, waiting_approval, succeeded, failed, cancelled, timed_out. Terminal states never change. Anything outside the allowed set is rejected with invalid transition <from> to <to>. Time spent waiting for approvals is excluded from the duration limit.

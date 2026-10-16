@@ -1,0 +1,1 @@
+web/src/lib/useEventStream.ts opens /api/events or /api/runs/{id}/events with fetch (so headers work), parses SSE frames, resumes with Last-Event-ID after a disconnect and exposes a connection state the pages show as Live. web/src/lib/useRefreshOnEvents.ts throttles list refreshes to one every 500 ms.

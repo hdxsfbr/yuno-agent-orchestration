@@ -1,0 +1,1 @@
+A node visit is exactly one OpenClaw turn (DESIGN 5.1 rule 5a); a workflow approval node releases the worker and the run is re-queued on the decision; a tool approval keeps the turn alive while the MCP call blocks, up to MCP_TOOL_WAIT_SECONDS, then the engine executes a late grant itself.

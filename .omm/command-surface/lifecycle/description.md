@@ -1,0 +1,1 @@
+run builds images stamped with the commit, starts the stack, waits for readiness, seeds and prints the URL; stop and down keep or drop containers; clean also drops volumes and removes the gateway state as root in a container; logs follows the api.

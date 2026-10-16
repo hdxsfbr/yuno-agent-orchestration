@@ -1,0 +1,1 @@
+internal/sched: cron (5-field, per time zone) and delay schedules; every SCHEDULER_TICK one transaction locks due rows, triggers runs with an occurrence key so a crash cannot fire an occurrence twice, advances or disables, records 422s and rate limits in last_error, disables schedules whose workflow is gone or whose cron has no future occurrence; no catch-up after downtime.

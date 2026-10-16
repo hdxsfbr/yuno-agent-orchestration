@@ -1,0 +1,1 @@
+Where state lives: Postgres for everything the platform records, the gateway's bind-mounted state directory for its configuration, agent workspaces and sessions, a volume for deployed releases, the repository for evaluation reports, and named volumes for build caches. make clean drops the volumes and the state directory.

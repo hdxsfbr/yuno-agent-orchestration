@@ -1,0 +1,1 @@
+AppendRunEvent stores every published event with a monotonic sequence; the SSE handler replays from a client's Last-Event-ID so a reconnecting browser misses nothing; the Runs list and the inbox refresh from the same events.

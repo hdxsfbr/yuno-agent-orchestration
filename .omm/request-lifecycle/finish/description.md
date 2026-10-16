@@ -1,0 +1,1 @@
+yuno__finish carries the run token and the result; the engine validates it against the node's output schema, stores it as the node output and in state[node], validates the whole state against state_schema, records the agent message to the next node and aborts the turn if the model continues.

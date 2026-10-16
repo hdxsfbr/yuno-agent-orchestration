@@ -1,0 +1,1 @@
+demo-record captures scenes in a Playwright container (SCENES, LIVE), demo-narrate voices the narration with local text-to-speech, demo-stitch assembles the video with ffmpeg; omm-view serves these architecture diagrams.

@@ -1,0 +1,1 @@
+One Docker container per agent (image yuno-sandbox: python, pytest, git), created by the gateway: no network, read-only root, capabilities dropped, pid and memory limits, user 1000, only the agent's workspace mounted read-write. exec, read, write and edit run here; the gateway prunes idle sandboxes.

@@ -1,0 +1,1 @@
+RunDetailPage loads the trace once and then follows /api/runs/{id}/events with Last-Event-ID replay, applying run.status, node.status, model_call, tool_call, approval.requested, approval.decided, agent_message and log events to the timeline, approvals, messages and state sections.

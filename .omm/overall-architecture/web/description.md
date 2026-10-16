@@ -1,0 +1,1 @@
+The operator UI (React 19, Vite, TypeScript, React Query, React Flow): agents and their every dimension, the visual workflow builder, runs with live traces, the approvals inbox, Telegram channels and conversations, schedules, skills, status. All data comes from /api over HTTP and SSE with the API token.

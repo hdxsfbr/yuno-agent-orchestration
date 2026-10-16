@@ -1,0 +1,1 @@
+Only the api process touches Postgres; the gateway never sees the database, the provider key or the approval decisions. Everything written before an SSE event is published is the record; SSE is best effort with replay.

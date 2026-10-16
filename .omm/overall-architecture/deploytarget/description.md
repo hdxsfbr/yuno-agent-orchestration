@@ -1,0 +1,1 @@
+internal/deploytarget is a small release store served by the yuno binary in its own container: POST /releases with an Idempotency-Key stores a tarball once and returns the same release for a repeated key; releases are browsable at /deploy/releases/ through nginx. It is the always-available side effect the demo deploys to.

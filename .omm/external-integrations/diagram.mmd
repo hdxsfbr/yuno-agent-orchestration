@@ -1,0 +1,25 @@
+graph LR
+    api["api\ninternal/httpapi/"]
+    engine["engine\ninternal/engine/"]
+    openclaw["OpenClaw gateway\nWebSocket RPC v4 on loopback"]
+    provider["Model provider\nAnthropic or OpenRouter"]
+    telegram["Telegram Bot API\nwebhook or polling"]
+    tunnel["cloudflared quick tunnel\ncompose profile tunnel"]
+    deploytarget["Deploy target\nHTTP, Idempotency-Key"]
+    gitlab["GitLab API\noptional, GITLAB_* set"]
+    docker["Docker Engine\nsocket mounted into the gateway"]
+    postgres["Postgres 16\ncompose service"]
+    engine -->|"agents, config, chat, sessions, approvals, restart"| openclaw
+    openclaw -->|"MCP yuno__* tools, model proxy"| api
+    api -->|"messages API, key injected, model ids rewritten"| provider
+    telegram -->|"updates with the secret header"| tunnel
+    tunnel -->|"only /telegram-webhook"| openclaw
+    openclaw -->|"replies, approval prompts"| telegram
+    api -->|"deploy_release"| deploytarget
+    api -->|"gitlab_create_mr: branch, commit, MR"| gitlab
+    openclaw -->|"sibling sandbox containers"| docker
+    api -->|"pgx pool, migrations"| postgres
+    classDef external fill:#585b70,stroke:#585b70,color:#cdd6f4
+    class openclaw,provider,telegram,tunnel,gitlab,docker external
+    classDef store fill:#a6e3a1,stroke:#a6e3a1,color:#1e1e2e
+    class postgres,deploytarget store

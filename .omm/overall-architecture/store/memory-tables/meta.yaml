@@ -1,0 +1,9 @@
+created: 2026-10-16T17:22:02.227Z
+updated: 2026-10-16T17:22:02.227Z
+update_count: 1
+last_field: description
+kind: nested-class
+title: memory-tables
+children: []
+parentPath:
+  - store

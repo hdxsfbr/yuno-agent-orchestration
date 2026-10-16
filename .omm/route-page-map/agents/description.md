@@ -1,0 +1,1 @@
+AgentsPage lists agents with model, channel and live state (running, waiting, idle) and offers quick runs; AgentFormPage edits every dimension with per-section validation errors mapped from 422 details and shows the OpenClaw runtime card.

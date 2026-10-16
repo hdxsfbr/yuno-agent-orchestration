@@ -1,0 +1,1 @@
+test-go against the yuno_test database, test-web with vitest, test-race for the engine and event packages, test-integration serially against the running gateway, lint with go vet, pinned staticcheck, eslint and tsc; all in the go and node tool containers.

@@ -1,0 +1,1 @@
+cmd/yuno/main.go reads the configuration from the environment, builds the redacting logger and dispatches on the first argument: api, migrate, seed, openclaw-init, deploytarget, eval, version. One image serves every role.

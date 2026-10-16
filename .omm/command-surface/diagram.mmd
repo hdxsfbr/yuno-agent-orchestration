@@ -1,0 +1,27 @@
+graph TD
+    yuno["yuno binary\ncmd/yuno/main.go"]
+    api["yuno api\ninternal/httpapi.Run"]
+    migrate["yuno migrate\ninternal/store.MigrateURL"]
+    seed["yuno seed\ninternal/seed"]
+    init["yuno openclaw-init\ninternal/openclaw.WriteBaseline"]
+    deploytarget["yuno deploytarget\ninternal/deploytarget.Run"]
+    eval["yuno eval\ninternal/evals.Run"]
+    make["Makefile targets\nMakefile"]
+    lifecycle["run, stop, down, clean, logs, ps\ncompose up --build, seed, down -v"]
+    tests["test, test-go, test-web, test-race, test-integration, lint\ntool containers go and node"]
+    checks["smoke, probe-openclaw, probe-approval, status-p95\nscripts/"]
+    evals["eval, eval-baseline, eval-final\ncompose profile eval"]
+    demo["demo-record, demo-narrate, demo-stitch, omm-view\nscripts/demo, docker/omm.Dockerfile"]
+    yuno -->|"compose service api"| api
+    yuno -->|"make migrate"| migrate
+    yuno -->|"make run, after readiness"| seed
+    yuno -->|"compose service openclaw-init, before the gateway"| init
+    yuno -->|"compose service deploytarget"| deploytarget
+    yuno -->|"compose profile eval"| eval
+    make -->|"start and stop the stack"| lifecycle
+    make -->|"prove the code"| tests
+    make -->|"prove the running stack"| checks
+    make -->|"grade the running stack"| evals
+    make -->|"derive the deliverables"| demo
+    classDef entry fill:#89b4fa,stroke:#89b4fa,color:#1e1e2e
+    class yuno,make entry

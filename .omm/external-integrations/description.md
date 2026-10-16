@@ -1,0 +1,1 @@
+Every system the platform talks to, with the protocol, the direction and the trust decision for each: the gateway over loopback RPC, the model provider through the key-injecting proxy, Telegram through a verified webhook or polling, the deploy target and GitLab as idempotent side effects, Docker for sandboxes, Postgres for everything persisted.

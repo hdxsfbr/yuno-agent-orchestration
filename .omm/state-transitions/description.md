@@ -1,0 +1,1 @@
+The four small state machines the platform enforces and never bends: run status, approval status, node visit status and tool call status. Each element's diagram shows its transitions with the event that causes them and the reason text recorded.

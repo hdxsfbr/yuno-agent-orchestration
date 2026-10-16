@@ -1,0 +1,1 @@
+smoke exercises every service through the paths the product uses including the webhook secret and registration; the probes verify the gateway contract live; status-p95 measures the status endpoint's latency.

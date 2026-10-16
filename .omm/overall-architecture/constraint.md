@@ -1,0 +1,1 @@
+The gateway is trusted code from a pinned image but runs untrusted model output; the provider key must never enter it (the model proxy exists for this). A non-loopback gateway client gets no scopes without device pairing, which is why api and gateway share a network namespace. Agent commands run only inside per-agent sandboxes with no network.

@@ -1,0 +1,1 @@
+Three layers, three places: web/ (UI), internal/httpapi + internal/engine + internal/tools + internal/openclaw (control and runtime integration), internal/store (persistence). The README's Architecture section carries the same picture in prose.

@@ -1,0 +1,1 @@
+WorkflowsPage lists editable workflows (template rows are read-only copies' sources, created through From template); the builder edits nodes, edges, conditions, limits and schemas on a React Flow canvas with an outline for keyboard use, validates against the API and runs the workflow.

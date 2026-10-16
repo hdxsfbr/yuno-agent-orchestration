@@ -1,0 +1,1 @@
+RequestApproval stores the approval, registers it with the gateway (so the Telegram chat also gets the prompt), moves the run to waiting_approval and publishes it; the inbox or the run page decides; the waiter returns the decision to the blocked MCP call.

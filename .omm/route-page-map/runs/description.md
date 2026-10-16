@@ -1,0 +1,1 @@
+RunsPage lists runs with agent, model, status, trigger, steps, cost and duration, any cell opening the run; RunDetailPage shows the header metrics, the timeline per node visit, approvals, agent messages, state and logs, following the run's SSE stream.

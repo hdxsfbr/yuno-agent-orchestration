@@ -1,0 +1,1 @@
+walk.go starts at the start node, follows edges in order with the first true condition, creates a run_nodes visit per node entry, enforces max_loop_visits and on_failure, and resumes at an approval node from its decision after a pause.

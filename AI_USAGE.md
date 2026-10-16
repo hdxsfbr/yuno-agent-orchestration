@@ -216,3 +216,11 @@ and the narration was generated from `docs/demo-script.md` with a local
 text-to-speech model. The coordinator verified the result from a frame sample every
 fifteen seconds and the per-scene timing table; Andre watched the finished file.
 
+**Architecture diagrams (2026-10-16).** After the submission commit, Andre asked for
+oh-my-mermaid so he could explore the architecture visually. The coordinator set it up
+without installing Node on the host (a pinned image, a compose service, a wrapper script,
+two project skills adapted to the container) and wrote the eight perspectives under
+`.omm/` from its knowledge of the code: every node carries a description and the files
+it covers, every edge a label, and the diagrams pass the tool's validator. Nothing in the
+product changed; the viewer's default port moved to 3030 because 3000 was in use on the
+machine.

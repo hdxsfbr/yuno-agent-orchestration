@@ -1,0 +1,12 @@
+graph LR
+    schema["Migrations 0001-0007\ninternal/store/migrations/"]
+    config-tables["agents, skills, workflows, schedules, channel_bindings\ninternal/store/agents.go, workflows.go, schedules.go, channels.go"]
+    run-tables["runs, run_nodes, model_calls, tool_calls, spans, run_events, agent_messages\ninternal/store/runs.go, engine_queries.go, events.go"]
+    gate-tables["approvals, side_effects\ninternal/store/approvals.go, side_effects.go"]
+    memory-tables["memory_facts, conversations, conversation_messages\ninternal/store/memory.go, channels.go"]
+    schema -->|"creates"| config-tables
+    schema -->|"creates"| run-tables
+    schema -->|"creates"| gate-tables
+    schema -->|"creates"| memory-tables
+    classDef store fill:#a6e3a1,stroke:#a6e3a1,color:#1e1e2e
+    class config-tables,run-tables,gate-tables,memory-tables store

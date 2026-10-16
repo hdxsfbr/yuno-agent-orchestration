@@ -1,0 +1,1 @@
+web/src/lib/api.ts: typed wrappers for every endpoint (agents, workflows, templates, runs, traces, approvals, channels, conversations, schedules, skills, memory, tools, status) and the TypeScript shapes mirroring the Go store structs' JSON tags. Errors are decoded into the API's {error: {code, message, details}} form so 422 details land on the right field.

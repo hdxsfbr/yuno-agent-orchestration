@@ -1,0 +1,1 @@
+Anthropic's messages API or OpenRouter's Anthropic-compatible endpoint, chosen by MODEL_UPSTREAM; the key lives only in the api's environment and is injected by the model proxy. Prices per model drive the cost column; cache read and write tokens are recorded per call.

@@ -1,0 +1,1 @@
+internal/model/proxy.go fronts the provider's messages API for the gateway: loopback only, injects the key (x-api-key for Anthropic, bearer for OpenRouter with model id rewriting), shapes thinking to adaptive without a display, rate limits, and records a span per upstream request. The scripted provider on the same proxy serves deterministic turns for tests and evals.

@@ -1,0 +1,1 @@
+deploy.go and package.go read the named files from the calling agent's workspace under runs/<run id>/ through an os.Root (links anywhere on the path are refused) and POST them to the deploy target with the Idempotency-Key; a 200 for a known key is a replay. Approval by default (side-effecting); operators may set it to auto per agent with a UI warning (D-009).

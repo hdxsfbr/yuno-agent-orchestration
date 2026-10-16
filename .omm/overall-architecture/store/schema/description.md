@@ -1,0 +1,1 @@
+0001 the core model, 0002 the OpenClaw columns (openclaw_agent_id, skills, thinking, exec_policy, materialized_hash, session_key), 0004 memory_facts, 0005 schedules, 0006 channels and nullable approval run ids, 0007 the schedule occurrence index and a rewrite of older schedule runs. Applied by `yuno migrate` and at api start.

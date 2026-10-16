@@ -1,0 +1,1 @@
+The agent page's quick-run dialog (task, optional model) and the workflow Run dialog, whose fields are generated from the workflow's input_schema; both call POST /api/runs and navigate to the run page.

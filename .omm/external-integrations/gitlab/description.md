@@ -1,0 +1,1 @@
+Registered only when the three GITLAB_* variables are set; branch yuno/<key prefix>, one commit through the commits API, a merge request; a repeat finds the open MR and replays. Tested against an httptest fake.

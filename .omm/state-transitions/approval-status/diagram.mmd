@@ -1,0 +1,13 @@
+graph LR
+    pending["pending"]
+    approved["approved"]
+    rejected["rejected"]
+    expired["expired"]
+    pending -->|"approve, approve_always"| approved
+    pending -->|"reject"| rejected
+    pending -->|"timeout sweep, run cancelled, run ended"| expired
+    approved -->|"second decision"| conflict["409 not pending"]
+    rejected -->|"second decision"| conflict
+    expired -->|"second decision"| conflict
+    classDef concern fill:#f38ba8,stroke:#f38ba8,color:#1e1e2e
+    class expired,conflict concern

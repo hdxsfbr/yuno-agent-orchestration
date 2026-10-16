@@ -1,0 +1,1 @@
+internal/evals creates agents and workflows through the API, registers deterministic scripts, triggers runs with the scripted model, decides approvals as the case says, fetches the trace and judges it with termination, trace_integrity, expectation, approval_gate, idempotency, schema and allowlist, plus a rubric graded heuristically or by a model; reports land in evals/reports/.

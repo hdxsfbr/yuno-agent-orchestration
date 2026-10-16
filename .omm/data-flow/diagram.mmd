@@ -1,0 +1,32 @@
+graph LR
+    gateway-events["Gateway events\nchat, agent, session.message, session.approval, sessions.changed"]
+    demux["Event demux per subscriber\ninternal/openclaw/gateway.go"]
+    recorder["Visit handlers write rows\ninternal/engine/node.go"]
+    run-state["runs.state, run_nodes.output\ninternal/engine/walk.go"]
+    rows["model_calls, tool_calls, spans, approvals, agent_messages\ninternal/store/"]
+    run-events["run_events: durable event log\ninternal/store/events.go"]
+    hub["In-process hub\ninternal/events/hub.go"]
+    sse["SSE streams\ninternal/httpapi/sse.go"]
+    trace-api["GET /api/runs/{id}/trace\ninternal/httpapi/runs.go"]
+    ui["Run, Runs, Approvals, Agents pages\nweb/src/pages/"]
+    evals["Eval runner and evaluators\ninternal/evals/"]
+    conversations["conversations, conversation_messages\ninternal/engine/conversations.go"]
+    memory["memory_facts to MEMORY.md\ninternal/memory/, internal/openclaw/materialize.go"]
+    gateway-events -->|"typed payloads"| demux
+    demux -->|"per visit and per session"| recorder
+    recorder -->|"insert after each event"| rows
+    recorder -->|"finish output"| run-state
+    recorder -->|"append then publish"| run-events
+    run-events -->|"sequence ids"| hub
+    hub -->|"live"| sse
+    run-events -->|"replay from Last-Event-ID"| sse
+    sse -->|"events"| ui
+    rows -->|"joined with side_effects"| trace-api
+    trace-api -->|"initial load"| ui
+    trace-api -->|"seven evaluators plus rubric"| evals
+    demux -->|"telegram sessions of the bound agent"| conversations
+    rows -->|"memory_save"| memory
+    classDef store fill:#a6e3a1,stroke:#a6e3a1,color:#1e1e2e
+    classDef external fill:#585b70,stroke:#585b70,color:#cdd6f4
+    class rows,run-events,run-state,conversations,memory store
+    class gateway-events external

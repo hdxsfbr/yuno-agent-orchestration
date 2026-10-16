@@ -1,0 +1,1 @@
+finish.go: every managed agent's last call; the result is validated against the node's output schema by the engine and becomes state[node]; a schema failure comes back as a tool result so the model can correct it, three in a row fail the node.

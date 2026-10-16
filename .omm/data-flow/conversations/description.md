@@ -1,0 +1,1 @@
+Telegram sessions of the bound agent are mirrored as conversations and messages (direction, text, usage), idempotent by message id, swept by the agent's retention, shown on the Channels page and emitted as conversation.message.

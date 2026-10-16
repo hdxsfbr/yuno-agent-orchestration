@@ -1,0 +1,1 @@
+rundir.go copies runs/<run id>/ from earlier agents' workspaces into the next agent's before its visit (later visit wins, links skipped), so Reviewer and Deployer see the Coder's files although every agent has its own sandboxed workspace.

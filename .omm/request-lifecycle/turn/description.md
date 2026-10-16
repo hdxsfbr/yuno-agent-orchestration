@@ -1,0 +1,1 @@
+chat.send with the rendered task plus the protocol block; the idempotency key of the send is the run id for retries; the visit then consumes chat, agent, session.message and session.approval events until the chat state is final, error or aborted.

@@ -1,0 +1,1 @@
+The client keeps one WebSocket and hands each event to the subscribers interested in it (a visit by session key or run id, the conversation mirror by session, the approvals listener by approval id), with a gap counter that triggers a history catch-up.

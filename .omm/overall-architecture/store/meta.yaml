@@ -1,0 +1,13 @@
+created: 2026-10-16T17:22:01.927Z
+updated: 2026-10-16T17:22:01.980Z
+update_count: 2
+last_field: diagram
+kind: nested-class
+title: store
+children:
+  - config-tables
+  - gate-tables
+  - memory-tables
+  - run-tables
+  - schema
+parentPath: []

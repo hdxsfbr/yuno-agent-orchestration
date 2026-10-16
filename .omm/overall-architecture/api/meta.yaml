@@ -1,0 +1,15 @@
+created: 2026-10-16T17:22:00.352Z
+updated: 2026-10-16T17:22:00.406Z
+update_count: 2
+last_field: diagram
+kind: nested-class
+title: api
+children:
+  - mcp-gate
+  - middleware
+  - model-proxy
+  - routes
+  - sse
+  - startup
+  - watchdog
+parentPath: []

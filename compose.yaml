@@ -331,6 +331,21 @@ services:
       - ./scripts/demo/out:/out
       - ./evals/reports:/reports:ro
 
+  # Architecture diagrams: oh-my-mermaid CLI and viewer over .omm/ (profile tools).
+  # scripts/omm.sh wraps `docker compose run omm`; `make omm-view` serves the viewer on :${OMM_PORT:-3030} (3000 is often taken by a dev server).
+  omm:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: docker/omm.Dockerfile
+    image: yuno-omm
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    working_dir: /work
+    volumes:
+      - .:/work
+    ports:
+      - "${OMM_PORT:-3030}:3000"
+
 volumes:
   pgdata: {}
   releases: {}

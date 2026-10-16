@@ -1,0 +1,1 @@
+One directory per gateway agent with SOUL.md, AGENTS.md, MEMORY.md, skills/<name>/SKILL.md and runs/<run id>/ for each run's artifacts; copied forward between agents of a run and packaged by deploy_release.

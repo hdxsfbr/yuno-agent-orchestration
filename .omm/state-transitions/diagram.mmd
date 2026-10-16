@@ -1,0 +1,8 @@
+graph TD
+    run-status["Run status machine\ninternal/engine/limits.go ValidTransition"]
+    approval-status["Approval status by kind\ninternal/engine/approvals.go"]
+    node-status["Node visit status\ninternal/store/types.go"]
+    tool-status["Tool call status\ninternal/httpapi/mcp.go, internal/engine/node.go"]
+    run-status -->|"waiting_approval is entered by"| approval-status
+    run-status -->|"one visit per node entry"| node-status
+    node-status -->|"calls within a visit"| tool-status

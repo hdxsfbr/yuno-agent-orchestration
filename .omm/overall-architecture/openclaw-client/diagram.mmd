@@ -1,0 +1,10 @@
+graph LR
+    gateway-conn["Connect, challenge, scopes, reconnect, demux\ninternal/openclaw/gateway.go"]
+    rpc["RPC wrappers: agents, config, chat, sessions, approvals, channels\ninternal/openclaw/rpc.go, channels.go, remove.go"]
+    materializer["Materialiser: desired state hash, files, exec policy\ninternal/openclaw/materialize.go"]
+    baseline["Baseline openclaw.json\ninternal/openclaw/baseline.go, cmd openclaw-init"]
+    rundir["Run directory copy-forward\ninternal/openclaw/rundir.go"]
+    materializer -->|"config.patch, exec.approvals.set, workspace files"| rpc
+    rpc -->|"request frames, matched responses"| gateway-conn
+    baseline -->|"providers, mcp server, sandbox, telegram, defaults"| gateway-conn
+    rundir -->|"state dir workspaces"| materializer

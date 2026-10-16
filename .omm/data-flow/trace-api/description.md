@@ -1,0 +1,1 @@
+The trace joins run, nodes, model calls, tool calls, spans, agent messages, approvals and side effects, strips reasoning parts and redacts, and is the one document both the run page and the evaluators read.

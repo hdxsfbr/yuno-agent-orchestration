@@ -1,0 +1,1 @@
+gitlab.go registers only when GITLAB_BASE_URL, GITLAB_PROJECT_ID and GITLAB_TOKEN are set: it creates a branch named from the idempotency key, commits the files and opens a merge request; a repeat finds the open MR and replays.

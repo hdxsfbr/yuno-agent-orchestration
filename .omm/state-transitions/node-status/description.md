@@ -1,0 +1,1 @@
+pending, running, waiting_approval, succeeded, failed, skipped per run_nodes row; a visit fails with reasons such as agent did not call finish, output schema, state schema, node iteration limit, run directory; on_failure edges route around a failed node when the failure is not a limit or a cancellation.

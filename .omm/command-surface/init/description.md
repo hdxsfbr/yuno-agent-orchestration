@@ -1,0 +1,1 @@
+Writes the managed part of openclaw.json into the state directory before the gateway starts (compose service openclaw-init), validating webhook mode's URL and secret; a hash sidecar avoids rewriting an unchanged file.

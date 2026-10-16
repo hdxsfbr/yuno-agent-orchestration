@@ -1,0 +1,19 @@
+graph LR
+    nav["Sidebar nav and sign-in\nweb/src/App.tsx"]
+    agents["/agents, /agents/new, /agents/:id\nAgentsPage, AgentFormPage"]
+    workflows["/workflows, /workflows/new, /workflows/:id\nWorkflowsPage, WorkflowBuilderPage"]
+    runs["/runs, /runs/:id\nRunsPage, RunDetailPage"]
+    approvals["/approvals\nApprovalsPage"]
+    channels["/channels, /channels/:conversationId\nChannelsPage"]
+    schedules["/schedules\nSchedulesPage"]
+    skills["/skills\nSkillsPage"]
+    status["/status\nStatusPage"]
+    nav -->|"pending count badge"| approvals
+    agents -->|"Run: quick run"| runs
+    workflows -->|"Run with input from input_schema"| runs
+    runs -->|"approve or reject inline"| approvals
+    channels -->|"run link on messages with a run"| runs
+    schedules -->|"last run link"| runs
+    agents -->|"Telegram line"| channels
+    classDef entry fill:#89b4fa,stroke:#89b4fa,color:#1e1e2e
+    class nav entry

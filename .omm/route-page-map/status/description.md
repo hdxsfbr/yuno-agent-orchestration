@@ -1,0 +1,1 @@
+StatusPage shows the api version (the commit), uptime, database, workers, queue counts, the gateway connection and version, the Telegram channel, the scheduler's tick and next due time, and whether an API token is in use.

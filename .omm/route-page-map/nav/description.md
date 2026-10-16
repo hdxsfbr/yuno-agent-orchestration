@@ -1,0 +1,1 @@
+App.tsx declares the routes, the sidebar links, the approvals badge (pending count from the inbox query, refreshed on approval events), the Sign out button when a token is stored, and mounts the sign-in dialog that any 401 opens.

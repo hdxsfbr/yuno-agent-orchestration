@@ -1,0 +1,1 @@
+node.go turns assistant entries into model_calls (tokens, cache, cost, stop reason), item events into tool_calls and spans (skipping yuno__ tools, which the gate records), session.approval into approvals, and keeps the visit's transcript in run_nodes.messages for resumption, redacted.

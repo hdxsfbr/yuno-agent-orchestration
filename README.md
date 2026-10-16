@@ -264,6 +264,13 @@ privileged channel between them (RPC, MCP, model proxy) is loopback only. Three 
 three directories: `web/` (UI), `internal/httpapi` + `internal/engine` + `internal/tools`
 (runtime integration and control), `internal/store` (persistence).
 
+Interactive diagrams of the same system live under `.omm/` (eight perspectives: overall
+architecture, request lifecycle, data flow, external integrations, state transitions,
+routes and pages, command surface, storage, each node with a description and the files
+it covers). `make omm-view` serves them at `http://<host>:3030` from a container
+(`OMM_PORT` changes the port); `scripts/omm.sh validate` checks the diagrams. They are
+regenerated with the project skill `/omm-scan`.
+
 ## Runtime choice
 
 The platform embeds OpenClaw (`docs/adr/0001-runtime.md` has the full record). The short

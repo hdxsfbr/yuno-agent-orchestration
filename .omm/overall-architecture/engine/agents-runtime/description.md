@@ -1,0 +1,1 @@
+agents_runtime.go: deleting an agent deletes it in the gateway and removes its workspace; at start and after every reconnect a full sync deletes stale gateway agents (except main) and materialises out-of-date platform agents, with a materialise-only pass every 30 s so seeded agents are usable at once.

@@ -1,0 +1,15 @@
+graph LR
+    postgres["Postgres volume pgdata\nplatform database yuno, test database yuno_test"]
+    state-dir["Gateway state directory\n./data/openclaw (bind mount)"]
+    config["openclaw.json and hash sidecar\nwritten by openclaw-init"]
+    workspaces["Agent workspaces\n./data/openclaw/workspace-<id>/"]
+    sessions["Gateway sessions and transcripts\n./data/openclaw/agents/<id>/"]
+    releases["Deploy target volume releases\nreleases stored by idempotency key"]
+    reports["Evaluation reports\nevals/reports/"]
+    caches["Build caches gomod, gocache, pnpm store\nnamed volumes"]
+    state-dir -->|"managed keys, patched live by the api"| config
+    state-dir -->|"SOUL.md, AGENTS.md, MEMORY.md, skills, runs/"| workspaces
+    state-dir -->|"owned by the gateway, never read by the api"| sessions
+    workspaces -->|"runs/<run id>/ copied forward"| workspaces
+    classDef store fill:#a6e3a1,stroke:#a6e3a1,color:#1e1e2e
+    class postgres,state-dir,config,workspaces,sessions,releases,reports,caches store

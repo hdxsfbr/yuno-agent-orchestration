@@ -1,0 +1,1 @@
+gateway.go dials ws://127.0.0.1:18789, answers connect.challenge as a backend client with operator scopes and the approvals capabilities, reconnects with backoff on close, and fans events (chat, agent streams, session.message, session.approval, sessions.changed, plugin.approval.resolved) to subscribers; retryable refusals from a starting gateway are retried.

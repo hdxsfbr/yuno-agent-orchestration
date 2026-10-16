@@ -1,0 +1,1 @@
+The API token lives in localStorage (key yuno.apiToken) and is sent only as an Authorization header. A 401 opens SignInDialog, which cannot be dismissed while the API refuses the token; saving retries the failed queries and reconnects the stream; Sign out in the nav footer clears it. Status shows whether a token is in use, never the token.

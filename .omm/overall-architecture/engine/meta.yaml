@@ -1,0 +1,18 @@
+created: 2026-10-16T17:22:00.801Z
+updated: 2026-10-16T17:22:00.856Z
+update_count: 2
+last_field: diagram
+kind: nested-class
+title: engine
+children:
+  - agents-runtime
+  - approvals
+  - conversations
+  - limits
+  - scheduler
+  - tokens
+  - trigger
+  - visit
+  - walk
+  - worker
+parentPath: []

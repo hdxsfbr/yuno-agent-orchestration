@@ -1,0 +1,1 @@
+Verified facts about the gateway are tagged [probed] in DESIGN 5.14 and 5.8 and re-checked by make probe-openclaw, make probe-approval and the Telegram probe: loopback trust, explicit ownership, Tool Search off for MCP tools, two-phase plugin approvals, in-place restart RPC, bindings read per message, concurrent tool calls within a turn.

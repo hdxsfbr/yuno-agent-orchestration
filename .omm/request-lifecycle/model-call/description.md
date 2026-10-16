@@ -1,0 +1,1 @@
+The gateway calls the provider through the api's model proxy on loopback; each assistant message with a usage block becomes a model_calls row with input, output, cache read and write tokens, cost from the price table cross-checked with the gateway's figure, stop reason and duration.

@@ -1,0 +1,1 @@
+finishRun writes the final state and status (succeeded, failed, cancelled, timed_out) through the state machine, closes the root span with counters and cost, deletes the node sessions, emits run.status and a log line.

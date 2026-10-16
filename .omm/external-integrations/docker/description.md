@@ -1,0 +1,1 @@
+The gateway container has the Docker socket (group_add DOCKER_GID) and a static Docker CLI so it can create sandbox containers from yuno-sandbox:latest with the agent's workspace mounted; it resolves its own container through /proc/self/mountinfo. This is the one root-equivalent surface, recorded in the threat model.

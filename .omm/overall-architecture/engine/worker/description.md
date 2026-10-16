@@ -1,0 +1,1 @@
+ENGINE_WORKERS goroutines claim the oldest queued run with FOR UPDATE SKIP LOCKED and run it to a terminal state or a pause; stale running runs older than ENGINE_STALE_AFTER are re-queued once with attempt+1 (their unfinished turns aborted by run id), then failed as worker lost.

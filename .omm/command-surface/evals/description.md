@@ -1,0 +1,1 @@
+eval runs the public split offline against the running stack (it builds only its own image); eval-baseline and eval-final store the report; eval-final runs every split and EVAL_PROVIDER=anthropic grades the rubric with a model.

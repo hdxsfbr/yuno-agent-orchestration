@@ -1,0 +1,1 @@
+MODEL_UPSTREAM selects Anthropic (x-api-key) or OpenRouter (bearer, anthropic/claude-x.y ids) behind the same proxy path; the gateway only knows the yuno-anthropic provider at the proxy's address; the scripted provider serves evals and tests with no network.

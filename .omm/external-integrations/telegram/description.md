@@ -1,0 +1,1 @@
+Configured by the baseline from TELEGRAM_* variables; bound to one platform agent from the Channels page (bindings with per-chat sessions); closed (dmPolicy disabled) until bound; allowlist of numeric user ids; webhook mode requires https PUBLIC_BASE_URL and a 32-character secret and is verified by smoke (401 on a wrong secret, registered URL checked with getWebhookInfo).

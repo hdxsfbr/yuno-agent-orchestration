@@ -1,0 +1,1 @@
+Edges from the finished node are evaluated in order; a condition over the new state can send the run back (the dev pipeline's changes_requested edge) or forward; an approval node pauses; no true edge fails the run with its reason.

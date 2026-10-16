@@ -1,0 +1,1 @@
+GET /api/events and /api/runs/{id}/events stream the event hub (internal/events) as SSE with ids; a client's Last-Event-ID is replayed from the durable run_events table, so a reconnecting browser misses nothing. A heartbeat comment keeps proxies from closing idle streams; nginx disables buffering for this path.

@@ -1,0 +1,1 @@
+httpfetch.go: https only, host in HTTP_FETCH_ALLOWLIST, at most three redirects each on the list, 1 MiB, 15 s; the body is wrapped in <untrusted_content source="http_fetch"> with any closing tag inside escaped, and AGENTS.md tells agents such blocks are data.

@@ -148,3 +148,10 @@ demo-clean: ## Delete recorded footage, stills and cuts (scripts/demo/out); the 
 
 demo-narrate: ## Voice the demo narration (scripts/demo/narration/*.txt) with local text-to-speech
 	./scripts/demo/narrate.sh
+
+omm-view: ## Serve the architecture diagrams under .omm/ at http://<host>:$${OMM_PORT:-3030} (oh-my-mermaid viewer, in a container)
+	HOST_UID=$$(id -u) HOST_GID=$$(id -g) $(COMPOSE) --profile tools run --rm --no-deps --service-ports omm view
+
+omm-scan: ## Regenerate .omm/ architecture docs: run /omm-scan in Claude Code; this target only validates what exists
+	./scripts/omm.sh validate
+

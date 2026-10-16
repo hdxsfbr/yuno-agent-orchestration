@@ -1,0 +1,1 @@
+Built-in tool calls (exec, read, write, edit, ls) are executed by the gateway inside the agent's sandbox container; their item start and end events and command output become tool_calls rows and spans. Tool calls issued in one turn run concurrently.

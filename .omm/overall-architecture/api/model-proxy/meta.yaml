@@ -1,0 +1,9 @@
+created: 2026-10-16T17:22:00.649Z
+updated: 2026-10-16T17:22:00.650Z
+update_count: 1
+last_field: description
+kind: nested-class
+title: model-proxy
+children: []
+parentPath:
+  - api

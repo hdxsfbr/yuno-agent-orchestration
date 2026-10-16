@@ -1,0 +1,1 @@
+The typed state: state[node] replaced on every visit with the validated finish output, validated as a whole against state_schema, plus pending_effects written by late approvals; snapshot-pinned definitions make the state's meaning stable for the run's life.

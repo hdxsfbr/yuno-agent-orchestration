@@ -1,0 +1,1 @@
+openclaw.json carries the managed keys the baseline renders (providers, MCP server, sandbox defaults, Telegram, ownership) and everything the api patches live (agent entries, bindings); yuno-baseline.hash records the inputs so unchanged inputs write nothing.

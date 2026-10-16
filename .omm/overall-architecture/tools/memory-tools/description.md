@@ -1,0 +1,1 @@
+memory.go calls internal/memory: facts per agent with a 30-day default TTL, oldest evicted at max_facts, recall of the 20 newest matches wrapped as untrusted content; after every save the agent's MEMORY.md is re-rendered so the next turn sees it; a sweeper deletes expired facts every 10 minutes.

@@ -1,0 +1,1 @@
+approvals (kind exec, tool or node; status pending, approved, rejected, expired; external_id for the gateway's id; conversation_id when raised in chat) and side_effects (idempotency_key primary key, result, the tool call that made the effect).

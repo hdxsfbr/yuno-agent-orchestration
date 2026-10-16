@@ -1,0 +1,22 @@
+graph TD
+    trigger["Trigger: validation, limits, snapshot, rate limit\ninternal/engine/trigger.go, engine.go"]
+    worker["Workers claim queued runs\ninternal/engine/engine.go"]
+    walk["Graph walk: edges, conditions, loops, state\ninternal/engine/walk.go"]
+    visit["Node visit: one OpenClaw turn\ninternal/engine/node.go"]
+    limits["Limits and cancellation\ninternal/engine/limits.go"]
+    approvals["Approvals: tool, node, exec, fallback execution\ninternal/engine/approvals.go"]
+    tokens["Run tokens and finish protocol\ninternal/engine/tokens.go"]
+    conversations["Conversation mirror\ninternal/engine/conversations.go"]
+    agents-runtime["Runtime reconciliation\ninternal/engine/agents_runtime.go"]
+    scheduler["Scheduler tick\ninternal/sched/scheduler.go"]
+    scheduler -->|"Trigger with an occurrence key"| trigger
+    trigger -->|"queued run, FOR UPDATE SKIP LOCKED"| worker
+    worker -->|"runRun"| walk
+    walk -->|"agent node, run directory copied forward"| visit
+    walk -->|"approval node pauses and releases the worker"| approvals
+    visit -->|"every counter event and a 2 s tick"| limits
+    visit -->|"issues, resolves, accepts finish"| tokens
+    visit -->|"gated MCP calls wait here"| approvals
+    conversations -->|"exec approvals of chat sessions"| approvals
+    classDef concern fill:#f38ba8,stroke:#f38ba8,color:#1e1e2e
+    class limits concern

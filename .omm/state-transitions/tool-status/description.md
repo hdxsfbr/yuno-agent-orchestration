@@ -1,0 +1,1 @@
+executed, failed, awaiting_approval, rejected, expired, blocked. Built-in tool rows come from gateway item events (executed or failed); platform tool rows are written by the gate: blocked before any execution, awaiting_approval while gated, then executed, rejected or expired; output.replayed marks an idempotent replay and policy auto marks a side effect run without a human.

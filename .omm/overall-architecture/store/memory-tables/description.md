@@ -1,0 +1,1 @@
+memory_facts per agent with expiry; conversations keyed by the gateway session (per Telegram chat) and conversation_messages with direction, text, external message id and optional run id, swept by the agent's conversation_ttl_days.

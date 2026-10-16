@@ -1,0 +1,1 @@
+tool.go compiles each tool's input schema at registration, fills timeout and retry defaults (side-effecting tools get two attempts, the rest three), validates inputs, caps and redacts outputs; platform.go lists the platform tools and the OpenClaw built-ins with their risk class for GET /api/tools and the UI.

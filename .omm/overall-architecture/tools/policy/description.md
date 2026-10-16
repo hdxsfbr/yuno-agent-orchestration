@@ -1,0 +1,1 @@
+policy.go: effective policy is the agent's interaction_rules entry, else require_approval for side-effecting tools, else auto; finish is always auto; blocked tools are removed from the agent's OpenClaw tool list by the materialiser and refused by the gate anyway. internal/guardrails adds blocked tools, input patterns (RE2 over canonical input) and the exec policy shaping.

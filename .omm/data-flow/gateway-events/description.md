@@ -1,0 +1,1 @@
+chat (state status, delta, final, error, aborted per runId), agent streams (lifecycle, assistant, usage, item start and end with toolCallId, command_output; reasoning dropped), session.message (transcript entries with usage and cost), session.approval (exec approvals), sessions.changed (roster), plugin.approval.resolved.

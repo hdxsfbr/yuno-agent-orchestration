@@ -1,0 +1,9 @@
+created: 2026-10-16T17:22:01.718Z
+updated: 2026-10-16T17:22:01.718Z
+update_count: 1
+last_field: description
+kind: nested-class
+title: deploy
+children: []
+parentPath:
+  - tools

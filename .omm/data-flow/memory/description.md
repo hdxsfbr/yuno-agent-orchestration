@@ -1,0 +1,1 @@
+memory_save writes a fact and re-renders the agent's MEMORY.md; memory_recall reads the newest matches wrapped as untrusted content; the materialiser writes MEMORY.md before each turn and on bind so OpenClaw's own memory loading sees the platform's facts.

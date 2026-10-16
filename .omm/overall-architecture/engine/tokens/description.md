@@ -1,0 +1,1 @@
+tokens.go: a run token (r_ plus 24 base32 characters) per node visit, resolvable to run, node visit, agent and output schema while the visit is live; AcceptFinish validates the result against the schema, stores the output and aborts the turn if the model keeps going; three consecutive schema rejections fail the node.

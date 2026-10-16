@@ -1,0 +1,1 @@
+watchdog.go pings Postgres every 5 s; after 30 s of continuous failure (the symptom of a dead shared network namespace) it returns an error that ends the process, so the container restart policy starts a fresh one inside the gateway's new namespace. Nginx re-resolves the gateway's address, so the stack recovers unaided after an in-place gateway restart.

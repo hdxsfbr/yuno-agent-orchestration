@@ -1,0 +1,1 @@
+Two command surfaces: the single yuno binary, whose subcommand is the compose service's role, and the Makefile, which is the whole operator interface (build, run, test, check, evaluate, record) and wraps docker compose so nothing is installed on the host.

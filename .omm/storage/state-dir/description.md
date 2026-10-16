@@ -1,0 +1,1 @@
+./data/openclaw is mounted into the gateway at /home/node/.openclaw and into the api at the same path, so the materialiser writes workspace files the gateway reads and the deploy tool reads run directories; root-owned sandbox leftovers are removed as root by make clean.

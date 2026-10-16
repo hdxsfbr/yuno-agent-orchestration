@@ -1,0 +1,1 @@
+yuno__* calls reach POST /mcp with the bearer; the gate resolves the run token, applies allowlist, policy and guardrails, computes the idempotency key, records the row and either executes or waits for an approval; the model sees the output, a rejected status or pending_approval.

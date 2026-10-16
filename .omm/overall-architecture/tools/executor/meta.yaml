@@ -1,0 +1,9 @@
+created: 2026-10-16T17:22:01.612Z
+updated: 2026-10-16T17:22:01.612Z
+update_count: 1
+last_field: description
+kind: nested-class
+title: executor
+children: []
+parentPath:
+  - tools

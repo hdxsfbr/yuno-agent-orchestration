@@ -1,0 +1,1 @@
+Built for the Gauntlet partner brief (docs/spec/). OpenClaw was required by the attached PDF; the portal brief grades the control-plane concerns around it: workflows, approvals, idempotency, limits, traces, evals. docs/adr/0001-runtime.md records the choice; docs/DESIGN.md holds the numbered rules the code implements.

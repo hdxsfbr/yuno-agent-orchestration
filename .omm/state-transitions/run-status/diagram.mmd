@@ -1,0 +1,22 @@
+graph TD
+    queued["queued"]
+    running["running"]
+    waiting["waiting_approval"]
+    succeeded["succeeded"]
+    failed["failed"]
+    cancelled["cancelled"]
+    timed-out["timed_out"]
+    queued -->|"worker claims"| running
+    queued -->|"cancel before start"| cancelled
+    running -->|"approval node or gated tool call"| waiting
+    waiting -->|"decision: re-queued or resumed"| queued
+    waiting -->|"tool approval decided while the call waits"| running
+    running -->|"end node reached"| succeeded
+    running -->|"limit, no matching edge, node failure, approval expired"| failed
+    running -->|"cancel_requested"| cancelled
+    running -->|"time limit exceeded"| timed-out
+    waiting -->|"approval expired or run cancelled"| failed
+    waiting -->|"cancel"| cancelled
+    running -->|"worker lost, attempt+1"| queued
+    classDef concern fill:#f38ba8,stroke:#f38ba8,color:#1e1e2e
+    class failed,timed-out concern

@@ -1,0 +1,1 @@
+runs.go createRun decodes the body (agent_id with task, or workflow_id with input; optional model override, script id for the scripted provider, limits, trigger manual or eval), maps engine validation errors to 422 details, rate limits to 429 and returns 201 with the run.

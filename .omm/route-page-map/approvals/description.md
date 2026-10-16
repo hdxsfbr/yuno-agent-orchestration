@@ -1,0 +1,1 @@
+ApprovalsPage is the inbox: pending by default with a status filter, each card naming the kind (command, tool call, workflow step), the run or conversation, the message and the full tool input, with approve (always for exec), reject and a reason; a 409 is shown as already decided.

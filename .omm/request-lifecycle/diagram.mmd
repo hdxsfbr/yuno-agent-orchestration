@@ -1,0 +1,36 @@
+graph TD
+    run-dialog["Run dialog or template Run\nweb/src/components/QuickRunDialog.tsx, workflow/RunWorkflowDialog.tsx"]
+    create-run["POST /api/runs\ninternal/httpapi/runs.go"]
+    trigger["Validate, layer limits, snapshot, queue\ninternal/engine/trigger.go"]
+    claim["Worker claims the queued run\ninternal/engine/engine.go"]
+    walk["Walk the graph from start\ninternal/engine/walk.go"]
+    visit-setup["Materialise, run dir, session, subscribe\ninternal/engine/node.go"]
+    turn["chat.send: one OpenClaw turn\ninternal/openclaw/rpc.go"]
+    model-call["Model call through the proxy\ninternal/model/proxy.go"]
+    sandbox-tool["Built-in tool in the sandbox\nexec, read, write, edit"]
+    mcp-call["Platform tool through the gate\ninternal/httpapi/mcp.go"]
+    approval["Approval requested and awaited\ninternal/engine/approvals.go"]
+    finish["yuno__finish accepted, state merged\ninternal/engine/tokens.go, walk.go"]
+    next-edge["Next edge, loop or end\ninternal/engine/walk.go"]
+    finish-run["Terminal status, spans, run.status event\ninternal/engine/run.go"]
+    live-trace["Run page follows the SSE stream\nweb/src/pages/RunDetailPage.tsx"]
+    run-dialog -->|"workflow_id and input, or agent_id and task"| create-run
+    create-run -->|"422 on invalid input or definition"| trigger
+    trigger -->|"runs row, status queued"| claim
+    claim -->|"runRun"| walk
+    walk -->|"agent node"| visit-setup
+    visit-setup -->|"task with run token and output schema"| turn
+    turn -->|"streams assistant messages with usage"| model-call
+    turn -->|"item events become tool_calls"| sandbox-tool
+    turn -->|"yuno__* calls carry the run token"| mcp-call
+    mcp-call -->|"side-effecting with require_approval"| approval
+    approval -->|"approved within the wait: result in the same turn"| mcp-call
+    mcp-call -->|"finish result validated"| finish
+    finish -->|"state[node], agent_messages"| next-edge
+    next-edge -->|"condition true: another node"| visit-setup
+    next-edge -->|"end node"| finish-run
+    finish-run -->|"run.status, node.status, model_call, tool_call events"| live-trace
+    classDef entry fill:#89b4fa,stroke:#89b4fa,color:#1e1e2e
+    classDef external fill:#585b70,stroke:#585b70,color:#cdd6f4
+    class run-dialog,create-run entry
+    class sandbox-tool external

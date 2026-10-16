@@ -1,0 +1,1 @@
+Optional bearer check against API_TOKEN (constant-time), request ids, structured request logs with duration, and the redacting slog handler from internal/obs that masks provider keys, bot tokens, run tokens and key-named fields. Validation errors are 422 with path-qualified details; 404, 409 and 502 have fixed meanings documented in DESIGN section 6.

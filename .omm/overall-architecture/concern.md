@@ -1,0 +1,1 @@
+The shared network namespace couples the api's life to the gateway container: an in-place gateway restart is survived (watchdog, restart policies, nginx re-resolution), but a recreated gateway container needs the api recreated too (make run does both). The Docker socket mounted into the gateway container is root-equivalent on the host.

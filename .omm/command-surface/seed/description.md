@@ -1,0 +1,1 @@
+Creates the six demo agents the templates name (Coder, Reviewer, Deployer, Researcher, Critic, Writer) once; never overwrites an edited agent; run by make run after readiness, and the api materialises them within 30 s.

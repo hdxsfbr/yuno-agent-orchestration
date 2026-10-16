@@ -1,0 +1,1 @@
+trigger.go: structure, agent existence, schemas, input validation and task templates rendered against an empty state; limits layered and clamped; the guardrails' cost cap and rate limit; the definition and overrides snapshotted into runs.workflow_snapshot so later edits never change a running run.

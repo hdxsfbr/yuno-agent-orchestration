@@ -1,0 +1,33 @@
+graph LR
+    web["React UI\nweb/src/"]
+    nginx["nginx: UI, /api proxy, webhook listener\ndocker/nginx.conf"]
+    api["Go api: HTTP, SSE, MCP gate, model proxy\ninternal/httpapi/"]
+    engine["Run engine, approvals, scheduler\ninternal/engine/, internal/sched/"]
+    tools["Platform tools and idempotent executor\ninternal/tools/"]
+    store["Postgres store and migrations\ninternal/store/"]
+    openclaw-client["Gateway client, materialiser, baseline\ninternal/openclaw/"]
+    gateway["OpenClaw gateway 2026.10.3\ncontainer yuno-openclaw"]
+    sandbox["Per-agent Docker sandboxes\ncontainers openclaw-sbx-*"]
+    provider["Model provider\nAnthropic or OpenRouter"]
+    telegram["Telegram bot API\nwebhook through a tunnel, or polling"]
+    deploytarget["Local deploy target\ninternal/deploytarget/"]
+    web -->|"HTTP and SSE with the API token"| nginx
+    nginx -->|"/api, /readyz, /openapi.yaml"| api
+    api -->|"every record: agents, runs, traces, approvals"| store
+    api -->|"trigger, cancel, decide approvals"| engine
+    engine -->|"agents, config, chat, sessions RPCs"| openclaw-client
+    openclaw-client -->|"WebSocket, loopback only"| gateway
+    gateway -->|"MCP calls to yuno__* tools, bearer"| api
+    api -->|"policy, approval gate, idempotency key"| tools
+    tools -->|"POST /releases with Idempotency-Key"| deploytarget
+    gateway -->|"model proxy on loopback, key injected"| api
+    api -->|"Anthropic messages API"| provider
+    gateway -->|"exec, read, write, edit inside"| sandbox
+    telegram <-->|"verified webhook, bound agent only"| gateway
+    gateway -->|"session, agent and approval events"| openclaw-client
+    classDef external fill:#585b70,stroke:#585b70,color:#cdd6f4
+    classDef store fill:#a6e3a1,stroke:#a6e3a1,color:#1e1e2e
+    classDef entry fill:#89b4fa,stroke:#89b4fa,color:#1e1e2e
+    class gateway,sandbox,provider,telegram external
+    class store store
+    class web,nginx entry

@@ -1,0 +1,1 @@
+Before the turn: materialise the agent if its desired hash changed, copy the run directory forward from earlier agents, render MEMORY.md, create the node-scoped session and apply a model override, subscribe to its messages and approvals, and register the run token.

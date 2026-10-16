@@ -1,0 +1,19 @@
+graph LR
+    registry["Registry, schemas, risk, timeouts\ninternal/tools/tool.go, platform.go"]
+    policy["Effective policy per agent and tool\ninternal/tools/policy.go, guardrails"]
+    executor["Executor: retries, idempotency, fallback\ninternal/tools/executor.go, canonical.go"]
+    finish["finish: typed node output\ninternal/tools/finish.go"]
+    deploy["deploy_release: packages runs/<id>/ files\ninternal/tools/deploy.go, package.go"]
+    http-fetch["http_fetch: allowlisted https, untrusted wrapper\ninternal/tools/httpfetch.go"]
+    memory-tools["memory_save, memory_recall\ninternal/tools/memory.go, internal/memory/"]
+    gitlab["gitlab_create_mr, when configured\ninternal/tools/gitlab.go"]
+    registry -->|"serves over MCP"| finish
+    registry -->|"side-effecting"| deploy
+    registry -->|"read-only"| http-fetch
+    registry -->|"computational and read-only"| memory-tools
+    registry -->|"side-effecting, GITLAB_* set"| gitlab
+    policy -->|"decides gate or auto"| executor
+    executor -->|"Idempotency-Key header"| deploy
+    executor -->|"branch named from the key"| gitlab
+    classDef concern fill:#f38ba8,stroke:#f38ba8,color:#1e1e2e
+    class deploy,gitlab concern

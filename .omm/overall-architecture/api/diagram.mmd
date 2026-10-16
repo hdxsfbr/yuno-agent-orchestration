@@ -1,0 +1,16 @@
+graph LR
+    middleware["Bearer auth, request ids, logging, redaction\ninternal/httpapi/middleware.go"]
+    routes["Route handlers per resource\ninternal/httpapi/{agents,runs,workflows,templates,approvals,channels,schedules,skills,memory,tools}.go"]
+    sse["SSE with durable replay\ninternal/httpapi/sse.go"]
+    mcp-gate["MCP tool gate\ninternal/httpapi/mcp.go"]
+    model-proxy["Model proxy, loopback only\ninternal/model/proxy.go"]
+    startup["Run: dial, engine, keepers, loaders\ninternal/httpapi/server.go"]
+    watchdog["Database watchdog\ninternal/httpapi/watchdog.go"]
+    middleware -->|"wraps every /api route"| routes
+    routes -->|"publish after commit"| sse
+    startup -->|"registers"| routes
+    startup -->|"registers behind YUNO_MCP_TOKEN"| mcp-gate
+    startup -->|"registers behind loopback check"| model-proxy
+    startup -->|"exits the process on 30 s of DNS failure"| watchdog
+    classDef entry fill:#89b4fa,stroke:#89b4fa,color:#1e1e2e
+    class routes,mcp-gate,model-proxy entry

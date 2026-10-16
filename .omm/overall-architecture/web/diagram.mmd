@@ -1,0 +1,11 @@
+graph LR
+    pages["Pages, one per route\nweb/src/pages/"]
+    components["Components by domain\nweb/src/components/"]
+    api-client["API client and shared types\nweb/src/lib/api.ts"]
+    event-stream["SSE hook with Last-Event-ID replay\nweb/src/lib/useEventStream.ts"]
+    auth["API token store and sign-in\nweb/src/lib/auth.ts, components/SignInDialog.tsx"]
+    pages -->|"compose"| components
+    pages -->|"queries and mutations"| api-client
+    pages -->|"invalidate on run, node, approval events"| event-stream
+    api-client -->|"bearer header, 401 opens sign-in"| auth
+    event-stream -->|"bearer header, reconnect on token change"| auth
