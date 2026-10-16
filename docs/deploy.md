@@ -42,8 +42,11 @@ ssh root@$IP bash -s -- < scripts/deploy/bootstrap-droplet.sh
 
 The bootstrap installs Docker Engine, git and unattended upgrades, creates the `yuno` user
 (uid 1000 so the bind-mounted state matches the containers' user, in the docker group, with
-root's authorized keys), adds swap, opens 22, 80 and 443 and clones the repository into
-`/home/yuno/yuno-agent-orchestration`.
+root's authorized keys), adds swap, opens 22, 80 and 443 and prepares the repository at
+`/home/yuno/yuno-agent-orchestration`. The GitLab project is internal, so the host cannot
+clone it without credentials; the bootstrap leaves an empty repository and every deploy
+pushes the commit from your checkout over SSH (git updates the working tree on push).
+Nothing on the host can read GitLab.
 
 Then prepare the host's environment file from your local one. Copy `.env` to `.env.prod`
 and change these lines (the rest, including the model and Telegram secrets, stay as they
@@ -64,8 +67,8 @@ API_TOKEN=<a long random value>  # the UI and every API call need it
 make deploy HOST=$IP ENV_FILE=.env.prod
 ```
 
-`scripts/deploy/deploy.sh` copies the file to the host (mode 600), checks out `main` there,
-runs `make run-public` (the usual `make run`, then Caddy, then waits for
+`scripts/deploy/deploy.sh` copies the file to the host (mode 600), pushes your local `main`
+to the host and checks it out there, runs `make run-public` (the usual `make run`, then Caddy, then waits for
 `https://DOMAIN/readyz`) and `make smoke`, which also checks that the webhook refuses a
 wrong secret and that Telegram has the right URL registered. The first certificate takes
 up to a minute; `make caddy-logs` on the host shows the issuance.
@@ -73,11 +76,11 @@ up to a minute; `make caddy-logs` on the host shows the issuance.
 ## Updating
 
 ```bash
-make deploy HOST=$IP            # main, no environment file
-make deploy HOST=$IP REF=<sha>  # any commit or branch; also how to roll back
+make deploy HOST=$IP            # your local main, no environment file
+make deploy HOST=$IP REF=<sha>  # any local commit or branch; also how to roll back
 ```
 
-A deploy rebuilds the images on the host (a few minutes on 4 vCPUs), recreates the
+A deploy ships what your checkout has, so pull first. It rebuilds the images on the host (a few minutes on 4 vCPUs), recreates the
 containers whose configuration changed and keeps Postgres, the gateway state and the
 releases volume. `.env` on the host is only touched when `ENV_FILE` is passed.
 
@@ -85,7 +88,8 @@ releases volume. `.env` on the host is only touched when `ENV_FILE` is passed.
 
 `.gitlab-ci.yml` has two jobs. `test` runs `make run`, `make test`, `make lint` and
 `make smoke` on a runner tagged `yuno-ci`; `deploy` runs `make run-public` and
-`make smoke` on a runner tagged `yuno-prod`, which is the droplet itself. Both need the
+`make smoke` on a runner tagged `yuno-prod`, which is the droplet itself; it fetches the
+commit with the job token, so the host still holds no GitLab credential. Both need the
 shell executor on a host with Docker: the tool containers bind-mount the checkout, which a
 docker-in-docker executor cannot provide. The deploy job is manual on `main` (a play button
 on the pipeline once `test` is green); set the project variable `DEPLOY_AUTO` to `true` to
@@ -106,6 +110,22 @@ does not run the production stack (same ports, same compose project name); a sec
 droplet or a workstation with the same installer and tag `yuno-ci` works. Until one exists
 the `test` job has nowhere to run and `deploy` cannot start, so deploy by hand with
 `make deploy`.
+
+## Current deployment
+
+| Item | Value |
+|---|---|
+| Host | `yuno-prod`, `s-4vcpu-8gb` in `sfo2` (sfo3 did not offer that size), tag `yuno` |
+| URL | <https://143.110.128.97.sslip.io> (Let's Encrypt certificate through Caddy) |
+| Deployed | commit `4488049` on 2026-10-16, `make deploy HOST=143.110.128.97`, smoke 12 of 12 |
+| Sign-in | the `API_TOKEN` in the operator's `.env.prod` (never in the repository) |
+| Telegram | webhook registered at `https://143.110.128.97.sslip.io/telegram-webhook`; the bot has one webhook, so this instance owns the bot while it runs |
+| Memory | about 1.7 GB used of 8 GB idle, the gateway 1 GB of its 4 GB cap |
+
+Three things bit on the first run and are now in the scripts: a fresh droplet holds the apt
+lock for cloud-init's first pass (the bootstrap waits for it), `make` was missing (installed),
+and a script fed to `bash -s` over ssh lost its tail to a child command that read stdin (every
+remote script is now one function called with stdin from `/dev/null`).
 
 ## Operations on the host
 

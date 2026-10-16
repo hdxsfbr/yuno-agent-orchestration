@@ -329,7 +329,9 @@ Docker publishes ports past the host firewall. `scripts/deploy/` creates the dro
 installs a GitLab runner for the pipeline in `.gitlab-ci.yml` (tests, then a manual or
 automatic deploy of `main`). `docs/deploy.md` has the steps, what is exposed and how it is
 protected. Managed-container platforms cannot run the stack: it needs the Docker socket and
-a shared network namespace (D-035).
+a shared network namespace (D-035). A public instance runs at
+<https://143.110.128.97.sslip.io> (an 8 GB droplet in sfo2, deployed from this repository
+with those scripts); the UI asks for the API token, which the operator hands out.
 
 ## Adding a workflow template
 

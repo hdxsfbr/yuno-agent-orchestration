@@ -6,6 +6,7 @@
 # deploy  updates the public host from the shell runner installed on it (tag yuno-prod,
 #         scripts/deploy/install-runner.sh): by hand from the pipeline page once test is
 #         green, or automatically on main when the project variable DEPLOY_AUTO is "true".
+#         It fetches the commit with the job token, so the host holds no GitLab credential.
 #
 # Pipelines are created only when the project variable YUNO_CI is "true", so a project with
 # no runners shows no pending pipelines.
@@ -46,7 +47,7 @@ deploy:
   resource_group: production
   script:
     - cd "$DEPLOY_DIR"
-    - git fetch -q origin
-    - git checkout -q "$CI_COMMIT_SHA"
+    - git fetch -q "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" "$CI_COMMIT_SHA"
+    - git checkout -q -B deploy FETCH_HEAD
     - make run-public
     - make smoke

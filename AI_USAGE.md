@@ -232,5 +232,11 @@ coordinator wrote the `public` compose profile with Caddy, the loopback binding,
 droplet creation, bootstrap, deploy and runner scripts, the GitLab pipeline with its
 manual-or-automatic deploy job, and `docs/deploy.md`; the compose file, the Caddyfile, the
 shell scripts and the pipeline were validated with their own tools in containers. The
-droplet itself is created from the same scripts with Andre's go-ahead on the size and
-cost.
+droplet was then created from the same scripts with Andre's go-ahead on the size and
+cost (sfo2, because sfo3 did not offer the size; Andre asked whether 8 GB was needed and
+kept it after seeing the measured 1.8 GB idle footprint), bootstrapped and deployed by
+the coordinator, with three script fixes found on the way (apt lock on a fresh droplet,
+missing `make`, a remote script losing its tail to a child reading stdin) committed as
+they were found. Verified from outside: readiness, a 401 without the token, a 401 on the
+webhook without the secret, a Let's Encrypt certificate, plain http unreachable, the
+webhook registered; smoke 12 of 12 on the host.
