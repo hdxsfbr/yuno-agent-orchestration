@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Installs a GitLab Runner (shell executor) on this host and registers it for the project, so
-# the pipeline's jobs can run here. Run as root on the host, fed over ssh, with the runner
-# authentication token in the environment (never on the command line):
-#   ssh root@HOST RUNNER_TOKEN=glrt-... bash -s -- --tags yuno-prod [--user yuno] [--url https://labs.gauntletai.com] < scripts/deploy/install-runner.sh
+# the pipeline's jobs can run here. Run as root on the host over ssh. The runner
+# authentication token travels as the FIRST LINE of stdin, ahead of the script, so it is
+# never on a command line or in a shell history:
+#   { cat runner-token.txt; cat scripts/deploy/install-runner.sh; } \
+#     | ssh root@HOST 'read -r RUNNER_TOKEN; export RUNNER_TOKEN; bash -s -- --tags yuno-prod [--user yuno] [--url https://labs.gauntletai.com]'
 # The service runs as --user so deploy jobs can reach that user's checkout, .env and the
-# docker group. Create the token in GitLab under Settings > CI/CD > Runners (project runner,
-# tag it the same way, "run untagged" off). Idempotent for the install; registration is
-# skipped when this token is already registered here. --tags only labels the description;
-# the runner's tags are set where the token is created.
+# docker group. Create the runner in GitLab (Settings > CI/CD > Runners, or POST /user/runners)
+# with the same tag and "run untagged" off; --tags here only labels the description.
+# Idempotent for the install; registration is skipped when this token is already registered.
 set -euo pipefail
 
 # This script arrives on bash's stdin over ssh: one function, read fully before anything
@@ -54,7 +55,8 @@ main() {
     echo "== this runner token is already registered here; skipping registration"
   else
     echo "== registering with $URL (tags: $TAGS)"
-    gitlab-runner register --non-interactive --url "$URL" --token "$RUNNER_TOKEN" \
+    # The token goes through the environment (CI_SERVER_TOKEN), not the command line.
+    CI_SERVER_URL="$URL" CI_SERVER_TOKEN="$RUNNER_TOKEN" gitlab-runner register --non-interactive \
       --executor shell --description "$(hostname) ($TAGS)" >/dev/null
   fi
   gitlab-runner start >/dev/null 2>&1 || gitlab-runner restart >/dev/null

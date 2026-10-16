@@ -97,19 +97,24 @@ deploy every green `main` pipeline automatically. Pipelines are created only whi
 project variable `YUNO_CI` is `true`, so nothing shows as pending before runners exist.
 
 To register the deploy runner on the droplet, create a project runner in GitLab
-(Settings, CI/CD, Runners: tag `yuno-prod`, "run untagged jobs" off) and feed its token to
-the installer through the environment:
+(Settings, CI/CD, Runners, or `POST /user/runners`: tag `yuno-prod`, "run untagged jobs"
+off) and feed its token to the installer as the first line of stdin, ahead of the script,
+so it never appears on a command line:
 
 ```bash
-ssh root@$IP RUNNER_TOKEN=glrt-... bash -s -- --tags yuno-prod < scripts/deploy/install-runner.sh
+{ cat runner-token.txt; cat scripts/deploy/install-runner.sh; } \
+  | ssh root@$IP 'read -r RUNNER_TOKEN; export RUNNER_TOKEN; bash -s -- --tags yuno-prod'
 ```
+
+Until a `yuno-ci` runner exists, leave the project variable `YUNO_CI_TEST` unset: the
+pipeline then contains only the manual deploy job and its name says that tests were run
+by hand. Set `YUNO_CI_TEST` to `true` once the test runner is registered and `test` becomes
+a prerequisite of `deploy`.
 
 The runner service runs as `yuno`, so the deploy job can reach the checkout, its `.env`
 and the docker group. The `test` runner needs another Docker host with at least 8 GB that
 does not run the production stack (same ports, same compose project name); a second
-droplet or a workstation with the same installer and tag `yuno-ci` works. Until one exists
-the `test` job has nowhere to run and `deploy` cannot start, so deploy by hand with
-`make deploy`.
+droplet or a workstation with the same installer and tag `yuno-ci` works.
 
 ## Current deployment
 
