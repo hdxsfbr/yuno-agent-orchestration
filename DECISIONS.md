@@ -6,6 +6,19 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-16
 
+**D-035 Public deployment is a plain Docker host behind Caddy; CI deploys through
+runners we register.** (Andre, 2026-10-16) The stack needs the Docker socket, a network
+namespace shared between api and gateway, a bind mount both write and 4 GB for the
+gateway, so Railway, App Platform and the other managed-container products cannot run it;
+a DigitalOcean droplet runs the same compose file with a `public` profile that adds Caddy
+for TLS, with every other port bound to loopback because Docker publishes past ufw.
+`.gitlab-ci.yml` tests on a `yuno-ci` shell runner and deploys from a `yuno-prod` shell
+runner on the droplet, manual on `main` by default and automatic with `DEPLOY_AUTO=true`;
+pipelines exist only while `YUNO_CI=true`, so the repository shows no stuck pipelines
+before a runner is registered. Why: the approved vendor list offers DigitalOcean, Vultr and
+Railway for hosting, and only a VM fits; a shell runner is the only executor that can
+bind-mount the checkout into the tool containers. See `docs/deploy.md`.
+
 **D-034 Runtime reconciliation details.** (Claude, from the fix pass) An agent deleted
 while one of its node visits is running stays in the runtime until the next full sync,
 so the run finishes on its snapshot (DESIGN 5.6 edge case); the api re-materialises

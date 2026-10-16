@@ -1,0 +1,10 @@
+# TLS front for a public deployment (compose profile public, docs/deploy.md). Caddy obtains
+# and renews a certificate for DOMAIN and proxies every path to nginx, which serves the UI
+# and routes /api to the api and /telegram-webhook to the gateway. flush_interval -1 keeps
+# the SSE streams unbuffered.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy web:80 {
+		flush_interval -1
+	}
+}

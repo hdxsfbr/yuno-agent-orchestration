@@ -320,6 +320,17 @@ dimensions, the dev pipeline template), a successful run with its live trace, a 
 failure (a loop limit), the approval gate in the inbox, the evaluation report, and a
 live Telegram conversation with the bound agent.
 
+## Deploy to a public host
+
+The same compose file runs on one Docker host (a DigitalOcean droplet) with the `public`
+profile, which adds Caddy for TLS on a hostname; everything else binds to loopback because
+Docker publishes ports past the host firewall. `scripts/deploy/` creates the droplet with
+`doctl`, bootstraps it, deploys a ref over SSH (`make deploy HOST=... [REF=...]`) and
+installs a GitLab runner for the pipeline in `.gitlab-ci.yml` (tests, then a manual or
+automatic deploy of `main`). `docs/deploy.md` has the steps, what is exposed and how it is
+protected. Managed-container platforms cannot run the stack: it needs the Docker socket and
+a shared network namespace (D-035).
+
 ## Adding a workflow template
 
 Drop a JSON file in `templates/` with `key`, `name`, `description` and a `definition`

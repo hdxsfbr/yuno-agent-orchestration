@@ -224,3 +224,13 @@ two project skills adapted to the container) and wrote the eight perspectives un
 it covers, every edge a label, and the diagrams pass the tool's validator. Nothing in the
 product changed; the viewer's default port moved to 3030 because 3000 was in use on the
 machine.
+
+**Public deployment path (2026-10-16).** Andre chose DigitalOcean from the approved vendor
+list after the coordinator showed why the stack cannot run on Railway or any managed
+container platform (Docker socket, shared network namespace, a 4 GB gateway). The
+coordinator wrote the `public` compose profile with Caddy, the loopback binding, the
+droplet creation, bootstrap, deploy and runner scripts, the GitLab pipeline with its
+manual-or-automatic deploy job, and `docs/deploy.md`; the compose file, the Caddyfile, the
+shell scripts and the pipeline were validated with their own tools in containers. The
+droplet itself is created from the same scripts with Andre's go-ahead on the size and
+cost.

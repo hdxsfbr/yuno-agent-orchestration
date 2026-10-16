@@ -122,6 +122,30 @@ eval-final: eval ## Run every split (public and private) and store the report as
 tunnel: ## Expose the web port through a cloudflared quick tunnel (demo only)
 	$(COMPOSE) --profile tunnel up tunnel
 
+# ---- public deployment (docs/deploy.md) ----------------------------------------------------
+# A plain Docker host (a DigitalOcean droplet) runs the same compose file plus Caddy for TLS.
+# scripts/deploy/ holds the droplet creation, bootstrap, deploy and runner scripts.
+
+.PHONY: run-public caddy-logs deploy
+
+run-public: export COMPOSE_PROFILES = public
+run-public: ## run, plus Caddy TLS for DOMAIN (needs DOMAIN in .env; WEB_BIND=127.0.0.1 on a public host)
+	@grep -qE '^DOMAIN=.+' .env || { echo "DOMAIN is not set in .env (see docs/deploy.md)"; exit 1; }
+	@grep -qE '^WEB_BIND=127\.0\.0\.1' .env || echo "warning: WEB_BIND is not 127.0.0.1, the plain-http port $(WEB_PORT) is reachable from outside"
+	$(MAKE) run
+	$(COMPOSE) up -d caddy
+	@dom=$$(grep -E '^DOMAIN=' .env | cut -d= -f2-); echo "waiting for https://$$dom ..."; \
+	for i in $$(seq 1 60); do \
+	  if curl -fsS -m 5 "https://$$dom/readyz" >/dev/null 2>&1; then echo "ready: https://$$dom"; exit 0; fi; sleep 2; done; \
+	echo "https://$$dom is not answering yet (certificate issuance can take a minute): make caddy-logs"; exit 1
+
+caddy-logs: ## Follow the TLS proxy's logs
+	$(COMPOSE) --profile public logs -f caddy
+
+deploy: ## Deploy REF (default main) to HOST over SSH: HOST=1.2.3.4 [REF=main] [ENV_FILE=.env.prod] [DEPLOY_USER=yuno]
+	@test -n "$(HOST)" || { echo "usage: make deploy HOST=<ip or name> [REF=main] [ENV_FILE=path] [DEPLOY_USER=yuno]"; exit 2; }
+	./scripts/deploy/deploy.sh --host "$(HOST)" --ref "$(or $(REF),main)" --user "$(or $(DEPLOY_USER),yuno)" $(if $(ENV_FILE),--env-file "$(ENV_FILE)")
+
 status-p95: ## Measure GET /api/status latency over 200 requests (p95 must stay under 500 ms)
 	./scripts/status-p95.sh 200
 

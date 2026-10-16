@@ -171,10 +171,32 @@ services:
       context: .
       dockerfile: docker/web.Dockerfile
     ports:
-      - "${WEB_PORT:-8080}:80"
+      # WEB_BIND=127.0.0.1 on a public host: Docker publishes ports past the host firewall.
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PORT:-8080}:80"
     depends_on:
       api:
         condition: service_healthy
+
+  # ---- public deployment (profile public, docs/deploy.md) ------------------------------
+  # Caddy terminates TLS for DOMAIN with automatic certificates and proxies everything
+  # (UI, /api, /telegram-webhook) to nginx. `make run-public` starts it; the profile is
+  # activated on the public host with COMPOSE_PROFILES=public in .env.
+  caddy:
+    profiles: ["public"]
+    image: caddy:2.10.2
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
 
   deploytarget:
     build:
@@ -351,3 +373,5 @@ volumes:
   releases: {}
   gomod: {}
   gocache: {}
+  caddy_data: {}
+  caddy_config: {}

@@ -2,8 +2,10 @@
 
 Real run on the submission commit's parent (`0c3afdd` plus the smoke fix), on the
 development machine (Linux, Docker 28, compose v2), everything inside containers. There
-is no CI service; these commands are the CI, run by hand before every commit and
-recorded here for this one.
+was no CI service when this was recorded; these commands were run by hand before every
+commit and recorded here for this one. A GitLab pipeline running the same commands was
+added afterwards (`.gitlab-ci.yml`, `docs/deploy.md`); it stays dormant until a runner is
+registered, so it has not run yet.
 
 | Command | Result |
 |---|---|

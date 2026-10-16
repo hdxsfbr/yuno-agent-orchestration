@@ -1,0 +1,52 @@
+# GitLab CI for the Yuno stack (docs/deploy.md).
+#
+# test    runs the commands docs/test-results.md records, on a shell runner tagged yuno-ci
+#         that has Docker with compose v2. The tool containers bind-mount the checkout, so a
+#         docker-in-docker executor cannot run them; the runner must be a host with Docker.
+# deploy  updates the public host from the shell runner installed on it (tag yuno-prod,
+#         scripts/deploy/install-runner.sh): by hand from the pipeline page once test is
+#         green, or automatically on main when the project variable DEPLOY_AUTO is "true".
+#
+# Pipelines are created only when the project variable YUNO_CI is "true", so a project with
+# no runners shows no pending pipelines.
+stages: [test, deploy]
+
+workflow:
+  rules:
+    - if: '$YUNO_CI == "true"'
+
+test:
+  stage: test
+  tags: [yuno-ci]
+  variables:
+    GIT_DEPTH: "20"
+  script:
+    - cp .env.example .env
+    - make run
+    - make test
+    - make lint
+    - make smoke
+  after_script:
+    - make down || true
+
+deploy:
+  stage: deploy
+  tags: [yuno-prod]
+  needs: [test]
+  variables:
+    GIT_STRATEGY: none
+    DEPLOY_DIR: /home/yuno/yuno-agent-orchestration
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $DEPLOY_AUTO == "true"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  environment:
+    name: production
+    url: https://$DOMAIN
+  resource_group: production
+  script:
+    - cd "$DEPLOY_DIR"
+    - git fetch -q origin
+    - git checkout -q "$CI_COMMIT_SHA"
+    - make run-public
+    - make smoke
