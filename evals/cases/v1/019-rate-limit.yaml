@@ -1,0 +1,71 @@
+id: 019-rate-limit
+version: v1
+split: public
+description: 'The agent allows one run per hour. The first run succeeds; triggering the workflow again straight after is refused with 429 "rate limit: 1 runs/hour for agent <name>" and creates no run.'
+workflow:
+  input_schema:
+    type: object
+    properties:
+      note: { type: string }
+    required: [note]
+    additionalProperties: true
+  nodes:
+    - { id: start, kind: start }
+    - id: scribe
+      kind: agent
+      agent_name: scribe
+      task: |-
+        Write the note below to runs/$RUN_ID/note.md and finish with a one-sentence summary.
+
+        {{.input.note}}
+      output_schema:
+        type: object
+        properties:
+          summary: { type: string }
+        required: [summary]
+        additionalProperties: true
+      input_from: [start]
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: scribe }
+    - { from: scribe, to: end }
+  limits:
+    max_steps: 10
+    max_duration_seconds: 120
+input:
+  note: The nightly import finished without errors.
+agents:
+  scribe:
+    name: Scribe
+    system_prompt: |
+      You write short notes to the run directory named in your task and call yuno__finish with a summary.
+    tool_allowlist: [write, finish]
+    guardrails:
+      max_runs_per_hour: 1
+script:
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/note.md"
+        content: |
+          The nightly import finished without errors.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: Saved the note about the nightly import.
+  - text: The note is saved and the result has been submitted.
+actions:
+  # Once this run has ended, the same trigger again is the agent's second run within the hour.
+  retrigger: true
+expect:
+  status: succeeded
+  min_model_calls: 3
+  min_tool_calls: 2
+  state:
+    "/scribe/summary": Saved the note about the nightly import.
+  approval_statuses: []
+  trigger_status: 429
+  trigger_error_contains: "rate limit: 1 runs/hour"
+rubric: []

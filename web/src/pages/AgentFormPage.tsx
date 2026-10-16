@@ -4,8 +4,11 @@ import { Link, useLocation, useNavigate, useParams } from "react-router";
 import { ApiError, createAgent, deleteAgent, getAgent, listAgents, listTools, materializeAgent, updateAgent, type Agent, type AgentInput } from "@/lib/api";
 import { parseFieldErrors, type FieldErrors } from "@/lib/agentForm";
 import { formatDateTime } from "@/lib/format";
+import { useSkills } from "@/lib/useSkills";
 import AgentForm from "@/components/agent/AgentForm";
+import MemoryFacts from "@/components/agent/MemoryFacts";
 import RuntimeCard from "@/components/agent/RuntimeCard";
+import TelegramLine from "@/components/agent/TelegramLine";
 import Button from "@/components/Button";
 import { PageHeader } from "@/components/Card";
 import { ConfirmDialog } from "@/components/Modal";
@@ -41,6 +44,7 @@ function CreateAgent() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const tools = useToolList();
+  const skills = useSkills();
   const [serverErrors, setServerErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -77,6 +81,7 @@ function CreateAgent() {
       <PageHeader title="New agent" />
       <AgentForm
         tools={tools}
+        skills={skills}
         saving={save.isPending}
         serverErrors={serverErrors}
         formError={formError}
@@ -98,6 +103,7 @@ function EditAgent({ id }: { id: string }) {
   const nav = location.state as NavState;
   const agentQ = useQuery({ queryKey: ["agent", id], queryFn: () => getAgent(id) });
   const tools = useToolList();
+  const skills = useSkills();
 
   const [serverErrors, setServerErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -200,6 +206,9 @@ function EditAgent({ id }: { id: string }) {
       <AgentForm
         agent={agent}
         tools={tools}
+        skills={skills}
+        memoryFacts={<MemoryFacts agentId={id} enabled={agent.memory_policy?.enabled ?? false} />}
+        telegram={<TelegramLine agentId={id} />}
         saving={save.isPending}
         serverErrors={serverErrors}
         formError={formError}

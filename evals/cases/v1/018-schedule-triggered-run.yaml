@@ -1,0 +1,32 @@
+id: 018-schedule-triggered-run
+version: v1
+split: public
+description: The runner creates a one-shot schedule for a workflow two seconds ahead. The scheduler fires it once, the run carries the schedule as its trigger, and the schedule disables itself afterwards. The workflow has no agent node, because a scheduled run cannot carry the scripted model and would otherwise call the real one.
+workflow:
+  input_schema:
+    type: object
+    properties:
+      topic: { type: string }
+    required: [topic]
+    additionalProperties: true
+  nodes:
+    - { id: start, kind: start }
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: end }
+  limits:
+    max_steps: 5
+    max_duration_seconds: 60
+input:
+  topic: nightly digest
+actions:
+  schedule:
+    kind: delay
+    run_in_seconds: 2
+    # One scheduler tick (SCHEDULER_TICK, default 10 s) after the schedule is due, with margin.
+    wait_seconds: 40
+expect:
+  status: succeeded
+  trigger: schedule
+  schedule_enabled: false
+rubric: []

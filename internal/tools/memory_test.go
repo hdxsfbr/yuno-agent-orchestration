@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"yuno/internal/memory"
 	"yuno/internal/store"
 )
 
@@ -74,12 +75,14 @@ func TestMemorySaveRecall(t *testing.T) {
 		t.Fatalf("no match = %v", got)
 	}
 
-	// max_facts keeps the newest three.
+	// max_facts 3 evicts the oldest by created_at: deploy cadence was first saved before
+	// python version, even though its replacement is the newest write (DESIGN 5.10
+	// rule 3).
 	for _, k := range []string{"a", "b"} {
 		time.Sleep(5 * time.Millisecond)
 		put("fact "+k, "value "+k, "")
 	}
-	if got := recallKeys(t, recall, f, ""); len(got) != 3 || strings.Join(got, ",") != "fact b,fact a,deploy cadence" {
+	if got := recallKeys(t, recall, f, ""); len(got) != 3 || strings.Join(got, ",") != "fact b,fact a,python version" {
 		t.Fatalf("after eviction = %v", got)
 	}
 
@@ -93,6 +96,34 @@ func TestMemorySaveRecall(t *testing.T) {
 	}
 	for _, k := range recallKeys(t, recall, f, "gone") {
 		t.Fatalf("expired fact recalled: %s", k)
+	}
+
+	// ttl_days 0 expires at once and is never returned (DESIGN 5.10 edge cases).
+	if r := put("instant", "never seen", `,"ttl_days":0`); r.IsError {
+		t.Fatalf("ttl 0: %+v", r)
+	}
+	for _, k := range recallKeys(t, recall, f, "never seen") {
+		t.Fatalf("ttl 0 fact recalled: %s", k)
+	}
+	// Values are bounded to 2 KiB.
+	if r := put("big", strings.Repeat("é", 1025), ""); !r.IsError || !strings.Contains(r.Text, "2048 bytes") {
+		t.Fatalf("over 2 KiB: %+v", r)
+	}
+}
+
+// Without ttl_days or a policy TTL a fact lives 30 days (DESIGN 5.10 inputs).
+func TestMemoryDefaultTTL(t *testing.T) {
+	pool := needDB(t)
+	f := newFixture(t, pool, &store.MemoryPolicy{Enabled: true})
+	before := time.Now().UTC()
+	res, err := NewMemorySave(pool).Invoke(context.Background(), memoryCall(f, `{"run_token":"r","key":"k","value":"v"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("save: %+v %v", res, err)
+	}
+	var exp time.Time
+	must(t, pool.QueryRow(context.Background(), `SELECT expires_at FROM memory_facts WHERE agent_id=$1`, f.agent.ID).Scan(&exp))
+	if d := exp.Sub(before); d < 30*24*time.Hour || d > 30*24*time.Hour+time.Minute {
+		t.Fatalf("expires in %s, want 30 days", d)
 	}
 }
 
@@ -113,9 +144,10 @@ func TestMemoryDefaults(t *testing.T) {
 	pool := needDB(t)
 	f := newFixture(t, pool, &store.MemoryPolicy{Enabled: true})
 	ctx := context.Background()
+	seeded := time.Now().Add(-time.Hour)
 	for i := range 200 {
 		fact := &store.MemoryFact{Scope: store.MemoryScopeAgent, AgentID: f.agent.ID, Key: fmt.Sprintf("fact %03d", i), Value: "v"}
-		must(t, store.SaveMemoryFact(ctx, pool, fact, 0))
+		must(t, memory.Save(ctx, pool, fact, 0, seeded.Add(time.Duration(i)*time.Second)))
 	}
 	res, err := NewMemorySave(pool).Invoke(ctx, memoryCall(f, `{"run_token":"r","key":"newest","value":"v"}`))
 	if err != nil || res.IsError {

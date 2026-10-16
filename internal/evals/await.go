@@ -67,7 +67,18 @@ func (r *Runner) await(ctx context.Context, c Case, run *store.Run) (out awaitOu
 				}
 			}
 			if got.Status == store.RunWaitingApproval {
-				if msg := r.applyApprovals(ctx, c, run.ID, &approvals); msg != "" {
+				if c.Actions.CancelWhenWaiting {
+					// The case is about the cancel, not the decision: the approval is left
+					// for the engine to expire with the run.
+					if !cancelled {
+						if err := r.api.CancelRun(ctx, run.ID); err != nil {
+							r.log.Warn("eval cancel failed", "case", c.ID, "run", run.ID, "error", err)
+						} else {
+							cancelled = true
+							r.log.Info("eval cancel requested while waiting for approval", "case", c.ID, "run", run.ID)
+						}
+					}
+				} else if msg := r.applyApprovals(ctx, c, run.ID, &approvals); msg != "" {
 					out.stalled = msg
 					return out, nil
 				}

@@ -54,11 +54,13 @@ type CaseResult struct {
 	E2E        bool         `json:"e2e"`
 	Evaluators []EvalResult `json:"evaluators"`
 	Rubric     RubricResult `json:"rubric"`
+	// Observed is what the runner saw outside the run's trace (see Observed).
+	Observed *Observed `json:"observed,omitempty"`
 }
 
-// Passed reports whether the case had no runner error and every deterministic
-// evaluator passed.
-func (r CaseResult) Passed() bool {
+// DeterministicPassed reports whether the case had no runner error and every
+// deterministic evaluator passed.
+func (r CaseResult) DeterministicPassed() bool {
 	if r.Error != "" || len(r.Evaluators) == 0 {
 		return false
 	}
@@ -69,6 +71,10 @@ func (r CaseResult) Passed() bool {
 	}
 	return true
 }
+
+// Passed reports whether the case passes (DESIGN 5.13 rule 5): every deterministic
+// evaluator passed and the rubric, when the case has one, scored at least 0.75.
+func (r CaseResult) Passed() bool { return r.DeterministicPassed() && r.Rubric.OK() }
 
 // Reason is the runner error when there is one, otherwise the run's failure reason.
 func (r CaseResult) Reason() string {
@@ -96,36 +102,57 @@ type EvaluatorRate struct {
 	Rate   float64 `json:"rate"`
 }
 
-// SplitSummary is the pass and success counts of one split.
+// SplitSummary is the pass and success counts of one split. Passed counts the cases
+// that pass outright (evaluators and rubric); DeterministicPassed those whose
+// deterministic evaluators all passed.
 type SplitSummary struct {
-	Cases             int     `json:"cases"`
-	Passed            int     `json:"passed"`
-	E2EPassed         int     `json:"e2e_passed"`
-	DeterministicPass float64 `json:"deterministic_pass"`
-	E2ESuccess        float64 `json:"e2e_success"`
+	Cases               int     `json:"cases"`
+	Passed              int     `json:"passed"`
+	DeterministicPassed int     `json:"deterministic_passed"`
+	E2EPassed           int     `json:"e2e_passed"`
+	OverallPass         float64 `json:"overall_pass"`
+	DeterministicPass   float64 `json:"deterministic_pass"`
+	E2ESuccess          float64 `json:"e2e_success"`
+}
+
+// RubricSummary aggregates the rubric evaluator over the cases that have a rubric.
+type RubricSummary struct {
+	Cases     int     `json:"cases"`
+	Passed    int     `json:"passed"`
+	MeanScore float64 `json:"mean_score"`
+	// Heuristic and Model count the cases by the mode that graded them; a case that
+	// could not be scored (it never ran) is in neither.
+	Heuristic int `json:"heuristic"`
+	Model     int `json:"model"`
 }
 
 // Summary holds the aggregates of a report.
 type Summary struct {
-	Cases             int             `json:"cases"`
-	Passed            int             `json:"passed"`
-	E2EPassed         int             `json:"e2e_passed"`
-	DeterministicPass float64         `json:"deterministic_pass"`
-	E2ESuccess        float64         `json:"e2e_success"`
-	Evaluators        []EvaluatorRate `json:"evaluators"`
-	MeanCostUSD       float64         `json:"mean_cost_usd"`
-	MeanDurationMs    float64         `json:"mean_duration_ms"`
-	Public            SplitSummary    `json:"public"`
-	SummaryLine       string          `json:"summary_line"`
+	Cases               int             `json:"cases"`
+	Passed              int             `json:"passed"`
+	DeterministicPassed int             `json:"deterministic_passed"`
+	E2EPassed           int             `json:"e2e_passed"`
+	OverallPass         float64         `json:"overall_pass"`
+	DeterministicPass   float64         `json:"deterministic_pass"`
+	E2ESuccess          float64         `json:"e2e_success"`
+	Evaluators          []EvaluatorRate `json:"evaluators"`
+	Rubric              RubricSummary   `json:"rubric"`
+	MeanCostUSD         float64         `json:"mean_cost_usd"`
+	MeanDurationMs      float64         `json:"mean_duration_ms"`
+	Public              SplitSummary    `json:"public"`
+	SummaryLine         string          `json:"summary_line"`
 }
 
 // ReportMeta describes the invocation a report belongs to.
 type ReportMeta struct {
 	GeneratedAt time.Time `json:"generated_at"`
 	Split       string    `json:"split"`
-	Provider    string    `json:"provider"`
-	APIURL      string    `json:"api_url"`
-	CasesDir    string    `json:"cases_dir"`
+	// Provider is EVAL_PROVIDER: the runs are always replayed from the cases' scripts,
+	// the provider says how rubrics are graded (scripted: local checks, anthropic: the
+	// model).
+	Provider string `json:"provider"`
+	APIURL   string `json:"api_url"`
+	CasesDir string `json:"cases_dir"`
 }
 
 // Report is the full result of one eval run.
@@ -153,10 +180,14 @@ func BuildReport(meta ReportMeta, results []CaseResult) *Report {
 		counts[name] = &EvaluatorRate{Name: name}
 	}
 	var costMicros, durationMs int64
+	var rubricSum float64
 	var pub SplitSummary
 	for _, r := range results {
 		if r.Passed() {
 			s.Passed++
+		}
+		if r.DeterministicPassed() {
+			s.DeterministicPassed++
 		}
 		if r.E2E {
 			s.E2EPassed++
@@ -172,6 +203,19 @@ func BuildReport(meta ReportMeta, results []CaseResult) *Report {
 				c.Passed++
 			}
 		}
+		if r.Rubric.Criteria > 0 {
+			s.Rubric.Cases++
+			rubricSum += r.Rubric.Score
+			if r.Rubric.OK() {
+				s.Rubric.Passed++
+			}
+			switch r.Rubric.Mode {
+			case RubricModeHeuristic:
+				s.Rubric.Heuristic++
+			case RubricModeModel:
+				s.Rubric.Model++
+			}
+		}
 		costMicros += r.CostUSDMicros
 		durationMs += r.DurationMs
 		if r.Split == SplitPublic {
@@ -179,14 +223,21 @@ func BuildReport(meta ReportMeta, results []CaseResult) *Report {
 			if r.Passed() {
 				pub.Passed++
 			}
+			if r.DeterministicPassed() {
+				pub.DeterministicPassed++
+			}
 			if r.E2E {
 				pub.E2EPassed++
 			}
 		}
 	}
 
-	s.DeterministicPass = ratio(s.Passed, s.Cases)
+	s.OverallPass = ratio(s.Passed, s.Cases)
+	s.DeterministicPass = ratio(s.DeterministicPassed, s.Cases)
 	s.E2ESuccess = ratio(s.E2EPassed, s.Cases)
+	if s.Rubric.Cases > 0 {
+		s.Rubric.MeanScore = rubricSum / float64(s.Rubric.Cases)
+	}
 	if s.Cases > 0 {
 		s.MeanCostUSD = float64(costMicros) / 1e6 / float64(s.Cases)
 		s.MeanDurationMs = float64(durationMs) / float64(s.Cases)
@@ -203,7 +254,8 @@ func BuildReport(meta ReportMeta, results []CaseResult) *Report {
 		s.Evaluators = append(s.Evaluators, *c)
 	}
 
-	pub.DeterministicPass = ratio(pub.Passed, pub.Cases)
+	pub.OverallPass = ratio(pub.Passed, pub.Cases)
+	pub.DeterministicPass = ratio(pub.DeterministicPassed, pub.Cases)
 	pub.E2ESuccess = ratio(pub.E2EPassed, pub.Cases)
 	s.Public = pub
 	s.SummaryLine = SummaryLine(pub)
@@ -217,8 +269,8 @@ func ratio(n, d int) float64 {
 	return float64(n) / float64(d)
 }
 
-// PublicGate returns an error when the deterministic pass rate of the public split is
-// below 0.9. A run with no public cases is not gated.
+// PublicGate returns an error when the pass rate of the public split, evaluators and
+// rubric together, is below 0.9. A run with no public cases is not gated.
 func (r *Report) PublicGate() error {
 	pub := r.Summary.Public
 	if pub.Cases == 0 {
@@ -226,7 +278,7 @@ func (r *Report) PublicGate() error {
 	}
 	if pub.Passed*passGateDen < pub.Cases*passGateNum {
 		return fmt.Errorf("public pass rate %.3f is below %.1f (%d of %d public cases passed)",
-			pub.DeterministicPass, float64(passGateNum)/float64(passGateDen), pub.Passed, pub.Cases)
+			pub.OverallPass, float64(passGateNum)/float64(passGateDen), pub.Passed, pub.Cases)
 	}
 	return nil
 }
@@ -237,12 +289,15 @@ func (r *Report) Markdown() string {
 	s := r.Summary
 	fmt.Fprintf(&b, "# Eval report %s\n\n", r.GeneratedAt.UTC().Format(time.RFC3339))
 	fmt.Fprintf(&b, "%s\n\n", s.SummaryLine)
-	fmt.Fprintf(&b, "- Split run: %s\n- Provider: %s\n- API: %s\n- Cases: %s\n\n", r.Split, r.Provider, r.APIURL, r.CasesDir)
+	fmt.Fprintf(&b, "- Split run: %s\n- Provider: %s\n- API: %s\n- Cases: %s\n\n", r.Split, providerLabel(r.Provider), r.APIURL, r.CasesDir)
 
 	b.WriteString("## Overall\n\n| Metric | Value |\n|---|---|\n")
 	fmt.Fprintf(&b, "| Cases | %d |\n", s.Cases)
-	fmt.Fprintf(&b, "| Overall pass rate (every evaluator passed) | %.3f (%d of %d) |\n", s.DeterministicPass, s.Passed, s.Cases)
+	fmt.Fprintf(&b, "| Overall pass rate (every evaluator passed and the rubric scored %.2f or more) | %.3f (%d of %d) |\n",
+		RubricPassScore, s.OverallPass, s.Passed, s.Cases)
+	fmt.Fprintf(&b, "| Deterministic pass rate (every evaluator passed) | %.3f (%d of %d) |\n", s.DeterministicPass, s.DeterministicPassed, s.Cases)
 	fmt.Fprintf(&b, "| End-to-end success (expected status reached) | %.3f (%d of %d) |\n", s.E2ESuccess, s.E2EPassed, s.Cases)
+	fmt.Fprintf(&b, "| Rubric (cases with a rubric that scored %.2f or more) | %s |\n", RubricPassScore, rubricSummaryCell(s.Rubric))
 	fmt.Fprintf(&b, "| Mean cost (USD) | %.6f |\n", s.MeanCostUSD)
 	fmt.Fprintf(&b, "| Mean duration | %s |\n\n", formatDuration(int64(s.MeanDurationMs)))
 
@@ -251,14 +306,15 @@ func (r *Report) Markdown() string {
 		fmt.Fprintf(&b, "| %s | %d | %d | %.3f |\n", e.Name, e.Passed, e.Total, e.Rate)
 	}
 
-	b.WriteString("\n## Cases\n\n| Case | Split | Status | Reason | Evaluators | Cost (USD) | Duration |\n|---|---|---|---|---|---|---|\n")
+	b.WriteString("\n## Cases\n\n| Case | Split | Status | Reason | Evaluators | Rubric | Cost (USD) | Duration |\n|---|---|---|---|---|---|---|---|\n")
 	for _, c := range r.Cases {
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %.6f | %s |\n",
-			cell(c.ID), c.Split, cell(c.Status), cell(c.Reason()), evaluatorsCell(c),
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %.6f | %s |\n",
+			cell(c.ID), c.Split, cell(c.Status), cell(c.Reason()), evaluatorsCell(c), rubricCell(c.Rubric),
 			float64(c.CostUSDMicros)/1e6, formatDuration(c.DurationMs))
 	}
 
 	r.writeEvaluatorMatrix(&b)
+	r.writeRubricTable(&b)
 
 	var failures []CaseResult
 	for _, c := range r.Cases {
@@ -282,9 +338,78 @@ func (r *Report) Markdown() string {
 					fmt.Fprintf(&b, "  - %s: %s\n", e.Name, oneLine(e.Detail))
 				}
 			}
+			writeRubricFailures(&b, c.Rubric)
 		}
 	}
 	return b.String()
+}
+
+// providerLabel says how the provider setting is used.
+func providerLabel(p string) string {
+	switch p {
+	case ProviderAnthropic:
+		return "anthropic (runs replayed from their scripts, rubrics graded by " + RubricModel + ")"
+	case ProviderScripted:
+		return "scripted (runs replayed from their scripts, rubrics graded by their local checks)"
+	}
+	return p
+}
+
+// rubricCell renders a case's rubric for the case table: "-" without one, otherwise the
+// score, the criteria met and the grader that produced it.
+func rubricCell(r RubricResult) string {
+	switch {
+	case r.Criteria == 0:
+		return "-"
+	case r.Mode == "":
+		return fmt.Sprintf("not scored (%d criteria)", r.Criteria)
+	}
+	return fmt.Sprintf("%.2f (%d/%d, %s)", r.Score, r.Met(), r.Criteria, r.Mode)
+}
+
+func rubricSummaryCell(s RubricSummary) string {
+	if s.Cases == 0 {
+		return "none of the cases has a rubric"
+	}
+	return fmt.Sprintf("%d of %d, mean score %.3f (%d heuristic, %d model)", s.Passed, s.Cases, s.MeanScore, s.Heuristic, s.Model)
+}
+
+// writeRubricTable lists every criterion of every case with a rubric, with the mode that
+// graded it and the grader's reason, so a reader can see what each score rests on.
+func (r *Report) writeRubricTable(b *strings.Builder) {
+	var rows []CaseResult
+	for _, c := range r.Cases {
+		if c.Rubric.Criteria > 0 && len(c.Rubric.Items) > 0 {
+			rows = append(rows, c)
+		}
+	}
+	if len(rows) == 0 {
+		return
+	}
+	b.WriteString("\n## Rubric by criterion\n\n| Case | Mode | Criterion | Met | Reason |\n|---|---|---|---|---|\n")
+	for _, c := range rows {
+		for _, it := range c.Rubric.Items {
+			fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n", cell(c.ID), c.Rubric.Mode, cell(it.Criterion),
+				map[bool]string{true: "yes", false: "NO"}[it.Passed], cell(it.Reason))
+		}
+	}
+}
+
+// writeRubricFailures lists what kept a rubric from passing: the criteria not met, or
+// why the rubric could not be scored.
+func writeRubricFailures(b *strings.Builder, r RubricResult) {
+	if r.Criteria == 0 || r.OK() {
+		return
+	}
+	fmt.Fprintf(b, "  - rubric: %s\n", oneLine(rubricCell(r)))
+	if r.Detail != "" {
+		fmt.Fprintf(b, "    - %s\n", oneLine(r.Detail))
+	}
+	for _, it := range r.Items {
+		if !it.Passed {
+			fmt.Fprintf(b, "    - not met: %s (%s)\n", oneLine(it.Criterion), oneLine(it.Reason))
+		}
+	}
 }
 
 // writeEvaluatorMatrix renders one row per case and one column per evaluator, so a

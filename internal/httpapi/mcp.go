@@ -15,6 +15,7 @@ import (
 
 	"yuno/internal/config"
 	"yuno/internal/engine"
+	"yuno/internal/guardrails"
 	"yuno/internal/obs"
 	"yuno/internal/store"
 	"yuno/internal/tools"
@@ -76,8 +77,9 @@ type gatePending struct {
 }
 
 // callPlatformTool is the gate every platform tool call goes through (DESIGN 5.3 rules
-// 5–8, 5.4 rule 1, 5.7 rules 3–4): resolve the run token, refuse tools the agent may
-// not use, validate the input, compute the idempotency key for side effects, record
+// 5–8, 5.4 rule 1, 5.7 rules 3–4, 5.11 rules 3–4): resolve the run token, refuse tools
+// the agent may not use or its guardrails block, validate the input, refuse input a
+// guardrail pattern matches, compute the idempotency key for side effects, record
 // the authoritative tool_calls row, then execute directly (auto) or behind a human
 // approval (require_approval). It returns the model's text and whether it is an error.
 func (s *Server) callPlatformTool(ctx context.Context, t *tools.Tool, args json.RawMessage) (string, bool) {
@@ -136,11 +138,25 @@ func (g *gateCall) run(ctx context.Context) (string, bool) {
 		g.log.Warn("platform tool refused: blocked for this agent", "agent_id", rc.AgentID)
 		return g.finish(ctx, store.ToolBlocked, tools.Result{IsError: true, Text: fmt.Sprintf("tool %s is blocked for this agent", t.Name)}, 1)
 	}
+	guard, err := s.agentGuardrails(ctx, rc.AgentID)
+	if err != nil {
+		// Guardrails that cannot be read are not skipped.
+		g.log.Error("load guardrails failed", "agent_id", rc.AgentID, "error", err)
+		return g.finish(ctx, store.ToolFailed, tools.Result{IsError: true, Text: t.Name + " failed with an internal error; try the call again"}, 1)
+	}
+	if guardrails.ToolBlocked(guard, t.Name) {
+		g.log.Warn("platform tool refused: blocked by guardrail", "agent_id", rc.AgentID)
+		return g.finish(ctx, store.ToolBlocked, tools.Result{IsError: true, Text: fmt.Sprintf("tool %s is blocked for this agent", t.Name)}, 1)
+	}
 	if err := t.ValidateInput(g.args); err != nil {
 		if t.OnInvalidInput != nil {
 			t.OnInvalidInput(ctx, g.call, err.Error())
 		}
 		return g.finish(ctx, store.ToolFailed, tools.Result{IsError: true, Text: err.Error()}, 1)
+	}
+	if p, blocked := guardrails.MatchInput(guard, t.Name, g.args); blocked {
+		g.log.Warn("platform tool refused: input blocked by guardrail", "agent_id", rc.AgentID, "guardrail", guardrails.PatternName(p))
+		return g.finish(ctx, store.ToolBlocked, tools.Result{IsError: true, Text: guardrails.BlockedMessage(p)}, 1)
 	}
 	if t.Risk == tools.RiskSideEffecting {
 		key, err := tools.IdempotencyKey(rc.RunID, rc.RunNodeID, t.Name, g.args)
@@ -168,6 +184,23 @@ func (g *gateCall) run(ctx context.Context) (string, bool) {
 		status = store.ToolFailed
 	}
 	return g.finish(ctx, status, res, out.Attempts)
+}
+
+// agentGuardrails reads the calling agent's guardrails as they are now (DESIGN 5.11
+// rules 3 and 4). A deleted agent keeps its guardrails for the runs that still name it;
+// an agent that never existed has none.
+func (s *Server) agentGuardrails(ctx context.Context, agentID string) (store.Guardrails, error) {
+	if s.pool == nil || agentID == "" {
+		return store.Guardrails{}, nil
+	}
+	a, err := store.GetAgentForRun(ctx, s.pool, agentID)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.Guardrails{}, nil
+	}
+	if err != nil {
+		return store.Guardrails{}, err
+	}
+	return a.Guardrails, nil
 }
 
 // gated records the call as awaiting_approval, asks the engine for an approval and

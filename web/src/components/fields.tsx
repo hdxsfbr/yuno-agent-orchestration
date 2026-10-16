@@ -61,8 +61,9 @@ export function TextField({
   placeholder,
   maxLength,
   mono,
+  disabled,
   ...c
-}: Common & { value: string; onChange: (v: string) => void; placeholder?: string; maxLength?: number; mono?: boolean }) {
+}: Common & { value: string; onChange: (v: string) => void; placeholder?: string; maxLength?: number; mono?: boolean; disabled?: boolean }) {
   return (
     <Field {...c}>
       {(p) => (
@@ -72,6 +73,7 @@ export function TextField({
           value={value}
           maxLength={maxLength}
           placeholder={placeholder}
+          disabled={disabled}
           onChange={(e) => onChange(e.target.value)}
           className={control(!!c.errors?.length, mono ? "font-mono" : "")}
         />

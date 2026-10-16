@@ -68,14 +68,16 @@ export default function ApprovalCard({ approval, toolCall, showRun = false, onDe
       <dl className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-xs text-zinc-500">
         {showRun ? (
           <div className="flex gap-1.5">
-            <dt>Run</dt>
+            <dt>{approval.run_id ? "Run" : "Raised in"}</dt>
             <dd>
               {approval.run_id ? (
                 <Link to={`/runs/${approval.run_id}`} className="font-mono text-zinc-900 hover:underline dark:text-zinc-100" title={approval.run_id}>
                   {shortId(approval.run_id)}
                 </Link>
               ) : (
-                "—"
+                <Link to="/channels" className="text-zinc-900 hover:underline dark:text-zinc-100">
+                  Conversation
+                </Link>
               )}
             </dd>
           </div>

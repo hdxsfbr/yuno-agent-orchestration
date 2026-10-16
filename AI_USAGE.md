@@ -146,3 +146,36 @@ and kept the corrected case. The agent also added `scripts/mutation-check.sh`, u
 rule that a command run twice becomes a script, and `make test-race` was added for the
 race run it did by hand.
 
+**Wave 3 prep (2026-10-16, coordinator).** Andre supplied the Telegram bot token and his
+user id through his local config; the coordinator wired them into the git-ignored `.env`,
+restarted the stack and probed the channel before briefing. The first probe caught the
+gateway answering Andre's messages from its own default agent on Opus (D-025) and
+produced a wrong intermediate conclusion (that bindings need a restart) that agent A
+later corrected from the gateway's reload table; the design records the corrected fact.
+Briefs in `docs/briefs/wave3/`.
+
+**Wave 3 agents.** A Telegram and conversations (Opus 5.5, 214 tool uses, 38 min), B
+scheduler, guardrails, memory and skills (Opus 5.5, 170, 28 min), C pages (Sonnet 5.5,
+60, 13 min), D rubric evaluator and cases to 24 (Sonnet 5.5, 193, 32 min). B's wiring
+requests to A were relayed mid-wave and landed in A's report; A's store changes for
+conversation approvals arrived as diffs the coordinator applied with their test; the
+coordinator also wired the rate-limit 429 and the agent-save validation B could not own.
+
+**Wave 3 verification, review and fix pass.** The coordinator ran the suites, lint, the
+race run, the serial live integration tests, both probes, a full `make run` on the new
+closed-by-default Telegram baseline, smoke, the binding through the platform's own API
+(the keeper had removed the probe's hand-made binding first), and the eval: 16 of 17
+public cases, the miss being the runner's own 429 decoding. One independent review
+(codex-cli, high reasoning, read-only) found six issues, two P1 (a scheduler occurrence
+that could fire twice across a crash, a host-exec allowlist that bypassed guardrail
+patterns); all six, the agents' leftovers and the runner bug went to one Opus 5.5 fix
+pass, dispositions in `docs/reviews/wave3-review.md`. The fix pass's one interpretation
+became D-029.
+
+**Secret hygiene (2026-10-16).** The coordinator's pre-commit scan of the wave-3 diff
+caught a token-shaped test fixture that an agent had modelled on the real bot: the bot's
+public numeric id with an invented secret half (hash and prefix comparison showed no
+overlap with the real secret beyond the two characters every Telegram token starts
+with). The fixture was replaced with a plainly fake value before the commit was final,
+and the agent rules now say fixtures never borrow any part of a real credential.
+

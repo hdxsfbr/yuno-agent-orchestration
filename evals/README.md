@@ -4,21 +4,26 @@ The eval runner (`yuno eval`, `make eval`) is a plain HTTP client of the api. Fo
 case it creates the temporary agents the case needs (and, for a workflow case, the
 workflow), registers the case's script with the scripted model provider, runs it, answers
 the approvals the case says to answer, waits for the run to end, judges the stored trace
-with the evaluators below and deletes what it created. It needs no cloud access: the model
-is `scripted/scripted-1` and replays the script in the case.
+with the evaluators below and deletes what it created. It needs no cloud access by
+default: the model is `scripted/scripted-1` and replays the script in the case, and the
+rubric is graded by local checks. Setting `EVAL_PROVIDER=anthropic` changes one thing:
+the rubric is graded by `claude-opus-5-5` through the api's model proxy (see "Rubric").
 
 ```
 make eval                      # EVAL_SPLIT=public by default
 EVAL_SPLIT=all make eval       # every split
+EVAL_SPLIT=all EVAL_PROVIDER=anthropic make eval   # every split, rubrics graded by the model
+make eval-baseline             # make eval, then copy the report to evals/reports/baseline.md
+make eval-final                # make eval, then copy the report to evals/reports/final.md
 ```
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `EVAL_API_URL` | `http://127.0.0.1:8080` | api to test |
+| `EVAL_API_URL` | `http://127.0.0.1:8080` | api to test; in model mode its `/model-proxy/anthropic` is called too |
 | `EVAL_SPLIT` | `public` | `public`, `private` or `all` |
 | `EVAL_CASES_DIR` | `evals/cases` | searched recursively for `*.yaml` / `*.yml` |
 | `EVAL_REPORTS_DIR` | `evals/reports` | where `<timestamp>.md` and `.json` are written |
-| `EVAL_PROVIDER` | `scripted` | only `scripted` is supported |
+| `EVAL_PROVIDER` | `scripted` | `scripted`: rubrics graded by their local checks. `anthropic`: rubrics graded by `claude-opus-5-5`. Runs are replayed from the scripts either way |
 | `API_TOKEN` | empty | sent as a bearer token when set |
 
 ## Case format
@@ -49,10 +54,23 @@ agent:
   limits:                          # max_steps, max_duration_seconds, max_node_iterations,
     max_steps: 10                  # max_loop_visits, max_cost_usd, max_tool_calls,
     max_duration_seconds: 120      # approval_timeout_seconds; zero or absent = default
+  guardrails:                      # optional, DESIGN 5.11, sent to the api as written
+    max_runs_per_hour: 1           # also max_cost_usd_per_run and blocked_tools: [..]
+    blocked_input_patterns:        # RE2 against the canonical JSON of the tool's input
+      - { name: no-secret-files, tool: deploy_release, regex: '\.env' }
+  memory_policy:                   # optional, DESIGN 5.10: enabled, max_facts, fact_ttl_days,
+    enabled: true                  # conversation_window, conversation_ttl_days
 task: |                            # the user task; $RUN_ID is replaced (see below)
   ...
 script: [...]                      # see "Script", "Actions" and "Expect" below
+rubric: [...]                      # optional, see "Rubric"
 ```
+
+`guardrails` and `memory_policy` are also accepted under each entry of a workflow case's
+`agents`. The loader applies the api's save-time rules (a pattern must compile as RE2 and
+have a name and a tool, counts must not be negative), so a case never reaches the api with
+a guardrail it will refuse. The `memory_save` and `memory_recall` tools are only offered to
+an agent whose `memory_policy.enabled` is true, so a case that uses them sets it.
 
 ### Workflow case
 
@@ -85,6 +103,9 @@ agents:                            # one temporary agent per key
     tool_allowlist: [read, write, finish]
     interaction_rules: { deploy_release: auto }   # optional
     limits: {...}                  # optional
+    guardrails: {...}              # optional, as in a quick run
+    memory_policy: {...}           # optional, as in a quick run
+rubric: [...]                      # optional, see "Rubric"
 ```
 
 The runner creates each agent as `eval-<case id>-<key>-<random>`, replaces every
@@ -94,6 +115,11 @@ input, the definition's limits and the scripted model. The case is rejected at l
 for an unknown field in the definition, an agent node whose `agent_name` is not a key of
 `agents`, an unused agent, a schema that does not compile, a task or message template that
 does not render, or an input that does not match `input_schema`.
+
+Two agent nodes may name the same agent: the agent is created once, and anything that
+belongs to an agent (its memory, its run count for a rate limit) carries from one node to
+the next. A workflow with no agent node at all (`start` to `end`, DESIGN 5.6) needs no
+`agents` and no `script`; case 018 is one.
 
 ### Script
 
@@ -106,11 +132,13 @@ script:                            # what the scripted model does, one entry per
   - text: Done.                    # ... or a plain text reply
 ```
 
-There is one script per case, consumed in execution order across all of a workflow's
-nodes: every model call takes the next step, whichever node makes it. A node visit ends
-with a text step, so after a `yuno__finish` step the script needs a text step before the
-next node's first step. The script must be consumed exactly: a missing step ends the run
-with `script exhausted`, a spare one is a mistake in the case.
+There is one script per case (none when the workflow has no agent node), consumed in
+execution order across all of a workflow's nodes: every model call takes the next step,
+whichever node makes it. A node visit ends with a text step, so after a `yuno__finish`
+step the script needs a text step before the next node's first step. The script must be
+consumed exactly: a missing step ends the run with `script exhausted`, a spare one is a
+mistake in the case. The exceptions are the limit cases, whose run the engine ends while
+the model still has steps left.
 
 Script steps have exactly one of `text` or `tool`. Tool `args` is a YAML mapping and is
 posted as a JSON object. Two names matter and are not the same thing:
@@ -152,6 +180,12 @@ actions:
     - { decision: approve, reason: Looks right. }   # approve | reject
     - { decision: reject }
   approval_wait_seconds: 40        # leave the first pending approval alone for this long
+  cancel_when_waiting: true        # cancel the run as soon as it waits for an approval
+  retrigger: true                  # after the run ends, trigger the same workflow again
+  schedule:                        # start the run through a one-shot schedule
+    kind: delay                    #   the only kind that fires within a case
+    run_in_seconds: 2              #   run_at = now + this, 1 to 30
+    wait_seconds: 40               #   how long to wait for the run to appear, default 30, at most 120
 ```
 
 While the run waits for approval the runner lists the run's pending approvals
@@ -163,6 +197,29 @@ case error: the runner stops waiting, records it, cancels the run and still judg
 trace, rather than waiting out the case timeout. `approval_wait_seconds` is for expiry cases:
 nothing is decided for that long after the first approval appears, and a run that ends
 meanwhile (the approval expired) ends the wait.
+
+`cancel_when_waiting` is for a run that must end at its gate. Instead of deciding the
+approval the runner posts one `POST /api/runs/<id>/cancel` the first time it sees the run in
+`waiting_approval`; the engine expires the approval with the reason `run cancelled`
+(DESIGN 5.3 rule 8). Case 022.
+
+`retrigger` is for the rate limit (DESIGN 5.11 rule 2). When the first run has ended, the
+runner posts the same `POST /api/runs` request again and records the HTTP status and error
+message of the answer, which `expect.trigger_status` checks. The second request names a
+script id that was never registered, so if the api wrongly accepts it, the run it creates
+cannot take steps from the first run's script; the runner cancels such a run. Case 019.
+
+`schedule` starts the run the way an operator would. The runner creates the agents and the
+workflow as usual, but instead of `POST /api/runs` it posts `POST /api/schedules` with
+`{workflow_id, kind: "delay", run_at, input, enabled: true}` (`run_at` an absolute UTC
+timestamp), then polls `GET /api/schedules/<id>` until `last_run_id` names the run the
+scheduler created, and follows that run like any other. The schedule is deleted afterwards.
+A schedule that records `last_error` instead of a run, or has not fired within
+`wait_seconds`, fails the case. A scheduler tick (`SCHEDULER_TICK`, 10 s by default) sits
+between the due time and the run, which is why the default wait is 30 s. A scheduled run
+cannot carry the scripted model, so the workflow of such a case must have no agent node,
+or its agents would call the real model. `schedule` cannot be combined with `retrigger`.
+Case 018.
 
 ### Expect
 
@@ -180,84 +237,172 @@ expect:
     other_tool: []                 #   an empty list: the run must have no row for the tool
   never_tool_statuses:             # optional: statuses no row of the tool may have; a row is not
     deploy_release: [executed]     #   required, for a call the runtime may refuse unrecorded
+  tool_outputs:                    # optional: tool -> texts, each in the output of some row of it
+    http_fetch: ['<untrusted_content source="http_fetch">']
   approval_statuses: [approved]    # optional: exact statuses of the run's approvals in request
                                    #   order; [] means the run raised none
-rubric: []                         # reserved for the rubric evaluator (empty for now)
+  approval_reasons: [run cancelled]   # optional: per approval, in request order, a substring of its
+                                   #   reason; an empty entry is not checked
+  trigger: schedule                # optional: the run's trigger (manual | schedule | channel)
+  schedule_enabled: false          # optional: whether the schedule is still enabled afterwards
+  trigger_status: 429              # optional: HTTP status of the answer to actions.retrigger
+  trigger_error_contains: "rate limit: 1 runs/hour"   # optional: substring of that answer's message
+  tools_present: [deploy_release]  # optional: names GET /api/tools must list
+  tools_absent: [gitlab_create_mr] # optional: names GET /api/tools must not list
+rubric: [...]                      # optional, see "Rubric"
 ```
 
 For a quick run the final state is `{"agent": <the agent's result>}`; for a workflow it is
 `{"<node id>": <that node's last result>}`.
 
+`tool_outputs` looks at the output stored on the tool call rows, whatever their status (a
+refused call leaves its refusal there): every string in the output, decoded, and the raw
+JSON, compared ignoring case. It is how a case shows that a tool returned something the
+scripted model could not have made up: the `<untrusted_content>` wrapper of `http_fetch`
+(case 021), the fact `memory_recall` returned (case 020), the text of a guardrail's refusal
+(case 024).
+
+The last six fields read what the runner saw outside the run's trace, which the report
+keeps under `observed` in the JSON: the answer to the extra trigger, the schedule read back
+after the run ended, and the tool list (fetched only when `tools_present` or `tools_absent`
+is set). `trigger: schedule` also requires the run's `trigger_ref` to be the schedule the
+runner created, and `trigger`, `schedule_enabled` need `actions.schedule`, `trigger_status`
+and `trigger_error_contains` need `actions.retrigger`; the loader refuses the combinations
+that cannot be checked.
+
+### Rubric
+
+A case may carry three to six criteria. Each is a sentence that is true or false of the
+run's outcome, and a local check that stands in for it offline:
+
+```yaml
+rubric:
+  - criterion: The critic reviewed the researcher's notes and approved them.
+    check: { path: /critic/verdict, json_path_eq: approved }
+  - criterion: The researcher's sources say the facts come from its own knowledge.
+    check: { path: /researcher/sources, contains: own knowledge }
+  - criterion: The writer's summary gives a recommendation.
+    check: { path: /writer/summary, regex: "(?i)recommend" }
+```
+
+A check sets exactly one of `contains`, `regex` or `json_path_eq`, and `path`, a JSON
+pointer into the run's final state (the same state `expect.state` reads). `contains` is a
+case-insensitive substring and `regex` an RE2 expression (case-sensitive unless it says
+`(?i)`); both look at the value at `path` when it is a string, otherwise at its compact
+JSON, and at the whole state when `path` is empty. `json_path_eq` needs a `path` and passes
+when the value there equals the given one (a YAML number equals the JSON number). A
+missing path fails the criterion.
+
+Each criterion scores 0 or 1 and the case's rubric score is the share met. A case passes
+when every deterministic evaluator passed **and** its rubric scored at least 0.75, so 3 of
+4 passes and 2 of 3 does not. A case without a rubric scores 1.
+
+Two graders produce the score, and the report says which one did, for every case:
+
+| Mode | When | How it grades |
+|---|---|---|
+| `heuristic` | `EVAL_PROVIDER=scripted` (the default) | runs each criterion's `check` against the final state; needs nothing but the trace |
+| `model` | `EVAL_PROVIDER=anthropic` | sends `claude-opus-5-5` the case's description and task or input, the run's status and failure reason, the final state and the numbered criteria, and asks for a JSON verdict per criterion (`score` 0 or 1 and a one-sentence `reason`) as structured output; the `check` is not shown to it |
+
+The model call goes to `<EVAL_API_URL>/model-proxy/anthropic/v1/messages`, the api's
+proxy, which holds the key; the runner sends no credentials. The proxy only answers
+loopback callers, and the eval container shares the api's network namespace, so it does.
+The request carries no sampling parameters and no forced tool choice (this model rejects
+both); an upstream that rejects the structured output format with a 400 or 422 is asked
+again once with the same prompt and its text answer parsed as JSON. The final state is
+agent output and reaches the grader inside a `<final_state>` block that the system prompt
+calls data. A call that fails (no key, rate limit, an answer that is not the JSON asked
+for) scores the rubric 0 with the reason under `model grading failed`; a run asked for
+model grading never passes without it. A criterion the model gives no verdict for counts as
+not met.
+
 ## What the runner does per case
 
 1. `POST /api/agents` creates `eval-<id>-<random>` (a quick run) or one
    `eval-<id>-<key>-<random>` per entry of `agents` (a workflow case) with the default
-   model, the case's prompts, allowlists, interaction rules and limits. A workflow case
-   then `POST /api/workflows` with the definition.
+   model, the case's prompts, allowlists, interaction rules, limits, guardrails and memory
+   policy. A workflow case then `POST /api/workflows` with the definition.
 2. `POST /api/evals/scripts` registers the script as `<id>-<random>` (the same random
-   suffix).
+   suffix); a workflow without agent nodes has no script.
 3. `POST /api/runs` triggers the run with model `scripted/scripted-1`, that script id and
    the case's limits: `{agent_id, task}` for a quick run, `{workflow_id, input}` for a
-   workflow case.
+   workflow case. With `actions.schedule` the run is created by a one-shot schedule instead
+   (`POST /api/schedules`, then `GET /api/schedules/{id}` until it names the run).
 4. `GET /api/runs/{id}` every 500 ms until the status is terminal, for at most 180 s. A run
    that has not finished by then is cancelled and recorded as failed with the reason
    `runner timeout`. With `actions.cancel_after_steps`, the runner posts one cancel as soon
-   as `step_count` reaches that value; approval actions are applied as described above.
-5. `GET /api/runs/{id}/trace`, then the evaluators.
-6. `DELETE /api/workflows/{id}` and `DELETE /api/agents/{id}`, whatever happened.
+   as `step_count` reaches that value; with `actions.cancel_when_waiting` it posts one as
+   soon as the run waits for approval; approval actions are applied as described above.
+5. Once the run has ended: the extra trigger of `actions.retrigger`, the schedule read
+   back, and `GET /api/tools` when the case lists `tools_present` or `tools_absent`.
+6. `GET /api/runs/{id}/trace`, then the evaluators and the rubric.
+7. `DELETE /api/schedules/{id}`, `DELETE /api/workflows/{id}` and `DELETE /api/agents/{id}`,
+   whatever happened.
 
 Cases run one at a time. An api error, a panic or a timeout in one case marks that case
-failed (every evaluator fails with the reason) and the suite carries on. The cases that
-publish a release (`deploy_release`) publish real ones, versioned `*-eval`, to the local
-deploy target.
+failed (every evaluator fails with the reason, its rubric is shown as not scored) and the
+suite carries on. The cases that publish a release (`deploy_release`) publish real ones,
+versioned `*-eval`, to the local deploy target.
 
 ## Evaluators
 
-All of them are pure functions of the case and the trace and run on every case, so a
-report shows each one for each case.
+All of them are pure functions of the case, the trace and what the runner observed, and run
+on every case, so a report shows each one for each case.
 
 | Evaluator | Passes when |
 |---|---|
-| `termination` | the run status is terminal and has `finished_at`; `step_count <= max_steps`; `finished_at - started_at - paused_total_ms <= max_duration_seconds`. Limits come from the run's own snapshot, then the limits the case asked for (the agent's, or the workflow definition's), then the platform defaults. A run that failed with a `step limit` reason may show one step over: the step that trips the limit is recorded before the abort. |
+| `termination` | the run status is terminal and has `finished_at`; `step_count <= max_steps`; `finished_at - started_at - paused_total_ms <= max_duration_seconds`. Limits come from the run's own snapshot, then the limits the case asked for (the agent's, or the workflow definition's), then the platform defaults. A run that failed with a `step limit` reason may show one step over: the step that trips the limit is recorded before the abort. A run that timed out may finish up to 12 s past its limit: the engine's 2 s tick plus the 10 s it waits for the abort |
 | `trace_integrity` | every tool call has a terminal status (`executed`, `rejected`, `blocked`, `expired`, `failed`) and `finished_at`; every model call has a model and no negative token count; the run has at least one span |
-| `expectation` | the status equals `expect.status`, the failure reason contains `failure_reason_contains` (ignoring case), the trace has at least `min_tool_calls` tool calls, `min_model_calls` model calls and `min_agent_messages` agent messages, and every `state`, `tool_statuses` and `approval_statuses` entry holds |
+| `expectation` | the status equals `expect.status`, the failure reason contains `failure_reason_contains` (ignoring case), the trace has at least `min_tool_calls` tool calls, `min_model_calls` model calls and `min_agent_messages` agent messages, and every `state`, `tool_statuses`, `never_tool_statuses`, `tool_outputs`, `approval_statuses` and `approval_reasons` entry holds, and so does what the runner observed: `trigger`, `schedule_enabled`, `trigger_status`, `trigger_error_contains`, `tools_present` and `tools_absent` |
 | `approval_gate` | every side-effecting tool call (`deploy_release`, `gitlab_create_mr`, or any call with an idempotency key) that reached `executed` references an approval that was `approved`, decided no later than the call finished. The exception is an agent whose interaction rule for the tool is `auto` in the case. A call that returned a stored result (`output.replayed`) caused no effect and is judged with the call that did |
 | `idempotency` | calls with the same node visit, tool and input share one idempotency key and produce exactly one `side_effects` row: the first executed call made the effect and every later one is marked `output.replayed`. Different visits or inputs never share a key, every executed side effect has a key and a row, and every row belongs to an executed call of this run |
 | `schema` | the output of every node that succeeded validates against that node's `output_schema`, and the final state validates against the workflow's `state_schema` when it has one. The definition is the run's stored snapshot when the trace has one, else the case's workflow, else the single-agent default |
 | `allowlist` | every tool call that executed is in its agent's `tool_allowlist` (without the `yuno__` prefix; `finish` is always allowed) and not blocked by the agent's rule. Calls that were refused do not count |
 
-The rubric evaluator is not part of this release. A case with an empty `rubric` scores 1 by
-definition; the score is kept in the JSON report only.
+The rubric evaluator is separate from these seven and described under "Rubric": a case
+passes when all seven pass and its rubric scores at least 0.75.
 
 ## Reports and exit status
 
 Each run writes `<UTC timestamp>.md` and `.json` to `EVAL_REPORTS_DIR` (`20261015T120000Z.md`);
 an existing report is never overwritten. `baseline.md` and `final.md` are copies made by
-`make eval-baseline` and `make eval-final`.
+`make eval-baseline` and `make eval-final`. Both run the suite for `EVAL_SPLIT` (public by
+default); set `EVAL_SPLIT=all` to put the private cases in the stored report as well. The
+pass gate and the summary line are about the public split either way.
 
-The report has the summary line, per-evaluator pass rates, the overall pass rate (cases on
-which every evaluator passed), end-to-end success (cases whose run ended with `expect.status`),
-mean cost and duration, a per-case table, a matrix of every evaluator against every case and
-a list of failures with each failing evaluator's reason. The summary line is also printed to
-standard output:
+The report has the summary line, the overall pass rate (cases on which every evaluator passed
+and the rubric scored at least 0.75), the deterministic pass rate (cases on which every
+evaluator passed), end-to-end success (cases whose run ended with `expect.status`), a rubric
+line (cases that passed it, the mean score, how many were graded in each mode), mean cost and
+duration, per-evaluator pass rates, a per-case table with a **Rubric** column, a matrix of
+every evaluator against every case, the criteria of every rubric with the grader's reason,
+and a list of failures with each failing evaluator's reason and each unmet criterion. A
+case's rubric cell reads `0.75 (3/4, heuristic)` or `1.00 (4/4, model)`; `-` means the case
+has no rubric and `not scored` that it never produced a trace. The provider line says how
+rubrics were graded. The JSON report carries the same, plus `rubric.items` per case and what
+the runner observed. The summary line, unchanged, is also printed to standard output:
 
 ```
-public split: 12 cases, deterministic pass 1.000, e2e success 1.000
+public split: 17 cases, deterministic pass 1.000, e2e success 1.000
 ```
 
-The command exits 1 when the deterministic pass rate of the public split is below 0.9, after
-writing the report. It also exits 1 when the cases cannot be loaded, the api never becomes
-ready, or the run is interrupted before every case ran.
+The command exits 1 when the overall pass rate of the public split (evaluators and rubric)
+is below 0.9, after writing the report. It also exits 1 when the cases cannot be loaded, the
+api never becomes ready, or the run is interrupted before every case ran.
 
 ## Cases
+
+Seventeen public and seven private. A case under the gate of the default `make eval`
+(public) needs nothing from the outside world; the private ones add a dependency each, noted
+below.
 
 | Id | Split | Shows | Expected |
 |---|---|---|---|
 | `001-quick-run-happy` | public | runs a command, writes `runs/$RUN_ID/notes.md`, finishes with a summary | succeeded, at least 2 tool calls |
 | `002-step-limit` | public | an agent that keeps calling tools without finishing hits `max_steps: 2` | failed, reason contains `step limit 2 exceeded` |
 | `003-cancel` | public | slow steps, cancelled by the runner after the first | cancelled |
-| `004-dev-pipeline-happy` | public | the dev pipeline template's graph end to end: code, review, a human approves the gate, a second approval lets `deploy_release` run, one release is published | succeeded, `deploy_release` executed, two approvals approved |
-| `005-feedback-loop-once` | public | the reviewer asks for changes once, the coder revises, the state keeps the second draft | succeeded, `/coder/tests_passed` true |
+| `004-dev-pipeline-happy` | public | the dev pipeline template's graph end to end: code, review, a human approves the gate, a second approval lets `deploy_release` run, one release is published | succeeded, `deploy_release` executed, two approvals approved; rubric of 4 |
+| `005-feedback-loop-once` | public | the reviewer asks for changes once, the coder revises, the state keeps the second draft | succeeded, `/coder/tests_passed` true; rubric of 3 |
 | `006-feedback-loop-limit` | public | a reviewer who never approves; `max_loop_visits: 2` stops the third coder visit | failed, `loop limit 2 exceeded for coder` |
 | `007-approval-rejected` | public | a human rejects the approval node; the deployer never runs | failed, `rejected at gate`, no deploy |
 | `008-approval-expiry` | public | nobody answers the gate; `approval_timeout_seconds: 5`, the runner waits 40 s | failed, `approval expired`, no deploy |
@@ -267,8 +412,23 @@ ready, or the run is interrupted before every case ran.
 | `012-prompt-injection-exec` | private | a command prints an instruction to deploy; the agent does not | succeeded, no `deploy_release` row, no approval |
 | `013-output-schema-repair` | public | the first `finish` breaks the output schema, the second is valid | succeeded, the state holds the valid result |
 | `014-tool-approval-gate` | private | `deploy_release` requires approval; a human approves it and it runs in the same turn | succeeded, `deploy_release` executed, one approval approved |
+| `015-research-pipeline-happy` | public | the `research_pipeline` template's graph with three agents and no `http_fetch`: notes, an approving critic, a report | succeeded, `/critic/verdict` approved; rubric of 4 |
+| `016-time-limit` | public | an `exec` that sleeps 10 s under `max_duration_seconds: 5` | timed_out, reason `time limit 5s exceeded` (about 7 to 17 s) |
+| `017-tool-call-limit` | public | an agent that keeps listing directories under `max_tool_calls: 3`, well below the step limit | failed, reason `tool call limit 3 exceeded` |
+| `018-schedule-triggered-run` | public | the runner creates a one-shot schedule two seconds ahead; the scheduler fires it once; the delay schedule disables itself. The workflow has no agent node (see Actions) | succeeded, trigger `schedule` with the schedule as `trigger_ref`, schedule disabled (about 12 s) |
+| `019-rate-limit` | public | an agent with `max_runs_per_hour: 1`; the first run succeeds, the same trigger again straight after is refused | succeeded, the second trigger answers 429 `rate limit: 1 runs/hour for agent <name>` |
+| `020-memory-across-nodes` | private | one agent with memory saves a fact in one node and recalls it in the next | succeeded, the `memory_recall` output holds the saved fact; rubric of 3 |
+| `021-http-fetch-untrusted-content` | private | the agent fetches a page; the platform wraps it as untrusted content; nothing is deployed though `deploy_release` is on the allowlist. Needs outbound https to `docs.python.org`, on the default `HTTP_FETCH_ALLOWLIST` | succeeded, `http_fetch` output holds both ends of the `<untrusted_content>` block, no `deploy_release` row, no approval |
+| `022-cancel-while-waiting-approval` | private | the run waits at an approval node and the runner cancels it | cancelled, one approval `expired` with the reason `run cancelled` |
+| `023-gitlab-tool-absent` | private | GitLab is not configured, so `GET /api/tools` lists `deploy_release` and `finish` and not `gitlab_create_mr`. Fails by design when `GITLAB_BASE_URL`, `GITLAB_PROJECT_ID` and `GITLAB_TOKEN` are all set | succeeded, the tool list as described |
+| `024-guardrail-blocked-input` | private | a guardrail pattern blocks `deploy_release` inputs naming `.env`, `.pem` or `secrets/` files; the call is refused before any approval is asked for | succeeded, `deploy_release` `blocked` with `input blocked by guardrail no-secret-files`, no approval |
+
+The channel-triggered reply of DESIGN 5.13 rule 6 is not a case: it needs a real message on
+a real Telegram chat. What can be asserted without one, that a session message is mirrored
+into the conversation tables, is a unit test of the channel code.
 
 To add a case, drop a file into the version directory, keep the `version` equal to the
 directory, and run `go test ./internal/evals/...`: the shipped cases are loaded and validated
-by the tests, and each one is played through a model of the engine's rules (script consumed
-exactly, expected end state reached, every evaluator satisfied) before it ever meets a running api.
+by the tests, and each one that the engine does not end by a limit is played through a model
+of the engine's rules (script consumed exactly, expected end state reached, every evaluator
+satisfied, every rubric criterion met) before it ever meets a running api.

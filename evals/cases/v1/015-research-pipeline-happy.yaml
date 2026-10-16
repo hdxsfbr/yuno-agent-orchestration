@@ -1,0 +1,214 @@
+id: 015-research-pipeline-happy
+version: v1
+split: public
+description: The research pipeline from start to finish with three agents and no http_fetch. The researcher writes notes from its own knowledge, the critic approves them on the first pass, the writer turns them into a report. The graph, tasks and schemas are the shipped template's.
+workflow:
+  input_schema:
+    type: object
+    properties:
+      topic: { type: string, description: What to research }
+      audience: { type: string, description: "Who the report is for, default a technical lead" }
+    required: [topic]
+    additionalProperties: true
+  state_schema:
+    type: object
+    properties:
+      researcher:
+        type: object
+        properties:
+          summary: { type: string }
+          notes_path: { type: string }
+          sources: { type: array, items: { type: string } }
+        required: [summary, notes_path]
+      critic:
+        type: object
+        properties:
+          verdict: { type: string, enum: [approved, changes_requested] }
+          feedback: { type: string }
+        required: [verdict, feedback]
+      writer:
+        type: object
+        properties:
+          summary: { type: string }
+          report_path: { type: string }
+        required: [summary, report_path]
+  nodes:
+    - { id: start, kind: start }
+    - id: researcher
+      kind: agent
+      agent_name: researcher
+      task: |-
+        Research this topic and write structured notes to runs/$RUN_ID/notes.md: key facts, trade-offs, open questions, and a list of sources (URLs when you fetched them, otherwise say the fact comes from your own knowledge).
+
+        Topic: {{.input.topic}}
+        {{with .state.critic}}
+        The critic was not satisfied with the previous notes. Address every point:
+        {{.feedback}}
+        {{end}}
+        Finish with a summary, the notes path and the sources.
+      output_schema:
+        type: object
+        properties:
+          summary: { type: string }
+          notes_path: { type: string }
+          sources: { type: array, items: { type: string } }
+        required: [summary, notes_path]
+        additionalProperties: true
+      input_from: [start, critic]
+    - id: critic
+      kind: agent
+      agent_name: critic
+      task: |-
+        Read the notes at {{.state.researcher.notes_path}} on the topic: {{.input.topic}}
+
+        Check them for unsupported claims, missing trade-offs and gaps a {{or .input.audience "technical lead"}} would notice. Finish with verdict "approved" when the notes are sound and complete enough to write from, otherwise "changes_requested" with specific questions for the researcher.
+      output_schema:
+        type: object
+        properties:
+          verdict: { type: string, enum: [approved, changes_requested] }
+          feedback: { type: string }
+        required: [verdict, feedback]
+        additionalProperties: true
+      input_from: [researcher]
+    - id: writer
+      kind: agent
+      agent_name: writer
+      task: |-
+        Write a report for a {{or .input.audience "technical lead"}} on: {{.input.topic}}
+
+        Use the approved notes at {{.state.researcher.notes_path}} and nothing the notes do not support. The critic's assessment: {{.state.critic.feedback}}
+
+        Write the report to runs/$RUN_ID/report.md with a one-paragraph summary, the findings, the trade-offs and a recommendation. Finish with the summary and the report path.
+      output_schema:
+        type: object
+        properties:
+          summary: { type: string }
+          report_path: { type: string }
+        required: [summary, report_path]
+        additionalProperties: true
+      input_from: [researcher, critic]
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: researcher }
+    - { from: researcher, to: critic }
+    - { from: critic, to: researcher, when: { path: /critic/verdict, op: eq, value: changes_requested } }
+    - { from: critic, to: writer, when: { path: /critic/verdict, op: eq, value: approved } }
+    - { from: writer, to: end }
+  limits:
+    max_steps: 40
+    max_duration_seconds: 300
+    max_node_iterations: 12
+    max_loop_visits: 3
+    max_cost_usd: 2
+    max_tool_calls: 80
+input:
+  topic: Choosing between SQLite and PostgreSQL for a small internal tool
+  audience: engineering manager
+agents:
+  researcher:
+    name: Research analyst
+    system_prompt: |
+      You research a topic and write structured notes: key facts, trade-offs, open questions and sources.
+      Say clearly which facts come from a fetched page and which from your own knowledge. You have no web
+      access in this deployment: every fact comes from your own knowledge, and the notes must say so.
+      Work only inside the run directory named in your task, and call yuno__finish with the result.
+    tool_allowlist: [read, write, ls, finish]
+  critic:
+    name: Research critic
+    system_prompt: |
+      You check research notes for unsupported claims, missing trade-offs and gaps. Approve notes that are
+      sound and complete enough to write from; otherwise ask specific questions. Call yuno__finish with
+      your verdict.
+    tool_allowlist: [read, ls, finish]
+  writer:
+    name: Technical writer
+    system_prompt: |
+      You write clear reports for a technical audience from approved notes, and nothing the notes do not
+      support: a one-paragraph summary, findings, trade-offs and a recommendation. Work only inside the
+      run directory named in your task, and call yuno__finish with the result.
+    tool_allowlist: [read, write, ls, finish]
+script:
+  # researcher
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/notes.md"
+        content: |
+          # SQLite or PostgreSQL for a small internal tool
+
+          Facts (from my own knowledge; nothing was fetched):
+          - SQLite is a library that stores a database in one file; PostgreSQL is a server.
+          - SQLite allows one writer at a time; PostgreSQL handles many concurrent writers.
+          - PostgreSQL needs a service to run, back up and upgrade; SQLite needs a file backup.
+
+          Trade-offs:
+          - Operations: SQLite has almost none; PostgreSQL has a real operational cost.
+          - Growth: moving from SQLite to PostgreSQL later means a migration.
+
+          Open questions:
+          - How many people write at the same time?
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: SQLite is enough for a few users who rarely write at the same time; PostgreSQL pays off with concurrent writers or growth.
+          notes_path: "runs/$RUN_ID/notes.md"
+          sources: ["own knowledge: SQLite and PostgreSQL documentation as I remember it"]
+  - text: The notes are written and the result has been submitted.
+  # critic
+  - tool:
+      name: read
+      args: { path: "runs/$RUN_ID/notes.md" }
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          verdict: approved
+          feedback: The notes state their facts and trade-offs, say that nothing was fetched, and leave one honest open question.
+  - text: The review is complete and the verdict has been submitted.
+  # writer
+  - tool:
+      name: read
+      args: { path: "runs/$RUN_ID/notes.md" }
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/report.md"
+        content: |
+          # SQLite or PostgreSQL for a small internal tool
+
+          Summary: for a small internal tool with few writers, start on SQLite and move to PostgreSQL when
+          concurrent writes or growth demand it. We recommend SQLite first.
+
+          Findings: SQLite is a file with one writer at a time; PostgreSQL is a server with many.
+
+          Trade-offs: SQLite costs almost nothing to run; PostgreSQL costs a service to operate but avoids a later migration.
+
+          Recommendation: SQLite now, PostgreSQL when more than a handful of people write at once.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: Start on SQLite for a small tool with few writers and move to PostgreSQL when concurrent writes or growth require it; the report recommends SQLite first.
+          report_path: "runs/$RUN_ID/report.md"
+  - text: The report is written and the result has been submitted.
+expect:
+  status: succeeded
+  min_model_calls: 10
+  min_tool_calls: 7
+  min_agent_messages: 2
+  state:
+    "/critic/verdict": approved
+  approval_statuses: []
+rubric:
+  - criterion: The critic reviewed the researcher's notes and approved them.
+    check: { path: /critic/verdict, json_path_eq: approved }
+  - criterion: The researcher's sources say that the facts come from its own knowledge, not from a fetched page.
+    check: { path: /researcher/sources, contains: own knowledge }
+  - criterion: The writer's summary gives a recommendation.
+    check: { path: /writer/summary, regex: "(?i)recommend" }
+  - criterion: The writer reports the path of the report file it wrote.
+    check: { path: /writer/report_path, regex: 'report\.md$' }

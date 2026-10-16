@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildInput, emptyDraft, inputFields, parseWholeInput } from "./runInput";
+import { buildInput, draftFromInput, emptyDraft, inputFields, parseWholeInput } from "./runInput";
 
 const schema = {
   type: "object",
@@ -73,5 +73,23 @@ describe("parseWholeInput", () => {
     expect(parseWholeInput("  ")).toEqual({ input: {} });
     expect(parseWholeInput("[1]").error).toBe("The input must be a JSON object");
     expect(parseWholeInput("{").error).toMatch(/^Not valid JSON/);
+  });
+});
+
+describe("draftFromInput", () => {
+  it("reproduces a saved input, so building it again gives the same values", () => {
+    const fields = inputFields(schema);
+    const input = { task: "ship it", retries: 3, ratio: 0.5, dry_run: true, files: ["a.go"], options: { fast: true } };
+    const draft = draftFromInput(fields, input);
+    expect(draft.task).toBe("ship it");
+    expect(draft.retries).toBe("3");
+    expect(draft.dry_run).toBe(true);
+    expect(buildInput(fields, draft)).toEqual({ input: { ...input }, errors: {} });
+  });
+
+  it("leaves fields the input does not have empty, and copes with no input at all", () => {
+    const fields = inputFields(schema);
+    expect(draftFromInput(fields, { task: "x" })).toEqual({ ...emptyDraft(fields), task: "x" });
+    expect(draftFromInput(fields, null)).toEqual(emptyDraft(fields));
   });
 });

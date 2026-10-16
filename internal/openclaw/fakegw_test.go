@@ -28,6 +28,11 @@ type fakeGateway struct {
 	conns       map[*websocket.Conn]context.CancelFunc
 	connects    int
 	lastConnect connectParams
+	// refuse answers this many connect frames with refusal, as a gateway that is
+	// starting answers {code: UNAVAILABLE, retryable: true} [probed].
+	refuse   int
+	refusal  *RPCError
+	refusedN int
 }
 
 type fakeCall struct {
@@ -59,6 +64,19 @@ func (f *fakeGateway) setScopes(s ...string) {
 	f.mu.Lock()
 	f.scopes = s
 	f.mu.Unlock()
+}
+
+// refuseConnects makes the next n connects fail with refusal.
+func (f *fakeGateway) refuseConnects(n int, refusal *RPCError) {
+	f.mu.Lock()
+	f.refuse, f.refusal = n, refusal
+	f.mu.Unlock()
+}
+
+func (f *fakeGateway) refusedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refusedN
 }
 
 // on installs the handler for a method; a nil RPCError means ok=true.
@@ -152,6 +170,19 @@ func (f *fakeGateway) serve(w http.ResponseWriter, r *http.Request) {
 		reply(Frame{Type: "res", ID: "1", OK: &no, Error: &RPCError{Code: "INVALID_REQUEST",
 			Message: "invalid connect params: at /client/id: must be equal to one of the allowed values"}})
 		c.Close(websocket.StatusPolicyViolation, "invalid connect params") //nolint:errcheck
+		return
+	}
+	f.mu.Lock()
+	refuse := f.refuse > 0
+	refusal := f.refusal
+	if refuse {
+		f.refuse--
+		f.refusedN++
+	}
+	f.mu.Unlock()
+	if refuse {
+		reply(Frame{Type: "res", ID: "1", OK: &no, Error: refusal})
+		c.Close(websocket.StatusTryAgainLater, "starting") //nolint:errcheck
 		return
 	}
 	if p.Auth.Token != f.token {

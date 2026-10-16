@@ -109,7 +109,8 @@ eval: ## Run the evaluation suite (offline by default: EVAL_PROVIDER=scripted)
 eval-baseline: eval ## Run evals and store the report as the baseline
 	@cp "$$(ls -t evals/reports/*.md | head -1)" evals/reports/baseline.md && echo "wrote evals/reports/baseline.md"
 
-eval-final: eval ## Run evals and store the report as the final
+eval-final: export EVAL_SPLIT ?= all
+eval-final: eval ## Run every split (public and private) and store the report as the final
 	@cp "$$(ls -t evals/reports/*.md | head -1)" evals/reports/final.md && echo "wrote evals/reports/final.md"
 
 tunnel: ## Expose the web port through a cloudflared quick tunnel (demo only)

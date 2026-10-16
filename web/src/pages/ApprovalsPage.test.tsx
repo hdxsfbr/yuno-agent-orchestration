@@ -129,6 +129,15 @@ describe("ApprovalsPage", () => {
     expect(JSON.parse(input.querySelector("pre")!.textContent!)).toEqual({ version: "1.2.0", paths: ["app.py", "README.md"] });
   });
 
+  it("points an approval raised in a conversation to Channels instead of a run", async () => {
+    server = [{ ...execApproval, id: "ap-chat", run_id: null }];
+    renderPage();
+    const chat = await card("ap-chat");
+    expect(chat.getByText("Raised in")).not.toBeNull();
+    expect(chat.queryByText("Run")).toBeNull();
+    expect(chat.getByRole("link", { name: "Conversation" }).getAttribute("href")).toBe("/channels");
+  });
+
   it("offers Approve always for commands only", async () => {
     renderPage();
     expect((await card("ap-exec")).getByRole("button", { name: "Approve always" })).not.toBeNull();

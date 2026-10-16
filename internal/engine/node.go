@@ -14,6 +14,8 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"yuno/internal/guardrails"
+	"yuno/internal/memory"
 	ymodel "yuno/internal/model"
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
@@ -214,6 +216,7 @@ func (v *visit) execute(ctx context.Context) outcome {
 	if err := v.prepareRunDir(); err != nil {
 		return failed(store.RunFailed, "run directory: "+err.Error())
 	}
+	v.renderMemory(ctx)
 
 	v.events, v.unsub = gw.Subscribe(4096)
 	if v.over.Model != "" {
@@ -308,6 +311,22 @@ func (v *visit) abortStale(ctx context.Context) {
 		v.e.deleteSession(context.WithoutCancel(ctx), *n.SessionKey)
 	}
 	v.stale = nil
+}
+
+// renderMemory writes the agent's newest facts into its MEMORY.md before the turn, so
+// OpenClaw's own memory loading sees them (DESIGN 5.10 rule 5 and implementation note).
+// A failure leaves the previous file and is logged; the turn still runs.
+func (v *visit) renderMemory(ctx context.Context) {
+	if !v.agent.MemoryPolicy.Enabled || v.ocID == "" {
+		return
+	}
+	facts, err := memory.PromptFactsFor(ctx, v.e.deps.Pool, v.agent.ID, v.e.clock.Now())
+	if err == nil {
+		err = openclaw.WriteMemoryMD(v.e.deps.StateDir, v.ocID, memory.RenderMemoryMD(facts))
+	}
+	if err != nil {
+		v.log.Warn("render MEMORY.md failed", "error", err)
+	}
 }
 
 // prepareRunDir creates runs/<run_id>/ in the agent's workspace (best effort) and
@@ -1046,6 +1065,14 @@ func (v *visit) onApproval(ctx context.Context, sa openclaw.SessionApprovalEvent
 			map[string]any{"approval_id": a.ID, "external_id": ap.ID, "command": ap.Presentation.CommandText})
 		e.emit(ctx, v.run.ID, "approval.requested", map[string]any{"approval": a})
 		v.pause(ctx)
+		// A command one of the agent's exec patterns blocks is denied at once (DESIGN
+		// 5.11 rule 4); the gateway's terminal event then finds the row decided.
+		if p, blocked := guardrails.MatchCommand(v.agent.Guardrails, ap.Presentation.CommandText); blocked && sa.Phase != "terminal" {
+			if _, err := e.DecideApproval(ctx, a.ID, DecisionReject, "guardrail", guardrails.BlockedMessage(p)); err != nil {
+				v.log.Warn("deny blocked command failed", "approval_id", a.ID, "error", err)
+			}
+			return
+		}
 	}
 	if sa.Phase != "terminal" || a.Status != "pending" {
 		return

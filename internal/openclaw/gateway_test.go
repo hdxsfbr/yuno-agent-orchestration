@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -402,5 +403,137 @@ func TestShutdownStopsReconnecting(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	if f.connectCount() != 1 {
 		t.Fatalf("reconnected after shutdown: %d connects", f.connectCount())
+	}
+}
+
+// startingRefusal is the gateway's answer to a connect while it boots or restarts
+// [probed 2026-10-16 during gateway.restart.request].
+func startingRefusal() *RPCError {
+	return &RPCError{Code: "UNAVAILABLE", Message: "gateway starting; retry shortly", Retryable: true, RetryAfterMs: 500,
+		Details: json.RawMessage(`{"reason":"startup-sidecars"}`)}
+}
+
+// lineLog collects slog output as JSON lines.
+type lineLog struct {
+	mu    sync.Mutex
+	lines []map[string]any
+}
+
+func (l *lineLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, line := range strings.Split(strings.TrimSpace(string(p)), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(line), &m) == nil {
+			l.lines = append(l.lines, m)
+		}
+	}
+	return len(p), nil
+}
+
+func (l *lineLog) count(level, msg string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, m := range l.lines {
+		if m["level"] == level && m["msg"] == msg {
+			n++
+		}
+	}
+	return n
+}
+
+// DESIGN 5.5 rule 1 at startup: the api dials until the gateway accepts, through its
+// "starting" refusals, logging every attempt at warn and the success at info.
+func TestDialRetriesRefusals(t *testing.T) {
+	tests := []struct {
+		name         string
+		refusal      *RPCError
+		retryRefused bool
+		refusals     int
+		wantErr      bool
+	}{
+		{name: "gateway starting, retried without asking", refusal: startingRefusal(), refusals: 3},
+		{name: "any refusal, retried with RetryRefused", refusal: &RPCError{Code: "UNAUTHORIZED", Message: "gateway token mismatch"}, retryRefused: true, refusals: 2},
+		{name: "a refusal that is not retryable fails at once", refusal: &RPCError{Code: "UNAUTHORIZED", Message: "gateway token mismatch"}, refusals: 1, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeGateway(t, testToken)
+			f.refuseConnects(tc.refusals, tc.refusal)
+			logs := &lineLog{}
+			log := slog.New(slog.NewJSONHandler(logs, nil))
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			c, err := Dial(ctx, DialConfig{URL: f.URL(), Token: testToken, BackoffBase: 5 * time.Millisecond,
+				BackoffMax: 20 * time.Millisecond, RetryRefused: tc.retryRefused}, log)
+			if tc.wantErr {
+				var he *HandshakeError
+				if !errors.As(err, &he) || f.refusedCount() != 1 {
+					t.Fatalf("err = %v after %d refusals, want a HandshakeError after one", err, f.refusedCount())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			if _, up := c.Info(); !up {
+				t.Fatal("not connected")
+			}
+			if f.refusedCount() != tc.refusals || f.connectCount() != 1 {
+				t.Fatalf("refused %d, connected %d; want %d refusals then one connect", f.refusedCount(), f.connectCount(), tc.refusals)
+			}
+			if n := logs.count("WARN", "openclaw gateway dial failed"); n != tc.refusals {
+				t.Errorf("warn lines = %d, want one per refused attempt (%d)", n, tc.refusals)
+			}
+			if n := logs.count("INFO", "openclaw gateway connected"); n != 1 {
+				t.Errorf("info lines on success = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// Dial keeps refusing until ctx ends when the gateway never accepts: no give-up window.
+func TestDialRetriesUntilContextEnds(t *testing.T) {
+	f := newFakeGateway(t, testToken)
+	f.refuseConnects(1<<30, startingRefusal())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := Dial(ctx, DialConfig{URL: f.URL(), Token: testToken, BackoffBase: 2 * time.Millisecond, BackoffMax: 5 * time.Millisecond}, nil)
+		done <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.refusedCount() < 5 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Dial gave up while the gateway was starting: %v", err)
+	default:
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Dial did not stop when ctx ended")
+	}
+}
+
+// The probed refusal decodes with its retry hint.
+func TestRPCErrorRetryable(t *testing.T) {
+	var e RPCError
+	if err := json.Unmarshal([]byte(`{"code":"UNAVAILABLE","message":"gateway starting; retry shortly","retryable":true,"retryAfterMs":500,"details":{"reason":"startup-sidecars"}}`), &e); err != nil {
+		t.Fatal(err)
+	}
+	he := &HandshakeError{RPC: &e}
+	if !he.Retryable() || e.RetryAfterMs != 500 {
+		t.Fatalf("decoded %+v", e)
+	}
+	if (&HandshakeError{Reason: "operator.admin scope not granted"}).Retryable() {
+		t.Fatal("a scope refusal is not retryable")
 	}
 }

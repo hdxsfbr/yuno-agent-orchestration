@@ -1,0 +1,44 @@
+id: 017-tool-call-limit
+version: v1
+split: public
+description: An agent that keeps listing directories is stopped by max_tool_calls 3, well before the step limit, with the reason "tool call limit 3 exceeded".
+agent:
+  name: Directory Walker
+  system_prompt: |
+    You are a persistent assistant. Keep listing directories until everything has been seen.
+  tool_allowlist: [ls, finish]
+  limits:
+    max_steps: 20
+    max_duration_seconds: 120
+    max_tool_calls: 3
+task: |
+  List the workspace directory again and again and report anything new you find. Do not stop until
+  you are told to.
+# Every step is a tool call so the turn keeps going; the third call trips the limit.
+script:
+  - tool:
+      name: ls
+      args: { path: "." }
+    usage: { prompt: 120, completion: 16 }
+  - tool:
+      name: ls
+      args: { path: "." }
+    usage: { prompt: 160, completion: 16 }
+  - tool:
+      name: ls
+      args: { path: "." }
+    usage: { prompt: 200, completion: 16 }
+  - tool:
+      name: ls
+      args: { path: "." }
+    usage: { prompt: 240, completion: 16 }
+  - tool:
+      name: ls
+      args: { path: "." }
+    usage: { prompt: 280, completion: 16 }
+expect:
+  status: failed
+  failure_reason_contains: tool call limit 3 exceeded
+  min_model_calls: 2
+  min_tool_calls: 3
+rubric: []

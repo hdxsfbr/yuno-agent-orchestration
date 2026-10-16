@@ -99,3 +99,82 @@ func checkApprovalStatuses(want *[]string, approvals []store.Approval) []string 
 	}
 	return []string{fmt.Sprintf("approval statuses [%s], want [%s]", strings.Join(have, ", "), strings.Join(*want, ", "))}
 }
+
+// checkToolOutputs requires each listed text to appear, ignoring case, in the output of
+// at least one row of the tool, whatever the row's status: a refused call leaves its
+// refusal there.
+func checkToolOutputs(want map[string][]string, calls []store.ToolCall) []string {
+	var problems []string
+	for _, tool := range sortedKeys(want) {
+		var haystacks []string
+		for _, tc := range calls {
+			if toolBase(tc.ToolName) == tool {
+				haystacks = append(haystacks, outputTexts(tc.Output)...)
+			}
+		}
+		for _, text := range want[tool] {
+			if !slices.ContainsFunc(haystacks, func(h string) bool { return containsFold(h, text) }) {
+				problems = append(problems, fmt.Sprintf("no %s output contains %q", tool, text))
+			}
+		}
+	}
+	return problems
+}
+
+// outputTexts returns the strings a tool output holds: every string value in it, decoded
+// (so quotes and angle brackets are what the model saw, not their JSON escapes), then the
+// raw JSON.
+func outputTexts(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out []string
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case string:
+			out = append(out, x)
+		case []any:
+			for _, e := range x {
+				walk(e)
+			}
+		case map[string]any:
+			for _, k := range sortedKeys(x) {
+				walk(x[k])
+			}
+		}
+	}
+	var doc any
+	if json.Unmarshal(raw, &doc) == nil {
+		walk(doc)
+	}
+	return append(out, string(raw))
+}
+
+// checkApprovalReasons compares the reasons of the run's approvals, oldest request
+// first, with the substrings the case lists. An empty entry is not checked.
+func checkApprovalReasons(want []string, approvals []store.Approval) []string {
+	if len(want) == 0 {
+		return nil
+	}
+	sorted := slices.Clone(approvals)
+	slices.SortStableFunc(sorted, func(a, b store.Approval) int { return a.RequestedAt.Compare(b.RequestedAt) })
+	var problems []string
+	for i, sub := range want {
+		if sub == "" {
+			continue
+		}
+		if i >= len(sorted) {
+			problems = append(problems, fmt.Sprintf("approval %d has no reason to check: the run raised %d approval(s), want reason containing %q", i+1, len(sorted), sub))
+			continue
+		}
+		reason := ""
+		if sorted[i].Reason != nil {
+			reason = *sorted[i].Reason
+		}
+		if !containsFold(reason, sub) {
+			problems = append(problems, fmt.Sprintf("approval %d reason %q does not contain %q", i+1, reason, sub))
+		}
+	}
+	return problems
+}

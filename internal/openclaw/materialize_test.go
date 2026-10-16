@@ -82,12 +82,43 @@ func TestToolListsDerivation(t *testing.T) {
 	if want := []string{"exec", "write", "yuno__finish"}; !slices.Equal(allow, want) {
 		t.Fatalf("allow = %v, want %v", allow, want)
 	}
-	if want := []string{"browser", "yuno__deploy_release", "yuno__http_fetch"}; !slices.Equal(deny, want) {
+	// Memory is off for this agent, so its tools are denied too (DESIGN 5.10 edge case).
+	if want := []string{"browser", "yuno__deploy_release", "yuno__http_fetch", "yuno__memory_recall", "yuno__memory_save"}; !slices.Equal(deny, want) {
 		t.Fatalf("deny = %v, want %v", deny, want)
 	}
-	_, deny = toolLists(&store.Agent{})
+	_, deny = toolLists(&store.Agent{MemoryPolicy: store.MemoryPolicy{Enabled: true}})
 	if deny == nil || len(deny) != 0 {
 		t.Fatalf("empty deny must be [] not nil: %v", deny)
+	}
+}
+
+// T5.11.3: a guardrail-blocked tool is absent from the tool list OpenClaw receives and
+// denied there, even when the allowlist names it; memory tools follow the policy.
+func TestBlockedToolNotOffered(t *testing.T) {
+	a := &store.Agent{ToolAllowlist: []string{"finish", "http_fetch", "memory_save", "exec"},
+		MemoryPolicy: store.MemoryPolicy{Enabled: true},
+		Guardrails:   store.Guardrails{BlockedTools: []string{"yuno__http_fetch", "exec", "finish"}}}
+	allow, deny := toolLists(a)
+	if want := []string{"yuno__finish", "yuno__memory_save"}; !slices.Equal(allow, want) {
+		t.Fatalf("allow = %v, want %v (finish is never blocked)", allow, want)
+	}
+	if want := []string{"exec", "yuno__http_fetch"}; !slices.Equal(deny, want) {
+		t.Fatalf("deny = %v, want %v", deny, want)
+	}
+}
+
+// DESIGN 5.11 implementation note: with an exec input pattern the exec policy pushed to
+// OpenClaw asks about every host command (no allowlist, on-miss, fallback deny).
+func TestExecPolicyAppliesBlockedPatterns(t *testing.T) {
+	a := testAgent()
+	a.Guardrails.BlockedInputPatterns = []store.BlockedPattern{{Name: "no pytest", Tool: "exec", Regex: "pytest"}}
+	dir := t.TempDir()
+	d := plan(dir, a, nil)
+	if len(d.Exec.Allowlist) != 0 || d.Exec.Security != "allowlist" || d.Exec.Ask != "on-miss" || d.Exec.AskFallback != "deny" {
+		t.Fatalf("exec policy = %+v", d.Exec)
+	}
+	if DesiredHash(dir, a, nil) == DesiredHash(dir, testAgent(), nil) {
+		t.Fatal("a new exec pattern must change the desired state")
 	}
 }
 
@@ -121,7 +152,7 @@ func TestMaterializeCreateThenUpdate(t *testing.T) {
 	if tools["profile"] != "coding" {
 		t.Fatalf("tools = %v", tools)
 	}
-	if got := toStrings(tools["deny"]); !slices.Equal(got, []string{"browser", "yuno__deploy_release", "yuno__http_fetch"}) {
+	if got := toStrings(tools["deny"]); !slices.Equal(got, []string{"browser", "yuno__deploy_release", "yuno__http_fetch", "yuno__memory_recall", "yuno__memory_save"}) {
 		t.Fatalf("deny = %v", got)
 	}
 	if got := toStrings(e["skills"]); !slices.Equal(got, []string{"pytest-basics"}) {

@@ -22,11 +22,16 @@ type Frame struct {
 	Event   string          `json:"event,omitempty"`
 }
 
-// RPCError is the error object in a res frame [probed].
+// RPCError is the error object in a res frame [probed]. Retryable is set on refusals
+// the gateway expects to lift by itself, such as a connect during startup: {code:
+// "UNAVAILABLE", message: "gateway starting; retry shortly", retryable: true,
+// retryAfterMs: 500} [probed 2026-10-16].
 type RPCError struct {
-	Code    string          `json:"code"`
-	Message string          `json:"message"`
-	Details json.RawMessage `json:"details,omitempty"`
+	Code         string          `json:"code"`
+	Message      string          `json:"message"`
+	Details      json.RawMessage `json:"details,omitempty"`
+	Retryable    bool            `json:"retryable,omitempty"`
+	RetryAfterMs int64           `json:"retryAfterMs,omitempty"`
 }
 
 func (e *RPCError) Error() string {

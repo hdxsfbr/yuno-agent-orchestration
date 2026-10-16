@@ -1,0 +1,75 @@
+id: 022-cancel-while-waiting-approval
+version: v1
+split: private
+description: The run is cancelled while it waits at a human approval. The run ends cancelled, the pending approval is expired with the reason "run cancelled", and nothing after the gate runs.
+workflow:
+  input_schema:
+    type: object
+    properties:
+      note: { type: string }
+    required: [note]
+    additionalProperties: true
+  nodes:
+    - { id: start, kind: start }
+    - id: drafter
+      kind: agent
+      agent_name: drafter
+      task: |-
+        Write the announcement below to runs/$RUN_ID/announcement.md and finish with a one-sentence summary.
+
+        {{.input.note}}
+      output_schema:
+        type: object
+        properties:
+          summary: { type: string }
+        required: [summary]
+        additionalProperties: true
+      input_from: [start]
+    - id: gate
+      kind: approval
+      message: 'Send this announcement? Draft: {{.state.drafter.summary}}'
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: drafter }
+    - { from: drafter, to: gate }
+    - { from: gate, to: end }
+  limits:
+    max_steps: 10
+    max_duration_seconds: 120
+    approval_timeout_seconds: 300
+input:
+  note: The maintenance window moves to Saturday.
+agents:
+  drafter:
+    name: Announcement drafter
+    system_prompt: |
+      You draft short announcements into the run directory named in your task and call yuno__finish with
+      a summary.
+    tool_allowlist: [write, finish]
+script:
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/announcement.md"
+        content: |
+          The maintenance window moves to Saturday.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: Drafted the announcement that the maintenance window moves to Saturday.
+  - text: The announcement is drafted and the result has been submitted.
+actions:
+  # Nobody decides the approval: the runner cancels the run as soon as it waits.
+  cancel_when_waiting: true
+expect:
+  status: cancelled
+  failure_reason_contains: cancelled
+  min_model_calls: 3
+  min_tool_calls: 2
+  state:
+    "/drafter/summary": Drafted the announcement that the maintenance window moves to Saturday.
+  approval_statuses: [expired]
+  approval_reasons: [run cancelled]
+rubric: []

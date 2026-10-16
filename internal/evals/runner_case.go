@@ -8,16 +8,20 @@ import (
 )
 
 // caseResources are the api objects one case created. release deletes them, newest
-// kind first (the workflow before the agents it names), and runs even when the case's
-// context has ended.
+// kind first (the schedule and the workflow before the agents they name), and runs even
+// when the case's context has ended.
 type caseResources struct {
 	r          *Runner
 	caseID     string
+	scheduleID string
 	workflowID string
 	agentIDs   []string
 }
 
 func (cr *caseResources) release() {
+	if cr.scheduleID != "" {
+		cr.r.deleteSchedule(cr.caseID, cr.scheduleID)
+	}
 	if cr.workflowID != "" {
 		cr.r.deleteWorkflow(cr.caseID, cr.workflowID)
 	}
@@ -43,21 +47,16 @@ func (r *Runner) execCase(ctx context.Context, c Case, res *CaseResult) (*store.
 	cr := &caseResources{r: r, caseID: c.ID}
 	defer cr.release()
 
-	req := RunRequest{Model: ScriptedModel, Limits: c.RunLimits()}
+	req := RunRequest{Limits: c.RunLimits()}
+	if c.RunsModel() {
+		req.Model = ScriptedModel
+	}
 	if c.IsWorkflow() {
 		if err := r.createWorkflowFixtures(ctx, c, suffix, cr, res, &req); err != nil {
 			return nil, err
 		}
 	} else {
-		agent, err := r.api.CreateAgent(ctx, AgentRequest{
-			Name:             "eval-" + c.ID + "-" + suffix,
-			Role:             c.Agent.Name,
-			SystemPrompt:     c.Agent.SystemPrompt,
-			Model:            r.cfg.DefaultModel,
-			ToolAllowlist:    c.Agent.ToolAllowlist,
-			InteractionRules: c.Agent.InteractionRules,
-			Limits:           c.Agent.Limits.Store(),
-		})
+		agent, err := r.api.CreateAgent(ctx, c.Agent.request("eval-"+c.ID+"-"+suffix, c.Agent.Name, r.cfg.DefaultModel))
 		if err != nil {
 			return nil, fmt.Errorf("create agent: %w", err)
 		}
@@ -66,16 +65,21 @@ func (r *Runner) execCase(ctx context.Context, c Case, res *CaseResult) (*store.
 		req.AgentID, req.Task = agent.ID, c.Task
 	}
 
-	scriptID := c.ID + "-" + suffix
-	res.ScriptID = scriptID
-	if err := r.api.RegisterScript(ctx, scriptID, steps); err != nil {
-		return nil, fmt.Errorf("register script: %w", err)
+	// A workflow without agent nodes plays no script: there is no model call to feed.
+	if len(steps) > 0 {
+		scriptID := c.ID + "-" + suffix
+		res.ScriptID = scriptID
+		if err := r.api.RegisterScript(ctx, scriptID, steps); err != nil {
+			return nil, fmt.Errorf("register script: %w", err)
+		}
+		req.ScriptID = scriptID
 	}
-	req.ScriptID = scriptID
 
-	run, err := r.api.CreateRun(ctx, req)
+	obs := &Observed{}
+	run, err := r.startRun(ctx, c, req, cr, obs)
+	res.Observed = obs
 	if err != nil {
-		return nil, fmt.Errorf("create run: %w", err)
+		return nil, err
 	}
 	res.RunID = run.ID
 	// Every exit that did not see the run finish cancels it (a timeout, an interrupted
@@ -95,6 +99,9 @@ func (r *Runner) execCase(ctx context.Context, c Case, res *CaseResult) (*store.
 		return nil, err
 	}
 	finished = !out.timedOut && out.stalled == ""
+	if finished {
+		r.observe(ctx, c, req, obs, res)
+	}
 
 	// On a timeout the trace is taken before the cancel so it shows the run as it was
 	// when the runner gave up.
@@ -119,8 +126,8 @@ func (r *Runner) execCase(ctx context.Context, c Case, res *CaseResult) (*store.
 }
 
 // createWorkflowFixtures creates the case's agents, one per entry of agents, then the
-// workflow with every agent_name replaced by the matching agent's id, and points the run
-// request at the workflow.
+// workflow with every agent_name replaced by the id of the matching agent, and points the
+// run request at the workflow.
 func (r *Runner) createWorkflowFixtures(ctx context.Context, c Case, suffix string, cr *caseResources, res *CaseResult, req *RunRequest) error {
 	ids := map[string]string{}
 	for _, key := range c.AgentKeys() {
@@ -129,15 +136,7 @@ func (r *Runner) createWorkflowFixtures(ctx context.Context, c Case, suffix stri
 		if role == "" {
 			role = key
 		}
-		agent, err := r.api.CreateAgent(ctx, AgentRequest{
-			Name:             "eval-" + c.ID + "-" + key + "-" + suffix,
-			Role:             role,
-			SystemPrompt:     spec.SystemPrompt,
-			Model:            r.cfg.DefaultModel,
-			ToolAllowlist:    spec.ToolAllowlist,
-			InteractionRules: spec.InteractionRules,
-			Limits:           spec.Limits.Store(),
-		})
+		agent, err := r.api.CreateAgent(ctx, spec.request("eval-"+c.ID+"-"+key+"-"+suffix, role, r.cfg.DefaultModel))
 		if err != nil {
 			return fmt.Errorf("create agent %s: %w", key, err)
 		}
@@ -168,11 +167,35 @@ func (r *Runner) createWorkflowFixtures(ctx context.Context, c Case, suffix stri
 	return nil
 }
 
+// request builds the agent the api is asked to create for this spec.
+func (a AgentSpec) request(name, role, defaultModel string) AgentRequest {
+	return AgentRequest{
+		Name:             name,
+		Role:             role,
+		SystemPrompt:     a.SystemPrompt,
+		Model:            defaultModel,
+		ToolAllowlist:    a.ToolAllowlist,
+		InteractionRules: a.InteractionRules,
+		Limits:           a.Limits.Store(),
+		Guardrails:       a.Guardrails.Store(),
+		MemoryPolicy:     a.MemoryPolicy.Store(),
+	}
+}
+
 // deleteWorkflow removes a case's temporary workflow. It runs even when ctx has ended.
 func (r *Runner) deleteWorkflow(caseID, workflowID string) {
 	ctx, cancel := cleanupContext(context.Background())
 	defer cancel()
 	if err := r.api.DeleteWorkflow(ctx, workflowID); err != nil {
 		r.log.Warn("eval workflow cleanup failed", "case", caseID, "workflow", workflowID, "error", err)
+	}
+}
+
+// deleteSchedule removes a case's temporary schedule. It runs even when ctx has ended.
+func (r *Runner) deleteSchedule(caseID, scheduleID string) {
+	ctx, cancel := cleanupContext(context.Background())
+	defer cancel()
+	if err := r.api.DeleteSchedule(ctx, scheduleID); err != nil {
+		r.log.Warn("eval schedule cleanup failed", "case", caseID, "schedule", scheduleID, "error", err)
 	}
 }

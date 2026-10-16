@@ -241,4 +241,12 @@ expect:
   tool_statuses:
     deploy_release: [executed]
   approval_statuses: [approved, approved]
-rubric: []
+rubric:
+  - criterion: The reviewer approved the change.
+    check: { path: /reviewer/verdict, json_path_eq: approved }
+  - criterion: The coder reports that its tests passed.
+    check: { path: /coder/tests_passed, json_path_eq: true }
+  - criterion: The deployer reports the release as deployed.
+    check: { path: /deployer/status, json_path_eq: deployed }
+  - criterion: The release carries the version the input asked for.
+    check: { path: /deployer/version, json_path_eq: 1.0.0-eval }

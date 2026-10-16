@@ -15,12 +15,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"yuno/api"
+	"yuno/internal/channels"
 	"yuno/internal/config"
 	"yuno/internal/deploytarget"
 	"yuno/internal/engine"
 	"yuno/internal/events"
+	"yuno/internal/memory"
 	"yuno/internal/model"
 	"yuno/internal/openclaw"
+	"yuno/internal/sched"
 	"yuno/internal/store"
 	"yuno/internal/tools"
 )
@@ -64,10 +67,12 @@ type Server struct {
 	mux          *http.ServeMux
 }
 
-// Gateway dial policy for Run: transport failures are retried every 2 s for up to 60 s.
+// Gateway dial policy for Run (DESIGN 5.5 rule 1): every failure, including the
+// gateway's "starting; retry shortly" refusal while it boots or restarts, is retried
+// with backoff from 1 s doubling to 30 s until the process is told to stop.
 const (
-	gatewayDialWindow  = 60 * time.Second
-	gatewayDialBackoff = 2 * time.Second
+	gatewayDialBackoffBase = time.Second
+	gatewayDialBackoffMax  = 30 * time.Second
 )
 
 // Run is the `yuno api` entrypoint: connect, migrate, dial the gateway, start the
@@ -91,21 +96,20 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	defer stop()
 	// The gateway connection outlives ctx until the engine has stopped, so a shutdown
 	// can still abort the turns in flight (the engine does that on its way out). A
-	// shutdown during the dial window still stops the dial.
+	// shutdown while dialling still stops the dial.
 	gwCtx, gwStop := context.WithCancel(context.WithoutCancel(ctx))
 	defer gwStop()
 	stopDialOnShutdown := context.AfterFunc(ctx, gwStop)
-	gw, err := dialWithin(gwCtx, gatewayDialWindow, gatewayDialBackoff, func(ctx context.Context) (openclaw.Client, error) {
-		return openclaw.Dial(ctx, openclaw.DialConfig{
-			URL:         cfg.OpenClawGatewayURL,
-			Token:       cfg.OpenClawGatewayToken,
-			Version:     config.Version,
-			BackoffBase: gatewayDialBackoff,
-			BackoffMax:  gatewayDialBackoff,
-		}, log)
-	})
+	gw, err := openclaw.Dial(gwCtx, openclaw.DialConfig{
+		URL:          cfg.OpenClawGatewayURL,
+		Token:        cfg.OpenClawGatewayToken,
+		Version:      config.Version,
+		BackoffBase:  gatewayDialBackoffBase,
+		BackoffMax:   gatewayDialBackoffMax,
+		RetryRefused: true,
+	}, log)
 	if err != nil {
-		return err
+		return fmt.Errorf("openclaw gateway: %w", err)
 	}
 	stopDialOnShutdown()
 
@@ -137,6 +141,18 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	s.engine = eng
 	engineDone := make(chan error, 1)
 	go func() { engineDone <- eng.Start(ctx) }()
+
+	// Telegram binding re-asserted at start and after every gateway reconnect (DESIGN
+	// 5.8 rules 3 and 7).
+	go (&channels.Keeper{Pool: pool, Gateway: gw, Log: log}).Run(ctx)
+
+	// Scheduler and memory retention (DESIGN 5.9, 5.10 rule 6); both stop with ctx.
+	go (&sched.Scheduler{Pool: pool, Engine: eng, Tick: cfg.SchedulerTick, Log: log, Emit: s.emit}).Run(ctx)
+	go (&memory.Sweeper{Pool: pool, Log: log, Also: []memory.SweepFunc{
+		func(ctx context.Context, now time.Time) (int64, error) {
+			return store.DeleteExpiredConversationMessages(ctx, pool, now)
+		},
+	}}).Run(ctx)
 
 	if err := s.LoadTemplates(ctx); err != nil {
 		log.Warn("workflow templates not loaded", "error", err)
@@ -184,44 +200,6 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		}
 	}
 	return runErr
-}
-
-// dialWithin calls dial with a context that outlives a successful dial (the client
-// keeps its connection on it) but is cancelled when no dial has succeeded within
-// window. Failed dials are retried after backoff; a handshake the gateway refused is
-// returned at once because retrying with the same token cannot help.
-func dialWithin(ctx context.Context, window, backoff time.Duration, dial func(context.Context) (openclaw.Client, error)) (openclaw.Client, error) {
-	connCtx, cancel := context.WithCancel(ctx)
-	timer := time.AfterFunc(window, cancel)
-	var lastErr error
-	for {
-		c, err := dial(connCtx)
-		if err == nil {
-			if !timer.Stop() {
-				cancel()
-				return nil, fmt.Errorf("openclaw gateway: no connection within %s", window)
-			}
-			// connCtx now lives as long as ctx; cancelling it would close the connection.
-			context.AfterFunc(ctx, cancel)
-			return c, nil
-		}
-		lastErr = err
-		var he *openclaw.HandshakeError
-		if errors.As(err, &he) {
-			timer.Stop()
-			cancel()
-			return nil, fmt.Errorf("openclaw gateway: %w", err)
-		}
-		select {
-		case <-connCtx.Done():
-			cancel()
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, fmt.Errorf("openclaw gateway: no connection within %s: %w", window, lastErr)
-		case <-time.After(backoff):
-		}
-	}
 }
 
 // New builds the server and its routes.
@@ -314,6 +292,27 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 
 	mux.HandleFunc("POST /api/evals/scripts", s.registerScript)
 
+	// Schedules, skills and agent memory (DESIGN 5.9, section 6, 5.10 rule 7).
+	mux.HandleFunc("GET /api/schedules", s.listSchedules)
+	mux.HandleFunc("POST /api/schedules", s.createSchedule)
+	mux.HandleFunc("GET /api/schedules/{id}", s.getSchedule)
+	mux.HandleFunc("PUT /api/schedules/{id}", s.updateSchedule)
+	mux.HandleFunc("DELETE /api/schedules/{id}", s.deleteSchedule)
+	mux.HandleFunc("GET /api/skills", s.listSkills)
+	mux.HandleFunc("POST /api/skills", s.createSkill)
+	mux.HandleFunc("GET /api/skills/{id}", s.getSkill)
+	mux.HandleFunc("PUT /api/skills/{id}", s.updateSkill)
+	mux.HandleFunc("DELETE /api/skills/{id}", s.deleteSkill)
+	mux.HandleFunc("GET /api/agents/{id}/memory", s.listAgentMemory)
+	mux.HandleFunc("DELETE /api/agents/{id}/memory/{factId}", s.deleteAgentMemory)
+
+	// Channels and conversations (DESIGN 5.8, section 6).
+	mux.HandleFunc("GET /api/channels", s.getChannels)
+	mux.HandleFunc("PUT /api/channels/telegram/binding", s.bindTelegram)
+	mux.HandleFunc("DELETE /api/channels/telegram/binding", s.unbindTelegram)
+	mux.HandleFunc("GET /api/conversations", s.listConversations)
+	mux.HandleFunc("GET /api/conversations/{id}/messages", s.listConversationMessages)
+
 	mux.Handle("/mcp", s.mcpHandler())
 
 	proxyCfg := model.AnthropicProxyConfig{
@@ -377,20 +376,37 @@ type statusResponse struct {
 	Workers   int              `json:"workers"`
 	Runs      map[string]int64 `json:"runs"`
 	SSEClient int              `json:"sse_clients"`
+	Scheduler schedulerStatus  `json:"scheduler"`
+}
+
+// schedulerStatus is how often the scheduler checks and when the next enabled schedule
+// is due (null when none is).
+type schedulerStatus struct {
+	TickSeconds float64    `json:"tick_seconds"`
+	NextDueAt   *time.Time `json:"next_due_at"`
 }
 
 // status answers within a 500 ms budget (DESIGN 5.12 rule 5).
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
 	defer cancel()
+	tick := s.cfg.SchedulerTick
+	if tick <= 0 {
+		tick = sched.DefaultTick
+	}
 	resp := statusResponse{
 		Version:   config.Version,
 		UptimeS:   int64(time.Since(s.startedAt).Seconds()),
 		Workers:   s.cfg.EngineWorkers,
 		Runs:      map[string]int64{"queued": 0, "running": 0, "waiting_approval": 0},
 		SSEClient: s.hub.Subscribers(),
+		Scheduler: schedulerStatus{TickSeconds: tick.Seconds()},
 	}
 	if s.pool != nil {
+		if next, err := store.NextScheduleDue(ctx, s.pool); err == nil && next != nil {
+			at := next.UTC()
+			resp.Scheduler.NextDueAt = &at
+		}
 		rows, err := s.pool.Query(ctx, `SELECT status, count(*) FROM runs WHERE status IN ('queued','running','waiting_approval') GROUP BY status`)
 		if err == nil {
 			resp.DBOK = true

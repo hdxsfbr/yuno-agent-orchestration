@@ -73,13 +73,15 @@ func statusOf(err error) int {
 
 // AgentRequest is the body of POST /api/agents the runner sends.
 type AgentRequest struct {
-	Name             string            `json:"name"`
-	Role             string            `json:"role,omitempty"`
-	SystemPrompt     string            `json:"system_prompt,omitempty"`
-	Model            string            `json:"model"`
-	ToolAllowlist    []string          `json:"tool_allowlist"`
-	InteractionRules map[string]string `json:"interaction_rules,omitempty"`
-	Limits           store.Limits      `json:"limits"`
+	Name             string             `json:"name"`
+	Role             string             `json:"role,omitempty"`
+	SystemPrompt     string             `json:"system_prompt,omitempty"`
+	Model            string             `json:"model"`
+	ToolAllowlist    []string           `json:"tool_allowlist"`
+	InteractionRules map[string]string  `json:"interaction_rules,omitempty"`
+	Limits           store.Limits       `json:"limits"`
+	Guardrails       store.Guardrails   `json:"guardrails"`
+	MemoryPolicy     store.MemoryPolicy `json:"memory_policy"`
 }
 
 // RunRequest is the body of POST /api/runs the runner sends: a one-node quick run
@@ -297,21 +299,28 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 }
 
 // decodeAPIError builds an APIError from the Error schema, falling back to the status.
+// details is free-form in the schema: a list of {path, message} on a 422, an object
+// elsewhere (the 429's {agent_id, limit}); it is decoded on its own so a shape the list
+// does not fit cannot lose the code and message.
 func decodeAPIError(method, path string, status int, raw []byte) *APIError {
 	ae := &APIError{Method: method, Path: path, Status: status}
 	var env struct {
 		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-			Details []struct {
-				Path    string `json:"path"`
-				Message string `json:"message"`
-			} `json:"details"`
+			Code    string          `json:"code"`
+			Message string          `json:"message"`
+			Details json.RawMessage `json:"details"`
 		} `json:"error"`
 	}
-	if json.Unmarshal(raw, &env) == nil {
-		ae.Code, ae.Message = env.Error.Code, env.Error.Message
-		for _, d := range env.Error.Details {
+	if json.Unmarshal(raw, &env) != nil {
+		return ae
+	}
+	ae.Code, ae.Message = env.Error.Code, env.Error.Message
+	var details []struct {
+		Path    string `json:"path"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(env.Error.Details, &details) == nil {
+		for _, d := range details {
 			if d.Path != "" {
 				ae.Details = append(ae.Details, d.Path+": "+d.Message)
 			} else {

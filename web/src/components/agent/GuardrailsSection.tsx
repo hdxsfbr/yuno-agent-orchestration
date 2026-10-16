@@ -57,7 +57,8 @@ export default function GuardrailsSection({ form, set, errors, toolNames }: Prop
               const base = `guardrails.blocked_input_patterns.${i}`;
               const nameErr = errorsFor(errors, `${base}.name`);
               const toolErr = errorsFor(errors, `${base}.tool`);
-              const regexErr = errorsFor(errors, `${base}.regex`);
+              // The API names the expression "pattern" in some messages and "regex" in the stored form.
+              const regexErr = [...errorsFor(errors, `${base}.regex`), ...errorsFor(errors, `${base}.pattern`)];
               const rowErr = errors[base] ?? [];
               return (
                 <li key={i} className="rounded-md border border-zinc-200 p-3 dark:border-zinc-800">

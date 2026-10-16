@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"yuno/internal/guardrails"
 	"yuno/internal/store"
 )
 
@@ -130,10 +131,10 @@ func agentID(a *store.Agent) string {
 // allowlist plus the finish tool, minus anything denied. Both sorted and unique.
 func toolLists(a *store.Agent) (allow, deny []string) {
 	denySet := map[string]bool{}
-	for _, t := range a.Guardrails.BlockedTools {
-		if t = strings.TrimSpace(t); t != "" {
-			denySet[ToolName(t)] = true
-		}
+	// Guardrail-blocked tools, and the memory tools while memory is off (DESIGN 5.11
+	// rule 3, 5.10 edge case), are never offered.
+	for _, t := range guardrails.DeniedTools(a) {
+		denySet[ToolName(t)] = true
 	}
 	for t, rule := range a.InteractionRules {
 		if rule == "blocked" && strings.TrimSpace(t) != "" {
@@ -230,7 +231,9 @@ func plan(stateDir string, a *store.Agent, skills []store.Skill) desired {
 		names = append(names, s.Name)
 		files[filepath.Join("skills", s.Name, "SKILL.md")] = skillMD(s)
 	}
-	pol := a.ExecPolicy
+	// The exec policy with the agent's blocked exec patterns applied (DESIGN 5.11
+	// implementation note).
+	pol := guardrails.ExecPolicy(a)
 	exec := execAgentPolicy{
 		Security:    orDefault(pol.Security, DefaultExecSecurity),
 		Ask:         orDefault(pol.Ask, DefaultExecAsk),
@@ -679,4 +682,21 @@ func listWorkspaceFiles(dir string) []string {
 	})
 	sort.Strings(out)
 	return out
+}
+
+// WriteMemoryMD replaces the agent's MEMORY.md with content (DESIGN 5.10
+// implementation note). The engine renders it from the agent's facts before each turn;
+// it is not part of the materialised hash, which keeps the bare header, so a new fact
+// never re-materialises the agent.
+func WriteMemoryMD(stateDir, openclawID, content string) error {
+	dir := WorkspaceDir(stateDir, openclawID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return writeAtomic(root, "MEMORY.md", content)
 }

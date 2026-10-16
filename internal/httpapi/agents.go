@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"yuno/internal/engine"
+	"yuno/internal/guardrails"
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
 	"yuno/internal/store"
@@ -195,7 +196,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &in, maxAgentBody) {
 		return
 	}
-	if fe := in.validate(s.tools); len(fe) > 0 {
+	fe := in.validate(s.tools)
+	known := func(n string) bool { _, ok := s.tools.Get(n); return ok || tools.IsOpenClawBuiltin(n) }
+	for _, p := range guardrails.Validate(in.Guardrails, known) {
+		fe.add(p.Path, "%s", p.Message)
+	}
+	skillErrs, err := s.checkAgentSkills(r.Context(), in.Skills)
+	if err != nil {
+		s.internalError(w, r, "check skills", err)
+		return
+	}
+	if fe = append(fe, skillErrs...); len(fe) > 0 {
 		writeValidation(w, "invalid agent", fe)
 		return
 	}
@@ -223,7 +234,17 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &in, maxAgentBody) {
 		return
 	}
-	if fe := in.validate(s.tools); len(fe) > 0 {
+	fe := in.validate(s.tools)
+	known := func(n string) bool { _, ok := s.tools.Get(n); return ok || tools.IsOpenClawBuiltin(n) }
+	for _, p := range guardrails.Validate(in.Guardrails, known) {
+		fe.add(p.Path, "%s", p.Message)
+	}
+	skillErrs, err := s.checkAgentSkills(r.Context(), in.Skills)
+	if err != nil {
+		s.internalError(w, r, "check skills", err)
+		return
+	}
+	if fe = append(fe, skillErrs...); len(fe) > 0 {
 		writeValidation(w, "invalid agent", fe)
 		return
 	}
@@ -268,6 +289,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, r, "agent", err)
 		return
 	}
+	s.unbindAgent(r.Context(), r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }
 

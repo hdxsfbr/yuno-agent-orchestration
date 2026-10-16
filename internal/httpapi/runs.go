@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"yuno/internal/engine"
+	"yuno/internal/guardrails"
 	"yuno/internal/store"
 )
 
@@ -249,6 +250,7 @@ func omitNull(raw json.RawMessage) json.RawMessage {
 // 500. The engine has no rate-limit error yet; guardrails arrive in a later wave.
 func (s *Server) engineError(w http.ResponseWriter, r *http.Request, err error) {
 	var ve *engine.ValidationError
+	var rl *guardrails.RateLimitError
 	switch {
 	case errors.As(err, &ve):
 		var fe fieldErrors
@@ -262,6 +264,8 @@ func (s *Server) engineError(w http.ResponseWriter, r *http.Request, err error) 
 		writeValidation(w, "invalid run", fe)
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error(), nil)
+	case errors.As(err, &rl):
+		writeError(w, http.StatusTooManyRequests, "rate_limited", rl.Error(), map[string]any{"agent_id": rl.AgentID, "limit": rl.Limit})
 	default:
 		s.internalError(w, r, "engine", err)
 	}

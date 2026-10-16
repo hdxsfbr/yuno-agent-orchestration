@@ -147,6 +147,8 @@ export type Status = {
   workers: number;
   sse_clients: number;
   runs: Record<string, number>;
+  /** Present once the scheduler runs. */
+  scheduler?: { tick_seconds?: number; next_due_at?: string | null };
 };
 
 export type OpenClawStatus = {
@@ -383,7 +385,8 @@ export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 
 export type Approval = {
   id: string;
-  run_id: string;
+  /** Empty for an approval raised in a conversation, which is not part of a run. */
+  run_id: string | null;
   run_node_id: string;
   tool_call_id?: string;
   kind: "exec" | "tool" | "node";
@@ -575,3 +578,106 @@ export async function listApprovals(opts: { status?: ApprovalStatus; runId?: str
 export const approveApproval = (id: string, body: ApprovalDecision = {}) => api<Approval>(`/api/approvals/${seg(id)}/approve`, withBody("POST", body));
 export const rejectApproval = (id: string, body: Pick<ApprovalDecision, "reason"> = {}) =>
   api<Approval>(`/api/approvals/${seg(id)}/reject`, withBody("POST", body));
+
+// ---------------------------------------------------------------------------------------
+// Channels and conversations (DESIGN 5.8), schedules (5.9), skills and agent memory (5.10).
+// ---------------------------------------------------------------------------------------
+
+export type TelegramBinding = { agent_id: string; agent_name: string };
+
+export type TelegramChannel = {
+  enabled: boolean;
+  /** polling, webhook or off. */
+  mode: string;
+  bot_username?: string;
+  allowed_user_ids: number[];
+  binding: TelegramBinding | null;
+};
+
+export type ChannelsInfo = { telegram: TelegramChannel };
+
+export type Conversation = {
+  id: string;
+  channel: string;
+  external_chat_id: string;
+  /** The person's name as the channel reports it, when it does. */
+  display_name?: string;
+  agent_id: string;
+  agent_name: string;
+  last_message_at: string;
+  message_count: number;
+};
+
+export type ConversationMessage = {
+  id: string;
+  direction: "in" | "out";
+  text: string;
+  /** Set when the message belongs to a workflow run. */
+  run_id?: string | null;
+  created_at: string;
+};
+
+export type ScheduleKind = "cron" | "delay";
+
+export type ScheduleInput = {
+  workflow_id: string;
+  kind: ScheduleKind;
+  cron_expr?: string;
+  tz: string;
+  run_at?: string;
+  enabled: boolean;
+  input: Record<string, unknown>;
+};
+
+export type Schedule = ScheduleInput & {
+  id: string;
+  /** The workflow's name as the API joined it; it survives the workflow's deletion. */
+  workflow_name?: string;
+  next_run_at?: string | null;
+  last_run_at?: string | null;
+  last_run_id?: string | null;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SkillInput = { name: string; description: string; body: string };
+export type Skill = SkillInput & { id: string; created_at: string; updated_at: string };
+
+export type MemoryFact = { id: string; key: string; value: string; created_at: string; expires_at?: string | null };
+
+export const getChannels = async (): Promise<ChannelsInfo> => {
+  const info = await api<ChannelsInfo>("/api/channels");
+  return normalizeChannels(info);
+};
+
+export function normalizeChannels(info: ChannelsInfo): ChannelsInfo {
+  const t = info?.telegram;
+  return { ...info, telegram: { ...t, allowed_user_ids: t?.allowed_user_ids ?? [], binding: t?.binding ?? null } };
+}
+
+export const bindTelegram = async (agentId: string) =>
+  normalizeChannels(await api<ChannelsInfo>("/api/channels/telegram/binding", withBody("PUT", { agent_id: agentId })));
+export const unbindTelegram = () => api<ChannelsInfo | undefined>("/api/channels/telegram/binding", withBody("DELETE"));
+
+export const listConversations = async () => (await api<Conversation[] | null>("/api/conversations")) ?? [];
+export const listConversationMessages = async (id: string) =>
+  (await api<ConversationMessage[] | null>(`/api/conversations/${seg(id)}/messages`)) ?? [];
+
+// Go encodes a nil map as null; the form treats the input as always present.
+const normalizeSchedule = (s: Schedule): Schedule => ({ ...s, input: s.input ?? {} });
+
+export const listSchedules = async () => ((await api<Schedule[] | null>("/api/schedules")) ?? []).map(normalizeSchedule);
+export const createSchedule = async (input: ScheduleInput) => normalizeSchedule(await api<Schedule>("/api/schedules", withBody("POST", input)));
+export const updateSchedule = async (id: string, input: ScheduleInput) =>
+  normalizeSchedule(await api<Schedule>(`/api/schedules/${seg(id)}`, withBody("PUT", input)));
+export const deleteSchedule = (id: string) => api<void>(`/api/schedules/${seg(id)}`, withBody("DELETE"));
+
+export const listSkills = async () => (await api<Skill[] | null>("/api/skills")) ?? [];
+export const createSkill = (input: SkillInput) => api<Skill>("/api/skills", withBody("POST", input));
+export const updateSkill = (id: string, input: SkillInput) => api<Skill>(`/api/skills/${seg(id)}`, withBody("PUT", input));
+export const deleteSkill = (id: string) => api<void>(`/api/skills/${seg(id)}`, withBody("DELETE"));
+
+export const listAgentMemory = async (agentId: string) => (await api<MemoryFact[] | null>(`/api/agents/${seg(agentId)}/memory`)) ?? [];
+export const deleteAgentMemory = (agentId: string, factId: string) =>
+  api<void>(`/api/agents/${seg(agentId)}/memory/${seg(factId)}`, withBody("DELETE"));

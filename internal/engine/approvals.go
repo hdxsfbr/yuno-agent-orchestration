@@ -310,7 +310,7 @@ func (e *Engine) decideExec(ctx context.Context, a *store.Approval, decision, st
 	}
 	if v := e.visitOf(decided); v != nil {
 		v.post(func(ctx context.Context) { v.approvalDecided(ctx, decided) })
-	} else {
+	} else if decided.RunID != "" {
 		e.requeueIfUnattended(ctx, decided.RunID)
 	}
 	return decided, nil
@@ -319,12 +319,26 @@ func (e *Engine) decideExec(ctx context.Context, a *store.Approval, decision, st
 // extendExecAllowlist adds an always-allowed command to the agent's stored exec
 // allowlist so the agent form shows the effective policy (DESIGN 5.3 rule 3).
 func (e *Engine) extendExecAllowlist(ctx context.Context, a *store.Approval) {
-	rn, err := store.GetRunNode(ctx, e.deps.Pool, a.RunNodeID)
-	if err != nil || rn.AgentID == nil || strings.TrimSpace(a.Message) == "" {
+	if strings.TrimSpace(a.Message) == "" {
 		return
 	}
-	if err := store.AddExecAllowlistPattern(ctx, e.deps.Pool, *rn.AgentID, strings.TrimSpace(a.Message)); err != nil {
-		e.log.Warn("extend exec allowlist failed", "agent_id", *rn.AgentID, "error", err)
+	var agentID string
+	if a.RunNodeID == "" {
+		// Raised in a conversation (DESIGN 5.8 rule 5): the conversation's agent.
+		c, err := store.ApprovalConversation(ctx, e.deps.Pool, a.ID)
+		if err != nil || c.AgentID == "" {
+			return
+		}
+		agentID = c.AgentID
+	} else {
+		rn, err := store.GetRunNode(ctx, e.deps.Pool, a.RunNodeID)
+		if err != nil || rn.AgentID == nil {
+			return
+		}
+		agentID = *rn.AgentID
+	}
+	if err := store.AddExecAllowlistPattern(ctx, e.deps.Pool, agentID, strings.TrimSpace(a.Message)); err != nil {
+		e.log.Warn("extend exec allowlist failed", "agent_id", agentID, "error", err)
 	}
 }
 
@@ -570,7 +584,8 @@ func (e *Engine) sweepApprovals(ctx context.Context) {
 	}
 	for i := range due {
 		a := &due[i]
-		if _, ok := e.expireApproval(ctx, a, "approval expired"); ok {
+		// A conversation's approval has no run to fail.
+		if _, ok := e.expireApproval(ctx, a, "approval expired"); ok && a.RunID != "" {
 			e.failRun(ctx, a.RunID, "approval expired")
 		}
 	}

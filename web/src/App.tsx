@@ -5,9 +5,12 @@ import { usePendingApprovals, useApprovalEvents } from "./lib/useApprovals";
 import AgentFormPage from "./pages/AgentFormPage";
 import AgentsPage from "./pages/AgentsPage";
 import ApprovalsPage from "./pages/ApprovalsPage";
+import ChannelsPage from "./pages/ChannelsPage";
 import NotFoundPage from "./pages/NotFoundPage";
 import RunDetailPage from "./pages/RunDetailPage";
 import RunsPage from "./pages/RunsPage";
+import SchedulesPage from "./pages/SchedulesPage";
+import SkillsPage from "./pages/SkillsPage";
 import StatusPage from "./pages/StatusPage";
 import WorkflowsPage from "./pages/WorkflowsPage";
 
@@ -24,6 +27,9 @@ const nav = [
   { to: "/workflows", label: "Workflows" },
   { to: "/runs", label: "Runs" },
   { to: "/approvals", label: "Approvals" },
+  { to: "/channels", label: "Channels" },
+  { to: "/schedules", label: "Schedules" },
+  { to: "/skills", label: "Skills" },
   { to: "/status", label: "Status" },
 ];
 
@@ -72,6 +78,10 @@ export default function App() {
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:id" element={<RunDetailPage />} />
           <Route path="/approvals" element={<ApprovalsPage />} />
+          <Route path="/channels" element={<ChannelsPage />} />
+          <Route path="/channels/:conversationId" element={<ChannelsPage />} />
+          <Route path="/schedules" element={<SchedulesPage />} />
+          <Route path="/skills" element={<SkillsPage />} />
           <Route path="/status" element={<StatusPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Routes>

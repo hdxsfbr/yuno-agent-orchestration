@@ -62,6 +62,7 @@ func (c Case) Validate(dirVersion string) error {
 	c.validateScript(add)
 	c.validateActions(add)
 	c.validateExpect(add)
+	c.validateRubric(add)
 
 	if len(p) == 0 {
 		return nil
@@ -83,8 +84,8 @@ func (c Case) validateWorkflowMode(add func(string, ...any)) {
 	if strings.TrimSpace(c.Task) != "" || !c.Agent.isZero() {
 		add("agent and task belong to a quick run; a workflow case has workflow, input and agents")
 	}
-	if len(c.Agents) == 0 {
-		add("agents is required for a workflow case")
+	if len(c.Agents) == 0 && c.RunsModel() {
+		add("agents is required for a workflow case with agent nodes")
 	}
 	for _, key := range c.AgentKeys() {
 		if !agentKeyPattern.MatchString(key) {
@@ -125,6 +126,7 @@ func checkAgentSpec(path string, a AgentSpec, add func(string, ...any)) {
 		}
 	}
 	checkLimits(path+".limits.", a.Limits.Store(), add)
+	checkPolicies(path, a, add)
 }
 
 func checkLimits(prefix string, l store.Limits, add func(string, ...any)) {
@@ -147,8 +149,11 @@ func checkLimits(prefix string, l store.Limits, add func(string, ...any)) {
 }
 
 func (c Case) validateScript(add func(string, ...any)) {
-	if len(c.Script) == 0 {
+	switch {
+	case len(c.Script) == 0 && c.RunsModel():
 		add("script is required and must have at least one step")
+	case len(c.Script) > 0 && !c.RunsModel():
+		add("script has steps but the workflow has no agent node to play them")
 	}
 	for i, s := range c.Script {
 		n := i + 1
@@ -185,6 +190,7 @@ func (c Case) validateActions(add func(string, ...any)) {
 			add("actions.approvals[%d].decision %q must be %q or %q", i, act.Decision, DecisionApprove, DecisionReject)
 		}
 	}
+	c.validateRunActions(add)
 }
 
 func (c Case) validateExpect(add func(string, ...any)) {
@@ -222,6 +228,7 @@ func (c Case) validateExpect(add func(string, ...any)) {
 			}
 		}
 	}
+	c.validateObservedExpect(add)
 }
 
 // sortedKeys returns the keys of m in order.

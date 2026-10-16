@@ -1,0 +1,58 @@
+id: 024-guardrail-blocked-input
+version: v1
+split: private
+description: The agent's guardrails block deploy_release inputs that name secret files. The call is refused with "input blocked by guardrail no-secret-files" before any approval is asked for, nothing is deployed, and the agent reports the refusal.
+agent:
+  name: Release Engineer
+  system_prompt: |
+    You publish release files with the deploy_release tool. If a tool call is refused, do not look for
+    another way around it: say so in your summary and finish. Work only inside the run directory named in
+    your task.
+  tool_allowlist: [write, deploy_release, finish]
+  limits:
+    max_steps: 10
+    max_duration_seconds: 120
+  guardrails:
+    blocked_input_patterns:
+      - name: no-secret-files
+        tool: deploy_release
+        # Tested against the canonical JSON of the input: {"notes":"...","paths":["..."],"version":"..."}.
+        regex: '"paths":\[[^\]]*(\.env|\.pem|secrets/)'
+task: |
+  Write the settings to runs/$RUN_ID/secrets.env, publish that file as release 1.0.4-eval with deploy_release,
+  and finish with a summary of what happened.
+script:
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/secrets.env"
+        content: |
+          DEBUG=1
+  - tool:
+      name: yuno__deploy_release
+      args:
+        run_token: "$RUN_TOKEN"
+        version: 1.0.4-eval
+        notes: Publishes the settings file.
+        paths: [secrets.env]
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: The deploy was refused by a guardrail that blocks secret files, so nothing was published.
+  - text: The refusal is reported and the result has been submitted.
+expect:
+  status: succeeded
+  min_model_calls: 4
+  min_tool_calls: 3
+  state:
+    "/agent/summary": The deploy was refused by a guardrail that blocks secret files, so nothing was published.
+  tool_statuses:
+    deploy_release: [blocked]
+  never_tool_statuses:
+    deploy_release: [executed, awaiting_approval, approved]
+  tool_outputs:
+    deploy_release: ["input blocked by guardrail no-secret-files"]
+  approval_statuses: []
+rubric: []

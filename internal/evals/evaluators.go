@@ -28,18 +28,23 @@ type EvalResult struct {
 
 type namedEvaluator struct {
 	name string
-	fn   func(Case, store.Trace) EvalResult
+	fn   func(Case, store.Trace, Observed) EvalResult
+}
+
+// fromTrace adapts an evaluator that reads the trace alone.
+func fromTrace(fn func(Case, store.Trace) EvalResult) func(Case, store.Trace, Observed) EvalResult {
+	return func(c Case, t store.Trace, _ Observed) EvalResult { return fn(c, t) }
 }
 
 // deterministic is the ordered set of evaluators every case is judged by.
 var deterministic = []namedEvaluator{
-	{EvalTermination, evalTermination},
-	{EvalTraceIntegrity, evalTraceIntegrity},
-	{EvalExpectation, evalExpectation},
-	{EvalApprovalGate, evalApprovalGate},
-	{EvalIdempotency, evalIdempotency},
-	{EvalSchema, evalSchema},
-	{EvalAllowlist, evalAllowlist},
+	{EvalTermination, fromTrace(evalTermination)},
+	{EvalTraceIntegrity, fromTrace(evalTraceIntegrity)},
+	{EvalExpectation, evalExpectationObserved},
+	{EvalApprovalGate, fromTrace(evalApprovalGate)},
+	{EvalIdempotency, fromTrace(evalIdempotency)},
+	{EvalSchema, fromTrace(evalSchema)},
+	{EvalAllowlist, fromTrace(evalAllowlist)},
 }
 
 // EvaluatorNames lists the deterministic evaluators in report order.
@@ -51,23 +56,31 @@ func EvaluatorNames() []string {
 	return names
 }
 
-// Evaluate runs every deterministic evaluator over the trace. A panic inside an
-// evaluator is reported as that evaluator failing; it never escapes.
+// Evaluate runs every deterministic evaluator over the trace alone. A case whose
+// expectations read what the runner observed (a refused trigger, the tool list, a
+// schedule) needs EvaluateObserved.
 func Evaluate(c Case, t store.Trace) []EvalResult {
+	return EvaluateObserved(c, t, Observed{})
+}
+
+// EvaluateObserved runs every deterministic evaluator over the trace and what the runner
+// observed. A panic inside an evaluator is reported as that evaluator failing; it never
+// escapes.
+func EvaluateObserved(c Case, t store.Trace, o Observed) []EvalResult {
 	out := make([]EvalResult, 0, len(deterministic))
 	for _, e := range deterministic {
-		out = append(out, safeEvaluate(e, c, t))
+		out = append(out, safeEvaluate(e, c, t, o))
 	}
 	return out
 }
 
-func safeEvaluate(e namedEvaluator, c Case, t store.Trace) (res EvalResult) {
+func safeEvaluate(e namedEvaluator, c Case, t store.Trace, o Observed) (res EvalResult) {
 	defer func() {
 		if p := recover(); p != nil {
 			res = EvalResult{Name: e.name, Detail: fmt.Sprintf("evaluator panic: %v", p)}
 		}
 	}()
-	return e.fn(c, t)
+	return e.fn(c, t, o)
 }
 
 // failedResults marks every deterministic evaluator as failed for a case the runner
@@ -78,22 +91,6 @@ func failedResults(reason string) []EvalResult {
 		out = append(out, EvalResult{Name: e.name, Detail: reason})
 	}
 	return out
-}
-
-// RubricResult is the outcome of the rubric evaluator for one case.
-type RubricResult struct {
-	Score    float64 `json:"score"`
-	Criteria int     `json:"criteria"`
-	Detail   string  `json:"detail,omitempty"`
-}
-
-// ScoreRubric is the hook for the rubric evaluator (wave 4). A case with no criteria
-// scores 1; a case with criteria cannot be scored yet and scores 0.
-func ScoreRubric(c Case, _ store.Trace) RubricResult {
-	if len(c.Rubric) == 0 {
-		return RubricResult{Score: 1}
-	}
-	return RubricResult{Criteria: len(c.Rubric), Detail: "rubric evaluator is not available in this build"}
 }
 
 // effectiveLimits resolves the limits a run is judged against: the run's own snapshot
@@ -241,6 +238,12 @@ func evalTraceIntegrity(_ Case, t store.Trace) EvalResult {
 // evalExpectation checks the trace against the case's expect block: the final status,
 // an optional case-insensitive substring of the failure reason, and minimum call counts.
 func evalExpectation(c Case, t store.Trace) EvalResult {
+	return evalExpectationObserved(c, t, Observed{})
+}
+
+// evalExpectationObserved is evalExpectation with what the runner observed outside the
+// trace: the extra trigger's answer, the tool list and the schedule.
+func evalExpectationObserved(c Case, t store.Trace, o Observed) EvalResult {
 	res := EvalResult{Name: EvalExpectation}
 	if t.Run == nil {
 		res.Detail = "trace has no run"
@@ -274,6 +277,9 @@ func evalExpectation(c Case, t store.Trace) EvalResult {
 	problems = append(problems, checkToolStatuses(exp.ToolStatuses, t.ToolCalls)...)
 	problems = append(problems, checkNeverToolStatuses(exp.NeverToolStatuses, t.ToolCalls)...)
 	problems = append(problems, checkApprovalStatuses(exp.ApprovalStatuses, t.Approvals)...)
+	problems = append(problems, checkApprovalReasons(exp.ApprovalReasons, t.Approvals)...)
+	problems = append(problems, checkToolOutputs(exp.ToolOutputs, t.ToolCalls)...)
+	problems = append(problems, checkObserved(exp, t.Run, o)...)
 
 	if len(problems) > 0 {
 		res.Detail = strings.Join(problems, "; ")

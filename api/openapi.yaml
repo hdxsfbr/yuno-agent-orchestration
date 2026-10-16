@@ -18,6 +18,10 @@ tags:
   - name: tools
   - name: approvals
   - name: workflows
+  - name: schedules
+  - name: skills
+  - name: memory
+  - name: channels
 paths:
   /healthz:
     get:
@@ -62,7 +66,11 @@ paths:
         `text/event-stream`. Each event has `id` (durable sequence), `event` (type) and JSON
         `data`. Send `Last-Event-ID` to replay missed events. A comment line is sent every
         15 seconds as a heartbeat. Event types: run.status, node.status, model_call,
-        tool_call, approval.requested, approval.decided, agent_message, log.
+        tool_call, approval.requested, approval.decided, agent_message, log,
+        schedule.fired (`{schedule, run}`, filed under the run it created), and
+        conversation.message (`{conversation, message}`: a Conversation and a
+        ConversationMessage, platform-wide, no run). An approval raised in a conversation
+        has no run; its approval.requested and approval.decided carry `conversation_id`.
       responses:
         "200": { description: event stream, content: { text/event-stream: { schema: { type: string } } } }
   /api/runs/{id}/events:
@@ -109,6 +117,7 @@ paths:
         "200": { description: agent, content: { application/json: { schema: { $ref: "#/components/schemas/Agent" } } } }
         "404": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
     delete:
       tags: [agents]
       summary: Soft-delete an agent (existing runs keep their snapshot)
@@ -131,6 +140,29 @@ paths:
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       responses:
         "200": { description: runtime view, content: { application/json: { schema: { $ref: "#/components/schemas/AgentRuntime" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/agents/{id}/memory:
+    get:
+      tags: [memory]
+      summary: The agent's remembered facts, newest first
+      description: |
+        Facts the agent saved with memory_save that have not expired; an expired fact is
+        left out even before the sweep deletes it.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200":
+          description: facts
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/MemoryFact" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/agents/{id}/memory/{factId}:
+    delete:
+      tags: [memory]
+      summary: Forget one fact
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: factId, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: deleted }
         "404": { $ref: "#/components/responses/Error" }
 
   /api/tools:
@@ -158,7 +190,12 @@ paths:
       summary: Trigger a run (manual trigger)
       description: |
         Either `workflow_id` with `input`, or `agent_id` with `task` for a one-node
-        "quick run" that wraps the agent in a single-agent workflow.
+        "quick run" that wraps the agent in a single-agent workflow. The run's
+        `max_cost_usd` is the smallest of the requested or workflow limit and every
+        participating agent's `guardrails.max_cost_usd_per_run`. When an agent in the
+        run already has `guardrails.max_runs_per_hour` runs created in the last hour the
+        answer is 429 with code `rate_limited` and the message
+        `rate limit: <n> runs/hour for agent <name>`.
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/RunCreate" } } }
@@ -334,6 +371,165 @@ paths:
         "204": { description: registered }
         "422": { $ref: "#/components/responses/Error" }
 
+  /api/schedules:
+    get:
+      tags: [schedules]
+      summary: List schedules, oldest first
+      responses:
+        "200":
+          description: schedules
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Schedule" } } } }
+    post:
+      tags: [schedules]
+      summary: Create a schedule
+      description: |
+        A `cron` schedule fires on a standard 5-field expression read in `tz`; a `delay`
+        schedule fires once at `run_at` and then disables itself. `next_run_at` is
+        computed from now. 422 details: `cron_expr` and `tz` carry the parser's message
+        (`cron_expr: no future occurrence` for an expression that names no date to come,
+        such as `0 0 31 2 *`), `input.<field>` the workflow's input schema violations.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ScheduleInput" } } }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Schedule" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/schedules/{id}:
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    get:
+      tags: [schedules]
+      summary: Get a schedule
+      responses:
+        "200": { description: schedule, content: { application/json: { schema: { $ref: "#/components/schemas/Schedule" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [schedules]
+      summary: Change a schedule; fields left out keep their value (`{"enabled":false}` pauses it)
+      description: next_run_at is recomputed from now and last_error is cleared.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ScheduleInput" } } }
+      responses:
+        "200": { description: schedule, content: { application/json: { schema: { $ref: "#/components/schemas/Schedule" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [schedules]
+      summary: Delete a schedule (runs it created are kept)
+      responses:
+        "204": { description: deleted }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/channels:
+    get:
+      tags: [channels]
+      summary: Channels the platform binds agents to, with the Telegram binding
+      responses:
+        "200": { description: channels, content: { application/json: { schema: { $ref: "#/components/schemas/Channels" } } } }
+  /api/channels/telegram/binding:
+    put:
+      tags: [channels]
+      summary: Bind an agent to Telegram (one agent at a time)
+      description: |
+        The binding is stored, then applied to the gateway (a config patch and, when
+        something changed, a gateway restart). 409 `channel_bound` while another agent is
+        bound, with `details: {agent_id, agent_name}`. 502 `gateway_error` when the
+        gateway refused the change: the binding is kept (`details: {binding_id}`) and
+        applied again when the api reconnects.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ChannelBindingInput" } } }
+      responses:
+        "200": { description: bound, content: { application/json: { schema: { $ref: "#/components/schemas/Channels" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [channels]
+      summary: Unbind Telegram and close it to direct messages
+      responses:
+        "200": { description: unbound, content: { application/json: { schema: { $ref: "#/components/schemas/Channels" } } } }
+        "502": { $ref: "#/components/responses/Error" }
+  /api/conversations:
+    get:
+      tags: [channels]
+      summary: Conversations mirrored from the bound agent's channel sessions, most recently active first
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 100, minimum: 1, maximum: 500 } }
+      responses:
+        "200":
+          description: conversations
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Conversation" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/conversations/{id}/messages:
+    get:
+      tags: [channels]
+      summary: A conversation's newest messages, oldest first
+      description: |
+        What the person sent (`in`) and what the agent answered (`out`), text only.
+        Messages older than the agent's `memory_policy.conversation_ttl_days` (7 by
+        default) are left out even before the retention sweep deletes them.
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: limit, in: query, schema: { type: integer, default: 500, minimum: 1, maximum: 1000 } }
+      responses:
+        "200":
+          description: messages
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ConversationMessage" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+
+  /api/skills:
+    get:
+      tags: [skills]
+      summary: List skills by name
+      responses:
+        "200":
+          description: skills
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Skill" } } } }
+    post:
+      tags: [skills]
+      summary: Create a skill
+      description: Agents list skills by name; each listed skill is written to the agent's workspace as skills/<name>/SKILL.md.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SkillInput" } } }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Skill" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/skills/{id}:
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    get:
+      tags: [skills]
+      summary: Get a skill
+      responses:
+        "200": { description: skill, content: { application/json: { schema: { $ref: "#/components/schemas/Skill" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [skills]
+      summary: Replace a skill and re-materialise the agents that use it
+      description: |
+        A rename is carried into every agent's `skills` list. When an agent could not be
+        pushed to OpenClaw the change is still saved and the answer is 502 with
+        `details: {id, agent_ids}`.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SkillInput" } } }
+      responses:
+        "200": { description: skill, content: { application/json: { schema: { $ref: "#/components/schemas/Skill" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [skills]
+      summary: Delete a skill, remove it from every agent and re-materialise them
+      responses:
+        "204": { description: deleted }
+        "404": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+
 components:
   parameters:
     Id:
@@ -359,7 +555,7 @@ components:
             details: {}
     Status:
       type: object
-      required: [version, uptime_s, db_ok, workers, runs, sse_clients]
+      required: [version, uptime_s, db_ok, workers, runs, sse_clients, scheduler]
       properties:
         version: { type: string }
         uptime_s: { type: integer }
@@ -367,6 +563,12 @@ components:
         workers: { type: integer }
         sse_clients: { type: integer }
         runs: { type: object, additionalProperties: { type: integer } }
+        scheduler:
+          type: object
+          required: [tick_seconds, next_due_at]
+          properties:
+            tick_seconds: { type: number, description: how often the scheduler looks for due schedules }
+            next_due_at: { type: [string, "null"], format: date-time, description: "earliest next_run_at of the enabled schedules; null when none is enabled" }
     OpenClawStatus:
       type: object
       required: [connected, scopes]
@@ -389,12 +591,22 @@ components:
         approval_timeout_seconds: { type: integer }
     Guardrails:
       type: object
+      description: |
+        Bounds on what the agent may spend and do (zero or absent means none). 422 paths
+        are `guardrails.<field>` and `guardrails.blocked_input_patterns[i].<field>`; a
+        regex that does not compile is refused with the parser's message.
       properties:
-        max_cost_usd_per_run: { type: number }
-        max_runs_per_hour: { type: integer }
-        blocked_tools: { type: array, items: { type: string } }
+        max_cost_usd_per_run: { type: number, description: caps max_cost_usd of every run the agent takes part in }
+        max_runs_per_hour: { type: integer, description: runs including this agent created in a rolling hour; more are refused with 429 }
+        blocked_tools: { type: array, items: { type: string }, description: never offered to the agent and refused if called }
         blocked_input_patterns:
           type: array
+          description: |
+            RE2 expressions tested against the canonical JSON of a call's input (keys
+            sorted, no spacing, run_token left out). A match refuses the call with
+            "input blocked by guardrail <name>". Platform tools are checked on every call.
+            With any exec pattern, every host exec command asks for approval (the exec
+            allowlist is not applied) and a command a pattern matches is denied at once.
           items:
             type: object
             required: [name, tool, regex]
@@ -405,11 +617,70 @@ components:
     MemoryPolicy:
       type: object
       properties:
-        enabled: { type: boolean }
-        max_facts: { type: integer }
-        fact_ttl_days: { type: integer }
+        enabled: { type: boolean, description: off means the memory tools are not offered and MEMORY.md stays empty }
+        max_facts: { type: integer, description: "default 200; past it the oldest fact by creation is dropped" }
+        fact_ttl_days: { type: integer, description: default 30 }
         conversation_window: { type: integer }
         conversation_ttl_days: { type: integer }
+    MemoryFact:
+      type: object
+      required: [id, scope, agent_id, key, value, created_at, updated_at]
+      properties:
+        id: { type: string }
+        scope: { type: string, enum: [agent, conversation] }
+        agent_id: { type: string }
+        key: { type: string }
+        value: { type: string }
+        source_run_id: { type: string, description: the run that saved it last }
+        created_at: { type: string, format: date-time, description: when the key was first saved }
+        updated_at: { type: string, format: date-time, description: when the value was last saved }
+        expires_at: { type: string, format: date-time }
+    ScheduleInput:
+      type: object
+      properties:
+        workflow_id: { type: string, description: required on create }
+        kind: { type: string, enum: [cron, delay], description: required on create }
+        cron_expr: { type: string, description: "kind cron: 5 fields (minute hour day-of-month month day-of-week), e.g. 0 9 * * 1-5" }
+        tz: { type: string, description: "IANA zone the expression is read in, default UTC" }
+        run_at: { type: string, format: date-time, description: "kind delay: when it fires" }
+        enabled: { type: boolean, description: default true }
+        input: { type: object, description: "the run input, checked against the workflow's input schema" }
+    Schedule:
+      type: object
+      required: [id, workflow_id, workflow_name, kind, tz, enabled, input, created_at, updated_at]
+      properties:
+        id: { type: string }
+        workflow_id: { type: string }
+        workflow_name: { type: string }
+        kind: { type: string, enum: [cron, delay] }
+        cron_expr: { type: string }
+        tz: { type: string }
+        run_at: { type: string, format: date-time }
+        enabled: { type: boolean }
+        next_run_at: { type: string, format: date-time, description: absent while disabled }
+        last_run_at: { type: string, format: date-time }
+        last_run_id: { type: string }
+        last_error: { type: string, description: "why the last firing created no run, e.g. workflow deleted" }
+        input: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SkillInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, pattern: "^[a-z0-9]+(-[a-z0-9]+)*$", maxLength: 64 }
+        description: { type: string, maxLength: 1024 }
+        body: { type: string, description: "markdown instructions, at most 256 KiB" }
+    Skill:
+      type: object
+      required: [id, name, description, body, created_at, updated_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        body: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     ExecPolicy:
       type: object
       description: OpenClaw exec approvals policy for elevated (host) exec; sandboxed exec needs no approval.
@@ -441,7 +712,7 @@ components:
         guardrails: { $ref: "#/components/schemas/Guardrails" }
         memory_policy: { $ref: "#/components/schemas/MemoryPolicy" }
         exec_policy: { $ref: "#/components/schemas/ExecPolicy" }
-        skills: { type: array, items: { type: string } }
+        skills: { type: array, items: { type: string }, description: "names of existing skills (422 skills[i] for an unknown one)" }
         channels: { type: array, items: { type: string, enum: [telegram] } }
     Agent:
       allOf:
@@ -519,7 +790,7 @@ components:
         workflow_id: { type: string }
         workflow_version: { type: integer }
         trigger: { type: string, enum: [manual, schedule, channel, eval] }
-        trigger_ref: { type: string }
+        trigger_ref: { type: string, description: "schedule: the occurrence fired, <schedule id>@<occurrence time, RFC 3339 UTC>; eval: the case id" }
         status: { type: string, enum: [queued, running, waiting_approval, succeeded, failed, cancelled, timed_out] }
         input: { type: object }
         state: { type: object }
@@ -646,6 +917,7 @@ components:
         decided_by: { type: string }
         reason: { type: string }
         expires_at: { type: string, format: date-time }
+        conversation_id: { type: string, description: "set, with run_id and run_node_id empty, for an exec approval raised in a conversation" }
     Trace:
       type: object
       required: [run, nodes, model_calls, tool_calls, spans, agent_messages, approvals]
@@ -758,3 +1030,59 @@ components:
       additionalProperties: false
       properties:
         name: { type: string, maxLength: 120, description: defaults to the template's name }
+    ChannelBindingInput:
+      type: object
+      required: [agent_id]
+      additionalProperties: false
+      properties:
+        agent_id: { type: string }
+    ChannelBinding:
+      type: object
+      required: [agent_id, agent_name, created_at]
+      properties:
+        agent_id: { type: string }
+        agent_name: { type: string }
+        created_at: { type: string, format: date-time }
+    Channels:
+      type: object
+      required: [telegram]
+      properties:
+        telegram:
+          type: object
+          required: [enabled, mode, allowed_user_ids, binding]
+          properties:
+            enabled: { type: boolean, description: the gateway runs the Telegram channel (TELEGRAM_MODE polling or webhook) }
+            mode: { type: string, enum: [polling, webhook, off] }
+            bot_username: { type: string, description: as the gateway reports it; absent while unknown }
+            allowed_user_ids: { type: array, items: { type: integer }, description: Telegram user ids that may message the bot }
+            binding:
+              description: the agent that answers Telegram; null while none is bound and the channel is closed
+              oneOf:
+                - $ref: "#/components/schemas/ChannelBinding"
+                - type: "null"
+    Conversation:
+      type: object
+      required: [id, channel, external_chat_id, agent_id, agent_name, session_key, created_at, message_count]
+      properties:
+        id: { type: string }
+        channel: { type: string, enum: [telegram] }
+        external_chat_id: { type: string, description: the Telegram user id of the direct chat }
+        agent_id: { type: string, description: empty when the agent was deleted }
+        agent_name: { type: string }
+        session_key: { type: string, description: the OpenClaw session the conversation mirrors }
+        display_name: { type: string }
+        created_at: { type: string, format: date-time }
+        last_message_at: { type: string, format: date-time }
+        message_count: { type: integer }
+    ConversationMessage:
+      type: object
+      required: [id, conversation_id, direction, external_message_id, text, run_id, created_at]
+      properties:
+        id: { type: string }
+        conversation_id: { type: string }
+        direction: { type: string, enum: [in, out], description: "in: what the person sent; out: what the agent answered" }
+        external_message_id: { type: string }
+        text: { type: string }
+        usage: { type: [object, "null"], description: "the model usage of an answer (out), null otherwise" }
+        run_id: { type: [string, "null"], description: always null; conversation turns are not runs }
+        created_at: { type: string, format: date-time }

@@ -45,6 +45,8 @@ type fakeClient struct {
 	// onExecResolve runs after exec.approval.resolve, e.g. to push the terminal
 	// session.approval event the gateway sends.
 	onExecResolve func(id, decision string)
+	// sessions is what sessions.list answers (the conversation mirror's roster).
+	sessions []openclaw.SessionRow
 }
 
 type fakeCall struct {
@@ -106,8 +108,12 @@ func (f *fakeClient) handle(method string, p json.RawMessage) (any, error) {
 		return map[string]any{"exists": true, "hash": "e1", "file": map[string]any{"version": 1, "agents": map[string]any{}}}, nil
 	case "exec.approvals.set", "sessions.patch", "sessions.delete":
 		return map[string]any{"ok": true}, nil
-	case "sessions.messages.subscribe":
+	case "sessions.messages.subscribe", "sessions.subscribe":
 		return map[string]any{"subscribed": true}, nil
+	case "sessions.list":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return map[string]any{"sessions": slices.Clone(f.sessions)}, nil
 	case "chat.send":
 		var in openclaw.ChatSendParams
 		_ = json.Unmarshal(p, &in)

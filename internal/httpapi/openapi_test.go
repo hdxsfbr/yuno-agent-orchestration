@@ -155,6 +155,36 @@ func TestOpenAPIConformance(t *testing.T) {
 	}
 }
 
+// Response validation accepts properties a schema does not list, so the fields and the
+// event the channel and scheduler work added are checked to be documented.
+func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
+	doc, err := openapi3.NewLoader().LoadFromData(api.OpenAPI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for schema, props := range map[string][]string{
+		"Approval":            {"conversation_id"},
+		"Status":              {"scheduler"},
+		"Conversation":        {"session_key", "message_count", "last_message_at"},
+		"ConversationMessage": {"direction", "text", "usage"},
+	} {
+		ref := doc.Components.Schemas[schema]
+		if ref == nil || ref.Value == nil {
+			t.Errorf("schema %s is missing", schema)
+			continue
+		}
+		for _, p := range props {
+			if ref.Value.Properties[p] == nil {
+				t.Errorf("schema %s does not document %s", schema, p)
+			}
+		}
+	}
+	events := doc.Paths.Find("/api/events")
+	if events == nil || events.Get == nil || !strings.Contains(events.Get.Description, "conversation.message") {
+		t.Error("GET /api/events does not document the conversation.message event")
+	}
+}
+
 // seedTrace inserts one node, model call, tool call, span, agent message and approval.
 func seedTrace(t *testing.T, runID string) {
 	t.Helper()

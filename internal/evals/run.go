@@ -16,6 +16,14 @@ import (
 	"yuno/internal/config"
 )
 
+// Eval providers (EVAL_PROVIDER). The runs themselves are always replayed from the
+// cases' scripts; the provider chooses who grades the rubric: the local checks for
+// "scripted", claude-opus-5-5 through the api's model proxy for "anthropic".
+const (
+	ProviderScripted  = "scripted"
+	ProviderAnthropic = "anthropic"
+)
+
 // Run executes the suite for cfg.EvalSplit against cfg.EvalAPIURL and writes the
 // report under cfg.EvalReportsDir. It returns an error, so the process exits 1, when
 // the public pass rate is below 0.9 (DESIGN 5.13).
@@ -23,16 +31,29 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	return runSuite(ctx, cfg, log, os.Stdout, nil)
 }
 
+// normalizeProvider returns the eval provider, defaulting to scripted.
+func normalizeProvider(p string) (string, error) {
+	switch p = strings.ToLower(strings.TrimSpace(p)); p {
+	case "", ProviderScripted:
+		return ProviderScripted, nil
+	case ProviderAnthropic:
+		return ProviderAnthropic, nil
+	}
+	return "", fmt.Errorf("eval provider %q is not supported (want %s or %s)", p, ProviderScripted, ProviderAnthropic)
+}
+
 // runSuite is Run with the summary destination and runner settings injectable.
 func runSuite(ctx context.Context, cfg config.Config, log *slog.Logger, out io.Writer, tune func(*Runner)) error {
-	if p := strings.ToLower(strings.TrimSpace(cfg.EvalProvider)); p != "" && p != "scripted" {
-		return fmt.Errorf("eval provider %q is not supported by this runner (want scripted)", cfg.EvalProvider)
+	provider, err := normalizeProvider(cfg.EvalProvider)
+	if err != nil {
+		return err
 	}
+	cfg.EvalProvider = provider
 	cases, err := LoadCases(cfg.EvalCasesDir, cfg.EvalSplit)
 	if err != nil {
 		return err
 	}
-	log.Info("eval start", "split", cfg.EvalSplit, "cases", len(cases), "api", cfg.EvalAPIURL)
+	log.Info("eval start", "split", cfg.EvalSplit, "cases", len(cases), "api", cfg.EvalAPIURL, "provider", provider)
 
 	runner := NewRunner(cfg, log)
 	if tune != nil {
@@ -49,7 +70,7 @@ func runSuite(ctx context.Context, cfg config.Config, log *slog.Logger, out io.W
 	report := BuildReport(ReportMeta{
 		GeneratedAt: runner.now(),
 		Split:       strings.ToLower(strings.TrimSpace(cfg.EvalSplit)),
-		Provider:    "scripted",
+		Provider:    provider,
 		APIURL:      cfg.EvalAPIURL,
 		CasesDir:    cfg.EvalCasesDir,
 	}, results)

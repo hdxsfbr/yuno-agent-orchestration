@@ -46,10 +46,10 @@ function renderApp(path = "/workflows") {
 }
 
 describe("navigation", () => {
-  it("links to every page, Workflows and Approvals included", async () => {
+  it("links to every page, Channels, Schedules and Skills included", async () => {
     renderApp();
     const nav = within(screen.getByRole("navigation"));
-    expect(nav.getAllByRole("link").map((l) => l.getAttribute("href"))).toEqual(["/agents", "/workflows", "/runs", "/approvals", "/status"]);
+    expect(nav.getAllByRole("link").map((l) => l.getAttribute("href"))).toEqual(["/agents", "/workflows", "/runs", "/approvals", "/channels", "/schedules", "/skills", "/status"]);
     expect(await screen.findByRole("heading", { name: "Workflows" })).not.toBeNull();
   });
 

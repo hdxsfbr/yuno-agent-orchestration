@@ -69,10 +69,14 @@ func Baseline(in BaselineInputs) map[string]any {
 	for _, id := range in.TelegramAllowedUserIDs {
 		ids = append(ids, id)
 	}
+	// Direct messages start refused and groups stay refused: only the platform opens DMs,
+	// once an agent is bound (DESIGN 5.8 rule 7, D-025), so a gateway that starts before
+	// the api, or with no binding, never answers from its default agent.
 	telegram := map[string]any{
-		"enabled":   in.TelegramMode == "polling" || in.TelegramMode == "webhook",
-		"dmPolicy":  "allowlist",
-		"allowFrom": ids,
+		"enabled":     in.TelegramMode == "polling" || in.TelegramMode == "webhook",
+		"dmPolicy":    TelegramDMClosed,
+		"groupPolicy": "disabled",
+		"allowFrom":   ids,
 		"execApprovals": map[string]any{
 			"enabled":   len(ids) > 0,
 			"approvers": ids,
@@ -160,7 +164,15 @@ func Baseline(in BaselineInputs) map[string]any {
 
 // BaselineVersion is folded into the inputs hash; bump it whenever the managed keys
 // change so an existing install is rewritten at the next start.
-const BaselineVersion = 3
+const BaselineVersion = 4
+
+// Telegram DM policies the platform switches between (DESIGN 5.8 rule 7): closed while
+// no agent is bound, the allowlist once one is. The gateway reads dmPolicy per message
+// (config.schema.lookup reloadKind "none") [probed].
+const (
+	TelegramDMClosed = "disabled"
+	TelegramDMOpen   = "allowlist"
+)
 
 // InputsHash is a stable digest of the inputs and the baseline version.
 func InputsHash(in BaselineInputs) string {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"yuno/internal/config"
@@ -40,8 +41,8 @@ type Runner struct {
 	poll         time.Duration
 	caseTimeout  time.Duration
 	readyTimeout time.Duration
-	evaluate     func(Case, store.Trace) []EvalResult
-	rubric       func(Case, store.Trace) RubricResult
+	evaluate     func(Case, store.Trace, Observed) []EvalResult
+	rubric       func(context.Context, Case, store.Trace) RubricResult
 	now          func() time.Time
 }
 
@@ -55,8 +56,8 @@ func NewRunner(cfg config.Config, log *slog.Logger) *Runner {
 		poll:         defaultPoll,
 		caseTimeout:  defaultCaseTimeout,
 		readyTimeout: defaultReadyTimeout,
-		evaluate:     Evaluate,
-		rubric:       ScoreRubric,
+		evaluate:     EvaluateObserved,
+		rubric:       rubricScorer(cfg),
 		now:          time.Now,
 	}
 }
@@ -79,7 +80,8 @@ func (r *Runner) Execute(ctx context.Context, cases []Case) ([]CaseResult, error
 		r.log.Info("eval case start", "case", c.ID, "split", c.Split, "n", i+1, "of", len(cases))
 		res := r.runCase(ctx, c)
 		r.log.Info("eval case done", "case", c.ID, "status", res.Status, "passed", res.Passed(),
-			"e2e", res.E2E, "reason", res.Reason(), "duration_ms", res.DurationMs)
+			"e2e", res.E2E, "reason", res.Reason(), "duration_ms", res.DurationMs,
+			"rubric", res.Rubric.Score, "rubric_mode", res.Rubric.Mode)
 		results = append(results, res)
 	}
 	return results, nil
@@ -95,7 +97,7 @@ func (r *Runner) runCase(ctx context.Context, c Case) (res CaseResult) {
 			r.log.Error("eval case panic", "case", c.ID, "panic", p)
 			res.Error = fmt.Sprintf("runner panic: %v", p)
 			res.Evaluators = failedResults(res.Error)
-			res.Rubric = RubricResult{}
+			res.Rubric = unscoredRubric(c, res.Error)
 		}
 		if res.DurationMs == 0 {
 			res.DurationMs = r.now().Sub(started).Milliseconds()
@@ -109,12 +111,36 @@ func (r *Runner) runCase(ctx context.Context, c Case) (res CaseResult) {
 			res.Error = err.Error()
 		}
 		res.Evaluators = failedResults(res.Error)
+		res.Rubric = unscoredRubric(c, res.Error)
 		return res
 	}
 	r.fill(&res, trace)
-	res.Evaluators = r.evaluate(c, *trace)
-	res.Rubric = r.rubric(c, *trace)
+	var obs Observed
+	if res.Observed != nil {
+		obs = *res.Observed
+	}
+	res.Evaluators = r.evaluate(c, *trace, obs)
+	res.Rubric = r.rubric(ctx, c, *trace)
 	return res
+}
+
+// rubricScorer picks the rubric grader for the eval provider: the model through the
+// api's proxy for "anthropic", the local checks otherwise (DESIGN 5.13 rule 4).
+func rubricScorer(cfg config.Config) func(context.Context, Case, store.Trace) RubricResult {
+	if strings.EqualFold(strings.TrimSpace(cfg.EvalProvider), ProviderAnthropic) {
+		return NewModelGrader(cfg.EvalAPIURL).Score
+	}
+	return func(_ context.Context, c Case, t store.Trace) RubricResult { return ScoreRubric(c, t) }
+}
+
+// unscoredRubric is the rubric of a case that never produced a trace: the criteria are
+// counted and score 0, with the reason, so a broken case cannot look like one without a
+// rubric.
+func unscoredRubric(c Case, reason string) RubricResult {
+	if len(c.Rubric) == 0 {
+		return RubricResult{Score: 1}
+	}
+	return RubricResult{Criteria: len(c.Rubric), Detail: "not scored: " + reason}
 }
 
 // fill copies the run-level facts of a trace into the case result.

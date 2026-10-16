@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link } from "react-router";
-import { MODELS, THINKING_LEVELS, type Agent, type AgentInput, type Tool, type ThinkingLevel } from "@/lib/api";
+import { MODELS, THINKING_LEVELS, type Agent, type AgentInput, type Skill, type Tool, type ThinkingLevel } from "@/lib/api";
 import {
   LIMIT_FIELDS,
-  SKILL_NAME,
   agentToForm,
   emptyForm,
   errorsFor,
@@ -17,9 +16,9 @@ import {
 import Button, { buttonClass } from "../Button";
 import { Card } from "../Card";
 import { CheckboxField, NumberField, SelectField, TextAreaField, TextField, toOptions } from "../fields";
-import TagInput from "../TagInput";
 import ExecPolicySection from "./ExecPolicySection";
 import GuardrailsSection from "./GuardrailsSection";
+import SkillPicker from "./SkillPicker";
 import ToolPicker from "./ToolPicker";
 
 function Section({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
@@ -36,6 +35,7 @@ type Props = {
   /** The agent being edited; omit to create one. */
   agent?: Agent;
   tools: { data?: Tool[]; isLoading: boolean; error: unknown; refetch: () => void };
+  skills: { data?: Skill[]; isLoading: boolean; error: unknown; refetch: () => void };
   saving: boolean;
   /** Field errors returned by the API (422). */
   serverErrors: FieldErrors;
@@ -43,9 +43,13 @@ type Props = {
   formError?: string | null;
   submitLabel: string;
   onSubmit: (input: AgentInput) => void;
+  /** Shown under the memory settings: what the agent has saved. Only an existing agent has any. */
+  memoryFacts?: ReactNode;
+  /** Shown with the skills: the agent's Telegram binding. Only an existing agent can be bound. */
+  telegram?: ReactNode;
 };
 
-export default function AgentForm({ agent, tools, saving, serverErrors, formError, submitLabel, onSubmit }: Props) {
+export default function AgentForm({ agent, tools, skills, saving, serverErrors, formError, submitLabel, onSubmit, memoryFacts, telegram }: Props) {
   const [form, setForm] = useState<FormState>(() => (agent ? agentToForm(agent) : emptyForm()));
   const [clientErrors, setClientErrors] = useState<FieldErrors>({});
   const [attempted, setAttempted] = useState(false);
@@ -155,6 +159,7 @@ export default function AgentForm({ agent, tools, saving, serverErrors, formErro
             <NumberField label="Conversation lifetime (days)" value={form.conversationTtlDays} onChange={(v) => set({ conversationTtlDays: v })} errors={errorsFor(errors, "memory_policy.conversation_ttl_days")} placeholder="Default" />
           </div>
         </div>
+        {memoryFacts}
       </Section>
 
       <Section title="Exec policy">
@@ -163,17 +168,8 @@ export default function AgentForm({ agent, tools, saving, serverErrors, formErro
 
       <Section title="Skills and channels">
         <div className="space-y-4">
-          <TagInput
-            label="Skills"
-            hint="Names of skills to give the agent, in lowercase words separated by hyphens."
-            values={form.skills}
-            onChange={(skills) => set({ skills })}
-            placeholder="skill-name"
-            validate={(v) => (SKILL_NAME.test(v) ? null : "Use lowercase words separated by hyphens")}
-            errors={errorsFor(errors, "skills")}
-            mono
-          />
-          <CheckboxField checked={form.telegram} onChange={(v) => set({ telegram: v })} label="Telegram" hint="Let people talk to this agent over Telegram." />
+          <SkillPicker skills={skills} selected={form.skills} onChange={(names) => set({ skills: names })} errors={errorsFor(errors, "skills")} />
+          {telegram}
           {errorsFor(errors, "channels").map((m, i) => (
             <p key={i} role="alert" className="text-xs text-red-600 dark:text-red-400">
               {m}

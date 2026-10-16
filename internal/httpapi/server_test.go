@@ -1,78 +1,17 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"yuno/internal/openclaw"
 )
 
 func newRecorder() *httptest.ResponseRecorder { return httptest.NewRecorder() }
-
-func TestDialWithin(t *testing.T) {
-	gw := adminGateway()
-	handshake := &openclaw.HandshakeError{Reason: "bad token"}
-	tests := []struct {
-		name      string
-		failures  int   // dials that fail before one succeeds; -1 never succeeds
-		failWith  error // error of the failing dials
-		wantErr   bool
-		wantDials int32
-	}{
-		{name: "first dial", failures: 0, wantDials: 1},
-		{name: "transient failures then success", failures: 2, failWith: errors.New("connection refused"), wantDials: 3},
-		{name: "refused handshake is not retried", failures: -1, failWith: handshake, wantErr: true, wantDials: 1},
-		{name: "gives up after the window", failures: -1, failWith: errors.New("connection refused"), wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			var dials atomic.Int32
-			var connCtx context.Context
-			c, err := dialWithin(ctx, 300*time.Millisecond, 20*time.Millisecond, func(dctx context.Context) (openclaw.Client, error) {
-				n := dials.Add(1)
-				if tc.failures < 0 || int(n) <= tc.failures {
-					return nil, tc.failWith
-				}
-				connCtx = dctx
-				return gw, nil
-			})
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if tc.wantDials != 0 && dials.Load() != tc.wantDials {
-				t.Fatalf("dials = %d, want %d", dials.Load(), tc.wantDials)
-			}
-			if tc.wantErr {
-				if errors.Is(tc.failWith, handshake) && !errors.As(err, new(*openclaw.HandshakeError)) {
-					t.Fatalf("handshake error not wrapped: %v", err)
-				}
-				return
-			}
-			if c != gw {
-				t.Fatal("wrong client")
-			}
-			time.Sleep(400 * time.Millisecond) // past the dial window
-			if connCtx.Err() != nil {
-				t.Fatal("connection context cancelled after a successful dial")
-			}
-			cancel()
-			select {
-			case <-connCtx.Done():
-			case <-time.After(time.Second):
-				t.Fatal("connection context outlived the parent")
-			}
-		})
-	}
-}
 
 func TestReadyz(t *testing.T) {
 	pool := needDB(t)

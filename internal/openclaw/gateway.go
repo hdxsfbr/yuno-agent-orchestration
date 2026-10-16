@@ -27,6 +27,9 @@ type DialConfig struct {
 	BackoffMax  time.Duration
 	// HandshakeTimeout bounds one connect attempt (challenge plus hello). Zero means 15 s.
 	HandshakeTimeout time.Duration
+	// RetryRefused makes Dial retry a refused handshake like a transport failure, until
+	// ctx ends. Without it only refusals the gateway marks retryable are retried.
+	RetryRefused bool
 }
 
 // RequiredScopes are the operator scopes the connect frame asks for (DESIGN 5.14 rule 2).
@@ -71,6 +74,10 @@ func (e *HandshakeError) Unwrap() error {
 	return e.RPC
 }
 
+// Retryable reports whether the gateway said the refusal will lift by itself (it is
+// starting or restarting).
+func (e *HandshakeError) Retryable() bool { return e.RPC != nil && e.RPC.Retryable }
+
 const (
 	readLimit       = 32 << 20 // the gateway advertises maxPayload 25 MiB
 	minIdleTimeout  = 90 * time.Second
@@ -112,9 +119,10 @@ var _ Client = (*Gateway)(nil)
 // Dial connects as client.id "gateway-client", client.mode "backend", role operator,
 // scopes read/write/admin/approvals, caps ["approvals", "exec-approvals"], and keeps
 // the connection alive with reconnect and backoff until ctx ends. It returns once the
-// first handshake succeeded. Transport failures before that are retried with backoff;
-// a refused handshake or missing operator.admin scope is returned at once. The
-// concrete type is *Gateway.
+// first handshake succeeded. Transport failures before that, and refusals the gateway
+// marks retryable ("gateway starting"), are retried with backoff, each attempt logged
+// at warn; any other refused handshake or a missing operator.admin scope is returned at
+// once unless cfg.RetryRefused. The concrete type is *Gateway.
 func Dial(ctx context.Context, cfg DialConfig, log *slog.Logger) (Client, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -146,11 +154,11 @@ func Dial(ctx context.Context, cfg DialConfig, log *slog.Logger) (Client, error)
 			return g, nil
 		}
 		var he *HandshakeError
-		if errors.As(err, &he) {
+		if errors.As(err, &he) && !he.Retryable() && !cfg.RetryRefused {
 			return nil, err
 		}
 		wait := g.backoff(attempt)
-		log.Warn("openclaw gateway dial failed", "error", err, "retry_in", wait.String())
+		log.Warn("openclaw gateway dial failed", "attempt", attempt+1, "error", err, "retry_in", wait.String())
 		select {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("openclaw: dial %s: %w", cfg.URL, ctx.Err())

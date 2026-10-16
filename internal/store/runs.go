@@ -8,8 +8,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ErrDuplicateTrigger is CreateRun's answer when a run with the same schedule
+// occurrence already exists (runs_schedule_occurrence_idx, DESIGN 5.9 rule 2).
+var ErrDuplicateTrigger = errors.New("a run for this trigger already exists")
 
 const runColumns = `id, workflow_id, workflow_version, workflow_snapshot, trigger, trigger_ref, status, input, state,
 	limits, current_node, resume_node_visit_id, step_count, tool_call_count, attempt, cancel_requested, cancel_by,
@@ -39,7 +44,26 @@ func CreateRun(ctx context.Context, q Querier, r *Run) error {
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		r.ID, r.WorkflowID, r.WorkflowVersion, r.WorkflowSnapshot, r.Trigger, r.TriggerRef,
 		r.Status, r.Input, r.State, r.Limits, r.Attempt, r.CreatedAt, r.UpdatedAt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "runs_schedule_occurrence_idx" {
+		return ErrDuplicateTrigger
+	}
 	return err
+}
+
+// GetRunByTrigger returns the run created by a trigger reference, e.g. a schedule
+// occurrence; ErrNotFound when there is none.
+func GetRunByTrigger(ctx context.Context, q Querier, trigger, ref string) (*Run, error) {
+	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE trigger=$1 AND trigger_ref=$2
+		ORDER BY created_at LIMIT 1`, trigger, ref)
+	if err != nil {
+		return nil, err
+	}
+	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
 }
 
 func GetRun(ctx context.Context, q Querier, id string) (*Run, error) {
@@ -382,6 +406,11 @@ func ListAgentMessages(ctx context.Context, q Querier, runID string) ([]AgentMes
 const approvalColumns = `id, run_id, run_node_id, tool_call_id, kind, node_id, message, status, external_id, requested_at,
 	decided_at, decided_by, reason, expires_at`
 
+// approvalSelect reads an approval for scanning. One raised in a conversation has no
+// run or run node (DESIGN 5.8 rule 5): they read as "", with conversation_id set.
+const approvalSelect = `id, COALESCE(run_id, '') AS run_id, COALESCE(run_node_id, '') AS run_node_id, tool_call_id, kind,
+	node_id, message, status, external_id, requested_at, decided_at, decided_by, reason, expires_at, conversation_id`
+
 func InsertApproval(ctx context.Context, q Querier, a *Approval) error {
 	if a.ID == "" {
 		a.ID = NewID()
@@ -392,14 +421,14 @@ func InsertApproval(ctx context.Context, q Querier, a *Approval) error {
 	if a.RequestedAt.IsZero() {
 		a.RequestedAt = time.Now().UTC()
 	}
-	_, err := q.Exec(ctx, `INSERT INTO approvals (`+approvalColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+	_, err := q.Exec(ctx, `INSERT INTO approvals (`+approvalColumns+`) VALUES ($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 		a.ID, a.RunID, a.RunNodeID, a.ToolCallID, a.Kind, a.NodeID, a.Message, a.Status, a.ExternalID, a.RequestedAt,
 		a.DecidedAt, a.DecidedBy, a.Reason, a.ExpiresAt)
 	return err
 }
 
 func GetApproval(ctx context.Context, q Querier, id string) (*Approval, error) {
-	rows, err := q.Query(ctx, `SELECT `+approvalColumns+` FROM approvals WHERE id=$1`, id)
+	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals WHERE id=$1`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -414,7 +443,7 @@ func ListApprovals(ctx context.Context, q Querier, status, runID string, limit i
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := q.Query(ctx, `SELECT `+approvalColumns+` FROM approvals
+	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals
 		WHERE ($1 = '' OR status=$1) AND ($2 = '' OR run_id=$2) ORDER BY requested_at DESC LIMIT $3`, status, runID, limit)
 	if err != nil {
 		return nil, err

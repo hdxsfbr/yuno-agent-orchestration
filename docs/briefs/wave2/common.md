@@ -45,6 +45,9 @@ parallel, in this checkout, on disjoint files. Read first, in this order:
 - Do not commit. Do not touch `README.md`, `DECISIONS.md`, `AI_USAGE.md`; put what they
   need to say in your report.
 - UI copy is for operators: no developer notes, stub explanations or placeholders.
+- Test fixtures never borrow any part of a real credential or id: no real bot ids,
+  tokens, keys or user ids, even with the secret half changed. Invent values that are
+  obviously fake and still match the shape the code checks.
 
 ## Conventions to match
 

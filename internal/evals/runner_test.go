@@ -595,11 +595,11 @@ func TestRunnerContinuesAfterAnError(t *testing.T) {
 func TestRunnerRecoversFromPanics(t *testing.T) {
 	f, srv := startFake(t)
 	r := fastRunner(testConfig(srv.URL))
-	r.evaluate = func(c Case, tr store.Trace) []EvalResult {
+	r.evaluate = func(c Case, tr store.Trace, o Observed) []EvalResult {
 		if c.ID == "001-quick-run-happy" {
 			panic("evaluator exploded")
 		}
-		return Evaluate(c, tr)
+		return EvaluateObserved(c, tr, o)
 	}
 	results, err := r.Execute(context.Background(), legacyCases(t))
 	if err != nil {
@@ -806,7 +806,7 @@ func TestRunSuiteRejectsBadConfiguration(t *testing.T) {
 		mutate func(*config.Config)
 		want   string
 	}{
-		{"unsupported provider", func(c *config.Config) { c.EvalProvider = "anthropic" }, "not supported"},
+		{"unsupported provider", func(c *config.Config) { c.EvalProvider = "openai" }, "not supported"},
 		{"unknown split", func(c *config.Config) { c.EvalSplit = "everything" }, "unknown eval split"},
 		{"missing cases directory", func(c *config.Config) { c.EvalCasesDir = filepath.Join(t.TempDir(), "nope") }, "read eval cases"},
 		{"no private cases", func(c *config.Config) { c.EvalSplit = "private" }, "no eval cases"},
@@ -854,7 +854,7 @@ func TestRunSuiteWithAnAPIThatNeverBecomesReady(t *testing.T) {
 func TestRunUsesTheExportedEntryPoint(t *testing.T) {
 	// Run is what cmd/yuno calls. With a bad provider it must fail before touching the api.
 	cfg := suiteConfig(t, "http://127.0.0.1:1")
-	cfg.EvalProvider = "anthropic"
+	cfg.EvalProvider = "openai"
 	if err := Run(context.Background(), cfg, quietLogger()); err == nil {
 		t.Fatal("expected an error")
 	}

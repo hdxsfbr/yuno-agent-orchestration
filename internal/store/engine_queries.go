@@ -137,7 +137,7 @@ func SetToolCallInput(ctx context.Context, q Querier, id string, input json.RawM
 
 // GetApprovalByExternalID finds the approval recorded for an OpenClaw approval id.
 func GetApprovalByExternalID(ctx context.Context, q Querier, externalID string) (*Approval, error) {
-	rows, err := q.Query(ctx, `SELECT `+approvalColumns+` FROM approvals WHERE external_id=$1 ORDER BY requested_at DESC LIMIT 1`, externalID)
+	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals WHERE external_id=$1 ORDER BY requested_at DESC LIMIT 1`, externalID)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +152,7 @@ func GetApprovalByExternalID(ctx context.Context, q Querier, externalID string) 
 // returns ErrNotFound when the approval is not pending.
 func DecideApprovalAt(ctx context.Context, q Querier, id, status, by, reason string, at time.Time) (*Approval, error) {
 	rows, err := q.Query(ctx, `UPDATE approvals SET status=$2, decided_at=$5, decided_by=$3, reason=$4
-		WHERE id=$1 AND status='pending' RETURNING `+approvalColumns, id, status, by, reason, at.UTC())
+		WHERE id=$1 AND status='pending' RETURNING `+approvalSelect, id, status, by, reason, at.UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func DecideApprovalAt(ctx context.Context, q Querier, id, status, by, reason str
 
 // ListPendingApprovals returns a run's pending approvals, oldest first.
 func ListPendingApprovals(ctx context.Context, q Querier, runID string) ([]Approval, error) {
-	rows, err := q.Query(ctx, `SELECT `+approvalColumns+` FROM approvals WHERE run_id=$1 AND status='pending' ORDER BY requested_at`, runID)
+	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals WHERE run_id=$1 AND status='pending' ORDER BY requested_at`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -266,7 +266,7 @@ func SetApprovalExternalID(ctx context.Context, q Querier, id, externalID string
 
 // ListExpiredApprovals returns pending approvals whose expires_at is not after `at`.
 func ListExpiredApprovals(ctx context.Context, q Querier, at time.Time) ([]Approval, error) {
-	rows, err := q.Query(ctx, `SELECT `+approvalColumns+` FROM approvals WHERE status='pending' AND expires_at <= $1
+	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals WHERE status='pending' AND expires_at <= $1
 		ORDER BY expires_at`, at.UTC())
 	if err != nil {
 		return nil, err
@@ -276,7 +276,7 @@ func ListExpiredApprovals(ctx context.Context, q Querier, at time.Time) ([]Appro
 
 // GetApprovalForRunNode returns the newest approval of a kind raised by a node visit.
 func GetApprovalForRunNode(ctx context.Context, q Querier, runNodeID, kind string) (*Approval, error) {
-	rows, err := q.Query(ctx, `SELECT `+approvalColumns+` FROM approvals WHERE run_node_id=$1 AND kind=$2
+	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals WHERE run_node_id=$1 AND kind=$2
 		ORDER BY requested_at DESC, id DESC LIMIT 1`, runNodeID, kind)
 	if err != nil {
 		return nil, err

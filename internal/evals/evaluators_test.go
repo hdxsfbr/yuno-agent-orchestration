@@ -348,8 +348,8 @@ func TestEvaluateOnAnEmptyTraceFailsWithoutPanicking(t *testing.T) {
 }
 
 func TestSafeEvaluateTurnsAPanicIntoAFailure(t *testing.T) {
-	boom := namedEvaluator{name: "boom", fn: func(Case, store.Trace) EvalResult { panic("kaput") }}
-	got := safeEvaluate(boom, baseCase(), goodTrace())
+	boom := namedEvaluator{name: "boom", fn: func(Case, store.Trace, Observed) EvalResult { panic("kaput") }}
+	got := safeEvaluate(boom, baseCase(), goodTrace(), Observed{})
 	if got.Passed || got.Name != "boom" || !strings.Contains(got.Detail, "kaput") {
 		t.Fatalf("got %+v", got)
 	}
@@ -364,18 +364,6 @@ func TestFailedResults(t *testing.T) {
 		if r.Passed || r.Detail != "api down" || r.Name != EvaluatorNames()[i] {
 			t.Errorf("result %d = %+v", i, r)
 		}
-	}
-}
-
-func TestScoreRubric(t *testing.T) {
-	if got := ScoreRubric(baseCase(), goodTrace()); got.Score != 1 || got.Criteria != 0 {
-		t.Fatalf("empty rubric = %+v, want score 1", got)
-	}
-	c := baseCase()
-	c.Rubric = []map[string]any{{"id": "a"}, {"id": "b"}}
-	got := ScoreRubric(c, goodTrace())
-	if got.Score != 0 || got.Criteria != 2 || got.Detail == "" {
-		t.Fatalf("non-empty rubric = %+v, want unscored with a reason", got)
 	}
 }
 

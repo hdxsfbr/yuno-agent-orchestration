@@ -133,5 +133,24 @@ func TestBaselineTelegramModes(t *testing.T) {
 		if _, has := tg["webhookUrl"]; has != (mode == "webhook") {
 			t.Errorf("%s: webhookUrl presence %v", mode, has)
 		}
+		// D-025: the gateway may start before the api re-asserts the binding, so the
+		// baseline itself refuses DMs and groups.
+		if tg["dmPolicy"] != TelegramDMClosed || tg["groupPolicy"] != "disabled" {
+			t.Errorf("%s: dmPolicy=%v groupPolicy=%v, want both refused", mode, tg["dmPolicy"], tg["groupPolicy"])
+		}
+	}
+	in := inputs()
+	in.TelegramMode = "polling"
+	in.TelegramAllowedUserIDs = []int64{1184040613}
+	tg := Baseline(in)["channels.telegram"].(map[string]any)
+	ea := tg["execApprovals"].(map[string]any)
+	if ea["target"] != "dm" || len(ea["approvers"].([]any)) != 1 || len(tg["allowFrom"].([]any)) != 1 {
+		t.Errorf("approvers and allowlist come from TELEGRAM_ALLOWED_USER_IDS: %v", tg)
+	}
+	if owners := Baseline(in)["commands.ownerAllowFrom"].([]any); len(owners) != 1 || owners[0] != int64(1184040613) {
+		t.Errorf("commands.ownerAllowFrom = %v", owners)
+	}
+	if _, has := tg["botToken"]; has {
+		t.Error("the bot token stays in the gateway's environment, never in the config")
 	}
 }

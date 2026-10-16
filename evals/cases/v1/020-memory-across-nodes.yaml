@@ -1,0 +1,104 @@
+id: 020-memory-across-nodes
+version: v1
+split: private
+description: One agent with memory enabled saves a fact in one node of a workflow and recalls it in the next. The recall's tool output carries the fact, which proves it came from stored memory and not from the node's own context.
+workflow:
+  input_schema:
+    type: object
+    properties:
+      team: { type: string }
+    required: [team]
+    additionalProperties: true
+  nodes:
+    - { id: start, kind: start }
+    - id: remember
+      kind: agent
+      agent_name: analyst
+      task: |-
+        Remember that the {{.input.team}} team deploys on Tuesdays at 14:00 UTC. Save it with memory_save under the key deploy_window, then finish with the key you used.
+      output_schema:
+        type: object
+        properties:
+          saved_key: { type: string }
+        required: [saved_key]
+        additionalProperties: true
+      input_from: [start]
+    - id: recall
+      kind: agent
+      agent_name: analyst
+      task: |-
+        Use memory_recall with the query deploy_window to look up when the {{.input.team}} team deploys, and finish with the answer you found.
+      output_schema:
+        type: object
+        properties:
+          answer: { type: string }
+        required: [answer]
+        additionalProperties: true
+      input_from: [start]
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: remember }
+    - { from: remember, to: recall }
+    - { from: recall, to: end }
+  limits:
+    max_steps: 20
+    max_duration_seconds: 120
+input:
+  team: platform
+agents:
+  analyst:
+    name: Release analyst
+    system_prompt: |
+      You keep track of facts about the teams you work with. Save facts with memory_save and look them up
+      with memory_recall; answer only from what memory returns. Call yuno__finish with the result.
+    tool_allowlist: [memory_save, memory_recall, finish]
+    memory_policy:
+      enabled: true
+script:
+  # remember
+  - tool:
+      name: yuno__memory_save
+      args:
+        run_token: "$RUN_TOKEN"
+        key: deploy_window
+        value: The platform team deploys on Tuesdays at 14:00 UTC.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          saved_key: deploy_window
+  - text: The fact is saved and the result has been submitted.
+  # recall
+  - tool:
+      name: yuno__memory_recall
+      args:
+        run_token: "$RUN_TOKEN"
+        query: deploy_window
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          answer: The platform team deploys on Tuesdays at 14:00 UTC.
+  - text: The answer is found and the result has been submitted.
+expect:
+  status: succeeded
+  min_model_calls: 6
+  min_tool_calls: 4
+  state:
+    "/remember/saved_key": deploy_window
+    "/recall/answer": The platform team deploys on Tuesdays at 14:00 UTC.
+  tool_statuses:
+    memory_save: [executed]
+    memory_recall: [executed]
+  tool_outputs:
+    memory_recall: ["Tuesdays at 14:00 UTC"]
+  approval_statuses: []
+rubric:
+  - criterion: The first node saved the deploy window fact under the key deploy_window.
+    check: { path: /remember/saved_key, json_path_eq: deploy_window }
+  - criterion: The second node's answer states the Tuesday 14:00 UTC deploy window that the first node saved.
+    check: { path: /recall/answer, contains: Tuesdays at 14:00 UTC }
+  - criterion: The answer names the team the fact is about.
+    check: { path: /recall/answer, contains: platform }

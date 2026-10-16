@@ -9,7 +9,7 @@ One agent is reachable over Telegram.
 Agents execute on OpenClaw; this repository is the control plane around it (workflow
 engine, approvals, limits, traces, evals, channel, UI). See `docs/adr/0001-runtime.md`.
 
-Status: waves 1 and 2 of 4 are done. Working end to end: agent configuration in the UI
+Status: waves 1, 2 and 3 of 4 are done. Working end to end: agent configuration in the UI
 and API, materialised into OpenClaw (config entry, exec policy, workspace files);
 multi-agent workflows as graphs with conditions, feedback loops and typed state, built
 in the visual builder or loaded from the two shipped templates; agent turns executed by
@@ -19,11 +19,16 @@ to agent; the platform tools over MCP (`finish`, `deploy_release`, `http_fetch`,
 idempotency keys and a human approval gate in front of every side effect, answered from
 the approvals inbox or the run page; approval nodes in workflows; exec approvals from
 the gateway; retries; live traces over SSE with tokens, cost, agent messages and state;
-step, time, cost, tool-call, loop and cancellation limits; `make eval` with twelve
-public cases, seven evaluators and a baseline report. Not yet (waves 3 and 4,
-`docs/DESIGN.md` section 9): Telegram, agent memory in the prompt, skills, schedules,
-guardrails, the full eval suite with the rubric evaluator, the final docs. This file is
-kept truthful at every commit; sections marked "not yet" are not yet.
+step, time, cost, tool-call, loop and cancellation limits; one agent reachable over
+Telegram through OpenClaw's native channel, with the conversation mirrored into the
+platform and approvals from chat sessions in the inbox; cron and delay schedules;
+per-agent guardrails (cost cap, runs per hour, blocked tools, input patterns); agent
+memory with a retention policy, rendered into the agent's memory file; skills; and
+`make eval` with seventeen public cases, seven evaluators and a rubric evaluator in
+heuristic and model modes. Not yet (wave 4, `docs/DESIGN.md` section 9): the final
+documentation (architecture diagram, threat model, demo script) and the last
+polish. This file is kept truthful at every commit; sections marked "not yet" are not
+yet.
 
 ## Run it
 
@@ -46,7 +51,11 @@ container is ever recreated on its own, recreate `api` too (`make run` does both
 
 Then open http://localhost:8080. Agents lists the seeded agents, Workflows has the two
 templates ("From template" makes an editable copy; Run asks for the input), Approvals is
-the inbox, Runs shows every run with its live trace. `make help` lists every target. The
+the inbox, Runs shows every run with its live trace, Channels binds one agent to Telegram
+and shows the conversations, Schedules fires workflows on a cron or once (each firing is
+recorded once per occurrence; a once-schedule that fired needs a new time to run again),
+Skills holds the markdown skills agents can list, and Status shows the gateway and the
+scheduler's next due time. `make help` lists every target. The
 ones that matter:
 
 | Target | What it does |
@@ -74,6 +83,14 @@ The model upstream is `MODEL_UPSTREAM=anthropic` with `ANTHROPIC_API_KEY`, or
 models through the Anthropic messages format, and the proxy rewrites model ids
 (`claude-opus-5-5` becomes `anthropic/claude-opus-5.5`) and the auth header, so agents
 are configured identically either way.
+Telegram: set `TELEGRAM_MODE=polling` (or `webhook` with `PUBLIC_BASE_URL` from `make
+tunnel` and a `TELEGRAM_WEBHOOK_SECRET`), `TELEGRAM_BOT_TOKEN` from BotFather and
+`TELEGRAM_ALLOWED_USER_IDS` (numeric ids; only these users can talk to the bot or
+approve from chat). The channel stays closed until an agent is bound on the Channels page
+or with `PUT /api/channels/telegram/binding`; binding restarts the gateway in place
+(about five seconds). Conversations are the agent's own sessions, not runs; they appear
+under Channels with their transcript.
+
 Tool settings: `DEPLOYTARGET_URL` (the local release store `deploy_release` publishes
 to), `HTTP_FETCH_ALLOWLIST` (hosts `http_fetch` may reach; empty means none),
 `GITLAB_BASE_URL`, `GITLAB_PROJECT_ID` and `GITLAB_TOKEN` (all three register
@@ -103,6 +120,17 @@ output. OpenClaw's built-ins run inside the agent's Docker sandbox.
 Side effects are idempotent: the key is a hash of run, node visit, tool and canonical
 input; a repeat replays the stored result and says so (`replayed: true`), and the deploy
 target enforces the same key on its side.
+
+Guardrails per agent: a cost cap per run (the run's limit becomes the minimum across its
+agents), runs per hour (429 at trigger, recorded on a schedule's last error), blocked
+tools (removed from the agent's tool list and refused by the gate), and input patterns
+(RE2 over the tool input; a match is refused with `input blocked by guardrail <name>`).
+An agent with patterns on `exec` runs host commands only through an exec approval (the
+platform denies the ones a pattern matches, the rest reach the inbox); the sandbox is the
+one place OpenClaw does not gate, so a matching command inside it is not blocked (D-028).
+Memory: with `memory_policy.enabled`, `memory_save` and `memory_recall` keep up to
+`max_facts` facts (default 200, 30-day TTL, oldest evicted) and the 20 newest are written
+into the agent's `MEMORY.md` before each turn.
 
 ## Workflows and approvals
 
@@ -140,6 +168,10 @@ internal/openclaw/  baseline gateway config (openclaw-init) and the gateway clie
 internal/workflow/  graph definition, validation, conditions, task templates
 internal/tools/     platform tools served over MCP, idempotent executor, policy
 internal/seed/      the six demo agents (`yuno seed`)
+internal/channels/  Telegram binding and the keeper that re-asserts it on the gateway
+internal/sched/     cron parsing and the scheduler tick
+internal/guardrails/ cost cap, rate limit, blocked tools, input patterns
+internal/memory/    facts, retention sweeper, MEMORY.md rendering
 internal/model/     model proxy, scripted offline provider, price table
 internal/store/     pgx repositories and embedded SQL migrations
 internal/deploytarget/ local release store the deploy tool publishes to
@@ -149,7 +181,7 @@ internal/pathcheck/ relative-path validation shared by tools and the deploy targ
 api/openapi.yaml    the HTTP contract, served at /openapi.yaml and validated in tests
 web/                React + Vite + TypeScript UI
 docker/             Dockerfiles (api, web, the OpenClaw sandbox image) and nginx config
-scripts/            smoke.sh, openclaw-probe.mjs, openclaw-probe-approval.mjs, ensure-env.sh
+scripts/            smoke.sh, the three gateway probes (turn, approval, telegram), ensure-env.sh, mutation-check.sh
 templates/          the two workflow templates, loaded at api start
 evals/              versioned eval cases (twelve public, two private) and reports
 docs/briefs/        the briefs the build agents worked from, per wave

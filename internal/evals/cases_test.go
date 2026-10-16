@@ -244,20 +244,30 @@ const shippedCasesDir = "../../evals/cases"
 
 // shippedSplits is the committed case list: every case and its split.
 var shippedSplits = map[string]string{
-	"001-quick-run-happy":       SplitPublic,
-	"002-step-limit":            SplitPublic,
-	"003-cancel":                SplitPublic,
-	"004-dev-pipeline-happy":    SplitPublic,
-	"005-feedback-loop-once":    SplitPublic,
-	"006-feedback-loop-limit":   SplitPublic,
-	"007-approval-rejected":     SplitPublic,
-	"008-approval-expiry":       SplitPublic,
-	"009-cost-limit":            SplitPublic,
-	"010-idempotent-replay":     SplitPublic,
-	"011-blocked-tool":          SplitPublic,
-	"012-prompt-injection-exec": SplitPrivate,
-	"013-output-schema-repair":  SplitPublic,
-	"014-tool-approval-gate":    SplitPrivate,
+	"001-quick-run-happy":               SplitPublic,
+	"002-step-limit":                    SplitPublic,
+	"003-cancel":                        SplitPublic,
+	"004-dev-pipeline-happy":            SplitPublic,
+	"005-feedback-loop-once":            SplitPublic,
+	"006-feedback-loop-limit":           SplitPublic,
+	"007-approval-rejected":             SplitPublic,
+	"008-approval-expiry":               SplitPublic,
+	"009-cost-limit":                    SplitPublic,
+	"010-idempotent-replay":             SplitPublic,
+	"011-blocked-tool":                  SplitPublic,
+	"012-prompt-injection-exec":         SplitPrivate,
+	"013-output-schema-repair":          SplitPublic,
+	"014-tool-approval-gate":            SplitPrivate,
+	"015-research-pipeline-happy":       SplitPublic,
+	"016-time-limit":                    SplitPublic,
+	"017-tool-call-limit":               SplitPublic,
+	"018-schedule-triggered-run":        SplitPublic,
+	"019-rate-limit":                    SplitPublic,
+	"020-memory-across-nodes":           SplitPrivate,
+	"021-http-fetch-untrusted-content":  SplitPrivate,
+	"022-cancel-while-waiting-approval": SplitPrivate,
+	"023-gitlab-tool-absent":            SplitPrivate,
+	"024-guardrail-blocked-input":       SplitPrivate,
 }
 
 func TestShippedCasesAreValid(t *testing.T) {
@@ -274,8 +284,8 @@ func TestShippedCasesAreValid(t *testing.T) {
 		} else if c.Split != want {
 			t.Errorf("%s: split = %s, want %s", c.ID, c.Split, want)
 		}
-		if len(c.Rubric) != 0 {
-			t.Errorf("%s: rubric must be empty in this wave", c.ID)
+		if n := len(c.Rubric); n != 0 && (n < MinRubricCriteria || n > MaxRubricCriteria) {
+			t.Errorf("%s: rubric has %d criteria, want %d to %d or none", c.ID, n, MinRubricCriteria, MaxRubricCriteria)
 		}
 		if _, err := c.ModelSteps(); err != nil {
 			t.Errorf("%s: %v", c.ID, err)

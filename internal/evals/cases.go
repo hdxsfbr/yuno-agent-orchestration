@@ -15,6 +15,7 @@ import (
 
 	"yuno/internal/model"
 	"yuno/internal/store"
+	"yuno/internal/workflow"
 )
 
 // Case splits. SplitAll is only valid as a filter, never as a case's own split.
@@ -53,10 +54,10 @@ type Case struct {
 	Input    map[string]any       `yaml:"input"`
 	Agents   map[string]AgentSpec `yaml:"agents"`
 
-	Script  []ScriptStep     `yaml:"script"`
-	Actions Actions          `yaml:"actions"`
-	Expect  Expect           `yaml:"expect"`
-	Rubric  []map[string]any `yaml:"rubric"`
+	Script  []ScriptStep      `yaml:"script"`
+	Actions Actions           `yaml:"actions"`
+	Expect  Expect            `yaml:"expect"`
+	Rubric  []RubricCriterion `yaml:"rubric"`
 
 	// Path is the file the case was loaded from.
 	Path string `yaml:"-"`
@@ -64,6 +65,25 @@ type Case struct {
 
 // IsWorkflow reports whether the case runs an inline workflow rather than one agent.
 func (c Case) IsWorkflow() bool { return c.Workflow != nil }
+
+// RunsModel reports whether the case has any agent turn to script: a quick run always
+// does, a workflow only when it has an agent node. A workflow without one (start to end,
+// DESIGN 5.6) needs no agents and no script.
+func (c Case) RunsModel() bool {
+	if !c.IsWorkflow() {
+		return true
+	}
+	def, err := c.Definition()
+	if err != nil {
+		return true
+	}
+	for _, n := range def.Nodes {
+		if n.Kind == workflow.KindAgent {
+			return true
+		}
+	}
+	return false
+}
 
 // AgentSpec describes a temporary agent created for the case. In a quick run Name is a
 // label sent as the agent's role; in a workflow case the key of the agents map is the
@@ -78,11 +98,16 @@ type AgentSpec struct {
 	// (DESIGN 5.3 rule 6). The approval_gate evaluator reads it to know which side
 	// effects were allowed to run without a human decision.
 	InteractionRules map[string]string `yaml:"interaction_rules"`
+	// Guardrails and MemoryPolicy are the agent's DESIGN 5.11 and 5.10 settings, sent
+	// to the api as they are.
+	Guardrails   Guardrails   `yaml:"guardrails"`
+	MemoryPolicy MemoryPolicy `yaml:"memory_policy"`
 }
 
 func (a AgentSpec) isZero() bool {
 	return a.Name == "" && a.SystemPrompt == "" && len(a.ToolAllowlist) == 0 &&
-		a.Limits == (Limits{}) && len(a.InteractionRules) == 0
+		a.Limits == (Limits{}) && len(a.InteractionRules) == 0 &&
+		a.Guardrails.isZero() && a.MemoryPolicy == (MemoryPolicy{})
 }
 
 // Limits mirrors store.Limits with YAML tags. Zero means the platform default.
@@ -152,6 +177,43 @@ type Actions struct {
 	// ApprovalWaitSeconds makes the runner leave the first pending approval alone for
 	// that long before it applies any action; an expiry case waits past the timeout.
 	ApprovalWaitSeconds int `yaml:"approval_wait_seconds"`
+	// CancelWhenWaiting cancels the run once it is waiting for approval, instead of
+	// deciding the approval (DESIGN 5.3 rule 8).
+	CancelWhenWaiting bool `yaml:"cancel_when_waiting"`
+	// Retrigger triggers the same workflow again once the run has ended and records the
+	// HTTP status of the answer (expect.trigger_status). A rate limit refuses it (429).
+	Retrigger bool `yaml:"retrigger"`
+	// Schedule starts the run through a schedule instead of POST /api/runs.
+	Schedule *ScheduleAction `yaml:"schedule"`
+}
+
+// ScheduleAction makes the runner trigger the case through a one-shot schedule
+// (DESIGN 5.9): POST /api/schedules with kind delay and run_at set RunInSeconds from
+// now, then wait for the run the scheduler creates.
+type ScheduleAction struct {
+	Kind         string `yaml:"kind"`           // delay (the only kind that fires within a case)
+	RunInSeconds int    `yaml:"run_in_seconds"` // run_at = now + this
+	WaitSeconds  int    `yaml:"wait_seconds"`   // how long to wait for the run to appear; default 30
+}
+
+// ScheduleKindDelay is the one-shot schedule kind of DESIGN 5.9.
+const ScheduleKindDelay = "delay"
+
+// Bounds for a schedule action, in seconds.
+const (
+	maxScheduleRunIn = 30
+	maxScheduleWait  = 120
+	// defaultScheduleWait covers one scheduler tick (SCHEDULER_TICK, default 10 s) plus
+	// the delay and some margin.
+	defaultScheduleWait = 30
+)
+
+// wait returns the time the runner waits for a scheduled run to appear.
+func (s ScheduleAction) wait() int {
+	if s.WaitSeconds > 0 {
+		return s.WaitSeconds
+	}
+	return defaultScheduleWait
 }
 
 // ApprovalAction is one human decision the runner makes on a pending approval.
@@ -183,6 +245,30 @@ type Expect struct {
 	// ApprovalStatuses, when set, is the exact list of the run's approval statuses in
 	// the order they were requested. An empty list means the run raised no approval.
 	ApprovalStatuses *[]string `yaml:"approval_statuses"`
+	// ApprovalReasons, when set, lists in request order a substring each approval's
+	// reason must contain (case-insensitive); an empty entry is not checked. A list
+	// shorter than the approvals checks the first ones only.
+	ApprovalReasons []string `yaml:"approval_reasons"`
+	// ToolOutputs maps a tool name to texts that must each appear in the output of at
+	// least one row of that tool (case-insensitive, in any string of the output).
+	ToolOutputs map[string][]string `yaml:"tool_outputs"`
+
+	// The next fields are checked against what the runner observed outside the run's
+	// own trace (see Observed).
+
+	// Trigger is the run's trigger (manual, schedule, channel). With "schedule" the run's
+	// trigger_ref must also name the schedule the runner created ("<id>@<occurrence>").
+	Trigger string `yaml:"trigger"`
+	// ScheduleEnabled is whether the schedule the case created is still enabled once
+	// the run has ended; a delay schedule disables itself after it fires.
+	ScheduleEnabled *bool `yaml:"schedule_enabled"`
+	// TriggerStatus is the HTTP status of the extra trigger of actions.retrigger.
+	TriggerStatus int `yaml:"trigger_status"`
+	// TriggerErrorContains is a case-insensitive substring of that answer's message.
+	TriggerErrorContains string `yaml:"trigger_error_contains"`
+	// ToolsPresent and ToolsAbsent are tool names GET /api/tools must, or must not, list.
+	ToolsPresent []string `yaml:"tools_present"`
+	ToolsAbsent  []string `yaml:"tools_absent"`
 }
 
 // ModelSteps converts the script to the API's registration shape.

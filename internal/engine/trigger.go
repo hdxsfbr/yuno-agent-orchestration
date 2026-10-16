@@ -10,6 +10,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"yuno/internal/guardrails"
 	"yuno/internal/store"
 	"yuno/internal/workflow"
 )
@@ -57,8 +58,14 @@ func (e *Engine) triggerWorkflow(ctx context.Context, req TriggerRequest) (*stor
 	if err != nil {
 		return nil, err
 	}
-	def.Limits = limits
-	return e.queueRun(ctx, wf, def, input, req)
+	// Guardrails (DESIGN 5.11 rules 1 and 2): every participating agent's per-run cost
+	// cap lowers the run's, and their hourly rates are checked as the run is stored.
+	agents, err := guardrails.ParticipatingAgents(ctx, e.deps.Pool, def)
+	if err != nil {
+		return nil, err
+	}
+	def.Limits = guardrails.EffectiveLimits(limits, agents, e.deps.Cfg.MaxCostUSD)
+	return e.queueRun(ctx, wf, def, input, req, agents)
 }
 
 // checkAgentNodes requires every agent node to name an existing agent by id (a

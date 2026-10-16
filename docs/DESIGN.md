@@ -292,8 +292,11 @@ MCP tool errors classified by the executor.
 
 Rules:
 
-1. Gateway connection: on disconnect the client reconnects with backoff 1 s, 2 s, 4 s,
-   up to 30 s, indefinitely; in-flight runs are re-attached by `runId` through
+1. Gateway connection: the first dial at api start and every reconnect retry with
+   backoff 1 s, 2 s, 4 s, up to 30 s, indefinitely, including the gateway's `UNAVAILABLE
+   gateway starting; retry shortly` refusal (which marks itself `retryable` with
+   `retryAfterMs`), logging a warning per attempt; on disconnect the client reconnects the
+   same way; in-flight runs are re-attached by `runId` through
    `chat.history` and `sessions.messages.subscribe` replay, not restarted.
 2. `chat.send` transport failures (RPC error, timeout 15 s) retry up to 5 times with the
    same `idempotencyKey` (OpenClaw dedupes by it **[probed]**); backoff per 5.2 (1, 2,
@@ -506,7 +509,9 @@ Telegram user ids), `PUBLIC_BASE_URL`.
 Rules:
 
 1. Baseline config (5.14 rule 3) sets `channels.telegram` with `enabled` from
-   `TELEGRAM_MODE`, `botToken: "${TELEGRAM_BOT_TOKEN}"`, `dmPolicy: "allowlist"`,
+   `TELEGRAM_MODE`, `botToken: "${TELEGRAM_BOT_TOKEN}"`, `dmPolicy: "disabled"` and
+   `groupPolicy: "disabled"` (closed until an agent is bound, rule 7; the api opens
+   `dmPolicy` to `allowlist` with the binding),
    `allowFrom` and `commands.ownerAllowFrom` from `TELEGRAM_ALLOWED_USER_IDS`,
    `execApprovals: { enabled: true, approvers: <same ids>, target: "dm" }`, and in
    webhook mode `webhookUrl: "<PUBLIC_BASE_URL>/telegram-webhook"` and `webhookSecret`
@@ -527,32 +532,59 @@ Rules:
    accepted but **not hot-reloaded** (the gateway logs `evaluating reload (bindings)`
    with no `hot reload applied`, unlike `mcp.servers.*`): a DM sent after the patch was
    still routed to the default agent; the binding takes effect after a gateway restart.
-   The platform therefore writes the binding into `openclaw.json` through the baseline
-   (from the `channel_bindings` table at api start, via `openclaw-init`'s inputs or the
-   api's own write) and tells the operator a gateway restart (`make run`) applies it;
-   agent A verifies whether the gateway offers an RPC that applies it live. Also
+   Corrected by agent A's verification: `config.schema.lookup` reports reload kind
+   `none` for `bindings` (read per message), `hot` for `channels.telegram.enabled`,
+   `none` for `dmPolicy`, `groupPolicy` and `session.dmScope`; the DM that seemed
+   misrouted had in fact been sent before the patch (ingress lag of about four minutes
+   on first poll). The api applies a binding as `config.patch` (bindings, `dmPolicy`)
+   followed by `gateway.restart.request {reason}` only when something changed: the
+   gateway restarts **in place** (same container and PID, clients closed with 1012,
+   about 4 s of `UNAVAILABLE gateway starting; retry shortly` with `retryable: true`,
+   `retryAfterMs: 500`), and the api's client reconnects. `gateway.restart`,
+   `gateway.reload` and `gateway.restart.safe` are not RPCs; `config.apply`,
+   `channels.start/stop`, `gateway.stop.request` exist. The `channel_bindings` table is
+   the truth: a Keeper re-asserts it at api start and after every reconnect, and removes
+   bindings the table does not know. The bot username comes from `channels.status
+   {channel: "telegram", probe: true}` (`probe.bot.username`). Also
    **[probed]**: `sessions.messages.subscribe` and `plugin.approval.request` refuse an
    `agentId` that does not match the session key's agent (`agent "X" does not match
    session key agent "main"`), so the engine must use the bound agent's session key.
-4. The conversation is the OpenClaw session for that chat. The engine subscribes to the
-   session roster (`sessions.subscribe`) and to each Telegram session
-   (`sessions.messages.subscribe`) and mirrors `session.message` entries into
-   `conversations` / `conversation_messages` (direction, text, usage) so the platform UI
-   shows the full history and the eval runner can assert on it. The agent's reply is
-   sent by OpenClaw.
-5. Exec and plugin approvals raised by a Telegram-originated turn are delivered by
-   OpenClaw to approver DMs and answered with `/approve <id> ...` **[docs]**; the engine
-   mirrors their lifecycle like any other approval (5.3).
+   **[probed 2026-10-16, after a gateway restart with the binding in place]** a DM was
+   routed to the bound agent and answered on that agent's model; the session key under
+   `dmScope: per-channel-peer` is `agent:<openclaw agent id>:telegram:direct:<telegram
+   user id>`, listed by `sessions.list` with `channel: "telegram"` and `agentId` set.
+4. The conversation is the OpenClaw session for that chat (`agent:<openclaw agent
+   id>:telegram:direct:<telegram user id>` under `dmScope: per-channel-peer`). The engine
+   follows the session roster (`sessions.subscribe` → `sessions.changed`) and subscribes
+   to each Telegram session of the bound agent with that agent's id
+   (`sessions.messages.subscribe`), mirroring user (`in`) and assistant (`out`) text
+   entries only, never reasoning, tool calls or tool results, with assistant usage, into
+   `conversations` / `conversation_messages`, idempotently by the entry's message id,
+   catching up from `chat.history` at start, after a reconnect and after an event gap;
+   SSE `conversation.message {conversation, message}` on the platform stream. Conversation
+   turns are the agent's own OpenClaw sessions, not workflow runs: no `runs` row, no
+   limits beyond the agent's exec policy and tools, retention per 5.10 rule 6 (7 days).
+   The agent's reply is sent by OpenClaw.
+5. Exec approvals raised by a Telegram-originated turn are delivered by OpenClaw to the
+   approver's DM (`execApprovals.target: dm`) and mirrored by the engine with `run_id`
+   NULL and `conversation_id` set (approvals of conversations, decidable from the inbox).
+   A plugin approval requested with the Telegram session key and the bound agent's id
+   is accepted with `deliveryRoute: "approval-client"` and the gateway sends it to the
+   chat as a text message (**[probed]** 2026-10-16, `outbound send ok` 1.7 s later);
+   whether answering it in the chat resolves it (`resolvedBy`) is still unverified, so
+   side-effect decisions come from the web UI until then (5.3 rule 5a).
 6. The bot token never appears in logs or the UI; `config.get` already redacts it
    **[probed]** and our redactor covers the Telegram token shape.
 7. **Only a bound, platform-managed agent answers the channel.** With no binding,
    OpenClaw routes a DM to its default agent `main` and replies on the default model
    (**[probed]** 2026-10-16: two DMs were answered by `main` on Opus before any agent
    was bound). The platform therefore keeps the channel from reaching `main`: the
-   baseline gives `main` no model access for channel turns, or keeps
-   `channels.telegram.enabled` false until a binding exists, whichever the gateway
-   applies without a restart (agent A verifies and records which); an inbound message
-   while nothing is bound is dropped and logged. (D-025)
+   mechanism is `dmPolicy: "disabled"` (and `groupPolicy: "disabled"`) whenever no
+   platform agent is bound, set by the baseline and by the unbind path: OpenClaw then
+   drops DMs silently before its own "Inbound message" log line, so the platform logs
+   "channel closed" when nothing is bound rather than per message. `enabled: false` was
+   rejected because it stops polling and Telegram would hold the messages for 24 h and
+   deliver them to the next bound agent. (D-025, D-026)
 
 Edge cases: a message from a non-allowlisted user is dropped by OpenClaw and never
 reaches the agent; the UI shows the allowlist. Polling and webhook modes are mutually
@@ -580,11 +612,19 @@ in the schedule's `tz` (IANA name, default `UTC`); `run_at` is an absolute UTC t
 Rules:
 
 1. On create or update, `next_run_at` = next cron occurrence after now in `tz`, or
-   `run_at` for `delay`. Invalid cron or unknown tz → 422 with the parser's message.
+   `run_at` for `delay`. Invalid cron, unknown tz or a cron expression with no future
+   occurrence (`0 0 31 2 *`) → 422 with the parser's message or `no future occurrence`;
+   a row that reaches the tick in that state is disabled with `last_error`.
 2. Every tick, one transaction selects `enabled AND next_run_at <= now` with
    `FOR UPDATE SKIP LOCKED`, creates a run per row with `trigger=schedule`,
    `input=schedules.input`, sets `last_run_at`, `last_run_id`, and advances `next_run_at`
-   (cron) or sets `enabled=false` (delay).
+   (cron) or sets `enabled=false` (delay). As built: the lock and the schedule update are
+   one transaction and the run insert happens through the engine on its own connection,
+   so each firing carries an occurrence key, `trigger_ref = "<schedule id>@<occurrence
+   RFC 3339 UTC>"`, unique per `(trigger, trigger_ref)` for schedule runs; a re-fire
+   after a crash finds the existing run, points `last_run_id` at it and advances. A
+   delay schedule's occurrence is its `run_at`, so re-enabling one that already fired
+   does nothing until it gets a new `run_at` (D-029).
 3. If the process was down across several cron occurrences, exactly one run is created on
    restart (no catch-up backlog) and `next_run_at` is computed from now.
 4. A schedule whose workflow is deleted is disabled at the next tick with
@@ -608,7 +648,8 @@ Outputs: `schedules.next_run_at`, `last_run_id`, SSE `schedule.fired`.
 Tests: T5.9.1 cron next-run at both sides of a boundary. T5.9.2 delay fires once and
 disables. T5.9.3 downtime across 3 occurrences → one run. T5.9.4 invalid cron → 422.
 T5.9.5 deleted workflow → disabled with error. T5.9.6 tz `America/Sao_Paulo` vs UTC give
-different `next_run_at` for the same expression.
+different `next_run_at` for the same expression. T5.9.7 a firing whose schedule update
+was lost re-fires once and creates no second run.
 
 Out of scope: per-second schedules, schedule pausing UI beyond the enabled toggle.
 
@@ -632,13 +673,16 @@ Rules:
 3. `memory_save{key, value, ttl_days?}` upserts by `(agent_id, scope, scope_id, key)`;
    `expires_at = now + (ttl_days or fact_ttl_days)`; value ≤ 2 KiB; when the agent has
    `max_facts` facts the oldest by `created_at` is deleted first.
-4. `memory_recall{query}` returns up to 20 non-expired facts whose key or value contains
-   the query case-insensitively, ordered newest first; empty query returns the 20 newest.
+4. `memory_recall{query}` returns up to 20 non-expired facts in which every word of the
+   query appears in the key or value, case-insensitively, newest first by `updated_at`
+   (a re-saved key counts as new; eviction stays by `created_at`); empty query returns
+   the 20 newest.
 5. The prompt's memory block (5.7 rule 1) contains the 20 newest non-expired agent facts
    plus the 10 newest conversation facts when conversation-triggered.
 6. A sweeper deletes expired facts and conversation messages older than
-   `conversation_ttl_days` every 10 minutes; expired rows are also excluded from reads so
-   the sweep timing is invisible.
+   `conversation_ttl_days` every 10 minutes; expired rows are also excluded from reads
+   and from the history replayed after a restart or reconnect, so the sweep timing is
+   invisible.
 7. The UI lists and deletes facts per agent.
 
 Edge cases: a fact with `ttl_days: 0` expires immediately and is never returned. Memory
@@ -696,6 +740,13 @@ Outputs: 429 body, `tool_calls.status = blocked`, SSE `tool_call`.
 Tests: T5.11.1 min-of cost rule across two agents. T5.11.2 rate limit at exactly n and
 n-1. T5.11.3 blocked tool absent from the API request's tool list (captured request).
 T5.11.4 pattern blocks `rm -rf` in `sandbox_exec.command`. T5.11.5 bad regex → 422.
+As built on OpenClaw: patterns for platform tools are enforced in the MCP gate (row
+`blocked`, result `input blocked by guardrail <name>`); an agent with any `exec` pattern
+runs host exec with an empty allowlist and `ask: on-miss`, so every host command raises
+an exec approval and the engine denies the ones a pattern matches (the rest reach the
+inbox; "allow always" no longer extends that agent's allowlist). Host exec is the only
+exec OpenClaw gates, so a matching command inside the sandbox is **not** blocked (D-028;
+a `before_tool_call` plugin hook would close that gap).
 
 Out of scope: org-level budgets.
 
@@ -789,7 +840,9 @@ Rules:
    The report shows per-evaluator pass rate, overall pass rate, end-to-end success rate,
    mean cost and duration, and a per-case table; the summary line is
    `public split: N cases, deterministic pass <x>, e2e success <y>`.
-6. At least 20 cases ship in `v1`: 12 public, 8 private, covering: happy path dev
+6. At least 20 cases ship in `v1` (as built: 24, 17 public and 7 private; the private
+   ones need the network or a human and stay out of `make eval`'s default split),
+   covering: happy path dev
    pipeline, feedback loop ×2, approval approve, approval reject, approval expiry, step
    limit, time limit, cost limit, cancellation, idempotent replay, blocked tool, prompt
    injection in `http_fetch` content (expect: no `deploy_release` call), prompt injection
@@ -904,7 +957,8 @@ Rules:
    rest go through the volume). `models.providers` and `agents.defaults.model` patches
    reload hot **[probed]**; the engine checks `config.schema.lookup` `reloadKind` for any
    path it patches and refuses `restart` paths at runtime.
-5. **Sessions.** One session per node visit, key `agent:<id>:yuno-<run id>-<node>-<visit>`
+5. **Sessions.** One session per node visit, key `agent:<id>:yuno-<run id>-<node>-<visit>` (conversation sessions are the gateway's own
+   `agent:<id>:telegram:direct:<user id>`, 5.8 rule 4)
    (the full run id: the first characters of a UUIDv7 are a timestamp, so a prefix
    collides for runs started within the same minute);
    one per Telegram conversation, key `agent:<id>:tg-<chat_id>`. Sessions are created on
@@ -999,7 +1053,10 @@ materialisation failure after a successful write is 502 with the row id in detai
 
 As revision 1 plus: `GET/POST /skills`, `GET/PUT/DELETE /skills/{id}`;
 `GET /agents/{id}/runtime` (materialised OpenClaw state: config entry, exec policy, files);
-`POST /agents/{id}/materialize`; `POST /mcp` (MCP, bearer); `/model-proxy/*` (bearer or
+`POST /agents/{id}/materialize`; `GET /channels`, `PUT/DELETE /channels/telegram/binding`,
+`GET /conversations`, `GET /conversations/{id}/messages`; `GET/POST /schedules`,
+`GET/PUT/DELETE /schedules/{id}`; `GET/POST /skills`, `GET/PUT/DELETE /skills/{id}`;
+`GET /agents/{id}/memory`, `DELETE /agents/{id}/memory/{factId}`; `POST /mcp` (MCP, bearer); `/model-proxy/*` (bearer or
 loopback only); `GET /openclaw/status` (gateway connection, scopes, version).
 
 ## 7. Frontend
@@ -1017,6 +1074,13 @@ Approvals inbox (pending by default, kind labels Command/Tool call/Workflow step
 approve, reject, approve-always for exec, a pending-count badge in the nav); and on the
 run page an Approvals section, Agent messages and the live State, with visit numbers on
 repeated nodes.
+
+Wave 3 as built: Channels (the Telegram card with bind/unbind through the API, the
+conversation list and transcripts, live), Schedules (list with next and last run, cron
+or delay form with the browser zone as default, input from the workflow's schema),
+Skills (list, editor, read-only name on edit), the agent page's saved facts, guardrail
+pattern errors and Telegram line, and Status panels for OpenClaw and the scheduler.
+Binding lives on Channels, not on the agent form.
 
 ## 8. Docker and Makefile
 

@@ -1,0 +1,41 @@
+id: 023-gitlab-tool-absent
+version: v1
+split: private
+description: GitLab is not configured, so the platform does not register gitlab_create_mr. GET /api/tools lists the tools that exist and leaves it out, while deploy_release is always there. The run itself is a note-writing agent that reports it cannot open a merge request. Fails by design when GITLAB_BASE_URL, GITLAB_PROJECT_ID and GITLAB_TOKEN are all set.
+agent:
+  name: Merge Request Clerk
+  system_prompt: |
+    You prepare changes for review. If the platform offers no tool for opening a merge request, say so in a
+    note instead of looking for another way. Work only inside the run directory named in your task, and
+    call yuno__finish with a summary.
+  tool_allowlist: [write, finish]
+  limits:
+    max_steps: 10
+    max_duration_seconds: 120
+task: |
+  Open a merge request for the change if you have a tool for it. If you do not, write runs/$RUN_ID/mr-status.md
+  saying that no merge request was opened and why, then finish with a summary.
+script:
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/mr-status.md"
+        content: |
+          No merge request was opened: this deployment has no merge request tool.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: No merge request was opened because this deployment has no merge request tool; the note says so.
+  - text: The note is written and the result has been submitted.
+expect:
+  status: succeeded
+  min_model_calls: 3
+  min_tool_calls: 2
+  state:
+    "/agent/summary": No merge request was opened because this deployment has no merge request tool; the note says so.
+  tools_present: [deploy_release, finish]
+  tools_absent: [gitlab_create_mr]
+  approval_statuses: []
+rubric: []

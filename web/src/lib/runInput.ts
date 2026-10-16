@@ -78,3 +78,16 @@ export function parseWholeInput(text: string): { input?: Record<string, unknown>
     return { error: `Not valid JSON: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
+
+/** The draft that reproduces an input already saved, so a form can open on it. */
+export function draftFromInput(fields: InputField[], input: Record<string, unknown> | null | undefined): InputDraft {
+  const draft = emptyDraft(fields);
+  for (const f of fields) {
+    const v = input?.[f.name];
+    if (v === undefined || v === null) continue;
+    if (f.type === "boolean") draft[f.name] = v === true;
+    else if (f.type === "json") draft[f.name] = JSON.stringify(v, null, 2);
+    else draft[f.name] = String(v);
+  }
+  return draft;
+}

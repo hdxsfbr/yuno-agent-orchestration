@@ -8,18 +8,15 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"yuno/internal/memory"
 	"yuno/internal/store"
 )
 
 // Memory tools (DESIGN 5.7 table, 5.10): an agent's own facts, scope agent this wave.
+// Retention, eviction and recall order are internal/memory's.
 const (
 	MemorySaveName   = "memory_save"
 	MemoryRecallName = "memory_recall"
-
-	// defaultMaxFacts applies when the agent's memory policy sets no max_facts; recall
-	// returns at most recallLimit facts (DESIGN 5.10 rules 3 and 4).
-	defaultMaxFacts = 200
-	recallLimit     = 20
 )
 
 var memorySaveSchema = json.RawMessage(`{
@@ -27,8 +24,8 @@ var memorySaveSchema = json.RawMessage(`{
   "properties": {
     "run_token": {"type": "string", "description": "The run token from the task message."},
     "key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "What the fact is about; saving the same key again replaces it."},
-    "value": {"type": "string", "minLength": 1, "maxLength": 4000, "description": "The fact."},
-    "ttl_days": {"type": "integer", "minimum": 1, "maximum": 3650, "description": "Forget the fact after this many days; default from the agent's memory policy."}
+    "value": {"type": "string", "minLength": 1, "maxLength": 2048, "description": "The fact, at most 2048 bytes."},
+    "ttl_days": {"type": "integer", "minimum": 0, "maximum": 3650, "description": "Forget the fact after this many days; default from the agent's memory policy (30 days unless set)."}
   },
   "required": ["run_token", "key", "value"],
   "additionalProperties": false
@@ -38,7 +35,7 @@ var memoryRecallSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "run_token": {"type": "string", "description": "The run token from the task message."},
-    "query": {"type": "string", "maxLength": 500, "description": "Words to look for in saved keys and values; empty returns the newest facts."}
+    "query": {"type": "string", "maxLength": 500, "description": "Words that must all appear in a saved key or value; empty returns the newest facts."}
   },
   "required": ["run_token", "query"],
   "additionalProperties": false
@@ -60,8 +57,8 @@ func memoryPolicy(ctx context.Context, pool *pgxpool.Pool, agentID string) (stor
 }
 
 // NewMemorySave builds memory_save: upsert the fact for the agent, expiring after
-// ttl_days (else the policy's fact_ttl_days, else never), keeping at most the policy's
-// max_facts newest facts.
+// ttl_days (else the policy's fact_ttl_days, else 30 days), keeping at most the
+// policy's max_facts live facts (DESIGN 5.10 rule 3).
 func NewMemorySave(pool *pgxpool.Pool) *Tool {
 	return &Tool{
 		Name:        MemorySaveName,
@@ -74,7 +71,7 @@ func NewMemorySave(pool *pgxpool.Pool) *Tool {
 			var in struct {
 				Key     string `json:"key"`
 				Value   string `json:"value"`
-				TTLDays int    `json:"ttl_days"`
+				TTLDays *int   `json:"ttl_days"`
 			}
 			if err := json.Unmarshal(call.Input, &in); err != nil {
 				return Result{}, &ModelError{Message: "invalid input: " + err.Error()}
@@ -89,40 +86,29 @@ func NewMemorySave(pool *pgxpool.Pool) *Tool {
 			if !pol.Enabled {
 				return Result{}, errMemoryDisabled
 			}
-			ttl := in.TTLDays
-			if ttl == 0 {
-				ttl = pol.FactTTLDays
+			if len(in.Value) > memory.MaxValueBytes {
+				return Result{}, &ModelError{Message: memory.ErrValueTooLong.Error()}
 			}
-			f := &store.MemoryFact{Scope: store.MemoryScopeAgent, AgentID: call.AgentID, Key: in.Key, Value: in.Value}
+			now := time.Now().UTC()
+			exp := memory.ExpiresAt(pol, in.TTLDays, now)
+			f := &store.MemoryFact{Scope: store.MemoryScopeAgent, AgentID: call.AgentID, Key: in.Key, Value: in.Value, ExpiresAt: &exp}
 			if call.RunID != "" {
 				f.SourceRunID = &call.RunID
 			}
-			if ttl > 0 {
-				exp := time.Now().UTC().Add(time.Duration(ttl) * 24 * time.Hour)
-				f.ExpiresAt = &exp
-			}
-			maxFacts := pol.MaxFacts
-			if maxFacts <= 0 {
-				maxFacts = defaultMaxFacts
-			}
-			if err := store.SaveMemoryFact(ctx, pool, f, maxFacts); err != nil {
+			if err := memory.Save(ctx, pool, f, memory.MaxFacts(pol), now); err != nil {
 				return Result{}, err
 			}
-			out := map[string]any{"status": "saved", "key": f.Key}
-			if f.ExpiresAt != nil {
-				out["expires_at"] = f.ExpiresAt.Format(time.RFC3339)
-			}
-			return JSONResult(out), nil
+			return JSONResult(map[string]any{"status": "saved", "key": f.Key, "expires_at": exp.Format(time.RFC3339)}), nil
 		},
 	}
 }
 
-// NewMemoryRecall builds memory_recall: the agent's live facts matching the query's
-// words, best matches first, at most twenty.
+// NewMemoryRecall builds memory_recall: the agent's live facts containing every word
+// of the query, newest first, at most twenty (DESIGN 5.10 rule 4).
 func NewMemoryRecall(pool *pgxpool.Pool) *Tool {
 	return &Tool{
 		Name:        MemoryRecallName,
-		Description: "Look up facts you saved in earlier runs. Returns up to twenty, best matches first.",
+		Description: "Look up facts you saved in earlier runs. Returns up to twenty that contain all the words of the query, newest first.",
 		InputSchema: memoryRecallSchema,
 		Risk:        RiskReadOnly,
 		Hits:        HitsPostgres,
@@ -144,7 +130,7 @@ func NewMemoryRecall(pool *pgxpool.Pool) *Tool {
 			if !pol.Enabled {
 				return Result{}, errMemoryDisabled
 			}
-			facts, err := store.RecallMemoryFacts(ctx, pool, call.AgentID, store.MemoryScopeAgent, in.Query, recallLimit)
+			facts, err := memory.Recall(ctx, pool, call.AgentID, in.Query, memory.RecallLimit, time.Now().UTC())
 			if err != nil {
 				return Result{}, err
 			}

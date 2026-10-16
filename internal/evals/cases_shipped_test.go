@@ -14,7 +14,10 @@ import (
 
 // enforcedByTheEngine are the cases whose end is decided by a limit or a cancel the
 // engine enforces while the model keeps calling tools, not by the script running out.
-var enforcedByTheEngine = map[string]bool{"002-step-limit": true, "003-cancel": true, "009-cost-limit": true}
+var enforcedByTheEngine = map[string]bool{
+	"002-step-limit": true, "003-cancel": true, "009-cost-limit": true,
+	"016-time-limit": true, "017-tool-call-limit": true,
+}
 
 // Every other shipped case is played through the model of simulate_test.go: the script
 // must be consumed exactly, the run must end as the case expects, and every evaluator
@@ -40,7 +43,7 @@ func TestShippedCasesPlayOutAsDesigned(t *testing.T) {
 			if c.ID >= "004" && e.MinModelCalls != len(s.tr.ModelCalls) {
 				t.Errorf("min_model_calls is %d but the platform records %d model calls for the script", e.MinModelCalls, len(s.tr.ModelCalls))
 			}
-			if c.ID >= "004" && e.MinToolCalls == 0 {
+			if c.ID >= "004" && len(s.tr.ToolCalls) > 0 && e.MinToolCalls == 0 {
 				t.Errorf("min_tool_calls is not set; the run records %d", len(s.tr.ToolCalls))
 			}
 			if e.MinToolCalls > len(s.tr.ToolCalls) {
@@ -49,9 +52,17 @@ func TestShippedCasesPlayOutAsDesigned(t *testing.T) {
 			if e.MinAgentMessages > s.messages {
 				t.Errorf("min_agent_messages is %d but the run hands over %d times", e.MinAgentMessages, s.messages)
 			}
-			for _, r := range Evaluate(c, s.tr) {
+			for _, r := range EvaluateObserved(c, s.tr, s.obs) {
 				if !r.Passed {
 					t.Errorf("evaluator %s rejects the trace of a correct run: %s", r.Name, r.Detail)
+				}
+			}
+			// A correct run meets every criterion, so the heuristic rubric scores 1.
+			if r := ScoreRubric(c, s.tr); r.Score != 1 {
+				for _, it := range r.Items {
+					if !it.Passed {
+						t.Errorf("rubric criterion %q is not met by the state of a correct run: %s", it.Criterion, it.Reason)
+					}
 				}
 			}
 		})

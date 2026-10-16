@@ -10,6 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"yuno/internal/guardrails"
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
 	"yuno/internal/store"
@@ -41,6 +44,7 @@ type Engine struct {
 	finishGrace   time.Duration // how long a turn may continue after finish was accepted
 	sendTimeout   time.Duration // one chat.send attempt
 	setupTimeout  time.Duration // one setup RPC (materialise, sessions.patch, subscribe)
+	convRetry     time.Duration // conversation mirror's retry tick (roster sync, catch-up)
 }
 
 // New builds an engine from its dependencies. It does not start workers.
@@ -66,6 +70,7 @@ func New(d Deps) *Engine {
 		finishGrace:   20 * time.Second,
 		sendTimeout:   15 * time.Second,
 		setupTimeout:  30 * time.Second,
+		convRetry:     convResyncEvery,
 	}
 	e.execute = e.runRun
 	return e
@@ -73,8 +78,8 @@ func New(d Deps) *Engine {
 
 var _ Service = (*Engine)(nil)
 
-// Start runs the worker pool, the stale-run and approval sweepers and the gateway
-// approval listener until ctx is done.
+// Start runs the worker pool, the stale-run and approval sweepers, the gateway
+// approval listener and the conversation mirror until ctx is done.
 func (e *Engine) Start(ctx context.Context) error {
 	workers := e.deps.Cfg.EngineWorkers
 	if workers <= 0 {
@@ -88,10 +93,14 @@ func (e *Engine) Start(ctx context.Context) error {
 			e.worker(ctx, n)
 		}(i)
 	}
-	wg.Add(3)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		e.sweeper(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		e.mirrorConversations(ctx)
 	}()
 	go func() {
 		defer wg.Done()
@@ -268,6 +277,11 @@ type runSnapshot struct {
 	RunOverrides *runOverrides `json:"run_overrides,omitempty"`
 }
 
+// ErrDuplicateTrigger is Trigger's answer when the request's schedule occurrence
+// (TriggerRef) already has its run: the occurrence has fired, nothing new is queued
+// (DESIGN 5.9 rule 2).
+var ErrDuplicateTrigger = errors.New("this schedule occurrence already has a run")
+
 // QuickRunTemplateKey is the template_key of the hidden one-node workflow behind an
 // agent's quick runs.
 func QuickRunTemplateKey(agentID string) string { return "quickrun:" + agentID }
@@ -296,18 +310,22 @@ func (e *Engine) Trigger(ctx context.Context, req TriggerRequest) (*store.Run, e
 	if err != nil {
 		return nil, err
 	}
+	agents := []*store.Agent{a}
+	limits = guardrails.EffectiveLimits(limits, agents, e.deps.Cfg.MaxCostUSD)
 	def := workflow.SingleAgent(a.ID, "{{.input.task}}", nil, limits)
 	wf, err := e.quickRunWorkflow(ctx, a, def)
 	if err != nil {
 		return nil, err
 	}
 	input, _ := json.Marshal(map[string]string{"task": req.Task})
-	return e.queueRun(ctx, wf, def, input, req, "agent_id", a.ID)
+	return e.queueRun(ctx, wf, def, input, req, agents, "agent_id", a.ID)
 }
 
 // queueRun stores a run with its snapshot (the definition as run, limits resolved, plus
-// the run overrides) and publishes it.
-func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow.Definition, input json.RawMessage, req TriggerRequest, logAttrs ...any) (*store.Run, error) {
+// the run overrides) and publishes it. The participating agents' hourly rate limits are
+// checked in the transaction that inserts the run (DESIGN 5.11 rule 2); a refusal is a
+// *guardrails.RateLimitError.
+func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow.Definition, input json.RawMessage, req TriggerRequest, agents []*store.Agent, logAttrs ...any) (*store.Run, error) {
 	snap := runSnapshot{Definition: *def}
 	if req.Model != "" || req.ScriptID != "" {
 		snap.RunOverrides = &runOverrides{Model: req.Model, ScriptID: req.ScriptID}
@@ -333,7 +351,31 @@ func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow
 		ref := req.TriggerRef
 		run.TriggerRef = &ref
 	}
-	if err := store.CreateRun(ctx, e.deps.Pool, run); err != nil {
+	err = pgx.BeginFunc(ctx, e.deps.Pool, func(tx pgx.Tx) error {
+		// An occurrence fired again must not count its own first run against the rate
+		// limit; the unique index settles a concurrent insert.
+		if trigger == store.TriggerSchedule && run.TriggerRef != nil {
+			if _, err := store.GetRunByTrigger(ctx, tx, trigger, *run.TriggerRef); err == nil {
+				return store.ErrDuplicateTrigger
+			} else if !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+		}
+		if err := guardrails.CheckRateLimit(ctx, tx, agents, e.clock.Now()); err != nil {
+			return err
+		}
+		return store.CreateRun(ctx, tx, run)
+	})
+	var rl *guardrails.RateLimitError
+	if errors.As(err, &rl) {
+		e.log.Info("run refused by a guardrail", "workflow_id", wf.ID, "agent_id", rl.AgentID, "trigger", trigger, "reason", rl.Error())
+		return nil, rl
+	}
+	if errors.Is(err, store.ErrDuplicateTrigger) {
+		e.log.Info("run not created: its schedule occurrence already has one", "workflow_id", wf.ID, "trigger_ref", req.TriggerRef)
+		return nil, ErrDuplicateTrigger
+	}
+	if err != nil {
 		return nil, fmt.Errorf("create run: %w", err)
 	}
 	created, err := store.GetRun(ctx, e.deps.Pool, run.ID)

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -53,7 +54,9 @@ type simulator struct {
 	paused   int64 // ms the run spent waiting for an approval
 
 	tr         store.Trace
-	seenInputs map[string]string // visit|tool|input -> idempotency key of the first call
+	seenInputs map[string]string            // visit|tool|input -> idempotency key of the first call
+	facts      map[string]map[string]string // agent label -> memory key -> value
+	obs        Observed                     // what the runner would observe outside the trace
 }
 
 func (s *simulator) problem(format string, args ...any) {
@@ -70,7 +73,8 @@ func (s *simulator) tick() time.Time {
 // simulate runs the case's script through the model.
 func simulate(t *testing.T, c Case) *simulator {
 	t.Helper()
-	s := &simulator{c: c, written: map[string]map[string]bool{}, state: map[string]any{}, seenInputs: map[string]string{}}
+	s := &simulator{c: c, written: map[string]map[string]bool{}, state: map[string]any{}, seenInputs: map[string]string{},
+		facts: map[string]map[string]string{}}
 	if c.IsWorkflow() {
 		def, err := c.Definition()
 		if err != nil {
@@ -81,6 +85,7 @@ func simulate(t *testing.T, c Case) *simulator {
 		s.def = workflow.SingleAgent("", c.Task, nil, c.Agent.Limits.Store())
 	}
 	s.walk()
+	s.observe()
 
 	if s.cursor != len(c.Script) {
 		s.problem("the script has %d steps but the run consumed %d", len(c.Script), s.cursor)
@@ -176,6 +181,17 @@ func (s *simulator) approvalNode(n *workflow.Node) bool {
 	}
 	wait := s.c.Actions.ApprovalWaitSeconds
 	switch {
+	case s.c.Actions.CancelWhenWaiting:
+		// The run is cancelled while the approval is pending: the engine expires the
+		// approval with the reason "run cancelled" (DESIGN 5.3 rule 8) and the run ends
+		// cancelled.
+		reason := "run cancelled"
+		decided := s.tick()
+		ap.Status, ap.Reason, ap.DecidedAt = store.ApprovalExpired, &reason, &decided
+		s.tr.Approvals = append(s.tr.Approvals, ap)
+		s.finishNode(rn, store.NodeFailed)
+		s.status, s.reason = store.RunCancelled, "cancelled by operator"
+		return false
 	case wait > timeout:
 		// Left alone past its timeout, the approval expires and the run fails.
 		if wait < timeout+sweepSeconds+5 {
@@ -320,7 +336,22 @@ func (s *simulator) toolCall(n *workflow.Node, runNodeID string, visit int, spec
 	}
 
 	rule := spec.InteractionRules[name]
+	if slices.Contains(spec.Guardrails.BlockedTools, name) {
+		rule = "blocked" // blocked_tools reach OpenClaw's tools.deny like a blocked rule (DESIGN 5.11 rule 3)
+	}
 	allowlisted := name == finishTool || allowed(spec.ToolAllowlist, name)
+	guardrail, guarded := BlockedPattern{}, false
+	if platform {
+		// The MCP gate tests the patterns against the canonical JSON of the input without
+		// the run token (DESIGN 5.11 rule 4).
+		withoutToken := map[string]any{}
+		for k, v := range tool.Args {
+			if k != "run_token" {
+				withoutToken[k] = v
+			}
+		}
+		guardrail, guarded = spec.Guardrails.blockedPatternFor(name, canonicalJSON(mustJSON(withoutToken)))
+	}
 	switch {
 	case rule == "blocked":
 		// OpenClaw refuses a denied tool itself and records no assistant message with
@@ -332,6 +363,10 @@ func (s *simulator) toolCall(n *workflow.Node, runNodeID string, visit int, spec
 	case !allowlisted:
 		s.problem("node %s: tool %s is not in the allowlist of its agent", n.ID, name)
 		row.Status = store.ToolBlocked
+	case guarded:
+		// Refused before any approval is asked for: the call is blocked, not gated.
+		row.Status, row.IsError = store.ToolBlocked, true
+		row.Output, _ = json.Marshal(map[string]string{"error": "input blocked by guardrail " + guardrail.Name})
 	case name == finishTool:
 		res, _ := json.Marshal(tool.Args["result"])
 		if msg := validateDoc(schema, res); msg != "" {
@@ -345,6 +380,15 @@ func (s *simulator) toolCall(n *workflow.Node, runNodeID string, visit int, spec
 		}
 	case sideEffectingTools[name]:
 		s.sideEffect(&row, n, visit, rule, tool)
+	case name == "http_fetch":
+		url, _ := tool.Args["url"].(string)
+		if !strings.HasPrefix(url, "https://") {
+			s.problem("node %s: http_fetch needs an https url, got %q", n.ID, url)
+		}
+		row.Output, _ = json.Marshal(map[string]string{"text": "HTTP 200 from " + url + " (text/html)\n" +
+			`<untrusted_content source="http_fetch">` + "\npage text\n" + `</untrusted_content>`})
+	case name == "memory_save" || name == "memory_recall":
+		s.memory(&row, n, spec, name, tool.Args)
 	default:
 		s.builtin(n, name, tool.Args)
 	}
@@ -438,12 +482,18 @@ func (s *simulator) finalize() {
 	started, finished := t0, t0.Add(s.clock+time.Duration(s.paused)*time.Millisecond)
 	run := &store.Run{
 		ID: simRunID, Status: s.status, StepCount: s.cursor, Limits: s.def.Limits,
-		StartedAt: &started, FinishedAt: &finished, PausedTotalMs: s.paused,
+		StartedAt: &started, FinishedAt: &finished, PausedTotalMs: s.paused, Trigger: store.TriggerManual,
 	}
 	if s.reason != "" {
 		run.FailureReason = &s.reason
 	}
 	run.State, _ = json.Marshal(s.state)
+	if sch := s.obs.Schedule; sch != nil {
+		// The scheduler creates the run with the schedule's occurrence as its trigger
+		// (DESIGN 5.9 rule 2).
+		ref := store.ScheduleOccurrenceRef(sch.ID, finished)
+		run.Trigger, run.TriggerRef = store.TriggerSchedule, &ref
+	}
 	s.tr.Run = run
 	s.tr.Spans = []store.Span{{ID: "s1", RunID: simRunID, Kind: "run", Name: "run"}}
 	s.tr.AgentMessages = make([]store.AgentMessage, s.messages)

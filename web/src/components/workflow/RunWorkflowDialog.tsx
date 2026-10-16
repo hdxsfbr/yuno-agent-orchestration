@@ -5,7 +5,7 @@ import { ApiError, createRun, type WorkflowDefinition } from "@/lib/api";
 import { errorsFor, parseFieldErrors, type FieldErrors } from "@/lib/agentForm";
 import { buildInput, emptyDraft, inputFields, parseWholeInput, type InputDraft } from "@/lib/runInput";
 import Button from "../Button";
-import { CheckboxField, Field, NumberField, TextField, control } from "../fields";
+import InputFields from "../InputFields";
 import { Modal } from "../Modal";
 import { InlineError, errorText } from "../QueryState";
 
@@ -80,30 +80,15 @@ export default function RunWorkflowDialog({ workflow, onClose }: Props) {
   return (
     <Modal title={`Run ${workflow.name}`} onClose={start.isPending ? () => undefined : onClose}>
       <form onSubmit={submit} className="space-y-4">
-        {fields.length === 0 ? (
-          <Field label="Input" hint="The workflow declares no input fields. Give the run's input as a JSON object." errors={clientErrors[""] ? [clientErrors[""]] : []}>
-            {(p) => <textarea {...p} rows={6} value={whole} spellCheck={false} onChange={(e) => setWhole(e.target.value)} className={control(!!clientErrors[""], "font-mono text-xs")} />}
-          </Field>
-        ) : (
-          fields.map((f) => {
-            const common = { label: f.name, required: f.required, hint: f.description, errors: errorsOf(f.name) };
-            const value = draft[f.name];
-            if (f.type === "boolean") {
-              return <CheckboxField key={f.name} label={f.name} hint={f.description} checked={value === true} onChange={(v) => set(f.name, v)} />;
-            }
-            if (f.type === "number" || f.type === "integer") {
-              return <NumberField key={f.name} {...common} value={typeof value === "string" ? value : ""} onChange={(v) => set(f.name, v)} />;
-            }
-            if (f.type === "json") {
-              return (
-                <Field key={f.name} {...common} hint={f.description ?? "JSON"}>
-                  {(p) => <textarea {...p} rows={4} value={typeof value === "string" ? value : ""} spellCheck={false} onChange={(e) => set(f.name, e.target.value)} className={control(common.errors.length > 0, "font-mono text-xs")} />}
-                </Field>
-              );
-            }
-            return <TextField key={f.name} {...common} value={typeof value === "string" ? value : ""} onChange={(v) => set(f.name, v)} />;
-          })
-        )}
+        <InputFields
+          fields={fields}
+          draft={draft}
+          onChange={set}
+          errorsOf={errorsOf}
+          whole={whole}
+          onWholeChange={setWhole}
+          wholeErrors={clientErrors[""] ? [clientErrors[""]] : []}
+        />
 
         {unplaced.length > 0 ? (
           <div className="space-y-1">

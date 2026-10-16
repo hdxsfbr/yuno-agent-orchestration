@@ -1,0 +1,39 @@
+id: 016-time-limit
+version: v1
+split: public
+description: A check that sleeps for ten seconds runs against a five second time limit. The engine ends the run as timed out with the reason "time limit 5s exceeded" instead of waiting for the command.
+agent:
+  name: Patient Checker
+  system_prompt: |
+    You run health checks with the exec tool, one after another, then call yuno__finish with the results.
+  tool_allowlist: [exec, finish]
+  limits:
+    max_steps: 10
+    max_duration_seconds: 5
+task: |
+  Run the migration check with the exec tool and report whether it passed. It may take a while.
+# The first command outlasts the limit; the steps after it are never asked for.
+script:
+  - tool:
+      name: exec
+      args: { command: "sleep 10 && echo migration check passed" }
+    usage: { prompt: 110, completion: 20 }
+  - tool:
+      name: exec
+      args: { command: "echo second check passed" }
+    usage: { prompt: 150, completion: 18 }
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: Both checks passed.
+    usage: { prompt: 190, completion: 20 }
+  - text: The checks passed and the result has been submitted.
+    usage: { prompt: 230, completion: 14 }
+expect:
+  status: timed_out
+  failure_reason_contains: time limit 5s exceeded
+  min_model_calls: 1
+  min_tool_calls: 1
+rubric: []

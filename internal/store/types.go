@@ -157,6 +157,9 @@ type Approval struct {
 	DecidedBy   *string    `db:"decided_by" json:"decided_by,omitempty"`
 	Reason      *string    `db:"reason" json:"reason,omitempty"`
 	ExpiresAt   time.Time  `db:"expires_at" json:"expires_at"`
+	// ConversationID is set, and RunID empty, for an approval raised in a conversation
+	// (DESIGN 5.8 rule 5).
+	ConversationID *string `db:"conversation_id" json:"conversation_id,omitempty"`
 }
 
 type Workflow struct {

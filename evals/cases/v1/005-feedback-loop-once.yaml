@@ -203,4 +203,10 @@ expect:
     "/reviewer/verdict": approved
     "/reviewer/feedback": The blank-name case is handled and the test passes.
   approval_statuses: []
-rubric: []
+rubric:
+  - criterion: The reviewer's final verdict is approval.
+    check: { path: /reviewer/verdict, json_path_eq: approved }
+  - criterion: The coder's final state is the revised draft, not the first one.
+    check: { path: /coder/summary, contains: Blank names now greet the stranger }
+  - criterion: The coder reports that its tests pass after the revision.
+    check: { path: /coder/tests_passed, json_path_eq: true }

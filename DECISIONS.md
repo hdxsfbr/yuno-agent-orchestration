@@ -6,6 +6,47 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-16
 
+**D-029 Schedule firings carry an occurrence key; a fired once-schedule stays fired.**
+(Claude, from the wave-3 review) Each scheduled run's `trigger_ref` is
+`<schedule id>@<occurrence time>`, unique among schedule runs, so a crash between
+creating the run and advancing the schedule cannot fire the occurrence twice. A delay
+schedule's occurrence is its `run_at`: re-enabling one that already fired does nothing
+until it gets a new `run_at`. Why: exactly-once per occurrence is the scheduler's whole
+promise (DESIGN 5.9). Cost: "run it again" is a new time, not a toggle; the Schedules
+page's edit form makes that one field.
+
+**D-028 Exec guardrail patterns cover host exec and approvals, not the sandbox.**
+(Claude, from agent B) OpenClaw's exec approvals apply to host (`elevated`) exec only;
+sandboxed commands run without a gateway hook. Patterns therefore shape the exec policy,
+auto-deny matching exec approvals, and block platform tools in the MCP gate, but a
+matching command inside the sandbox runs. Why: the sandbox has no network and only the
+agent's workspace, so the blast radius is the run directory; a `before_tool_call` plugin
+hook is the fix if the demand appears. Cost: the guardrail is weaker than the design's
+T5.11.4 reads; the README says so.
+
+**D-027 Eval splits are 17 public and 7 private; the model grades only the rubric.**
+(Claude, from agent D) `make eval` runs the public split offline; the private cases need
+the network, a configured service or a human and run with `make eval-final`
+(`EVAL_SPLIT=all`). `EVAL_PROVIDER=anthropic` changes who grades the rubric, never how
+runs are driven (always the scripted model); a grader failure scores 0 with the reason,
+no silent fallback. The schedule case uses an agentless workflow because a schedule
+cannot carry the scripted model override. Why: `make eval` must stay offline and
+deterministic; the rubric is the only place a real model adds judgement. Cost: the
+channel-triggered reply is not an eval case (it needs a real Telegram message); the
+conversation mirroring is covered by unit tests instead.
+
+**D-026 Telegram stays closed until an agent is bound; binding is a config patch plus an
+in-place gateway restart.** (Claude, from agent A) The baseline writes
+`channels.telegram.dmPolicy: "disabled"`; `PUT /api/channels/telegram/binding` patches
+`bindings[]` (dmScope per-channel-peer) and `dmPolicy: allowlist`, then asks
+`gateway.restart.request`, which restarts the gateway in place (same container, about
+five seconds, the api reconnects); unbinding closes the channel again. The
+`channel_bindings` table is the truth and a keeper re-asserts it at every api start and
+reconnect. Why: `enabled: false` would stop polling and Telegram would hand the held
+messages to the next bound agent; `dmPolicy: disabled` drops them. Cost: a message sent
+while unbound is dropped without a platform log line (OpenClaw drops it before logging);
+the Channels page shows the channel as closed.
+
 **D-025 The Telegram channel never answers from OpenClaw's default agent.** (Claude,
 from the first live probe) With Telegram enabled and no binding, the gateway routed
 Andre's first two messages to its built-in `main` agent, which replied on Opus. The
