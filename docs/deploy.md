@@ -119,7 +119,7 @@ the `test` job has nowhere to run and `deploy` cannot start, so deploy by hand w
 | URL | <https://143.110.128.97.sslip.io> (Let's Encrypt certificate through Caddy) |
 | Deployed | commit `4488049` on 2026-10-16, `make deploy HOST=143.110.128.97`, smoke 12 of 12 |
 | Sign-in | the `API_TOKEN` in the operator's `.env.prod` (never in the repository) |
-| Telegram | webhook registered at `https://143.110.128.97.sslip.io/telegram-webhook`; the bot has one webhook, so this instance owns the bot while it runs |
+| Telegram | webhook registered at `https://143.110.128.97.sslip.io/telegram-webhook`; verified live on 2026-10-16 (a direct message from the allowlisted user, answered by the bound Coder in 17 s, mirrored under Channels). The bot has one webhook, so this instance owns the bot while it runs; bind an agent first, an unbound channel drops messages |
 | Memory | about 1.7 GB used of 8 GB idle, the gateway 1 GB of its 4 GB cap |
 
 Three things bit on the first run and are now in the scripts: a fresh droplet holds the apt
