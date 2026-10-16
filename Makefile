@@ -8,7 +8,7 @@ WEB_PORT     ?= 8080
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env run smoke probe-openclaw stop down clean logs ps test test-go test-web web-deps \
+.PHONY: help env run smoke probe-openclaw probe-deliver stop down clean logs ps test test-go test-web web-deps \
         test-integration lint tidy install migrate seed eval eval-baseline eval-final \
         tunnel build openclaw-shell openclaw-logs openclaw-validate prune-sandboxes
 
@@ -42,6 +42,9 @@ probe-openclaw: ## Run the OpenClaw integration canary against the running gatew
 
 probe-approval: ## Verify the gateway's plugin approval RPCs the side-effect gate uses (DESIGN 5.3 rule 5)
 	$(COMPOSE) --profile tools run --rm --entrypoint node probe /scripts/openclaw-probe-approval.mjs
+
+probe-deliver: ## Verify chat.send {deliver: true} reaches Telegram (sends one message; needs a Telegram session)
+	$(COMPOSE) --profile tools run --rm --entrypoint node probe /scripts/openclaw-probe-deliver.mjs
 
 build: ## Build images without starting
 	$(COMPOSE) --profile build build

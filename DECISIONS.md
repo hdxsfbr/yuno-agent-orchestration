@@ -6,6 +6,18 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-16
 
+**D-036 One coordinator agent on Telegram; chat-time tools identified by a chat token.**
+(Andre, 2026-10-16) The person talks to one agent, the Chief of Staff, which delegates
+to the others as platform runs and relays their outcomes; it is seeded, bound when
+nothing else is, and talks through OpenClaw's native chat. Because the gateway's MCP
+client carries no identity, chat tool calls carry a per-agent `chat_token` the way run
+calls carry `run_token`; only six tools accept it. Delegation needs no approval by
+default (the delegated run's side effects keep theirs); approvals are decided in the
+UI and the chat is only told; both templates are instantiated at seed so workflows can
+be named. Why: the demo had six peers and no front door; a coordinator that lives
+inside the platform's runs keeps every delegated task traced, limited and gated, which
+OpenClaw's own sub-agent spawning would bypass. Design: `docs/DESIGN.md` 5.15.
+
 **D-035 Public deployment is a plain Docker host behind Caddy; CI deploys through
 runners we register.** (Andre, 2026-10-16) The stack needs the Docker socket, a network
 namespace shared between api and gateway, a bind mount both write and 4 GB for the
