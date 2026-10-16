@@ -45,6 +45,7 @@ type Engine struct {
 	sendTimeout   time.Duration // one chat.send attempt
 	setupTimeout  time.Duration // one setup RPC (materialise, sessions.patch, subscribe)
 	convRetry     time.Duration // conversation mirror's retry tick (roster sync, catch-up)
+	agentSync     time.Duration // KeepAgents' materialisation pass between full syncs
 }
 
 // New builds an engine from its dependencies. It does not start workers.
@@ -71,6 +72,7 @@ func New(d Deps) *Engine {
 		sendTimeout:   15 * time.Second,
 		setupTimeout:  30 * time.Second,
 		convRetry:     convResyncEvery,
+		agentSync:     30 * time.Second,
 	}
 	e.execute = e.runRun
 	return e

@@ -266,7 +266,7 @@ func TestRunnerRunsAWorkflowCase(t *testing.T) {
 			run := onlyRunLocked(f)
 			want := RunRequest{WorkflowID: wfID, Model: ScriptedModel, ScriptID: run.req.ScriptID, Limits: store.Limits{MaxSteps: 5, MaxLoopVisits: 2}}
 			if run.req.AgentID != "" || run.req.Task != "" || run.req.WorkflowID != want.WorkflowID || run.req.Model != want.Model ||
-				run.req.Limits != want.Limits || string(run.req.Input) != `{"task":"build it"}` {
+				run.req.Limits != want.Limits || string(run.req.Input) != `{"task":"build it"}` || run.req.Trigger != store.TriggerEval {
 				t.Errorf("run request = %+v", run.req)
 			}
 			if run.req.ScriptID != "wf-a-"+strings.TrimPrefix(wf.Name, "eval-wf-a-") {

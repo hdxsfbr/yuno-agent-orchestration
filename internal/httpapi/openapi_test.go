@@ -293,3 +293,42 @@ func mustDo(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+// Every /api operation declares the bearer scheme, described as optional without
+// API_TOKEN; health, readiness and the document are open (audit #28).
+func TestOpenAPISecurity(t *testing.T) {
+	doc, err := openapi3.NewLoader().LoadFromData(api.OpenAPI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := doc.Components.SecuritySchemes["bearerAuth"]
+	if ref == nil || ref.Value == nil {
+		t.Fatal("no bearerAuth security scheme")
+	}
+	if s := ref.Value; s.Type != "http" || s.Scheme != "bearer" || !strings.Contains(s.Description, "API_TOKEN is unset") ||
+		!strings.Contains(s.Description, "Optional") {
+		t.Fatalf("bearerAuth = %+v", s)
+	}
+	checked := 0
+	for path, item := range doc.Paths.Map() {
+		for method, op := range item.Operations() {
+			reqs := doc.Security
+			if op.Security != nil {
+				reqs = *op.Security
+			}
+			bearer := false
+			for _, r := range reqs {
+				if _, ok := r["bearerAuth"]; ok {
+					bearer = true
+				}
+			}
+			if isAPI := strings.HasPrefix(path, "/api/"); bearer != isAPI {
+				t.Errorf("%s %s: bearerAuth applies = %v, want %v", method, path, bearer, isAPI)
+			}
+			checked++
+		}
+	}
+	if checked < 40 {
+		t.Fatalf("checked %d operations", checked)
+	}
+}

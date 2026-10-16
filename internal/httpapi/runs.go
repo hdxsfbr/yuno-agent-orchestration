@@ -37,7 +37,12 @@ type runCreate struct {
 	Limits     store.Limits    `json:"limits"`
 	Model      string          `json:"model"`
 	ScriptID   string          `json:"script_id"`
+	Trigger    string          `json:"trigger"`
 }
+
+// apiTriggers are the triggers a client may name; schedules and channels start their
+// runs themselves.
+var apiTriggers = []string{store.TriggerManual, store.TriggerEval}
 
 func (in *runCreate) validate() fieldErrors {
 	var fe fieldErrors
@@ -54,6 +59,9 @@ func (in *runCreate) validate() fieldErrors {
 	}
 	if in.ScriptID != "" && !validScriptID(in.ScriptID) {
 		fe.add("script_id", "must match %s", scriptIDPattern)
+	}
+	if in.Trigger != "" && !slices.Contains(apiTriggers, in.Trigger) {
+		fe.add("trigger", "must be one of %s", strings.Join(apiTriggers, ", "))
 	}
 	return fe
 }
@@ -90,7 +98,8 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, runs)
 }
 
-// createRun is the manual trigger (RunCreate maps one to one onto TriggerRequest).
+// createRun starts a run for an operator (trigger manual, the default) or for the eval
+// runner (trigger eval); RunCreate maps one to one onto TriggerRequest.
 func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	var in runCreate
 	if !decodeBody(w, r, &in, maxRunBody) {
@@ -108,13 +117,17 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	if string(bytes.TrimSpace(input)) == "null" {
 		input = nil
 	}
+	trigger := in.Trigger
+	if trigger == "" {
+		trigger = store.TriggerManual
+	}
 	run, err := s.engine.Trigger(r.Context(), engine.TriggerRequest{
 		WorkflowID: in.WorkflowID,
 		Input:      input,
 		AgentID:    in.AgentID,
 		Task:       in.Task,
 		Limits:     in.Limits,
-		Trigger:    store.TriggerManual,
+		Trigger:    trigger,
 		Model:      in.Model,
 		ScriptID:   in.ScriptID,
 	})

@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 )
@@ -41,8 +42,8 @@ func TestHubDropsWhenFull(t *testing.T) {
 	if e := <-ch; e.Seq != 1 {
 		t.Fatalf("got %d", e.Seq)
 	}
-	if h.dropped != 1 {
-		t.Fatalf("dropped = %d", h.dropped)
+	if h.Dropped() != 1 {
+		t.Fatalf("dropped = %d", h.Dropped())
 	}
 }
 
@@ -53,5 +54,28 @@ func TestCancelTwiceIsSafe(t *testing.T) {
 	cancel()
 	if h.Subscribers() != 0 {
 		t.Fatal("subscriber not removed")
+	}
+}
+
+// Publishers run concurrently under the read lock; the drop counter must not race
+// (audit #26, run with -race) nor lose counts.
+func TestHubConcurrentDrops(t *testing.T) {
+	h := NewHub()
+	_, cancel := h.Subscribe("", 1)
+	defer cancel()
+	const publishers, each = 8, 200
+	var wg sync.WaitGroup
+	for range publishers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range each {
+				h.Publish(Event{Seq: int64(i)})
+			}
+		}()
+	}
+	wg.Wait()
+	if got, want := h.Dropped(), int64(publishers*each-1); got != want {
+		t.Fatalf("dropped = %d, want %d", got, want)
 	}
 }

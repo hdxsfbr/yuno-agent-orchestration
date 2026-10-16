@@ -223,6 +223,9 @@ type Keeper struct {
 	Pool    *pgxpool.Pool
 	Gateway openclaw.Client
 	Log     *slog.Logger
+	// StateDir is the gateway state directory; when set, the bound agent's MEMORY.md is
+	// rendered after each re-assert.
+	StateDir string
 	// Backoff bounds the retry of a failed re-assert (1 s doubling to 30 s by default).
 	BackoffBase, BackoffMax time.Duration
 }
@@ -255,6 +258,9 @@ func (k *Keeper) Run(ctx context.Context) {
 			due = false
 			actx, cancel := context.WithTimeout(ctx, ApplyTimeout)
 			_, err := Reassert(actx, k.Pool, k.Gateway, log)
+			if err == nil {
+				k.renderBoundMemory(actx, log)
+			}
 			cancel()
 			if err != nil && ctx.Err() == nil {
 				log.Warn("telegram binding re-assert failed", "error", err, "retry_in", wait.String())
@@ -277,5 +283,28 @@ func (k *Keeper) Run(ctx context.Context) {
 		case <-retry.C:
 			due = true
 		}
+	}
+}
+
+// renderBoundMemory writes the bound agent's MEMORY.md from its facts: a conversation
+// reaches the agent without passing through the engine, which renders the file only
+// before a node visit (DESIGN 5.10 rule 5). Failures are logged.
+func (k *Keeper) renderBoundMemory(ctx context.Context, log *slog.Logger) {
+	if k.StateDir == "" {
+		return
+	}
+	b, err := store.GetChannelBinding(ctx, k.Pool, store.ChannelTelegram)
+	if errors.Is(err, store.ErrNotFound) {
+		return
+	}
+	var a *store.Agent
+	if err == nil {
+		a, err = store.GetAgent(ctx, k.Pool, b.AgentID)
+	}
+	if err == nil {
+		err = openclaw.RenderMemory(ctx, k.Pool, k.StateDir, a, time.Now().UTC())
+	}
+	if err != nil {
+		log.Warn("render the bound agent's MEMORY.md failed", "error", err)
 	}
 }

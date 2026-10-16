@@ -13,7 +13,7 @@ import (
 	"yuno/internal/store"
 )
 
-const convKey = "agent:agconv:telegram:direct:1184040613"
+const convKey = "agent:agconv:telegram:direct:100000001"
 
 // convEnv is an engine whose agent "agconv" is bound to Telegram, with the mirror
 // running and an SSE subscriber on every event.
@@ -73,8 +73,8 @@ func (c *convEnv) sseTypes(want string, n int) []events.Event {
 
 func changed(key, agent string) map[string]any {
 	return map[string]any{"sessionKey": key, "agentId": agent, "phase": "message", "channel": "telegram",
-		"displayName": "Andre (@hdxsfbr) id:1184040613",
-		"origin":      map[string]any{"provider": "telegram", "from": "telegram:1184040613", "to": "telegram:1184040613", "chatType": "direct"}}
+		"displayName": "Test Operator (@test_operator) id:100000001",
+		"origin":      map[string]any{"provider": "telegram", "from": "telegram:100000001", "to": "telegram:100000001", "chatType": "direct"}}
 }
 
 func userEntry(id, text string, ts int64) map[string]any {
@@ -104,8 +104,8 @@ func TestConversationMirror(t *testing.T) {
 		t.Fatalf("subscribe params = %+v", sub)
 	}
 	conv := c.conversation()
-	if conv == nil || conv.ExternalChatID != "1184040613" || conv.AgentID != c.agent.ID || conv.AgentName != "Coder" ||
-		conv.Channel != "telegram" || conv.DisplayName != "Andre (@hdxsfbr) id:1184040613" {
+	if conv == nil || conv.ExternalChatID != "100000001" || conv.AgentID != c.agent.ID || conv.AgentName != "Coder" ||
+		conv.Channel != "telegram" || conv.DisplayName != "Test Operator (@test_operator) id:100000001" {
 		t.Fatalf("conversation = %+v", conv)
 	}
 
@@ -308,7 +308,7 @@ func TestConversationMirrorIgnoresUnboundAgents(t *testing.T) {
 		agt  string
 	}{
 		{name: "the default agent's main session", bind: true, key: "agent:main:main", agt: "main"},
-		{name: "another agent's telegram session", bind: true, key: "agent:agother:telegram:direct:1184040613", agt: "agother"},
+		{name: "another agent's telegram session", bind: true, key: "agent:agother:telegram:direct:100000001", agt: "agother"},
 		{name: "nothing bound", bind: false, key: convKey, agt: "agconv"},
 		{name: "a node session of the bound agent", bind: true, key: "agent:agconv:yuno-run-1-coder-1", agt: "agconv"},
 	}

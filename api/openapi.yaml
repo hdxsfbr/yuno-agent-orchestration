@@ -11,6 +11,10 @@ info:
     described here beyond their existence.
 servers:
   - url: /
+# Every /api operation carries the bearer scheme (optional while API_TOKEN is unset);
+# health, readiness and this document are open. See components.securitySchemes.
+security:
+  - bearerAuth: []
 tags:
   - name: ops
   - name: agents
@@ -27,12 +31,14 @@ paths:
     get:
       tags: [ops]
       summary: Process liveness
+      security: []
       responses:
         "200": { description: ok, content: { text/plain: { schema: { type: string } } } }
   /readyz:
     get:
       tags: [ops]
       summary: Readiness (database reachable, gateway connected and scoped)
+      security: []
       responses:
         "200": { description: ready, content: { text/plain: { schema: { type: string } } } }
         "503": { $ref: "#/components/responses/Error" }
@@ -40,6 +46,7 @@ paths:
     get:
       tags: [ops]
       summary: This document
+      security: []
       responses:
         "200": { description: OpenAPI document, content: { application/yaml: { schema: { type: string } } } }
   /api/status:
@@ -88,7 +95,7 @@ paths:
       responses:
         "200":
           description: agents
-          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Agent" } } } }
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/AgentListItem" } } } }
     post:
       tags: [agents]
       summary: Create an agent and materialise it in OpenClaw
@@ -531,6 +538,15 @@ paths:
         "502": { $ref: "#/components/responses/Error" }
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <API_TOKEN>`. Required on every /api path (except
+        /api/openapi.yaml, which serves this document) when the api runs with API_TOKEN set,
+        and answered with 401 when missing or wrong. Optional when API_TOKEN is unset, the
+        local default: requests without it are accepted.
   parameters:
     Id:
       name: id
@@ -725,6 +741,24 @@ components:
             materialized_hash: { type: string }
             created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
+    AgentListItem:
+      description: An agent as GET /api/agents lists it.
+      allOf:
+        - $ref: "#/components/schemas/Agent"
+        - type: object
+          required: [channels, activity]
+          properties:
+            channels:
+              type: array
+              items: { type: string, enum: [telegram] }
+              description: The channels this agent answers now, from the channel bindings (telegram when it is bound); empty otherwise.
+            activity:
+              type: object
+              description: This agent's node visits in flight, in runs that have not finished.
+              required: [running, waiting_approval]
+              properties:
+                running: { type: integer, minimum: 0 }
+                waiting_approval: { type: integer, minimum: 0 }
     AgentRuntime:
       type: object
       description: The agent as OpenClaw holds it after materialisation.
@@ -760,6 +794,7 @@ components:
         limits: { $ref: "#/components/schemas/Limits" }
         model: { type: string, description: "OpenClaw model ref override for this run, e.g. scripted/scripted-1 (evals and tests)" }
         script_id: { type: string, description: "Script registered via /api/evals/scripts that the scripted provider replays for this run" }
+        trigger: { type: string, enum: [manual, eval], default: manual, description: "Who starts the run: an operator, or the eval runner (eval runs can be filtered out of the run list); schedules and channels start their own runs" }
     ScriptStep:
       type: object
       description: One scripted model response; exactly one of text or tool.

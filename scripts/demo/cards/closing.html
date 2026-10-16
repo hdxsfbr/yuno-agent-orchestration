@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Yuno Agent Orchestration Platform</title>
+<link rel="stylesheet" href="card.css">
+<style>
+  h1 { font-size: 64px; margin-top: 30px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; margin-top: 56px; max-width: 1140px; }
+  h2 { margin: 0 0 18px; font-size: 20px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); font-weight: 600; }
+  ul { margin: 0; padding: 0; list-style: none; font-size: 30px; line-height: 1.7; }
+  li::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; background: var(--accent); margin-right: 16px; vertical-align: middle; }
+  .cmd { display: flex; flex-direction: column; gap: 14px; }
+  .cmd code { font-size: 30px; background: var(--ink); color: #fafafa; padding: 12px 22px; border-radius: 10px; width: max-content; }
+  .repo { margin-top: 56px; font-size: 24px; color: var(--muted); }
+  .repo .mono { color: var(--ink); }
+</style>
+</head>
+<body>
+<main class="stage">
+  <div class="mark"><i></i>Yuno</div>
+  <h1>Thanks for watching</h1>
+  <div class="cols">
+    <section>
+      <h2>In the README</h2>
+      <ul>
+        <li>Architecture</li>
+        <li>Runtime choice</li>
+        <li>Threat model</li>
+        <li>Evaluation</li>
+      </ul>
+    </section>
+    <section>
+      <h2>The whole interface</h2>
+      <div class="cmd">
+        <code>make run</code>
+        <code>make test</code>
+        <code>make eval</code>
+      </div>
+    </section>
+  </div>
+  <p class="repo hidden" id="repo">Repository <span class="mono"></span></p>
+</main>
+<script>
+  const card = window.__CARD__ || {};
+  if (card.repo) {
+    const el = document.getElementById("repo");
+    el.querySelector(".mono").textContent = card.repo;
+    el.classList.remove("hidden");
+  }
+</script>
+</body>
+</html>

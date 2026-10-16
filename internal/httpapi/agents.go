@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"yuno/internal/engine"
@@ -171,13 +172,40 @@ func sortedKeys(m map[string]string) []string {
 	return keys
 }
 
+// agentListItem is an agent in GET /api/agents (AgentListItem): channels are the ones it
+// answers, from the channel bindings rather than the form's setting, and activity counts
+// its node visits in flight (audit #17, #18).
+type agentListItem struct {
+	store.Agent
+	Activity store.AgentActivity `json:"activity"`
+}
+
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
-	agents, err := store.ListAgents(r.Context(), s.pool)
+	ctx := r.Context()
+	agents, err := store.ListAgents(ctx, s.pool)
 	if err != nil {
 		s.internalError(w, r, "list agents", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, agents)
+	bound, err := store.ListAgentChannels(ctx, s.pool)
+	if err != nil {
+		s.internalError(w, r, "list agent channels", err)
+		return
+	}
+	activity, err := store.ListAgentActivity(ctx, s.pool)
+	if err != nil {
+		s.internalError(w, r, "list agent activity", err)
+		return
+	}
+	items := make([]agentListItem, len(agents))
+	for i, a := range agents {
+		a.Channels = bound[a.ID]
+		if a.Channels == nil {
+			a.Channels = []string{}
+		}
+		items[i] = agentListItem{Agent: a, Activity: activity[a.ID]}
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
@@ -284,12 +312,27 @@ func (s *Server) materialize(ctx context.Context, id string) (*engine.RuntimeVie
 	return s.engine.MaterializeAgent(ctx, id)
 }
 
+// agentRemoveTimeout bounds taking a deleted agent out of OpenClaw within the request.
+const agentRemoveTimeout = 15 * time.Second
+
+// deleteAgent soft-deletes the agent, closes Telegram if it was the bound agent, and
+// removes it from OpenClaw. A runtime that refuses is logged, not answered: the
+// deletion stands and the sync at the next api start removes what is left.
 func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
-	if err := store.DeleteAgent(r.Context(), s.pool, r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	if err := store.DeleteAgent(r.Context(), s.pool, id); err != nil {
 		s.storeError(w, r, "agent", err)
 		return
 	}
-	s.unbindAgent(r.Context(), r.PathValue("id"))
+	s.unbindAgent(r.Context(), id)
+	if s.engine != nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), agentRemoveTimeout)
+		err := s.engine.RemoveAgent(ctx, id)
+		cancel()
+		if err != nil {
+			s.log.Warn("deleted agent not removed from OpenClaw", "agent_id", id, "error", err)
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

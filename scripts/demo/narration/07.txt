@@ -1,0 +1,1 @@
+One agent is bound to Telegram from the Channels page; the channel stays closed until an agent is bound and only allowlisted users can talk to it. I'll message the bot from my phone: the message reaches Coder, which answers with its configured personality, and the whole conversation is mirrored here.

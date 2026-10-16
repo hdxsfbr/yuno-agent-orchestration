@@ -1,0 +1,1 @@
+Limits are enforced by the platform, not by the model's good will: here the step limit stops a run after two calls, with the reason on the run. And a rejected approval goes back to the agent as a result, so it finishes cleanly instead of failing.

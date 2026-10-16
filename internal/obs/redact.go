@@ -13,9 +13,13 @@ const Redacted = "[redacted]"
 // Values that look like credentials wherever they appear in a string.
 var secretValuePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{10,}`),            // Anthropic API keys
+	regexp.MustCompile(`sk-or-v1-[A-Za-z0-9]{10,}`),            // OpenRouter API keys
 	regexp.MustCompile(`\b\d{6,}:[A-Za-z0-9_-]{30,}`),          // Telegram bot tokens
 	regexp.MustCompile(`glpat-[A-Za-z0-9_-]{15,}`),             // GitLab personal access tokens
 	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]{16,}`), // Authorization headers
+	// Run tokens (DESIGN 5.14 rule 7) bind platform tool calls to a node visit; logs and
+	// stored transcripts never keep one. Minted lowercase, matched in either case.
+	regexp.MustCompile(`(?i)\br_[a-z2-7]{24}\b`),
 }
 
 // Keys whose whole value is a secret regardless of shape. Deliberately does not match

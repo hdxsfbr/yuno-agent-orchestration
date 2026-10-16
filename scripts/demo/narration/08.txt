@@ -1,0 +1,1 @@
+Runs can also start on a schedule, cron or once, in any time zone; the status page shows the gateway, the scheduler and the queues.

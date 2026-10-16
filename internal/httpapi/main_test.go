@@ -156,6 +156,8 @@ type fakeEngine struct {
 	cancelErr      error
 	finishErr      error
 	materialized   []string
+	removed        []string
+	removeErr      error
 	triggers       []engine.TriggerRequest
 	cancels        []string
 	finishes       []string
@@ -188,6 +190,14 @@ func (f *fakeEngine) MaterializeAgent(ctx context.Context, agentID string) (*eng
 		}
 	}
 	return f.view(agentID), nil
+}
+
+// RemoveAgent records the agent taken out of OpenClaw.
+func (f *fakeEngine) RemoveAgent(_ context.Context, agentID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removed = append(f.removed, agentID)
+	return f.removeErr
 }
 
 func (f *fakeEngine) AgentRuntime(ctx context.Context, agentID string) (*engine.RuntimeView, error) {

@@ -9,30 +9,45 @@ export function json(body: unknown, status = 200) {
 
 export const apiError = (status: number, code: string, message: string, details?: unknown) => json({ error: { code, message, details } }, status);
 
-export type Call = { method: string; url: string; body: unknown };
+/** Header names are lower-cased so a test does not depend on how the code spelled them. */
+export type HeaderMap = Record<string, string>;
+export type Call = { method: string; url: string; body: unknown; headers: HeaderMap };
 type Request = Call & { match: RegExpMatchArray };
 type Handler = (req: Request) => unknown | Response | Promise<unknown | Response>;
 
 const encoder = new TextEncoder();
 
+const lowerCased = (h?: HeadersInit): HeaderMap => Object.fromEntries(new Headers(h).entries());
+
 export function installFakeApi() {
   const calls: Call[] = [];
+  const streamCalls: Call[] = [];
   const handlers: { method: string; pattern: RegExp; fn: Handler }[] = [];
   const streams = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
   let eventId = 0;
+  let requiredToken: string | undefined;
 
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string, init?: RequestInit) => {
       const method = (init?.method ?? "GET").toUpperCase();
       const url = String(input);
-      if (url.split("?")[0].endsWith("/events")) {
+      const headers = lowerCased(init?.headers);
+      const isStream = url.split("?")[0].endsWith("/events");
+      // Like the real API with API_TOKEN set: every call without the bearer is refused.
+      if (requiredToken !== undefined && headers.authorization !== `Bearer ${requiredToken}`) {
+        (isStream ? streamCalls : calls).push({ method, url, body: undefined, headers });
+        return apiError(401, "unauthorized", "missing or invalid bearer token");
+      }
+      if (isStream) {
         const path = url.split("?")[0];
+        streamCalls.push({ method, url, body: undefined, headers });
         const body = new ReadableStream<Uint8Array>({
           start(c) {
             streams.set(path, c);
             c.enqueue(encoder.encode(": connected\n\n"));
             init?.signal?.addEventListener("abort", () => {
+              if (streams.get(path) === c) streams.delete(path);
               try {
                 c.close();
               } catch {
@@ -45,12 +60,12 @@ export function installFakeApi() {
       }
       let body: unknown;
       if (typeof init?.body === "string") body = JSON.parse(init.body);
-      calls.push({ method, url, body });
+      calls.push({ method, url, body, headers });
       for (let i = handlers.length - 1; i >= 0; i--) {
         const h = handlers[i];
         const match = h.pattern.exec(url);
         if (h.method === method && match) {
-          const out = await h.fn({ method, url, body, match });
+          const out = await h.fn({ method, url, body, headers, match });
           return out instanceof Response ? out : json(out);
         }
       }
@@ -60,9 +75,15 @@ export function installFakeApi() {
 
   return {
     calls,
+    /** Every attempt to open an event stream, refused ones included. */
+    streamCalls,
     /** Later registrations win, so a test can override a default. */
     on(method: string, pattern: RegExp | string, fn: Handler) {
       handlers.push({ method: method.toUpperCase(), pattern: typeof pattern === "string" ? new RegExp(`^${pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) : pattern, fn });
+    },
+    /** From now on, requests and streams must carry `Authorization: Bearer <token>`. */
+    requireToken(token: string) {
+      requiredToken = token;
     },
     /** The calls made with this method whose url matches. */
     made(method: string, pattern: RegExp | string): Call[] {

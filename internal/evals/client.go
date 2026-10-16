@@ -94,6 +94,9 @@ type RunRequest struct {
 	Model      string          `json:"model,omitempty"`
 	ScriptID   string          `json:"script_id,omitempty"`
 	Limits     store.Limits    `json:"limits"`
+	// Trigger is "eval" for every run the runner creates (CreateRun sets it), so eval
+	// runs can be told apart from an operator's in the run list.
+	Trigger string `json:"trigger,omitempty"`
 }
 
 // WorkflowRequest is the body of POST /api/workflows the runner sends.
@@ -216,8 +219,11 @@ func (c *Client) RegisterScript(ctx context.Context, scriptID string, steps []mo
 	return c.do(ctx, http.MethodPost, "/api/evals/scripts", scriptRegistration{ScriptID: scriptID, Steps: steps}, nil)
 }
 
-// CreateRun triggers a quick run.
+// CreateRun triggers a run, tagged with trigger eval.
 func (c *Client) CreateRun(ctx context.Context, req RunRequest) (*store.Run, error) {
+	if req.Trigger == "" {
+		req.Trigger = store.TriggerEval
+	}
 	var out store.Run
 	if err := c.do(ctx, http.MethodPost, "/api/runs", req, &out); err != nil {
 		return nil, err

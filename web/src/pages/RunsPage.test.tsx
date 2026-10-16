@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes, useParams } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Run } from "@/lib/api";
+import { installFakeApi } from "@/test/fakeApi";
 import RunsPage from "./RunsPage";
 
 const DONE = "01a14161-d5ef-7d96-ba96-a45d5d4bb0f2";
@@ -105,5 +106,20 @@ describe("RunsPage", () => {
     const row = (await screen.findByTitle(DONE)).closest("tr")!;
     fireEvent.click(within(row).getByText("manual"));
     expect(await screen.findByText(`run page ${DONE}`)).not.toBeNull();
+  });
+});
+
+describe("RunsPage live list", () => {
+  it("refreshes the list on any event, once for a burst", async () => {
+    const api = installFakeApi();
+    api.on("GET", /^\/api\/runs\?/, () => runs);
+    renderPage();
+    await screen.findByTitle(DONE);
+    await waitFor(() => expect(api.hasStream("/api/events")).toBe(true));
+
+    for (const event of ["log", "tool_call", "model_call", "agent_message"]) api.send("/api/events", event, {});
+    await waitFor(() => expect(api.made("GET", /^\/api\/runs\?/)).toHaveLength(2));
+    await act(async () => void (await new Promise((r) => setTimeout(r, 800))));
+    expect(api.made("GET", /^\/api\/runs\?/)).toHaveLength(2);
   });
 });

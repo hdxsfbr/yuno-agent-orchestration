@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"yuno/internal/memory"
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
 	"yuno/internal/store"
@@ -528,4 +530,32 @@ func TestBindChannelOneAgent(t *testing.T) {
 	if got, err := store.BindChannel(ctx, pool, store.ChannelTelegram, b.ID); err != nil || got.AgentID != b.ID {
 		t.Fatalf("binding after the bound agent was deleted: %+v %v", got, err)
 	}
+}
+
+// The bound agent's MEMORY.md is rendered from its facts when the binding is asserted:
+// a conversation does not pass through the engine, which renders it before node visits.
+func TestKeeperRendersBoundMemory(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	a, err := store.GetAgent(ctx, pool, boundAgent(t, pool, "agmemory").ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.MemoryPolicy.Enabled = true
+	if err := store.UpdateAgent(ctx, pool, a); err != nil {
+		t.Fatal(err)
+	}
+	exp := time.Now().Add(time.Hour)
+	if err := memory.Save(ctx, pool, &store.MemoryFact{AgentID: a.ID, Key: "favourite colour", Value: "teal", ExpiresAt: &exp}, 0, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go (&Keeper{Pool: pool, Gateway: newFakeGW(baselineTelegram), Log: slog.New(slog.DiscardHandler), StateDir: dir}).Run(runCtx)
+	path := filepath.Join(openclaw.WorkspaceDir(dir, "agmemory"), "MEMORY.md")
+	waitFor(t, "MEMORY.md rendered", func() bool {
+		b, err := os.ReadFile(path)
+		return err == nil && strings.Contains(string(b), "- favourite colour: teal")
+	})
 }

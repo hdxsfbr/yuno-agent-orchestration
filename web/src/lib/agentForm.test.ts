@@ -198,3 +198,12 @@ describe("parseFieldErrors", () => {
     expect(unplacedErrors(parseFieldErrors(["name: bad"]))).toEqual([]);
   });
 });
+
+describe("memory policy", () => {
+  it("never sends a conversation window, whether or not the saved agent has one", () => {
+    const withWindow = { ...agent, memory_policy: { enabled: true, conversation_window: 30, conversation_ttl_days: 14 } as Agent["memory_policy"] };
+    expect(emptyForm()).not.toHaveProperty("conversationWindow");
+    expect(toInput(agentToForm(withWindow)).memory_policy).toEqual({ enabled: true, conversation_ttl_days: 14 });
+    expect(validateForm(agentToForm(withWindow))).toEqual({});
+  });
+});

@@ -25,10 +25,9 @@ platform and approvals from chat sessions in the inbox; cron and delay schedules
 per-agent guardrails (cost cap, runs per hour, blocked tools, input patterns); agent
 memory with a retention policy, rendered into the agent's memory file; skills; and
 `make eval` with seventeen public cases, seven evaluators and a rubric evaluator in
-heuristic and model modes. Not yet (wave 4, `docs/DESIGN.md` section 9): the final
-documentation (architecture diagram, threat model, demo script) and the last
-polish. This file is kept truthful at every commit; sections marked "not yet" are not
-yet.
+heuristic and model modes. Still to come: the recorded walkthrough video and the final evaluation report over
+every split, both linked from this file when they exist. This file is kept truthful at
+every commit.
 
 ## Run it
 
@@ -39,36 +38,41 @@ state and agent workspaces under `./data/openclaw` (git-ignored).
 
 ```bash
 cp .env.example .env     # fill in ANTHROPIC_API_KEY to use a real model; optional otherwise
-make run                 # generates platform tokens, builds images, starts postgres,
-                         # openclaw, deploytarget, api, web
-make seed                # the six demo agents the workflow templates name
+make run                 # generates platform tokens, builds images stamped with the commit,
+                         # starts postgres, openclaw, deploytarget, api, web, migrates, seeds
 make smoke               # every service answers; gateway, socket and sandbox image checked
 make probe-openclaw      # a real OpenClaw turn with a sandboxed exec, through the gateway
 ```
 
-The api shares the gateway container's network namespace, so if the `openclaw`
-container is ever recreated on its own, recreate `api` too (`make run` does both).
+The api shares the gateway container's network namespace. A gateway that crashes or is
+restarted in place comes back on its own (both containers carry a restart policy, the
+api exits when its namespace dies and rejoins the restarted gateway, nginx re-resolves
+the address; measured at about two minutes end to end). A gateway container that is
+*recreated* gets a new identity the api cannot rejoin by itself: recreate `api` too
+(`make run` does both).
 
-Then open http://localhost:8080. Agents lists the seeded agents, Workflows has the two
+Then open http://localhost:8080. Agents lists the seeded agents with their channel and
+live state, Workflows has the two
 templates ("From template" makes an editable copy; Run asks for the input), Approvals is
 the inbox, Runs shows every run with its live trace, Channels binds one agent to Telegram
 and shows the conversations, Schedules fires workflows on a cron or once (each firing is
 recorded once per occurrence; a once-schedule that fired needs a new time to run again),
-Skills holds the markdown skills agents can list, and Status shows the gateway and the
-scheduler's next due time. `make help` lists every target. The
+Skills holds the markdown skills agents can list, and Status shows the commit the stack was built
+from, the gateway and the scheduler's next due time. Deleting an agent removes it from
+the runtime too, and the api reconciles the runtime's agents with its own at start. `make help` lists every target. The
 ones that matter:
 
 | Target | What it does |
 |---|---|
-| `make run` | Build and start the stack, wait for readiness, print the URL |
+| `make run` | Build and start the stack, wait for readiness, seed the demo agents, print the URL |
 | `make smoke` | Hit every service in the running stack and check the sandbox is isolated |
 | `make test` | Go unit tests (against the `yuno_test` database) and frontend tests |
 | `make test-integration` | Live tests against the running gateway, run serially |
-| `make test-race` | The engine package under the race detector (installs gcc in the throwaway tools container) |
+| `make test-race` | The engine and event packages under the race detector (installs gcc in the throwaway tools container) |
 | `make probe-openclaw` | A real OpenClaw turn with a sandboxed `exec`, the integration canary |
 | `make probe-approval` | Verifies the gateway's plugin approval calls the side-effect gate relies on |
 | `make seed` | Creates the six demo agents the workflow templates name (Coder, Reviewer, Deployer, Researcher, Critic, Writer); idempotent |
-| `make eval` | Run the evaluation suite offline with the scripted provider; `make eval-baseline` stores the report |
+| `make eval` | Run the evaluation suite offline with the scripted provider against the running stack; `make eval-baseline` / `make eval-final` store the report |
 | `make lint` | `go vet`, `staticcheck`, `eslint`, `tsc` |
 | `scripts/mutation-check.sh` | Breaks a line of code, runs a test command, restores the file, and says whether the test caught it |
 | `make logs` | Follow the api logs |
@@ -83,10 +87,14 @@ The model upstream is `MODEL_UPSTREAM=anthropic` with `ANTHROPIC_API_KEY`, or
 models through the Anthropic messages format, and the proxy rewrites model ids
 (`claude-opus-5-5` becomes `anthropic/claude-opus-5.5`) and the auth header, so agents
 are configured identically either way.
-Telegram: set `TELEGRAM_MODE=polling` (or `webhook` with `PUBLIC_BASE_URL` from `make
-tunnel` and a `TELEGRAM_WEBHOOK_SECRET`), `TELEGRAM_BOT_TOKEN` from BotFather and
-`TELEGRAM_ALLOWED_USER_IDS` (numeric ids; only these users can talk to the bot or
-approve from chat). The channel stays closed until an agent is bound on the Channels page
+Telegram: `TELEGRAM_BOT_TOKEN` from BotFather and `TELEGRAM_ALLOWED_USER_IDS` (numeric
+ids; only these users can talk to the bot or approve from chat). `TELEGRAM_MODE=webhook`
+is the verified-inbound mode: `make tunnel` starts a cloudflared quick tunnel to a
+listener that serves only `/telegram-webhook`, its `https://…trycloudflare.com` URL goes
+in `PUBLIC_BASE_URL`, `TELEGRAM_WEBHOOK_SECRET` must be at least 32 characters (the
+setup refuses webhook mode otherwise), the gateway registers the URL with Telegram and
+answers a wrong secret with 401; `make smoke` checks both. `TELEGRAM_MODE=polling` works
+without a public URL. The channel stays closed until an agent is bound on the Channels page
 or with `PUT /api/channels/telegram/binding`; binding restarts the gateway in place
 (about five seconds). Conversations are the agent's own sessions, not runs; they appear
 under Channels with their transcript.
@@ -97,8 +105,15 @@ to), `HTTP_FETCH_ALLOWLIST` (hosts `http_fetch` may reach; empty means none),
 `gitlab_create_mr`), `MCP_TOOL_WAIT_SECONDS` (how long a gated tool call waits for the
 human before the agent continues with `pending_approval`, default 540), `TOOL_OUTPUT_MAX_BYTES`. The memory
 tools need the agent's `memory_policy.enabled`.
-Secrets never go in the repository; the log handler redacts anything shaped like an API
-key, bot token or bearer token (see `internal/obs/redact.go`).
+Secrets never go in the repository; the log handler redacts anything shaped like a
+provider key (Anthropic or OpenRouter), a bot token, a run token or a bearer token, in
+logs and in stored transcripts (see `internal/obs/redact.go`). Postgres is published on
+loopback only.
+
+Access: with `API_TOKEN` set, every `/api` request and stream needs `Authorization:
+Bearer <token>`; the UI asks for the token once (stored in the browser) and offers Sign
+out. The OpenAPI document declares the scheme. Without `API_TOKEN` the API is open,
+which is only for a trusted machine.
 
 ## Tools
 
@@ -114,7 +129,7 @@ output. OpenClaw's built-ins run inside the agent's Docker sandbox.
 | `gitlab_create_mr` | side-effecting, approval by default | GitLab (when configured) | 30 s + approval wait | `{run_token, title, description, paths[]}` |
 | `http_fetch` | read-only | allowlisted https hosts | 15 s | `{run_token, url}`; output wrapped as untrusted content |
 | `memory_save` | computational | postgres | 5 s | `{run_token, key, value, ttl_days?}` |
-| `memory_recall` | read-only | postgres | 5 s | `{run_token, query}` |
+| `memory_recall` | read-only | postgres | 5 s | `{run_token, query}`; output wrapped as untrusted content |
 | `read`, `write`, `edit`, `apply_patch`, `ls`, `exec`, `process` | OpenClaw built-ins | the sandbox | OpenClaw's | |
 
 Side effects are idempotent: the key is a hash of run, node visit, tool and canonical
@@ -193,9 +208,111 @@ DECISIONS.md        assumptions and decisions log
 AI_USAGE.md         how AI was used to build this
 ```
 
-## Architecture, runtime choice, threat model, evaluation report, demo
+## Architecture
 
-Not yet. Each lands with its wave; the final README will carry the architecture diagram,
-the runtime justification (summarised from `docs/adr/0001-runtime.md`), the threat model
-and known limitations, the tool table, and how to add a workflow template or a messaging
-channel.
+```mermaid
+flowchart LR
+  subgraph browser["Operator's browser"]
+    UI["React UI<br/>agents, workflows, runs, approvals,<br/>channels, schedules, skills"]
+  end
+  subgraph compose["docker compose"]
+    WEB["nginx (web)<br/>serves the UI, proxies /api, /deploy,<br/>/telegram-webhook"]
+    API["api (Go)<br/>HTTP API + SSE, run engine, scheduler,<br/>approvals, MCP tool server, model proxy"]
+    PG[("Postgres<br/>agents, workflows, runs, traces,<br/>approvals, conversations, memory")]
+    GW["OpenClaw gateway<br/>executes every agent turn,<br/>Telegram channel, sessions"]
+    SBX["per-agent Docker sandbox<br/>exec, file tools; no network"]
+    DT["deploy target<br/>local release store"]
+  end
+  TG["Telegram"]
+  LLM["Model provider<br/>(Anthropic or OpenRouter)"]
+  UI -- "HTTP + SSE" --> WEB --> API
+  API <--> PG
+  API -- "WebSocket RPC (loopback)" --> GW
+  GW -- "MCP: yuno__* tools (bearer)" --> API
+  GW -- "model proxy (loopback, key injected)" --> API --> LLM
+  GW --> SBX
+  API -- "deploy_release" --> DT
+  TG <--> GW
+```
+
+The control plane is the Go `api`: it owns the data model, the workflow engine (graph
+walk, typed state, limits, approvals, retries), the scheduler, the platform tools served
+over MCP, the model proxy that keeps the provider key out of the runtime, and the SSE
+streams the UI follows. OpenClaw is the execution engine: every agent turn runs there,
+with the agent's `SOUL.md`, `AGENTS.md`, `MEMORY.md` and skills materialised from the
+platform's configuration, tools executed in a per-agent Docker sandbox, and the Telegram
+channel handled natively. The api and the gateway share one network namespace so every
+privileged channel between them (RPC, MCP, model proxy) is loopback only. Three layers,
+three directories: `web/` (UI), `internal/httpapi` + `internal/engine` + `internal/tools`
+(runtime integration and control), `internal/store` (persistence).
+
+## Runtime choice
+
+The platform embeds OpenClaw (`docs/adr/0001-runtime.md` has the full record). The short
+version: the attached brief requires one of OpenClaw, OpenCode or Goose as the execution
+engine; of the three, OpenClaw is the only always-on gateway with a stable WebSocket
+protocol, per-agent sandboxing, a native Telegram channel with inbound verification, and
+an agent model (markdown files, skills, memory) that maps onto the brief's configuration
+dimensions. OpenCode is a stronger coding agent but has no channel or scheduler story;
+Goose's extension model would have meant writing the channel and the sandbox ourselves.
+The trade-off accepted: the platform's limits, approvals and idempotency are enforced
+around OpenClaw's loop (by event, by tick and at the MCP gate) rather than inside a loop
+we own, and several gateway behaviours had to be probed rather than read from docs; the
+probes are committed (`make probe-openclaw`, `make probe-approval`, the Telegram probe).
+Go for the control plane: one static binary behind every compose service, a standard
+toolchain, and a type system that keeps a 30-table data model honest.
+
+## Threat model and known limitations
+
+`docs/threat-model.md` lists assets, trust boundaries, each threat with its mitigation
+and the residual risk, and the known limitations. The headline items: model output and
+every tool result are untrusted (schemas, allowlists, the approval gate and the
+untrusted-content wrapper stand between them and a side effect); agent commands run in a
+sandbox with no network; the provider key never reaches the runtime; secrets are redacted
+from logs and traces; the Docker socket mounted into the gateway container is the one
+root-equivalent surface, and exec guardrail patterns do not reach the sandbox.
+
+## Evaluation
+
+`make eval` runs the public split (17 cases) offline against the running stack with the
+deterministic scripted model, seven evaluators (`termination`, `trace_integrity`,
+`expectation`, `approval_gate`, `idempotency`, `schema`, `allowlist`) and the rubric in
+heuristic mode, and writes `evals/reports/<timestamp>.md`. `make eval-baseline` stores
+the report as `evals/reports/baseline.md`; `make eval-final` runs every split (24 cases;
+the 7 private ones need the network, a configured GitLab or a human) and stores
+`evals/reports/final.md`; `EVAL_PROVIDER=anthropic` grades the rubric with a real model
+through the proxy. Cases live in `evals/cases/v1/` and are described in `evals/README.md`.
+The baseline committed with wave 3 is 17 of 17 public cases, deterministic pass 1.000,
+end-to-end success 1.000.
+
+## Demo
+
+`docs/demo-script.md` is the walkthrough the video follows: configuration (an agent's
+dimensions, the dev pipeline template), a successful run with its live trace, a handled
+failure (a loop limit), the approval gate in the inbox, the evaluation report, and a
+live Telegram conversation with the bound agent.
+
+## Adding a workflow template
+
+Drop a JSON file in `templates/` with `key`, `name`, `description` and a `definition`
+(see `templates/dev_pipeline.json`): nodes of kind `start`, `agent`, `approval`, `end`;
+agent nodes name their agent with `agent_name` and carry a `task` template over
+`{{.input.*}}` and `{{.state.<node>.*}}` plus an `output_schema`; edges in evaluation
+order with optional `when` conditions over the state; `limits`. It loads at the next api
+start as a read-only template; "From template" on the Workflows page resolves the agent
+names to your agents (`make seed` creates the six the shipped templates use) and makes
+an editable copy.
+
+## Adding a messaging channel
+
+Telegram is OpenClaw's native channel configured by the platform. Another OpenClaw
+channel (Slack, WhatsApp, Discord) follows the same three steps: add its block to the
+baseline config in `internal/openclaw/baseline.go` from the channel's environment
+variables (`openclaw-init` writes it); extend `internal/channels` so the binding patch
+writes a `bindings[]` entry whose `match.channel` names the new channel and the keeper
+re-asserts it; and let the conversation mirror in `internal/engine/conversations.go`
+recognise the channel's session keys (`agent:<id>:<channel>:…`). The Channels page reads
+`GET /api/channels`, so a second card appears once the handler reports the channel. A
+channel OpenClaw does not have would be an inbound adapter in the api instead: verify
+the source (signature or secret), persist the update, and trigger a run on the bound
+agent, with the reply sent through the channel's API.

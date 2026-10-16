@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { getOpenClawStatus, getStatus } from "@/lib/api";
+import { useToken } from "@/lib/auth";
 import { formatDateTime, formatDuration } from "@/lib/format";
 import { useChannels } from "@/lib/useChannels";
 import { useSchedules } from "@/lib/useSchedules";
@@ -141,9 +142,12 @@ function SchedulerPanel() {
 }
 
 export default function StatusPage() {
+  const token = useToken();
   return (
     <div className="space-y-6">
-      <PageHeader title="Status" />
+      <PageHeader title="Status">
+        <Badge tone={token ? "green" : "zinc"}>{token ? "API token in use" : "No API token"}</Badge>
+      </PageHeader>
       <PlatformCards />
       <OpenClawPanel />
       <SchedulerPanel />

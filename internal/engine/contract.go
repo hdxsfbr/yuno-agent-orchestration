@@ -118,6 +118,10 @@ type Service interface {
 	MaterializeAgent(ctx context.Context, agentID string) (*RuntimeView, error)
 	// AgentRuntime reports what OpenClaw currently holds without writing.
 	AgentRuntime(ctx context.Context, agentID string) (*RuntimeView, error)
+	// RemoveAgent takes a soft-deleted agent out of OpenClaw (agents.delete and its
+	// workspace directory). Called after delete; the caller logs a failure, the
+	// deletion stands and the start-up sync retries it.
+	RemoveAgent(ctx context.Context, agentID string) error
 	// Trigger validates and queues a run (422 on bad input, 404 on unknown ids, 429 on
 	// guardrail rate limits are returned as typed errors by the implementation).
 	Trigger(ctx context.Context, req TriggerRequest) (*store.Run, error)

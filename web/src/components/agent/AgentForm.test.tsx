@@ -243,3 +243,27 @@ describe("AgentForm guardrail errors", () => {
     expect(screen.getByLabelText("Runs per hour").parentElement?.textContent).toContain("must be a whole number");
   });
 });
+
+describe("AgentForm memory and limits", () => {
+  it("has no conversation window field and sends none, even for an agent that saved one", () => {
+    const legacy = saved({ memory_policy: { enabled: true, max_facts: 25, conversation_ttl_days: 14, conversation_window: 30 } as Agent["memory_policy"] });
+    const { onSubmit } = setup({ agent: legacy });
+    expect(screen.queryByLabelText(/conversation window/i)).toBeNull();
+    expect(screen.queryByText(/conversation window/i)).toBeNull();
+    // the other memory settings are still there, filled from the agent
+    expect((screen.getByLabelText("Max facts") as HTMLInputElement).value).toBe("25");
+    expect((screen.getByLabelText("Conversation lifetime (days)") as HTMLInputElement).value).toBe("14");
+
+    submit();
+    const policy = onSubmit.mock.calls[0][0].memory_policy!;
+    expect(policy).not.toHaveProperty("conversation_window");
+    expect(policy).toEqual({ enabled: true, max_facts: 25, conversation_ttl_days: 14 });
+  });
+
+  it("says which limits apply to a quick run and which to a workflow run", () => {
+    setup();
+    const limits = screen.getByRole("heading", { name: "Limits" }).parentElement!;
+    expect(limits.textContent).toContain("A quick run stops when it reaches any of these limits; workflow runs use the workflow's limits, plus this agent's cost cap.");
+    expect(limits.textContent).not.toContain("A run stops when it reaches any limit");
+  });
+});

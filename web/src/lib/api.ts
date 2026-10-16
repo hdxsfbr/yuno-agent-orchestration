@@ -1,6 +1,8 @@
 // Thin fetch wrapper matching the API's one error shape, plus an SSE client built on
 // fetch so it can send headers (Last-Event-ID, Authorization) that EventSource cannot.
 
+import { authHeaders, getToken, reportUnauthorized, subscribeAuth } from "./auth";
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -13,10 +15,12 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const sent = getToken();
   const res = await fetch(path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "Content-Type": "application/json", ...authHeaders(sent), ...(init?.headers ?? {}) },
   });
+  if (res.status === 401) reportUnauthorized(sent);
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   let body: unknown = undefined;
@@ -87,7 +91,8 @@ export type SubscribeOptions = {
 };
 
 /**
- * Subscribes to an SSE endpoint. Reconnects with Last-Event-ID after a 1 s pause.
+ * Subscribes to an SSE endpoint. Reconnects with Last-Event-ID after a 1 s pause, or at
+ * once when the API token changes so the stream never outlives the token it was opened with.
  * Returns an unsubscribe function.
  */
 export function subscribe(
@@ -96,17 +101,40 @@ export function subscribe(
   onStatus?: (s: "open" | "closed") => void,
   options?: SubscribeOptions,
 ) {
-  const controller = new AbortController();
+  let controller = new AbortController();
   let lastId: string | undefined = options?.lastEventId;
   let stopped = false;
+  let sent = getToken();
+  let tokenChanged = false;
+  let wake: (() => void) | undefined;
+
+  const offAuth = subscribeAuth(() => {
+    if (getToken() === sent) return;
+    tokenChanged = true;
+    controller.abort();
+    wake?.();
+  });
+
+  const pause = () =>
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 1000);
+      wake = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
 
   const connect = async () => {
     while (!stopped) {
+      controller = new AbortController();
+      sent = getToken();
+      tokenChanged = false;
       try {
         const res = await fetch(path, {
-          headers: { Accept: "text/event-stream", ...(lastId ? { "Last-Event-ID": lastId } : {}) },
+          headers: { Accept: "text/event-stream", ...authHeaders(sent), ...(lastId ? { "Last-Event-ID": lastId } : {}) },
           signal: controller.signal,
         });
+        if (res.status === 401) reportUnauthorized(sent);
         if (!res.ok || !res.body) throw new Error(`sse ${res.status}`);
         onStatus?.("open");
         const parser = createSSEParser((e) => {
@@ -125,13 +153,15 @@ export function subscribe(
       }
       onStatus?.("closed");
       if (stopped) return;
-      await new Promise((r) => setTimeout(r, 1000));
+      if (!tokenChanged) await pause();
     }
   };
   void connect();
   return () => {
     stopped = true;
+    offAuth();
     controller.abort();
+    wake?.();
   };
 }
 
@@ -182,7 +212,6 @@ export type MemoryPolicy = {
   enabled?: boolean;
   max_facts?: number;
   fact_ttl_days?: number;
-  conversation_window?: number;
   conversation_ttl_days?: number;
 };
 
@@ -225,10 +254,14 @@ export type AgentInput = {
   channels?: "telegram"[];
 };
 
+/** Runs of an agent that are in flight right now; the list endpoint fills it. */
+export type AgentActivity = { running: number; waiting_approval: number };
+
 export type Agent = AgentInput & {
   id: string;
   openclaw_agent_id?: string;
   materialized_hash?: string;
+  activity?: AgentActivity;
   created_at: string;
   updated_at: string;
 };

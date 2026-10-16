@@ -216,7 +216,11 @@ func (f *simAPI) createRun(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.runRequests = append(f.runRequests, req)
-	run := &simRun{req: req, trigger: store.TriggerManual}
+	trigger := req.Trigger
+	if trigger == "" {
+		trigger = store.TriggerManual
+	}
+	run := &simRun{req: req, trigger: trigger}
 	switch {
 	case req.WorkflowID != "":
 		wf, ok := f.workflows[req.WorkflowID]

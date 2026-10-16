@@ -102,7 +102,7 @@ func TestListTools(t *testing.T) {
 		"deploy_release": {"side_effecting", "local_service", 30, false},
 		"finish":         {"computational", "postgres", 5, false},
 		"http_fetch":     {"read_only", "external", 15, true},
-		"memory_recall":  {"read_only", "postgres", 5, false},
+		"memory_recall":  {"read_only", "postgres", 5, true},
 		"memory_save":    {"computational", "postgres", 5, false},
 	}
 	for _, tv := range got {

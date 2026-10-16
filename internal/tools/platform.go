@@ -29,6 +29,10 @@ type PlatformDeps struct {
 	Fetch  FetchConfig
 	// GitLab registers gitlab_create_mr when set (D-010).
 	GitLab *GitLabConfig
+	// MemorySaved runs after every memory_save; nil skips it.
+	MemorySaved MemorySaved
+	// MaxOutputBytes is the cap the MCP server applies to every result (0: none).
+	MaxOutputBytes int
 }
 
 // NewPlatformRegistry returns the platform tools served over MCP (DESIGN 5.7).
@@ -37,8 +41,8 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 	r.Register(NewFinish(d.AcceptFinish, d.RejectFinish))
 	r.Register(NewDeployRelease(d.Deploy))
 	r.Register(NewHTTPFetch(d.Fetch))
-	r.Register(NewMemorySave(d.Pool))
-	r.Register(NewMemoryRecall(d.Pool))
+	r.Register(NewMemorySave(d.Pool, d.MemorySaved))
+	r.Register(NewMemoryRecall(d.Pool, d.MaxOutputBytes))
 	if d.GitLab != nil {
 		r.Register(NewGitLabCreateMR(*d.GitLab))
 	}

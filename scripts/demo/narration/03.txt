@@ -1,0 +1,1 @@
+Workflows are graphs. This is the dev pipeline template: Coder, Reviewer, a human gate, Deployer. The feedback loop is just an edge with a condition on the reviewer's typed output; the loop limit bounds it. Nothing about Coder or Reviewer is hard-coded in the engine. I'll run it with a small task.

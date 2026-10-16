@@ -1,0 +1,1 @@
+The evaluation suite runs offline against the same stack with a scripted model: twenty-four versioned cases, seventeen public, seven evaluators, a rubric. The baseline report is in the repository and `make eval` reproduces it.

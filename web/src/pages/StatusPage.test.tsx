@@ -4,6 +4,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import type { ChannelsInfo, Schedule, Status } from "@/lib/api";
+import { clearToken } from "@/lib/auth";
 import { formatDateTime } from "@/lib/format";
 import { apiError, installFakeApi } from "@/test/fakeApi";
 import StatusPage from "./StatusPage";
@@ -45,6 +46,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  clearToken();
+  localStorage.clear();
   vi.unstubAllGlobals();
 });
 
@@ -113,5 +116,33 @@ describe("Scheduler panel", () => {
     const p = await panel("Scheduler");
     expect(await p.findByText("Nothing scheduled")).not.toBeNull();
     expect(value(p, "Active schedules")).toBe("0");
+  });
+});
+
+describe("platform cards", () => {
+  it("puts the api version first, ahead of the other figures and the OpenClaw panel", async () => {
+    status = { ...baseStatus, version: "0.3.0+1941f75" };
+    renderPage();
+    const version = (await screen.findAllByText("Version"))[0];
+    expect(version.nextElementSibling!.textContent).toBe("0.3.0+1941f75");
+    expect(version.compareDocumentPosition(screen.getByText("Uptime")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const openclaw = await screen.findByRole("heading", { name: "OpenClaw" });
+    expect(version.compareDocumentPosition(openclaw) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe("API token", () => {
+  it("says a token is in use, without showing it", async () => {
+    localStorage.setItem("yuno.apiToken", "tok-never-shown-0001");
+    renderPage();
+    expect(await screen.findByText("API token in use")).not.toBeNull();
+    expect(screen.queryByText(/tok-never-shown-0001/)).toBeNull();
+    expect(document.body.innerHTML).not.toContain("tok-never-shown-0001");
+  });
+
+  it("says when none is", async () => {
+    renderPage();
+    expect(await screen.findByText("No API token")).not.toBeNull();
+    expect(screen.queryByText("API token in use")).toBeNull();
   });
 });

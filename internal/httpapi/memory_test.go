@@ -3,11 +3,16 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"yuno/internal/memory"
+	"yuno/internal/openclaw"
 	"yuno/internal/store"
 )
 
@@ -65,5 +70,82 @@ func TestAgentMemoryAPI(t *testing.T) {
 	}
 	if code, _ := do(t, ts, http.MethodDelete, "/api/agents/no-such-agent/memory/x", ""); code != http.StatusNotFound {
 		t.Fatalf("unknown agent delete: %d", code)
+	}
+}
+
+// readMemoryMD returns an agent's MEMORY.md under the state directory, "" when absent.
+func readMemoryMD(t *testing.T, stateDir, openclawID string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(openclaw.WorkspaceDir(stateDir, openclawID), "MEMORY.md"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// MEMORY.md is fresh outside node visits too, for conversations (audit #8): rewritten
+// after every memory_save and after a fact is deleted.
+func TestMemoryFileFollowsFacts(t *testing.T) {
+	g := newGateFixture(t, []string{"memory_save"}, nil, 5*time.Second)
+	g.setGuardrails(t, store.Guardrails{}, true)
+	stateDir, ocID := g.s.cfg.OpenClawStateDir, *g.agent.OpenClawAgentID
+	if text, isErr := g.call(t, "memory_save", map[string]any{"run_token": g.token, "key": "release day", "value": "Tuesday"}); isErr {
+		t.Fatalf("memory_save: %s", text)
+	}
+	if got := readMemoryMD(t, stateDir, ocID); !strings.Contains(got, "- release day: Tuesday\n") {
+		t.Fatalf("MEMORY.md after memory_save = %q", got)
+	}
+	if text, isErr := g.call(t, "memory_save", map[string]any{"run_token": g.token, "key": "release day", "value": "Thursday"}); isErr {
+		t.Fatalf("memory_save: %s", text)
+	}
+	got := readMemoryMD(t, stateDir, ocID)
+	if !strings.Contains(got, "- release day: Thursday\n") || strings.Contains(got, "Tuesday") {
+		t.Fatalf("MEMORY.md after replacing the fact = %q", got)
+	}
+
+	facts, err := memory.List(context.Background(), testPool, g.agent.ID, time.Now())
+	if err != nil || len(facts) != 1 {
+		t.Fatalf("facts = %v %v", facts, err)
+	}
+	if code, b := do(t, g.ts, http.MethodDelete, "/api/agents/"+g.agent.ID+"/memory/"+facts[0].ID, ""); code != http.StatusNoContent {
+		t.Fatalf("delete fact: %d %s", code, b)
+	}
+	if got := readMemoryMD(t, stateDir, ocID); got != "# Memory\n" {
+		t.Fatalf("MEMORY.md after deleting the only fact = %q", got)
+	}
+}
+
+// Binding an agent to Telegram renders its MEMORY.md, which its conversations read.
+func TestBindRendersMemory(t *testing.T) {
+	pool := needDB(t)
+	unbindAll := func() { _, _ = pool.Exec(context.Background(), `DELETE FROM channel_bindings`) }
+	unbindAll()
+	t.Cleanup(unbindAll)
+	cfg := testConfig()
+	cfg.TelegramMode = "polling"
+	cfg.OpenClawStateDir = t.TempDir()
+	_, ts := newTestServerDeps(t, Deps{Cfg: cfg, Pool: pool, Gateway: newChannelGateway()}, &fakeEngine{pool: pool})
+	a := channelAgent(t, "Chatter")
+	now := time.Now().UTC()
+	saveFact(t, a.ID, "timezone", now, now.Add(time.Hour))
+	bind := func() {
+		t.Helper()
+		if code, b := do(t, ts, http.MethodPut, "/api/channels/telegram/binding", `{"agent_id":"`+a.ID+`"}`); code != http.StatusOK {
+			t.Fatalf("bind: %d %s", code, b)
+		}
+	}
+
+	// Memory off: the file is the materialiser's, never rendered from facts.
+	bind()
+	if got := readMemoryMD(t, cfg.OpenClawStateDir, "t-"+a.ID); got != "" {
+		t.Fatalf("MEMORY.md rendered for an agent with memory off: %q", got)
+	}
+	stored, err := store.GetAgent(context.Background(), pool, a.ID)
+	mustDo(t, err)
+	stored.MemoryPolicy.Enabled = true
+	mustDo(t, store.UpdateAgent(context.Background(), pool, stored))
+	bind()
+	if got := readMemoryMD(t, cfg.OpenClawStateDir, "t-"+a.ID); !strings.Contains(got, "- timezone: value of timezone\n") {
+		t.Fatalf("MEMORY.md after binding = %q", got)
 	}
 }

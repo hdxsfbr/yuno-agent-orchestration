@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
+
 	"yuno/internal/obs"
 	"yuno/internal/store"
 	"yuno/internal/workflow"
@@ -26,6 +28,11 @@ type walk struct {
 	rootSpan string
 	stale    []store.RunNode // a lost worker's unfinished visits, for the next agent visit
 	sessions []string        // node sessions to delete when the worker lets the run go
+
+	// The definition's state_schema, compiled at the first agent node output.
+	stateSchema         *jsonschema.Schema
+	stateSchemaErr      error
+	stateSchemaCompiled bool
 }
 
 func (w *walk) execute(ctx context.Context) outcome {
@@ -186,6 +193,11 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 		return "", &res
 	}
 	v.abortLiveTurn(wctx) // a turn whose chat.send answer was lost, or an unconfirmed abort
+	if res.nodeStatus == store.NodeSucceeded {
+		if msg := w.checkState(ctx, node.ID, res.output); msg != "" {
+			res = failed(store.RunFailed, "state schema: "+msg)
+		}
+	}
 	v.finish(wctx, res)
 	if v.sessionCreated {
 		w.sessions = append(w.sessions, v.key)
@@ -453,4 +465,54 @@ func (w *walk) refresh(ctx context.Context) {
 	} else if !errors.Is(err, context.Canceled) {
 		w.e.log.Warn("re-read run failed", "run_id", w.run.ID, "error", err)
 	}
+}
+
+// checkState validates the run state, with output stored as state[nodeID], against the
+// definition's state_schema (audit #16): the first violation, path-qualified, or ""
+// when the state holds or there is no schema. pending_effects is the engine's own
+// record, not node output, and is left out.
+func (w *walk) checkState(ctx context.Context, nodeID string, output json.RawMessage) string {
+	raw := bytes.TrimSpace(w.def.StateSchema)
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	if !w.stateSchemaCompiled {
+		w.stateSchemaCompiled = true
+		w.stateSchema, w.stateSchemaErr = compileSchema(raw)
+		if w.stateSchemaErr != nil { // validated at save; reported in the schema's own words
+			w.stateSchemaErr = errors.New("does not compile: " + strings.TrimPrefix(w.stateSchemaErr.Error(), "output schema: "))
+		}
+	}
+	if w.stateSchemaErr != nil {
+		return w.stateSchemaErr.Error()
+	}
+	w.refresh(ctx)
+	var state map[string]json.RawMessage
+	_ = json.Unmarshal(w.run.State, &state)
+	if state == nil {
+		state = map[string]json.RawMessage{}
+	}
+	delete(state, workflow.StatePendingEffects)
+	state[nodeID] = output
+	doc, err := json.Marshal(state)
+	if err != nil {
+		return err.Error()
+	}
+	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(doc))
+	if err != nil {
+		return "state is not valid JSON"
+	}
+	err = w.stateSchema.Validate(inst)
+	var ve *jsonschema.ValidationError
+	if err == nil {
+		return ""
+	}
+	if !errors.As(err, &ve) {
+		return err.Error()
+	}
+	leaf := ve
+	for len(leaf.Causes) > 0 {
+		leaf = leaf.Causes[0]
+	}
+	return fmt.Sprintf("at /%s: %s", strings.Join(leaf.InstanceLocation, "/"), leaf.ErrorKind.LocalizedString(schemaPrinter))
 }

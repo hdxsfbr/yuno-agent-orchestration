@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { RUN_STATUSES, isTerminalStatus, listRuns, type RunStatus } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, humanize, shortId } from "@/lib/format";
-import { useEventStream } from "@/lib/useEventStream";
 import { useNow } from "@/lib/useNow";
+import { useRefreshOnEvents } from "@/lib/useRefreshOnEvents";
 import { RunStatusBadge } from "@/components/Badge";
 import { cardClass, PageHeader } from "@/components/Card";
 import ConnectionIndicator from "@/components/ConnectionIndicator";
@@ -13,15 +12,11 @@ import { EmptyState, Loading, QueryError } from "@/components/QueryState";
 
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** How long to gather events before refreshing the list. */
-const REFRESH_DELAY_MS = 500;
-
 function parseStatus(value: string | null): RunStatus | undefined {
   return RUN_STATUSES.find((s) => s === value);
 }
 
 export default function RunsPage() {
-  const qc = useQueryClient();
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const status = parseStatus(params.get("status"));
@@ -32,18 +27,8 @@ export default function RunsPage() {
     refetchOnWindowFocus: true,
   });
 
-  // Any run event may change a row (status, steps, cost), so refresh the list, at most
-  // twice a second however busy the stream is.
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const onEvent = useCallback(() => {
-    if (timer.current) return;
-    timer.current = setTimeout(() => {
-      timer.current = undefined;
-      void qc.invalidateQueries({ queryKey: ["runs"] });
-    }, REFRESH_DELAY_MS);
-  }, [qc]);
-  useEffect(() => () => clearTimeout(timer.current), []);
-  const connection = useEventStream("/api/events", onEvent);
+  // Any run event may change a row (status, steps, cost), so every event refreshes the list.
+  const connection = useRefreshOnEvents(["runs"]);
 
   const hasActive = !!q.data?.some((r) => !isTerminalStatus(r.status));
   const now = useNow(hasActive);

@@ -86,7 +86,7 @@ func TestRequestBodiesMatchTheOpenAPIDocument(t *testing.T) {
 		InteractionRules: map[string]string{"deploy_release": "auto"}}
 	checkBody(t, "POST /api/agents", agent, schemas("AgentInput"))
 
-	run := RunRequest{AgentID: "a", Task: "t", Model: ScriptedModel, ScriptID: "s", Limits: fullLimits}
+	run := RunRequest{AgentID: "a", Task: "t", Model: ScriptedModel, ScriptID: "s", Limits: fullLimits, Trigger: store.TriggerEval}
 	checkBody(t, "POST /api/runs", run, schemas("RunCreate"))
 	wfRun := RunRequest{WorkflowID: "w", Input: json.RawMessage(`{"task":"t"}`), Model: ScriptedModel, ScriptID: "s", Limits: fullLimits}
 	checkBody(t, "POST /api/runs (workflow)", wfRun, schemas("RunCreate"))

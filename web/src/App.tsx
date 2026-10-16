@@ -1,6 +1,10 @@
 import { Suspense, lazy } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { NavLink, Navigate, Route, Routes } from "react-router";
+import Button from "./components/Button";
 import { Loading } from "./components/QueryState";
+import SignInDialog from "./components/SignInDialog";
+import { clearToken, useToken } from "./lib/auth";
 import { usePendingApprovals, useApprovalEvents } from "./lib/useApprovals";
 import AgentFormPage from "./pages/AgentFormPage";
 import AgentsPage from "./pages/AgentsPage";
@@ -46,10 +50,30 @@ function PendingCount() {
   );
 }
 
+/** Offered only while a token is stored; signing out drops what the signed-in view loaded. */
+function SignOut() {
+  const qc = useQueryClient();
+  const token = useToken();
+  if (!token) return null;
+  return (
+    <Button
+      variant="ghost"
+      className="w-full justify-start"
+      onClick={() => {
+        clearToken();
+        void qc.resetQueries();
+      }}
+    >
+      Sign out
+    </Button>
+  );
+}
+
 export default function App() {
   return (
     <div className="flex min-h-screen">
-      <aside className="w-56 shrink-0 border-r border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+      <SignInDialog />
+      <aside className="flex w-56 shrink-0 flex-col border-r border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
         <div className="mb-6 text-lg font-semibold">Yuno Agents</div>
         <nav className="flex flex-col gap-1">
           {nav.map((n) => (
@@ -65,6 +89,9 @@ export default function App() {
             </NavLink>
           ))}
         </nav>
+        <div className="mt-auto pt-6">
+          <SignOut />
+        </div>
       </aside>
       <main className="min-w-0 flex-1 p-6">
         <Routes>

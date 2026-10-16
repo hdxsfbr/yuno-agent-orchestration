@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -141,16 +142,77 @@ func TestBaselineTelegramModes(t *testing.T) {
 	}
 	in := inputs()
 	in.TelegramMode = "polling"
-	in.TelegramAllowedUserIDs = []int64{1184040613}
+	in.TelegramAllowedUserIDs = []int64{100000001}
 	tg := Baseline(in)["channels.telegram"].(map[string]any)
 	ea := tg["execApprovals"].(map[string]any)
 	if ea["target"] != "dm" || len(ea["approvers"].([]any)) != 1 || len(tg["allowFrom"].([]any)) != 1 {
 		t.Errorf("approvers and allowlist come from TELEGRAM_ALLOWED_USER_IDS: %v", tg)
 	}
-	if owners := Baseline(in)["commands.ownerAllowFrom"].([]any); len(owners) != 1 || owners[0] != int64(1184040613) {
+	if owners := Baseline(in)["commands.ownerAllowFrom"].([]any); len(owners) != 1 || owners[0] != int64(100000001) {
 		t.Errorf("commands.ownerAllowFrom = %v", owners)
 	}
 	if _, has := tg["botToken"]; has {
 		t.Error("the bot token stays in the gateway's environment, never in the config")
+	}
+}
+
+// Only well-formed agent ids other than the gateway's default may be deleted, so an id
+// the gateway reports can never point the workspace removal outside the state directory.
+func TestRemovable(t *testing.T) {
+	for id, want := range map[string]bool{
+		"ag0123456789": true, "zz-probe-two": true, "main": false, "": false, "..": false,
+		"../workspace": false, "a/b": false, "Upper": false, "-lead": false,
+	} {
+		if got := Removable(id); got != want {
+			t.Errorf("Removable(%q) = %v, want %v", id, got, want)
+		}
+	}
+}
+
+// Webhook mode is refused unless Telegram can deliver to it and the gateway can verify
+// the secret: openclaw-init names what is missing and writes nothing (audit #1).
+func TestWriteBaselineRefusesUnverifiableWebhook(t *testing.T) {
+	const secret = "fake-webhook-secret-0123456789abcdef" // 36 characters
+	tests := []struct {
+		name, url, secret string
+		want              []string // substrings of the error; none means accepted
+	}{
+		{"https and a long secret", "https://example.trycloudflare.com", secret, nil},
+		{"no public url", "", secret, []string{"PUBLIC_BASE_URL"}},
+		{"plain http", "http://example.trycloudflare.com", secret, []string{"PUBLIC_BASE_URL starting with https://"}},
+		{"scheme only", "https://", secret, []string{"PUBLIC_BASE_URL"}},
+		{"short secret", "https://example.trycloudflare.com", secret[:31], []string{"TELEGRAM_WEBHOOK_SECRET of at least 32 characters"}},
+		{"both missing", "", "", []string{"PUBLIC_BASE_URL", "TELEGRAM_WEBHOOK_SECRET"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			in := inputs()
+			in.TelegramMode, in.PublicBaseURL, in.TelegramWebhookSecret = "webhook", tc.url, tc.secret
+			changed, err := WriteBaseline(dir, in)
+			if tc.want == nil {
+				if err != nil || !changed {
+					t.Fatalf("WriteBaseline = %v, %v; want a write", changed, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("WriteBaseline accepted an unverifiable webhook")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error %q does not name %q", err, w)
+				}
+			}
+			if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+				t.Errorf("wrote %d files before refusing", len(entries))
+			}
+		})
+	}
+	// Polling needs neither.
+	in := inputs()
+	in.TelegramMode = "polling"
+	if _, err := WriteBaseline(t.TempDir(), in); err != nil {
+		t.Fatalf("polling: %v", err)
 	}
 }

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Yuno Agent Orchestration Platform</title>
+<link rel="stylesheet" href="card.css">
+</head>
+<body>
+<main class="stage">
+  <div class="mark"><i></i>Yuno</div>
+  <h1>Yuno Agent Orchestration Platform</h1>
+  <p class="lead">A Go control plane over an OpenClaw runtime, with a React UI, Postgres, Docker compose and an agent on Telegram.</p>
+  <div class="meta">
+    <span class="chip hidden" id="commit">Build <b class="mono"></b></span>
+    <span class="chip hidden" id="date"><b></b></span>
+  </div>
+</main>
+<script>
+  // The recorder injects { commit, date } before the page loads; absent values leave their chip hidden.
+  const card = window.__CARD__ || {};
+  for (const [id, value] of [["commit", card.commit], ["date", card.date]]) {
+    if (!value) continue;
+    const el = document.getElementById(id);
+    el.querySelector("b").textContent = value;
+    el.classList.remove("hidden");
+  }
+</script>
+</body>
+</html>

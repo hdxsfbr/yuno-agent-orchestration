@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"yuno/internal/channels"
@@ -21,7 +20,7 @@ import (
 const (
 	maxBindingBody       = 4 << 10
 	botLookupTimeout     = 5 * time.Second
-	botNameTTL           = 10 * time.Minute
+	botLearnWindow       = 2 * time.Minute
 	defaultConversations = 100
 	maxConversations     = 500
 	defaultMessages      = 500
@@ -50,36 +49,53 @@ type bindingInput struct {
 	AgentID string `json:"agent_id"`
 }
 
-// botNames caches the bot username per gateway connection: reading it makes the
-// gateway call Telegram's getMe.
-var botNames sync.Map // openclaw.Client → cachedBotName
+// The bot username comes from the gateway's channels.status probe, which makes the
+// Telegram plugin call getMe: seconds on a slow network, and nothing while the gateway
+// restarts. GET /api/channels reads only the cache (audit #27), which is filled at api
+// start and again at every bind; "" until known.
 
-type cachedBotName struct {
-	name string
-	at   time.Time
+func (s *Server) telegramOn() bool {
+	return s.gateway != nil && s.cfg.TelegramMode != "" && s.cfg.TelegramMode != "off"
 }
 
-func (s *Server) botUsername(ctx context.Context) string {
-	if s.gateway == nil || s.cfg.TelegramMode == "" || s.cfg.TelegramMode == "off" {
-		return ""
+// botUsername is the cached bot username, "" until known.
+func (s *Server) botUsername() string {
+	if p := s.botName.Load(); p != nil {
+		return *p
 	}
-	if v, ok := botNames.Load(s.gateway); ok {
-		if c := v.(cachedBotName); time.Since(c.at) < botNameTTL {
-			return c.name
-		}
-	}
-	if _, up := s.gateway.Info(); !up {
-		return ""
+	return ""
+}
+
+// refreshBotUsername asks the gateway for the bot and caches the answer; it reports
+// whether a name is known.
+func (s *Server) refreshBotUsername(ctx context.Context) bool {
+	if !s.telegramOn() {
+		return false
 	}
 	cctx, cancel := context.WithTimeout(ctx, botLookupTimeout)
 	defer cancel()
 	name, err := openclaw.TelegramBotUsername(cctx, s.gateway, int(botLookupTimeout/time.Millisecond))
 	if err != nil || name == "" {
 		s.log.Warn("telegram bot username unavailable", "error", err)
-		return ""
+		return false
 	}
-	botNames.Store(s.gateway, cachedBotName{name: name, at: time.Now()})
-	return name
+	s.botName.Store(&name)
+	return true
+}
+
+// learnBotUsername refreshes the cache, retrying with backoff from 1 s doubling to 30 s
+// until the gateway answers or ctx ends. The api runs it at start and after every bind
+// (the bind restarts the gateway, so the first attempt may find it away).
+func (s *Server) learnBotUsername(ctx context.Context) {
+	wait := time.Second
+	for s.telegramOn() && !s.refreshBotUsername(ctx) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, 30*time.Second)
+	}
 }
 
 // channelsState renders GET /api/channels.
@@ -104,7 +120,7 @@ func (s *Server) channelsState(ctx context.Context) (channelsView, error) {
 	case !errors.Is(err, store.ErrNotFound):
 		return v, err
 	}
-	v.Telegram.BotUsername = s.botUsername(ctx)
+	v.Telegram.BotUsername = s.botUsername()
 	if b != nil && v.Telegram.BotUsername != "" && b.ExternalID != v.Telegram.BotUsername {
 		if err := store.SetChannelBindingExternalID(ctx, s.pool, store.ChannelTelegram, v.Telegram.BotUsername); err != nil {
 			s.log.Warn("record bot username failed", "error", err)
@@ -179,6 +195,13 @@ func (s *Server) bindTelegram(w http.ResponseWriter, r *http.Request) {
 	if !s.applyTelegram(w, r, *a.OpenClawAgentID, "yuno: telegram bound to "+a.Name, b.ID) {
 		return
 	}
+	// The bound agent answers people from its workspace, MEMORY.md included.
+	s.renderMemory(ctx, a)
+	go func() { // the bot username, for the Channels page
+		lctx, cancel := context.WithTimeout(context.Background(), botLearnWindow)
+		defer cancel()
+		s.learnBotUsername(lctx)
+	}()
 	s.log.Info("telegram bound", "agent_id", a.ID, "openclaw_agent_id", *a.OpenClawAgentID)
 	s.writeChannels(w, r)
 }

@@ -38,6 +38,29 @@ x-api-env: &api-env
   ENGINE_WORKERS: ${ENGINE_WORKERS:-4}
   HTTP_FETCH_ALLOWLIST: ${HTTP_FETCH_ALLOWLIST:-docs.python.org,pypi.org,raw.githubusercontent.com}
   LOG_LEVEL: ${LOG_LEVEL:-info}
+  # Everything else internal/config reads, with its defaults, so a value set in .env
+  # reaches the api (internal/config/config_test.go keeps this list complete). The
+  # addresses above that are written out are the compose topology, not settings.
+  LISTEN_ADDR: ${LISTEN_ADDR:-:8080}
+  OPENCLAW_SANDBOX_IMAGE: ${OPENCLAW_SANDBOX_IMAGE:-yuno-sandbox:latest}
+  API_BASE_FOR_OPENCLAW: ${API_BASE_FOR_OPENCLAW:-http://127.0.0.1:8080}
+  DEPLOYTARGET_LISTEN: ${DEPLOYTARGET_LISTEN:-:8091}
+  DEPLOYTARGET_DATA_DIR: ${DEPLOYTARGET_DATA_DIR:-/tmp/yuno-releases}
+  DEPLOYTARGET_MAX_MB: ${DEPLOYTARGET_MAX_MB:-100}
+  ENGINE_STALE_AFTER: ${ENGINE_STALE_AFTER:-300s}
+  TOOL_OUTPUT_MAX_BYTES: ${TOOL_OUTPUT_MAX_BYTES:-32768}
+  MAX_STEPS: ${MAX_STEPS:-200}
+  MAX_DURATION_SECONDS: ${MAX_DURATION_SECONDS:-3600}
+  MAX_NODE_ITERATIONS: ${MAX_NODE_ITERATIONS:-50}
+  MAX_LOOP_VISITS: ${MAX_LOOP_VISITS:-10}
+  MAX_COST_USD: ${MAX_COST_USD:-20}
+  MAX_TOOL_CALLS: ${MAX_TOOL_CALLS:-300}
+  APPROVAL_TIMEOUT_MAX_SECONDS: ${APPROVAL_TIMEOUT_MAX_SECONDS:-604800}
+  EVAL_API_URL: ${EVAL_API_URL:-http://127.0.0.1:8080}
+  EVAL_PROVIDER: ${EVAL_PROVIDER:-scripted}
+  EVAL_SPLIT: ${EVAL_SPLIT:-public}
+  EVAL_CASES_DIR: ${EVAL_CASES_DIR:-evals/cases}
+  EVAL_REPORTS_DIR: ${EVAL_REPORTS_DIR:-evals/reports}
 
 services:
   postgres:
@@ -46,8 +69,10 @@ services:
       POSTGRES_USER: yuno
       POSTGRES_PASSWORD: yuno
       POSTGRES_DB: yuno
+    # Published on the loopback interface only: the database has a fixed password and no
+    # business on the network (make test and psql from the host still reach it).
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
@@ -63,6 +88,8 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+      args: &version-arg
+        VERSION: ${VERSION:-dev}
     command: ["openclaw-init"]
     environment:
       <<: *api-env
@@ -82,6 +109,7 @@ services:
       openclaw-init:
         condition: service_completed_successfully
     environment:
+      NODE_OPTIONS: "--max-old-space-size=3072"
       OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?set OPENCLAW_GATEWAY_TOKEN in .env}
       OPENCLAW_GATEWAY_BIND: lan
       OPENCLAW_SANDBOX: "1"
@@ -102,7 +130,8 @@ services:
       - "18789"
       - "8080"
     pids_limit: 1024
-    mem_limit: 2g
+    mem_limit: 4g
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
@@ -114,10 +143,12 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+      args: *version-arg
     command: ["api"]
     # Loopback trust with the gateway (DESIGN 5.14 rule 1). The api's port 8080 is
     # therefore reachable as openclaw:8080 from the compose network.
     network_mode: "service:openclaw"
+    restart: unless-stopped
     environment:
       <<: *api-env
     volumes:
@@ -149,6 +180,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+      args: *version-arg
     command: ["deploytarget"]
     environment:
       DEPLOYTARGET_DATA_DIR: /data
@@ -231,6 +263,7 @@ services:
     build:
       context: .
       dockerfile: docker/api.Dockerfile
+      args: *version-arg
     command: ["eval"]
     network_mode: "service:openclaw"
     environment:
@@ -251,10 +284,52 @@ services:
 
   tunnel:
     profiles: ["tunnel"]
-    image: cloudflare/cloudflared:latest
-    command: ["tunnel", "--no-autoupdate", "--url", "http://web:80"]
+    image: cloudflare/cloudflared:2026.10.1
+    command: ["tunnel", "--no-autoupdate", "--url", "http://web:8081"]
     depends_on:
       - web
+
+  # Demo recorder (scripts/demo/README.md): drives the UI in a real browser, one WebM per scene.
+  # It joins the default network and reaches the UI as http://web:80. API_TOKEN comes from .env
+  # through the environment and is attached to API requests by the browser; it is not written
+  # anywhere. Run it with `make demo-record` (--no-deps: it never touches the running stack).
+  demo:
+    profiles: ["tools"]
+    image: mcr.microsoft.com/playwright:v1.49.1-noble
+    working_dir: /demo
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    init: true
+    ipc: host
+    entrypoint: ["sh", "/demo/entrypoint.sh"]
+    environment:
+      HOME: /tmp
+      PW_DIR: /demo/.pw
+      FONTCONFIG_FILE: /demo/fonts.conf
+      OUT_DIR: /out
+      BASE_URL: ${DEMO_BASE_URL:-http://web:80}
+      API_TOKEN: ${API_TOKEN:-}
+      SCENES: ${SCENES:-}
+      LIVE: ${LIVE:-}
+      COMMIT: ${DEMO_COMMIT:-}
+      REPO_URL: ${DEMO_REPO_URL:-}
+      RUN_ID: ${DEMO_RUN_ID:-}
+      PACE: ${DEMO_PACE:-}
+      NEW_COPY: ${DEMO_NEW_COPY:-}
+      MASK_IDS: ${DEMO_MASK_IDS:-}
+      PIPELINE_TASK: ${DEMO_PIPELINE_TASK:-}
+      PIPELINE_TEMPLATE: ${DEMO_PIPELINE_TEMPLATE:-}
+      PIPELINE_WORKFLOW: ${DEMO_PIPELINE_WORKFLOW:-}
+      SCHEDULE_WORKFLOW: ${DEMO_SCHEDULE_WORKFLOW:-}
+      STEP_LIMIT_TASK: ${DEMO_STEP_LIMIT_TASK:-}
+      REJECT_TASK: ${DEMO_REJECT_TASK:-}
+      SCHEDULE_TOPIC: ${DEMO_SCHEDULE_TOPIC:-}
+      EVAL_CONSOLE: ${DEMO_EVAL_CONSOLE:-}
+      RUN_TIMEOUT_MS: ${DEMO_RUN_TIMEOUT_MS:-}
+      PHONE_TIMEOUT_MS: ${DEMO_PHONE_TIMEOUT_MS:-}
+    volumes:
+      - ./scripts/demo:/demo
+      - ./scripts/demo/out:/out
+      - ./evals/reports:/reports:ro
 
 volumes:
   pgdata: {}

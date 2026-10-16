@@ -57,6 +57,19 @@ probe showed the cost: a client outside loopback gets no scopes without device p
 headless exec approvals are denied unless the client declares the approvals capability,
 and the system prompt it builds is large (about 47 KB with the coding profile).
 
+## Language
+
+Go for the control plane (the brief suggests Kotlin or Go). Reasons: one static binary
+serves every compose role (`api`, `migrate`, `seed`, `openclaw-init`, `deploytarget`,
+`eval`), so the stack is one image and one toolchain; the standard library covers HTTP,
+SSE, JSON and concurrency without a framework; `go test` with a real Postgres gives
+integration tests that run in the same container as the build; the type system and
+`staticcheck` keep a thirty-table data model and a forty-method gateway client honest;
+and the module system pins every dependency by hash. TypeScript with React and Vite for
+the UI because React Flow is the right tool for a visual graph editor and the operator
+team already uses it. Kotlin would have done the job on the JVM at the cost of a heavier
+image and slower container builds in the three-day timebox.
+
 ## Consequences
 
 - The agent loop, context assembly, built-in tools and skills prompt are OpenClaw's. We do

@@ -28,6 +28,8 @@ func TestCreateRunValidation(t *testing.T) {
 		{name: "input not an object", body: `{"workflow_id":"w","input":[1]}`, wantPaths: []string{"input"}},
 		{name: "bad script id", body: `{"agent_id":"a","task":"t","script_id":"has space"}`, wantPaths: []string{"script_id"}},
 		{name: "script id the provider cannot read back", body: `{"agent_id":"a","task":"t","script_id":"case-"}`, wantPaths: []string{"script_id"}},
+		{name: "a trigger only the platform starts", body: `{"agent_id":"a","task":"t","trigger":"schedule"}`, wantPaths: []string{"trigger"}},
+		{name: "unknown trigger", body: `{"agent_id":"a","task":"t","trigger":"cron"}`, wantPaths: []string{"trigger"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -66,6 +68,14 @@ func TestCreateRunMapsToTrigger(t *testing.T) {
 	code, _ = do(t, ts, http.MethodPost, "/api/runs", `{"workflow_id":"wf-1","input":{"repo":"x"}}`)
 	if code != http.StatusCreated || string(fe.triggers[1].Input) != `{"repo":"x"}` || fe.triggers[1].WorkflowID != "wf-1" {
 		t.Fatalf("workflow trigger: %d %+v", code, fe.triggers[1])
+	}
+
+	// The eval runner tags its runs (audit #30); manual says so explicitly too.
+	for i, tr := range []string{store.TriggerEval, store.TriggerManual} {
+		code, body = do(t, ts, http.MethodPost, "/api/runs", `{"agent_id":"ag-1","task":"t","trigger":"`+tr+`"}`)
+		if code != http.StatusCreated || len(fe.triggers) != 3+i || fe.triggers[2+i].Trigger != tr {
+			t.Fatalf("trigger %s: %d %s, engine got %+v", tr, code, body, fe.triggers)
+		}
 	}
 }
 

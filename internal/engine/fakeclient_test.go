@@ -47,6 +47,10 @@ type fakeClient struct {
 	onExecResolve func(id, decision string)
 	// sessions is what sessions.list answers (the conversation mirror's roster).
 	sessions []openclaw.SessionRow
+	// createErr fails agents.create for these agent names.
+	createErr map[string]error
+	// defaultID, when set, is the gateway's default agent besides main.
+	defaultID string
 }
 
 type fakeCall struct {
@@ -89,17 +93,37 @@ func (f *fakeClient) handle(method string, p json.RawMessage) (any, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		list := []map[string]any{{"id": "main"}}
+		def := "main"
+		if f.defaultID != "" {
+			def = f.defaultID
+			list = append(list, map[string]any{"id": def})
+		}
 		for _, a := range f.agents {
 			list = append(list, map[string]any{"id": a})
 		}
-		return map[string]any{"defaultId": "main", "agents": list}, nil
+		return map[string]any{"defaultId": def, "agents": list}, nil
 	case "agents.create":
 		var in struct{ Name, Workspace string }
 		_ = json.Unmarshal(p, &in)
 		f.mu.Lock()
+		if err := f.createErr[in.Name]; err != nil {
+			f.mu.Unlock()
+			return nil, err
+		}
 		f.agents = append(f.agents, in.Name)
 		f.mu.Unlock()
 		return map[string]any{"ok": true, "agentId": in.Name, "name": in.Name, "workspace": in.Workspace}, nil
+	case "agents.delete":
+		var in struct{ AgentID string }
+		_ = json.Unmarshal(p, &in)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		i := slices.Index(f.agents, in.AgentID)
+		if i < 0 {
+			return nil, &openclaw.RPCError{Code: "INVALID_REQUEST", Message: "agent not found: " + in.AgentID}
+		}
+		f.agents = slices.Delete(f.agents, i, i+1)
+		return map[string]any{"ok": true}, nil
 	case "config.get":
 		return map[string]any{"hash": "h1", "config": map[string]any{"agents": map[string]any{"entries": map[string]any{}}}}, nil
 	case "config.patch":

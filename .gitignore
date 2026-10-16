@@ -23,3 +23,9 @@
 
 # OpenClaw state and workspaces (host bind mounts; secrets and transcripts live here)
 /data/
+
+# demo recorder output and its browser-driver install (scripts/demo)
+/scripts/demo/out/
+/scripts/demo/.pw/
+/scripts/demo/.piper/
+/scripts/demo/narration/*.wav

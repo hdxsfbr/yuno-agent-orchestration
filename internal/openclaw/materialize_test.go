@@ -437,3 +437,16 @@ func TestMaterializeDoesNotFollowWorkspaceSymlinks(t *testing.T) {
 		t.Fatalf("run directory created outside the workspace: %v", err)
 	}
 }
+
+// AGENTS.md tells a bound agent how to answer a person: a message without a run token
+// is a conversation, not a run (audit #8).
+func TestAgentsMDChatRule(t *testing.T) {
+	d := plan(t.TempDir(), &store.Agent{ID: "0199f0a2-0000-7000-8000-00000000abcd", Name: "Chatter"}, nil)
+	md := d.Files["AGENTS.md"]
+	for _, want := range []string{"chatting with a person on a channel", "carries no run_token",
+		"answer the person directly and keep to your role", "do not call yuno__finish", "do not work in a run directory"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("AGENTS.md lacks %q:\n%s", want, md)
+		}
+	}
+}

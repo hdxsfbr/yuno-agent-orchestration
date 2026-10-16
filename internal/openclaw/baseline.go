@@ -174,6 +174,27 @@ const (
 	TelegramDMOpen   = "allowlist"
 )
 
+// MinWebhookSecretLen is the shortest TELEGRAM_WEBHOOK_SECRET webhook mode accepts.
+const MinWebhookSecretLen = 32
+
+// ValidateTelegram refuses a webhook mode the gateway could not verify (DESIGN 5.8 rule
+// 2): Telegram only delivers to an https URL, and the secret token it echoes in every
+// request is the only proof a request came from Telegram. The error names each missing
+// piece.
+func ValidateTelegram(in BaselineInputs) error {
+	if in.TelegramMode != "webhook" {
+		return nil
+	}
+	var errs []error
+	if !strings.HasPrefix(in.PublicBaseURL, "https://") || len(in.PublicBaseURL) == len("https://") {
+		errs = append(errs, errors.New("TELEGRAM_MODE=webhook needs PUBLIC_BASE_URL starting with https:// (make tunnel prints one)"))
+	}
+	if len(in.TelegramWebhookSecret) < MinWebhookSecretLen {
+		errs = append(errs, fmt.Errorf("TELEGRAM_MODE=webhook needs TELEGRAM_WEBHOOK_SECRET of at least %d characters", MinWebhookSecretLen))
+	}
+	return errors.Join(errs...)
+}
+
 // InputsHash is a stable digest of the inputs and the baseline version.
 func InputsHash(in BaselineInputs) string {
 	b, _ := json.Marshal(struct {
@@ -225,6 +246,9 @@ const HashFile = "yuno-baseline.hash"
 func WriteBaseline(stateDir string, in BaselineInputs) (changed bool, err error) {
 	if in.GatewayToken == "" || in.MCPToken == "" {
 		return false, errors.New("OPENCLAW_GATEWAY_TOKEN and YUNO_MCP_TOKEN are required")
+	}
+	if err := ValidateTelegram(in); err != nil {
+		return false, err
 	}
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		return false, err

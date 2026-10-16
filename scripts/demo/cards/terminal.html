@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Terminal</title>
+<style>
+  :root { font-family: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1440px; height: 900px; overflow: hidden; background: #0c0c0e; }
+  .bar { height: 44px; background: #1c1c20; display: flex; align-items: center; padding: 0 18px; gap: 8px; }
+  .bar i { width: 12px; height: 12px; border-radius: 50%; background: #3f3f46; display: inline-block; }
+  pre { margin: 0; padding: 24px 32px; height: calc(900px - 44px); overflow: hidden; color: #e4e4e7; font-size: 18px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+  .prompt { color: #86efac; }
+</style>
+</head>
+<body>
+<div class="bar"><i></i><i></i><i></i></div>
+<pre id="out"></pre>
+<script>
+  // The recorder injects the captured console text of a real `make eval` as window.__CONSOLE__; the view
+  // keeps its tail, which is where the summary line is.
+  const text = (window.__CONSOLE__ || "").replace(/\x1b\[[0-9;]*m/g, "");
+  const lines = text.split("\n");
+  const tail = lines.slice(Math.max(0, lines.length - 34));
+  document.getElementById("out").innerHTML = '<span class="prompt">$ make eval</span>\n' + tail.map((l) => l.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c])).join("\n");
+</script>
+</body>
+</html>

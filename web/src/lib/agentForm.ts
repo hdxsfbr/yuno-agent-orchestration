@@ -46,7 +46,6 @@ export type FormState = {
   memoryEnabled: boolean;
   maxFacts: string;
   factTtlDays: string;
-  conversationWindow: string;
   conversationTtlDays: string;
   execSecurity: ExecSecurity;
   execAsk: ExecAsk;
@@ -76,7 +75,6 @@ export function emptyForm(): FormState {
     memoryEnabled: false,
     maxFacts: "",
     factTtlDays: "",
-    conversationWindow: "",
     conversationTtlDays: "",
     // The policy OpenClaw applies to elevated exec unless told otherwise (DESIGN 5.3 rule 1).
     execSecurity: "allowlist",
@@ -112,7 +110,6 @@ export function agentToForm(a: Agent): FormState {
     memoryEnabled: a.memory_policy?.enabled ?? false,
     maxFacts: text(a.memory_policy?.max_facts),
     factTtlDays: text(a.memory_policy?.fact_ttl_days),
-    conversationWindow: text(a.memory_policy?.conversation_window),
     conversationTtlDays: text(a.memory_policy?.conversation_ttl_days),
     execSecurity: a.exec_policy?.security ?? base.execSecurity,
     execAsk: a.exec_policy?.ask ?? base.execAsk,
@@ -256,7 +253,6 @@ export function validateForm(f: FormState): FieldErrors {
   checkNumber(errors, "guardrails.max_runs_per_hour", f.maxRunsPerHour, "Runs per hour", true);
   checkNumber(errors, "memory_policy.max_facts", f.maxFacts, "Max facts", true);
   checkNumber(errors, "memory_policy.fact_ttl_days", f.factTtlDays, "Fact lifetime", true);
-  checkNumber(errors, "memory_policy.conversation_window", f.conversationWindow, "Conversation window", true);
   checkNumber(errors, "memory_policy.conversation_ttl_days", f.conversationTtlDays, "Conversation lifetime", true);
 
   f.patterns.forEach((p, i) => {
@@ -331,8 +327,6 @@ export function toInput(f: FormState): AgentInput {
   if (facts !== undefined) m.max_facts = facts;
   const factTtl = num(f.factTtlDays);
   if (factTtl !== undefined) m.fact_ttl_days = factTtl;
-  const window = num(f.conversationWindow);
-  if (window !== undefined) m.conversation_window = window;
   const convTtl = num(f.conversationTtlDays);
   if (convTtl !== undefined) m.conversation_ttl_days = convTtl;
   return input;

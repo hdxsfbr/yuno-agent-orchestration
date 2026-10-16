@@ -119,7 +119,8 @@ func channelServer(t *testing.T, gw *channelGateway) (*fakeEngine, func(method, 
 	cfg.TelegramMode = "polling"
 	cfg.TelegramAllowedUserIDs = []int64{42}
 	eng := &fakeEngine{pool: pool}
-	_, ts := newTestServerDeps(t, Deps{Cfg: cfg, Pool: pool, Gateway: gw}, eng)
+	s, ts := newTestServerDeps(t, Deps{Cfg: cfg, Pool: pool, Gateway: gw}, eng)
+	s.refreshBotUsername(context.Background()) // as the api does at start
 	return eng, func(method, path, body string) (int, []byte) { return do(t, ts, method, path, body) }
 }
 
@@ -243,7 +244,7 @@ func TestConversationsAPI(t *testing.T) {
 	a := channelAgent(t, "Coder")
 	key := "agent:t-" + store.NewID()[24:] + ":telegram:direct:42"
 	conv, err := store.UpsertConversation(ctx, pool, &store.Conversation{Channel: "telegram", ExternalChatID: "42", AgentID: a.ID,
-		SessionKey: key, DisplayName: "Andre (@hdxsfbr) id:42"})
+		SessionKey: key, DisplayName: "Test Operator (@test_operator) id:42"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,5 +413,65 @@ func TestStatusScheduler(t *testing.T) {
 	// store.NextScheduleDue's own test pins the value.
 	if st.Scheduler.TickSeconds != 7 || st.Scheduler.NextDueAt == nil || st.Scheduler.NextDueAt.After(due) {
 		t.Fatalf("scheduler = tick %v next %v, want tick 7 and a due time no later than %s", st.Scheduler.TickSeconds, st.Scheduler.NextDueAt, due)
+	}
+}
+
+// slowStatusGateway never answers the bot probe, like a gateway mid-restart or a
+// Telegram API that does not respond.
+type slowStatusGateway struct{ *channelGateway }
+
+func (g slowStatusGateway) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	if method == "channels.status" {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return g.channelGateway.Call(ctx, method, params)
+}
+
+// GET /api/channels reads the cached bot username and never waits for the gateway's
+// getMe probe (audit #27): "" until it is known.
+func TestChannelsNeverWaitOnBotName(t *testing.T) {
+	pool := needDB(t)
+	cfg := testConfig()
+	cfg.TelegramMode = "polling"
+	s, ts := newTestServerDeps(t, Deps{Cfg: cfg, Pool: pool, Gateway: slowStatusGateway{newChannelGateway()}}, &fakeEngine{pool: pool})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.learnBotUsername(ctx) // a lookup in flight, as at api start
+	for i := range 3 {
+		start := time.Now()
+		code, body := do(t, ts, http.MethodGet, "/api/channels", "")
+		if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+			t.Fatalf("request %d took %v", i, elapsed)
+		}
+		if v := decodeChannels(t, body); code != http.StatusOK || v.Telegram.BotUsername != "" || !v.Telegram.Enabled {
+			t.Fatalf("GET /api/channels: %d %s", code, body)
+		}
+	}
+}
+
+// Binding learns the bot username in the background when the api did not know it yet.
+func TestBindLearnsBotName(t *testing.T) {
+	pool := needDB(t)
+	unbindAll := func() { _, _ = pool.Exec(context.Background(), `DELETE FROM channel_bindings`) }
+	unbindAll()
+	t.Cleanup(unbindAll)
+	cfg := testConfig()
+	cfg.TelegramMode = "polling"
+	s, ts := newTestServerDeps(t, Deps{Cfg: cfg, Pool: pool, Gateway: newChannelGateway()}, &fakeEngine{pool: pool})
+	a := channelAgent(t, "Namer")
+	if code, body := do(t, ts, http.MethodPut, "/api/channels/telegram/binding", `{"agent_id":"`+a.ID+`"}`); code != http.StatusOK {
+		t.Fatalf("bind: %d %s", code, body)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for s.botUsername() != "yuno_test_bot" {
+		if time.Now().After(deadline) {
+			t.Fatal("the bot username was not learnt after the bind")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_, body := do(t, ts, http.MethodGet, "/api/channels", "")
+	if v := decodeChannels(t, body); v.Telegram.BotUsername != "yuno_test_bot" {
+		t.Fatalf("GET /api/channels after the bind: %s", body)
 	}
 }

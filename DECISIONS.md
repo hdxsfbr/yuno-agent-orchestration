@@ -6,6 +6,55 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-16
 
+**D-034 Runtime reconciliation details.** (Claude, from the fix pass) An agent deleted
+while one of its node visits is running stays in the runtime until the next full sync,
+so the run finishes on its snapshot (DESIGN 5.6 edge case); the api re-materialises
+out-of-date agents every 30 s besides the full sync at start and reconnect, so agents
+seeded by `make run` are usable at once. The UI keeps the API token in the browser's
+local storage and sends it only as a header; the sign-in dialog cannot be dismissed
+while the API refuses the token; streams reconnect when the token changes. Why: the
+simplest behaviours that keep the runtime's agents equal to the platform's and the
+approval gate closed to the network. Cost: a deleted busy agent lingers for one run.
+
+**D-033 Disclosed deviations from the audit, kept on purpose.** (Andre, 2026-10-16, on the
+coordinator's recommendation) The runtime keeps its own session transcripts, thinking
+included, inside its state directory; the platform never stores or shows reasoning and
+that is the brief's "never store/expose chain-of-thought" as read here. Schedules target
+workflows; a per-agent schedule is that agent's quick-run workflow. The deterministic
+local fallback is the evaluation path (scripted model); UI runs need a model key. The
+evaluation suite replays scripted runs and judges outcomes against expectations; the
+real-model run is the demo. Guardrails and limits cover runs, not chat conversations
+(the sender allowlist bounds those). The termination evaluator tolerates one extra step
+and the cost limit may overshoot by one call. Idempotency keys include the node visit by
+design, so a loop revisit is a new effect. Why: each is a deliberate reading of the
+brief recorded in `docs/prd-compliance.md` with its reason; changing them now would
+trade verified behaviour for unverified behaviour on the last day.
+
+**D-032 The demo and the submission run Telegram in webhook mode through a public tunnel
+that exposes only the webhook path.** (Andre) `make tunnel` starts a cloudflared quick
+tunnel to a second nginx listener that serves `/telegram-webhook` and nothing else;
+`PUBLIC_BASE_URL` and `TELEGRAM_MODE=webhook` go in `.env`, `openclaw-init` refuses
+webhook mode without an https URL and a 32-character secret, the gateway registers the
+URL with Telegram, and a wrong secret is answered 401 (smoke asserts it, and asserts the
+registered URL). Polling stays supported for local use. Why: the brief says "verified
+inbound webhooks"; polling verifies by token but shows no verification. Cost: a quick
+tunnel's URL changes when it restarts, so `make tunnel` runs before `make run` on the
+demo machine.
+
+**D-031 The UI carries the API token.** (Andre) When `API_TOKEN` is set the UI asks for
+it once (stored in the browser's local storage), sends it on every request and stream,
+and signs out on request; the OpenAPI document declares the bearer scheme. Why: the
+approval gate is only a gate if the API is not open to the network it listens on.
+Cost: still a single shared token, no users or roles (known limitation).
+
+**D-030 Deleting an agent deletes it in the runtime; the api reconciles at start.**
+(Claude, from the audit) The gateway's heap crash came from 133 agents evals had left
+behind. Deletion now removes the gateway entry and the workspace, and at api start
+every stale gateway agent is deleted and every unmaterialised platform agent is pushed
+(so `make seed` agents are usable at once). Why: the runtime's state must mirror the
+platform's. Cost: a deleted agent's sandbox containers are removed by the gateway's
+own prune, not immediately.
+
 **D-029 Schedule firings carry an occurrence key; a fired once-schedule stays fired.**
 (Claude, from the wave-3 review) Each scheduled run's `trigger_ref` is
 `<schedule id>@<occurrence time>`, unique among schedule runs, so a crash between

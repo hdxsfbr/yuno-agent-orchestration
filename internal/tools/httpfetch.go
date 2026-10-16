@@ -58,9 +58,14 @@ func EscapeUntrusted(s string) string {
 	return closingTag.ReplaceAllString(s, "&lt;/untrusted_content")
 }
 
-// WrapUntrusted wraps content for the model as data, never instructions.
+// WrapUntrusted wraps fetched content for the model as data, never instructions.
 func WrapUntrusted(content string) string {
 	return untrustedOpen + "\n" + EscapeUntrusted(content) + "\n" + untrustedClose
+}
+
+// WrapUntrustedFrom is WrapUntrusted for content from another tool, named in source.
+func WrapUntrustedFrom(source, content string) string {
+	return `<untrusted_content source="` + source + `">` + "\n" + EscapeUntrusted(content) + "\n" + untrustedClose
 }
 
 // errFetchPolicy marks a redirect the policy refused, so it is reported as such.

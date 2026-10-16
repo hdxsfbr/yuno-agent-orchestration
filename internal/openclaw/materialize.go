@@ -16,8 +16,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"yuno/internal/guardrails"
+	"yuno/internal/memory"
 	"yuno/internal/store"
 )
 
@@ -43,7 +45,13 @@ const AgentsMD = "You run on the Yuno platform. Work only inside the directory r
 	"and finish. Create and change files with the file tools (write, edit), never with exec: the " +
 	"runtime refuses heredocs and inline interpreter scripts in exec commands, so use exec only " +
 	"to run programs. Tool calls made in the same turn run at the same time; when a call needs " +
-	"another's result, such as running a file you just wrote, make it in the next turn.\n"
+	"another's result, such as running a file you just wrote, make it in the next turn. " +
+	ChatRule + "\n"
+
+// ChatRule is the AGENTS.md sentence for an agent bound to a channel: a person's message
+// has no task, run token or run directory, and the rules above are about runs.
+const ChatRule = "When you are chatting with a person on a channel and their message carries no run_token, " +
+	"answer the person directly and keep to your role: do not call yuno__finish and do not work in a run directory."
 
 // MemoryMD is the MEMORY.md written in wave 1 (facts arrive in wave 3, DESIGN 5.10).
 const MemoryMD = "# Memory\n"
@@ -699,4 +707,20 @@ func WriteMemoryMD(stateDir, openclawID, content string) error {
 	}
 	defer root.Close()
 	return writeAtomic(root, "MEMORY.md", content)
+}
+
+// RenderMemory writes an agent's MEMORY.md from its live facts at now (DESIGN 5.10 rule
+// 5) outside a node visit, before which the engine renders it itself: after
+// memory_save, after a fact is deleted, and when the agent is bound to a channel, whose
+// turns reach the agent without passing through the engine. Nothing is written while the
+// agent's memory is off or before it has an OpenClaw id.
+func RenderMemory(ctx context.Context, q store.Querier, stateDir string, a *store.Agent, now time.Time) error {
+	if !a.MemoryPolicy.Enabled || a.OpenClawAgentID == nil || *a.OpenClawAgentID == "" || stateDir == "" {
+		return nil
+	}
+	facts, err := memory.PromptFactsFor(ctx, q, a.ID, now)
+	if err != nil {
+		return fmt.Errorf("memory facts: %w", err)
+	}
+	return WriteMemoryMD(stateDir, *a.OpenClawAgentID, memory.RenderMemoryMD(facts))
 }

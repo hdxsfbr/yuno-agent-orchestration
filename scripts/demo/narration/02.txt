@@ -1,0 +1,1 @@
+An agent is configured entirely from the UI: its role and prompt, the model, the tools it may use and whether each needs a human, its limits and guardrails, memory with a retention policy, skills, and the channel it's bound to. Saving pushes the configuration into OpenClaw; the runtime card shows what the gateway holds, including the markdown files that define the agent there.

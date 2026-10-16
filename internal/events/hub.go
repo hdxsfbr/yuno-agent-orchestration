@@ -5,6 +5,7 @@ package events
 import (
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,9 +23,10 @@ type subscriber struct {
 }
 
 type Hub struct {
-	mu      sync.RWMutex
-	subs    map[*subscriber]struct{}
-	dropped int64
+	mu   sync.RWMutex
+	subs map[*subscriber]struct{}
+	// dropped is counted by concurrent publishers, which hold only the read lock.
+	dropped atomic.Int64
 }
 
 func NewHub() *Hub {
@@ -63,7 +65,7 @@ func (h *Hub) Publish(e Event) {
 		select {
 		case s.ch <- e:
 		default:
-			h.dropped++
+			h.dropped.Add(1)
 		}
 	}
 }
@@ -74,3 +76,6 @@ func (h *Hub) Subscribers() int {
 	defer h.mu.RUnlock()
 	return len(h.subs)
 }
+
+// Dropped counts events a full subscriber did not get.
+func (h *Hub) Dropped() int64 { return h.dropped.Load() }

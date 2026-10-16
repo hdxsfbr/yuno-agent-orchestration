@@ -1,12 +1,14 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"yuno/internal/store"
 )
@@ -166,5 +168,90 @@ func TestAgentAcceptsPlatformToolRules(t *testing.T) {
 	var a store.Agent
 	if code != http.StatusCreated || json.Unmarshal(resp, &a) != nil || a.InteractionRules["deploy_release"] != "auto" {
 		t.Fatalf("status %d: %s", code, resp)
+	}
+}
+
+// Deleting an agent takes it out of OpenClaw too; a runtime that refuses does not fail
+// the request (audit #5).
+func TestDeleteAgentRemovesRuntime(t *testing.T) {
+	pool := needDB(t)
+	fe := &fakeEngine{pool: pool}
+	_, ts := newTestServer(t, pool, fe, nil)
+	first, second := testAgent(t, "delete-runtime"), testAgent(t, "delete-refused")
+	if code, b := do(t, ts, http.MethodDelete, "/api/agents/"+first, ""); code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", code, b)
+	}
+	fe.removeErr = errors.New("agents.delete: gateway disconnected")
+	if code, b := do(t, ts, http.MethodDelete, "/api/agents/"+second, ""); code != http.StatusNoContent {
+		t.Fatalf("delete with the runtime refusing: %d %s", code, b)
+	}
+	if code, _ := do(t, ts, http.MethodDelete, "/api/agents/"+first, ""); code != http.StatusNotFound {
+		t.Fatalf("second delete: %d", code)
+	}
+	if want := []string{first, second}; !slices.Equal(fe.removed, want) {
+		t.Fatalf("removed from the runtime = %v, want %v", fe.removed, want)
+	}
+}
+
+// The agents list says which channel each agent answers (from the binding) and how many
+// of its node visits are in flight (audit #17, #18).
+func TestListAgentsChannelsAndActivity(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	unbindAll := func() { _, _ = pool.Exec(ctx, `DELETE FROM channel_bindings`) }
+	unbindAll()
+	t.Cleanup(unbindAll)
+	_, ts := newTestServer(t, pool, &fakeEngine{pool: pool}, nil)
+	busy, idle := testAgent(t, "list-busy"), testAgent(t, "list-idle")
+	if _, err := store.BindChannel(ctx, pool, store.ChannelTelegram, busy); err != nil {
+		t.Fatal(err)
+	}
+	visit := func(runStatus, nodeStatus string) {
+		t.Helper()
+		run, err := createTestRun(ctx, pool, store.TriggerManual, nil, store.Limits{})
+		mustDo(t, err)
+		_, err = pool.Exec(ctx, `UPDATE runs SET status=$2 WHERE id=$1`, run.ID, runStatus)
+		mustDo(t, err)
+		now := time.Now()
+		mustDo(t, store.CreateRunNode(ctx, pool, &store.RunNode{RunID: run.ID, NodeID: "agent", AgentID: &busy, Visit: 1, Status: nodeStatus, StartedAt: &now}))
+	}
+	visit(store.RunRunning, store.NodeRunning)
+	visit(store.RunRunning, store.NodeRunning)
+	visit(store.RunWaitingApproval, store.NodeWaitingApproval)
+	visit(store.RunRunning, store.NodeSucceeded) // an earlier visit of a running run
+	visit(store.RunFailed, store.NodeRunning)    // left behind in a finished run
+
+	code, body := do(t, ts, http.MethodGet, "/api/agents", "")
+	var items []struct {
+		ID       string   `json:"id"`
+		Channels []string `json:"channels"`
+		Activity *struct {
+			Running         int `json:"running"`
+			WaitingApproval int `json:"waiting_approval"`
+		} `json:"activity"`
+	}
+	if code != http.StatusOK || json.Unmarshal(body, &items) != nil {
+		t.Fatalf("list: %d %s", code, body)
+	}
+	seen := 0
+	for _, it := range items {
+		if it.Activity == nil || it.Channels == nil {
+			t.Fatalf("item without channels or activity: %+v", it)
+		}
+		switch it.ID {
+		case busy:
+			seen++
+			if !slices.Equal(it.Channels, []string{"telegram"}) || it.Activity.Running != 2 || it.Activity.WaitingApproval != 1 {
+				t.Errorf("busy agent = %+v %+v", it.Channels, *it.Activity)
+			}
+		case idle:
+			seen++
+			if len(it.Channels) != 0 || it.Activity.Running != 0 || it.Activity.WaitingApproval != 0 {
+				t.Errorf("idle agent = %+v %+v", it.Channels, *it.Activity)
+			}
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("listed %d of the two agents", seen)
 	}
 }

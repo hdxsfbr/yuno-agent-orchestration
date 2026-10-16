@@ -124,3 +124,72 @@ func DeleteAgent(ctx context.Context, q Querier, id string) error {
 	}
 	return nil
 }
+
+// ListAgentsWithDeleted is ListAgents plus the soft-deleted rows, for reconciling the
+// runtime with the platform: a deleted agent still owns its OpenClaw id.
+func ListAgentsWithDeleted(ctx context.Context, q Querier) ([]Agent, error) {
+	rows, err := q.Query(ctx, `SELECT `+agentColumns+` FROM agents ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByName[Agent])
+	if out == nil {
+		out = []Agent{}
+	}
+	return out, err
+}
+
+// AgentActivity counts an agent's node visits in flight: running, or waiting for an
+// approval, in a run that has not finished (a visit a lost worker left behind in a
+// finished run does not count).
+type AgentActivity struct {
+	Running         int `json:"running"`
+	WaitingApproval int `json:"waiting_approval"`
+}
+
+// Busy reports whether any visit is in flight.
+func (a AgentActivity) Busy() bool { return a.Running+a.WaitingApproval > 0 }
+
+// ListAgentActivity returns the activity of every agent with a visit in flight, by
+// agent id; agents without one are absent.
+func ListAgentActivity(ctx context.Context, q Querier) (map[string]AgentActivity, error) {
+	rows, err := q.Query(ctx, `SELECT rn.agent_id,
+		count(*) FILTER (WHERE rn.status = $1), count(*) FILTER (WHERE rn.status = $2)
+		FROM run_nodes rn JOIN runs r ON r.id = rn.run_id
+		WHERE rn.agent_id IS NOT NULL AND rn.status IN ($1, $2) AND r.status IN ($3, $4, $5)
+		GROUP BY rn.agent_id`,
+		NodeRunning, NodeWaitingApproval, RunQueued, RunRunning, RunWaitingApproval)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]AgentActivity{}
+	for rows.Next() {
+		var id string
+		var a AgentActivity
+		if err := rows.Scan(&id, &a.Running, &a.WaitingApproval); err != nil {
+			return nil, err
+		}
+		out[id] = a
+	}
+	return out, rows.Err()
+}
+
+// ListAgentChannels returns the ids of the agents bound to a channel, mapped to the
+// channels they answer (DESIGN 5.8 rule 3: at most one agent per channel).
+func ListAgentChannels(ctx context.Context, q Querier) (map[string][]string, error) {
+	rows, err := q.Query(ctx, `SELECT agent_id, channel FROM channel_bindings ORDER BY channel`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var id, ch string
+		if err := rows.Scan(&id, &ch); err != nil {
+			return nil, err
+		}
+		out[id] = append(out[id], ch)
+	}
+	return out, rows.Err()
+}

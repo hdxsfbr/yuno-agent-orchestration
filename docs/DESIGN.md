@@ -408,8 +408,9 @@ Rules:
 10. The loop in `dev_pipeline` is data: the `reviewer→coder` edge and `max_loop_visits`.
     Nothing in Go knows the words coder or reviewer.
 11. `input` is validated against `input_schema` at trigger time (422 with the schema
-    message); the final state is checked against `state_schema` by the `schema`
-    evaluator, not by the engine.
+    message); after every node's output is merged the engine validates the whole state
+    against `state_schema` when present, failing the node with reason `state schema:
+    <error>` (the `schema` evaluator checks the same thing after the fact).
 12. A node's `on_failure` edge is followed when the node fails for a reason that is not a
     limit violation or a cancellation; without one the run fails with the node's reason.
 13. **Run directory flows forward.** Every agent has its own OpenClaw workspace, so
@@ -549,6 +550,9 @@ Rules:
    **[probed]**: `sessions.messages.subscribe` and `plugin.approval.request` refuse an
    `agentId` that does not match the session key's agent (`agent "X" does not match
    session key agent "main"`), so the engine must use the bound agent's session key.
+   Webhook mode is refused by `openclaw-init` without an https `PUBLIC_BASE_URL` and a
+   secret of at least 32 characters; smoke asserts the wrong-secret 401 and the URL
+   Telegram reports (D-032).
    **[probed 2026-10-16, after a gateway restart with the binding in place]** a DM was
    routed to the bound agent and answered on that agent's model; the session key under
    `dmScope: per-channel-peer` is `agent:<openclaw agent id>:telegram:direct:<telegram
@@ -774,7 +778,7 @@ Rules:
    `Last-Event-ID` by replaying from the DB-backed event log for that run; heartbeat
    comment every 15 s.
 4. The slog handler redacts values of keys named `*token*`, `*secret*`, `*key*`,
-   `authorization` and any string matching `sk-ant-[A-Za-z0-9_-]{10,}`, `sk-or-v1-[A-Za-z0-9]{10,}` or
+   `authorization` and any string matching `sk-ant-[A-Za-z0-9_-]{10,}`, `sk-or-v1-[A-Za-z0-9]{10,}`, run tokens `r_[a-z2-7]{24}` or
    `\d{6,}:[A-Za-z0-9_-]{30,}` (Telegram bot tokens) with `[redacted]`. The same function
    runs on tool outputs before storage.
 5. `GET /healthz` (process up), `GET /readyz` (DB ping ≤ 1 s), `GET /api/status`

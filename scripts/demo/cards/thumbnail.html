@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Yuno Agent Orchestration Platform</title>
+<link rel="stylesheet" href="card.css">
+<style>
+  /* Rendered at 1440x900 and scaled to 1280x720 by the recorder's screenshot. */
+  .stage { padding: 80px 100px; justify-content: space-between; position: relative; }
+  .shot { position: absolute; right: -120px; bottom: -90px; width: 820px; border-radius: 16px; border: 1px solid var(--line);
+          box-shadow: 0 30px 80px rgba(24, 24, 27, 0.25); }
+  h1 { font-size: 96px; margin: 40px 0 0; max-width: 760px; position: relative; }
+  .lead { position: relative; max-width: 700px; font-size: 32px; }
+</style>
+</head>
+<body>
+<main class="stage">
+  <div>
+    <div class="mark"><i></i>Yuno</div>
+    <h1>Agent Orchestration</h1>
+    <p class="lead">Configure agents, build workflows, approve what matters, and watch every call.</p>
+  </div>
+  <img class="shot hidden" id="shot" alt="">
+</main>
+<script>
+  // window.__CARD__.shot is a data URL of a real screenshot of the app, when one was captured.
+  const card = window.__CARD__ || {};
+  if (card.shot) {
+    const img = document.getElementById("shot");
+    img.src = card.shot;
+    img.classList.remove("hidden");
+  }
+</script>
+</body>
+</html>

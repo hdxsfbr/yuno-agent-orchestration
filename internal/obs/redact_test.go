@@ -17,6 +17,14 @@ func TestRedact(t *testing.T) {
 		{"bearer", "Authorization: Bearer abcdefghijklmnopqrstuvwxyz", "Authorization: [redacted]"},
 		{"idempotency key untouched", "idempotency_key=9f86d081884c7d659a2feaa0c55ad015", "idempotency_key=9f86d081884c7d659a2feaa0c55ad015"},
 		{"short digits untouched", "chat 12345:abc", "chat 12345:abc"},
+		{"openrouter key", "key sk-or-v1-0123456789abcdef0123456789abcdef here", "key [redacted] here"},
+		{"run token", "run_token: r_abcdefghijklmnopqrstuvwx\n", "run_token: [redacted]\n"},
+		{"run token, upper case", "R_ABCDEFGHIJKLMNOPQRSTUVWX.", "[redacted]."},
+		{"run token in json", `{"t":"r_abcdefghijklmnopqrstuv23"}`, `{"t":"[redacted]"}`},
+		{"not a run token: too short", "r_abcdefghijklmnopqrstuvw", "r_abcdefghijklmnopqrstuvw"},
+		{"not a run token: too long", "r_abcdefghijklmnopqrstuvwxy", "r_abcdefghijklmnopqrstuvwxy"},
+		{"not a run token: inside a word", "attr_abcdefghijklmnopqrstuvwx", "attr_abcdefghijklmnopqrstuvwx"},
+		{"not a run token: base32 has no 0, 1, 8, 9", "r_abcdefghijklmnopqrstuv01", "r_abcdefghijklmnopqrstuv01"},
 	}
 	for _, c := range cases {
 		if got := Redact(c.in); got != c.want {

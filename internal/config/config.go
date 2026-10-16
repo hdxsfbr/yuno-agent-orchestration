@@ -42,7 +42,6 @@ type Config struct {
 	OpenRouterAPIKey        string
 	OpenRouterBaseURL       string
 	DefaultModel            string
-	ModelCallTimeout        time.Duration
 	ModelProxyRatePerMinute int
 
 	// Telegram through OpenClaw's native channel (DESIGN 5.8).
@@ -106,7 +105,6 @@ func FromEnv() Config {
 		OpenRouterAPIKey:        env("OPENROUTER_API_KEY", ""),
 		OpenRouterBaseURL:       strings.TrimRight(env("OPENROUTER_BASE_URL", "https://openrouter.ai/api"), "/"),
 		DefaultModel:            env("DEFAULT_MODEL", "claude-opus-5-5"),
-		ModelCallTimeout:        envDuration("MODEL_CALL_TIMEOUT", 180*time.Second),
 		ModelProxyRatePerMinute: envInt("MODEL_PROXY_RATE_PER_MINUTE", 60),
 
 		TelegramMode:           env("TELEGRAM_MODE", "off"),

@@ -130,7 +130,7 @@ export default function AgentForm({ agent, tools, skills, saving, serverErrors, 
         <ToolPicker tools={tools} selected={form.tools} onChange={(next) => set({ tools: next })} errors={errors} />
       </Section>
 
-      <Section title="Limits" description="A run stops when it reaches any limit. Leave a field empty to use the platform default.">
+      <Section title="Limits" description="A quick run stops when it reaches any of these limits; workflow runs use the workflow's limits, plus this agent's cost cap. Leave a field empty to use the platform default.">
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {LIMIT_FIELDS.map((l) => (
             <NumberField
@@ -152,10 +152,9 @@ export default function AgentForm({ agent, tools, skills, saving, serverErrors, 
       <Section title="Memory">
         <div className="space-y-4">
           <CheckboxField checked={form.memoryEnabled} onChange={(v) => set({ memoryEnabled: v })} label="Remember facts between runs" hint="Saved facts are recalled at the start of later runs." />
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <NumberField label="Max facts" value={form.maxFacts} onChange={(v) => set({ maxFacts: v })} errors={errorsFor(errors, "memory_policy.max_facts")} placeholder="Default" />
             <NumberField label="Fact lifetime (days)" value={form.factTtlDays} onChange={(v) => set({ factTtlDays: v })} errors={errorsFor(errors, "memory_policy.fact_ttl_days")} placeholder="Default" />
-            <NumberField label="Conversation window (messages)" value={form.conversationWindow} onChange={(v) => set({ conversationWindow: v })} errors={errorsFor(errors, "memory_policy.conversation_window")} placeholder="Default" />
             <NumberField label="Conversation lifetime (days)" value={form.conversationTtlDays} onChange={(v) => set({ conversationTtlDays: v })} errors={errorsFor(errors, "memory_policy.conversation_ttl_days")} placeholder="Default" />
           </div>
         </div>

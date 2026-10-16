@@ -21,14 +21,18 @@ env: ## Create .env from the example and generate missing platform tokens
 	@./scripts/ensure-env.sh
 	@mkdir -p data/openclaw
 
-run: env ## Build and start everything, wait for ready, print the URL
+# Images carry the commit they were built from (/api/status and the Status page show it).
+run build: export VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+
+run: env ## Build and start everything, wait for ready, seed the demo agents, print the URL
 	$(COMPOSE) --profile build build sandbox-image
 	$(COMPOSE) up --build -d postgres deploytarget openclaw api web
 	@echo "waiting for the stack..."
 	@for i in $$(seq 1 120); do \
-	  if curl -fsS -m 2 http://localhost:$(WEB_PORT)/readyz >/dev/null 2>&1; then \
-	    echo "ready: http://localhost:$(WEB_PORT)"; exit 0; fi; sleep 1; done; \
+	  if curl -fsS -m 2 http://localhost:$(WEB_PORT)/readyz >/dev/null 2>&1; then exit 0; fi; sleep 1; done; \
 	  echo "stack did not become ready; see: make ps, make logs, make openclaw-logs"; $(COMPOSE) ps -a; exit 1
+	$(COMPOSE) run --rm api seed
+	@echo "ready: http://localhost:$(WEB_PORT)"
 
 smoke: ## Hit every service in the running stack and check isolation (scripts/smoke.sh)
 	@WEB_PORT=$(WEB_PORT) ./scripts/smoke.sh
@@ -51,7 +55,8 @@ down: ## Stop and remove containers, keep volumes and ./data
 clean: ## Stop and remove containers, volumes and ./data (drops the database and OpenClaw state)
 	$(COMPOSE) --profile tools --profile eval --profile tunnel --profile build down --remove-orphans --volumes
 	@docker ps -aq --filter "name=openclaw-sbx-" | xargs -r docker rm -f
-	rm -rf data/openclaw
+	@# The gateway's sandbox leaves root-owned directories under data/openclaw; remove as root in a container.
+	docker run --rm -v "$(CURDIR)/data:/data" alpine:3.20 rm -rf /data/openclaw
 
 logs: ## Follow api logs
 	$(COMPOSE) logs -f api
@@ -77,23 +82,23 @@ tidy: ## go mod tidy inside the Go container
 install: ## pnpm install inside the Node container
 	$(NODE) pnpm install
 
-test: test-go test-web ## Run all tests
+test: env test-go test-web ## Run all tests
 
-test-go: ## Go unit tests (uses the yuno_test database)
+test-go: env ## Go unit tests (uses the yuno_test database)
 	$(GO) go test ./... -count=1
 
-test-race: ## Engine package under the race detector (cgo: gcc installed in the throwaway container)
-	$(COMPOSE) --profile tools run --rm --no-deps go sh -c 'apk add --no-cache gcc musl-dev >/dev/null 2>&1; CGO_ENABLED=1 go test -race ./internal/engine/ -count=1'
+test-race: ## Engine and event hub under the race detector (cgo: gcc installed in the throwaway container)
+	$(COMPOSE) --profile tools run --rm --no-deps go sh -c 'apk add --no-cache gcc musl-dev >/dev/null 2>&1; CGO_ENABLED=1 go test -race ./internal/engine/ ./internal/events/ -count=1'
 
 test-integration: ## Live tests against the running gateway (serial: the packages patch gateway config)
 	$(GO) go test -tags integration -p 1 ./internal/openclaw/ ./internal/engine/ -run TestIntegration -count=1
 
-test-web: ## Frontend tests
+test-web: env ## Frontend tests
 	$(NODE) pnpm test
 
 lint: ## go vet, staticcheck, eslint, tsc
 	$(GO) go vet ./...
-	$(GO) sh -c 'go run honnef.co/go/tools/cmd/staticcheck@latest ./...'
+	$(GO) sh -c 'go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...'
 	$(NODE) pnpm lint
 
 migrate: ## Apply database migrations
@@ -102,7 +107,8 @@ migrate: ## Apply database migrations
 seed: ## Create the demo agents the workflow templates name (templates load at api start)
 	$(COMPOSE) run --rm api seed
 
-eval: ## Run the evaluation suite (offline by default: EVAL_PROVIDER=scripted)
+eval: env ## Run the evaluation suite against the running stack (offline by default: EVAL_PROVIDER=scripted)
+	@curl -fsS -m 3 http://localhost:$(WEB_PORT)/readyz >/dev/null 2>&1 || { echo 'the stack is not running: run `make run` first'; exit 1; }
 	$(COMPOSE) --profile eval build eval
 	$(COMPOSE) --profile eval run --rm --no-deps eval
 
@@ -115,3 +121,30 @@ eval-final: eval ## Run every split (public and private) and store the report as
 
 tunnel: ## Expose the web port through a cloudflared quick tunnel (demo only)
 	$(COMPOSE) --profile tunnel up tunnel
+
+status-p95: ## Measure GET /api/status latency over 200 requests (p95 must stay under 500 ms)
+	./scripts/status-p95.sh 200
+
+# ---- demo video (scripts/demo/README.md) ------------------------------------------------------
+# Footage is recorded in a Playwright container and stitched in an ffmpeg container; nothing here
+# needs a browser or ffmpeg on the host. SCENES=04,06 picks scenes; LIVE=1 lets them change state.
+
+DEMO_DIR := scripts/demo
+
+.PHONY: demo-record demo-stitch demo-clean
+
+demo-record: ## Record the demo scenes in a browser container (SCENES=04,06 to pick; LIVE=1 changes state)
+	@mkdir -p $(DEMO_DIR)/out
+	HOST_UID=$$(id -u) HOST_GID=$$(id -g) \
+	DEMO_COMMIT="$$(git rev-parse --short HEAD)" \
+	DEMO_REPO_URL="$$(git remote get-url origin 2>/dev/null | sed -E 's#^(https?://)[^@/]*@#\1#; s#\.git$$##')" \
+	$(COMPOSE) --profile tools run --rm -T --no-deps demo
+
+demo-stitch: ## Cut the recorded waits, mux narration, write scripts/demo/out/demo.mp4 (ffmpeg in a container)
+	@./$(DEMO_DIR)/stitch.sh
+
+demo-clean: ## Delete recorded footage, stills and cuts (scripts/demo/out); the cards and narration stay
+	rm -rf $(DEMO_DIR)/out
+
+demo-narrate: ## Voice the demo narration (scripts/demo/narration/*.txt) with local text-to-speech
+	./scripts/demo/narrate.sh

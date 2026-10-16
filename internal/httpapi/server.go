@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -65,6 +66,9 @@ type Server struct {
 	templatesDir string
 	startedAt    time.Time
 	mux          *http.ServeMux
+
+	// botName is the Telegram bot username once known (channels.go).
+	botName atomic.Pointer[string]
 }
 
 // Gateway dial policy for Run (DESIGN 5.5 rule 1): every failure, including the
@@ -141,10 +145,14 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	s.engine = eng
 	engineDone := make(chan error, 1)
 	go func() { engineDone <- eng.Start(ctx) }()
+	// The gateway's agents follow the platform's: stale ones removed at start and after
+	// every reconnect, missing or out-of-date ones (a fresh seed) materialised then and
+	// every 30 s in between.
+	go eng.KeepAgents(ctx)
 
 	// Telegram binding re-asserted at start and after every gateway reconnect (DESIGN
 	// 5.8 rules 3 and 7).
-	go (&channels.Keeper{Pool: pool, Gateway: gw, Log: log}).Run(ctx)
+	go (&channels.Keeper{Pool: pool, Gateway: gw, Log: log, StateDir: cfg.OpenClawStateDir}).Run(ctx)
 
 	// Scheduler and memory retention (DESIGN 5.9, 5.10 rule 6); both stop with ctx.
 	go (&sched.Scheduler{Pool: pool, Engine: eng, Tick: cfg.SchedulerTick, Log: log, Emit: s.emit}).Run(ctx)
@@ -168,6 +176,11 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- srv.ListenAndServe() }()
 	go refreshMCPAfterStart(ctx, cfg, gw, log)
+	go s.learnBotUsername(ctx)
+	// The database watchdog ends the process when the shared network namespace has
+	// died under it (see dbWatchdog); the container restart policy starts a fresh one.
+	watchdogDone := make(chan error, 1)
+	go func() { watchdogDone <- dbWatchdog(ctx, pool.Ping, 5*time.Second, 30*time.Second) }()
 	log.Info("api listening", "addr", cfg.ListenAddr, "version", config.Version)
 
 	// Serve until the process is told to stop, the listener fails, or the engine
@@ -179,6 +192,11 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	case err := <-serveDone:
 		if !errors.Is(err, http.ErrServerClosed) {
 			runErr = fmt.Errorf("listen: %w", err)
+		}
+	case err := <-watchdogDone:
+		runErr = err
+		if err != nil {
+			log.Error("database watchdog", "error", err)
 		}
 	case err := <-engineDone:
 		engineStopped = true
@@ -458,9 +476,11 @@ func refreshMCPAfterStart(ctx context.Context, cfg config.Config, gw openclaw.Cl
 func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 	cfg := d.Cfg
 	pd := tools.PlatformDeps{
-		AcceptFinish: s.acceptFinish,
-		RejectFinish: s.rejectFinish,
-		Pool:         d.Pool,
+		AcceptFinish:   s.acceptFinish,
+		RejectFinish:   s.rejectFinish,
+		Pool:           d.Pool,
+		MemorySaved:    s.memorySaved,
+		MaxOutputBytes: cfg.ToolOutputMaxBytes,
 		Deploy: tools.DeployConfig{
 			TargetURL:       cfg.DeployTargetURL,
 			MaxBytes:        int64(cfg.DeployTargetMaxMB) << 20,
