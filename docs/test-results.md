@@ -4,9 +4,8 @@ Real run on the submission commit's parent (`0c3afdd` plus the smoke fix), on th
 development machine (Linux, Docker 28, compose v2), everything inside containers. There
 was no CI service when this was recorded; these commands were run by hand before every
 commit and recorded here for this one. A GitLab pipeline was added afterwards
-(`.gitlab-ci.yml`, `docs/deploy.md`): its deploy job runs on the public host's runner and
-has deployed from it; its test job, which runs these same commands, waits for a `yuno-ci`
-runner on a second Docker host and has not run yet.
+(`.gitlab-ci.yml`, `docs/deploy.md`) and now runs these same commands on every push to
+`main`; see the CI run below.
 
 | Command | Result |
 |---|---|
@@ -34,3 +33,23 @@ packages, `make clean` succeeded.
 
 Known partial check: the Telegram approval prompt's reply path (the prompt reaches the
 chat; a reply resolving it has not been observed).
+
+## CI run, 2026-10-16
+
+Pipeline 57534 on commit `8aa891c`, test job on the `yuno-ci` droplet runner (fresh
+checkout, example environment, scripted model, Telegram off), 4 min 53 s:
+
+| Step | Result |
+|---|---|
+| `make run` | stack built and ready, demo agents seeded |
+| `make test-go` | 18 packages ok, 0 failures |
+| `make test-web` | 27 files, 325 tests passed |
+| `make lint` | clean |
+| `make smoke` | 10 checks passed, Telegram checks skipped (mode off) |
+| deploy job (played by hand after the green test) | `make run-public` and `make smoke` on the public host, 12 of 12 |
+
+The first two CI runs failed and both failures were real: `TestEnvExampleAndComposeCoverConfig`
+did not know that compose reads `COMPOSE_PROFILES` from `.env` itself (test fixed), and a
+fresh checkout has no `web/node_modules`, which the development machine always had
+(`make test-web` and `make lint` now install them first). Pipeline 57515 and 57524 hold
+the failing traces.

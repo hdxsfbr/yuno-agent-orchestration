@@ -249,3 +249,12 @@ on the way, both recorded: a host check printed the runner token into the coordi
 own output through colour codes that defeated the mask, so the token was rotated through
 the API and the runner re-registered before anything else; and the first job died on
 Ubuntu's default `.bash_logout`, fixed in the installer. The test job still has no runner.
+
+**CI test runner (2026-10-16).** Andre chose a second 8 GB droplet for the test job. The
+coordinator created it and its runner with the same scripts, hardened the job (loopback web
+bind, package caches kept, a full clean after each job) and set the project variable that
+adds the test job. The first two pipelines failed on real problems the development machine
+had hidden: a config test that did not know compose reads `COMPOSE_PROFILES` itself, and
+web tests that assumed installed dependencies. Both fixed at the source; the third
+pipeline went green and its deploy job, played by hand, put that commit on the public
+instance. docs/test-results.md records the CI run.
