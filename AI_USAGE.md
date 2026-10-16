@@ -258,3 +258,8 @@ had hidden: a config test that did not know compose reads `COMPOSE_PROFILES` its
 web tests that assumed installed dependencies. Both fixed at the source; the third
 pipeline went green and its deploy job, played by hand, put that commit on the public
 instance. docs/test-results.md records the CI run.
+
+**Automatic deploys (2026-10-16).** Andre chose automatic deploys of green `main`
+pipelines; the coordinator set `DEPLOY_AUTO` and proved it with pipeline 57577, whose
+deploy job started on its own after the test job and put that commit on the public
+instance. Every push to `main` from here on tests and deploys itself.
