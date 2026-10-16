@@ -179,3 +179,40 @@ overlap with the real secret beyond the two characters every Telegram token star
 with). The fixture was replaced with a plainly fake value before the commit was final,
 and the agent rules now say fixtures never borrow any part of a real credential.
 
+**Wave 4: audit (2026-10-16).** Per the operator's requirements-audit procedure, both
+spec texts were copied into `docs/spec/` and a fresh Opus 5.5 agent read them line by
+line against the code with the project's own documents excluded as evidence, while the
+coordinator checked deliverables, environment coverage, named tests and timing. The
+agent returned 34 findings (three blockers: webhook verification never exercised, an
+API that ran open because the UI sent no token, missing deliverables); the coordinator
+reconciled them with its own list, classified each as fix / disclose / accept, and
+Andre approved the recommended set. During the audit the full-split eval exposed a
+real incident: the gateway's Node process ran out of heap after 133 eval agents had
+accumulated, and the api, which shares its network namespace, lost its database
+address. The fix (runtime deletion and reconciliation, heap and memory limits, restart
+policies, an api watchdog, nginx re-resolution) was measured: after an in-place gateway
+restart the stack recovers unaided in about two minutes.
+
+**Wave 4: fixes and documents.** Two agents in parallel (backend Opus 5.5, 231 tool
+uses, 40 min; frontend Sonnet 5.5, 112, 16 min), both mutation-checked; the backend
+agent also replaced three test fixtures that carried Andre's real Telegram id. The
+coordinator wrote the threat model, the README's final sections, the compliance
+document, the test-results record and the decisions D-030 to D-034, switched the live
+stack to webhook mode through a tunnel limited to the webhook path, and generated the
+demo narration with a local text-to-speech model in a container rather than a paid
+service. A Sonnet 5.5 agent built the Playwright capture pipeline from the operator's
+demo-recording procedure (one video per scene, waits cut in post, title cards,
+ffmpeg stitch); the live scenes were recorded by the coordinator with Andre on the
+Telegram side.
+
+**Demo video (2026-10-16).** Recorded by the coordinator from the running build at
+commit `0c3afdd` with the Playwright pipeline, one scene at a time: the title card, the
+Coder's configuration, the dev pipeline built from its template and run on the real
+model with both approvals granted from the inbox, a step-limit failure and a rejected
+deploy, the evaluation report, a Telegram conversation with Andre on the phone, a
+once-schedule firing the research pipeline, and the closing card. Only the model and
+gateway waits were cut (the cut intervals are recorded), footage runs at natural speed,
+and the narration was generated from `docs/demo-script.md` with a local
+text-to-speech model. The coordinator verified the result from a frame sample every
+fifteen seconds and the per-scene timing table; Andre watched the finished file.
+

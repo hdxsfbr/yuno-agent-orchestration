@@ -27,9 +27,12 @@ live check; "Partial" says exactly how it differs.
 
 ## Open items
 
-None blocking. Being verified with Andre: a reply to the approval prompt the bot sends
-in Telegram resolving the approval (the prompt is delivered; the reply path is
-unverified).
+None blocking. Verified live on 2026-10-16: two messages from Andre's phone delivered
+by Telegram over the webhook through the tunnel (Telegram's own address, answered 200),
+answered by the bound Coder within five seconds, mirrored into the platform and shown
+live on the Channels page during the recording. Still unverified: a reply to the
+approval prompt the bot sends in Telegram resolving the approval (the prompt is
+delivered; decisions are made in the web UI).
 
 ## Fixed from the audit (2026-10-16)
 

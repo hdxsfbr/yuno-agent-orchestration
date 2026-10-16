@@ -29,6 +29,24 @@ heuristic and model modes. Still to come: the recorded walkthrough video and the
 every split, both linked from this file when they exist. This file is kept truthful at
 every commit.
 
+## Where to look first
+
+1. `docs/demo-script.md` and the walkthrough video linked in the Demo section: what the
+   platform does, in the order a reviewer would ask.
+2. `docs/adr/0001-runtime.md` and the Architecture section below: why OpenClaw executes
+   the agents and Go orchestrates them, and what that costs.
+3. `docs/DESIGN.md`: the rules the code was built from, numbered, with the tests they
+   name; `docs/prd-compliance.md` maps both briefs onto them, with the disclosed
+   deviations.
+4. `internal/engine` (the run engine), `internal/httpapi/mcp.go` (the tool gate),
+   `internal/openclaw` (the runtime contract) and `web/src` (the UI).
+5. `docs/threat-model.md`, `docs/test-results.md`, `DECISIONS.md` and `AI_USAGE.md`.
+
+Known limits, one line each: one shared API token, no users; the Docker socket is
+mounted into the gateway container; exec guardrail patterns do not reach the sandbox;
+approvals are decided in the web UI (the Telegram prompt's reply path is unverified);
+schedules target workflows; the deterministic fallback covers the evaluation path.
+
 ## Run it
 
 Requirements on the host: Docker (with compose v2) with a usable Docker socket, `make`
@@ -287,6 +305,9 @@ end-to-end success 1.000.
 
 ## Demo
 
+The walkthrough video is `docs/demo/yuno-demo.mp4` (6 min 33 s, 1440x900, recorded from the
+running build at commit `0c3afdd` on 2026-10-16, narrated; nothing simulated, the model
+waits are cut and the cuts are listed in `scripts/demo/out/cuts.json` when regenerated).
 `docs/demo-script.md` is the walkthrough the video follows: configuration (an agent's
 dimensions, the dev pipeline template), a successful run with its live trace, a handled
 failure (a loop limit), the approval gate in the inbox, the evaluation report, and a
