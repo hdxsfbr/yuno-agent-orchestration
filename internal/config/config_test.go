@@ -146,8 +146,10 @@ func TestEnvExampleAndComposeCoverConfig(t *testing.T) {
 			}
 		}
 	}
+	// Variables docker compose itself reads from .env, without ${...} interpolation.
+	composeNative := map[string]bool{"COMPOSE_PROFILES": true, "COMPOSE_PROJECT_NAME": true}
 	for name := range example {
-		if _, read := names[name]; !read && !strings.Contains(composeFile, "${"+name) {
+		if _, read := names[name]; !read && !composeNative[name] && !strings.Contains(composeFile, "${"+name) {
 			t.Errorf(".env.example names %s, which neither the config nor compose.yaml reads", name)
 		}
 	}
