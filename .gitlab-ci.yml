@@ -29,14 +29,21 @@ test:
     - if: '$YUNO_CI_TEST == "true"'
   variables:
     GIT_DEPTH: "20"
+    # Keep the package caches between jobs; everything else is cleaned by git.
+    GIT_CLEAN_FLAGS: -ffdx -e web/.pnpm-store -e web/node_modules
   script:
+    # The example env: no provider key (the scripted model serves the tests), Telegram off.
+    # The web port binds to loopback so the CI host never exposes the test stack.
     - cp .env.example .env
+    - sed -i 's/^WEB_BIND=.*/WEB_BIND=127.0.0.1/' .env
     - make run
     - make test
     - make lint
     - make smoke
   after_script:
-    - make down || true
+    # Full clean: volumes and the gateway state, which contains root-owned sandbox
+    # directories that would otherwise break the next job's checkout.
+    - make clean || true
 
 deploy:
   stage: deploy
