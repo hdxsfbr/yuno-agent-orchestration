@@ -42,6 +42,12 @@ main() {
 
   # The package installs the service as the gitlab-runner user; re-install it as the deploy user.
   HOME_DIR=$(getent passwd "$USER_NAME" | cut -d: -f6)
+  # Ubuntu's default ~/.bash_logout runs clear_console, which fails without a terminal and
+  # makes every job die in "prepare environment" (gitlab-runner docs: shell profile loading).
+  if [ -s "$HOME_DIR/.bash_logout" ]; then
+    : > "$HOME_DIR/.bash_logout"
+    echo "== emptied $HOME_DIR/.bash_logout for non-interactive job shells"
+  fi
   if ! grep -q -- "--user $USER_NAME" /etc/systemd/system/gitlab-runner.service 2>/dev/null; then
     echo "== service as $USER_NAME"
     gitlab-runner stop >/dev/null 2>&1 || true

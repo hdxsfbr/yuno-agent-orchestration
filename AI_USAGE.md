@@ -240,3 +240,12 @@ missing `make`, a remote script losing its tail to a child reading stdin) commit
 they were found. Verified from outside: readiness, a 401 without the token, a 401 on the
 webhook without the secret, a Let's Encrypt certificate, plain http unreachable, the
 webhook registered; smoke 12 of 12 on the host.
+
+**CI wired to the droplet (2026-10-16).** On Andre's go-ahead the coordinator created a
+project runner through the GitLab API, installed it on the droplet as the deploy user with
+the token passed over stdin, set the two project variables, triggered a pipeline and played
+its manual deploy job, which redeployed the public instance and passed smoke. Two mistakes
+on the way, both recorded: a host check printed the runner token into the coordinator's
+own output through colour codes that defeated the mask, so the token was rotated through
+the API and the runner re-registered before anything else; and the first job died on
+Ubuntu's default `.bash_logout`, fixed in the installer. The test job still has no runner.

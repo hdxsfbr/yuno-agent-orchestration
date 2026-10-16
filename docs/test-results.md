@@ -3,9 +3,10 @@
 Real run on the submission commit's parent (`0c3afdd` plus the smoke fix), on the
 development machine (Linux, Docker 28, compose v2), everything inside containers. There
 was no CI service when this was recorded; these commands were run by hand before every
-commit and recorded here for this one. A GitLab pipeline running the same commands was
-added afterwards (`.gitlab-ci.yml`, `docs/deploy.md`); it stays dormant until a runner is
-registered, so it has not run yet.
+commit and recorded here for this one. A GitLab pipeline was added afterwards
+(`.gitlab-ci.yml`, `docs/deploy.md`): its deploy job runs on the public host's runner and
+has deployed from it; its test job, which runs these same commands, waits for a `yuno-ci`
+runner on a second Docker host and has not run yet.
 
 | Command | Result |
 |---|---|
