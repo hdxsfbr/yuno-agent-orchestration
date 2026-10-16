@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
-import type { Agent, ChannelsInfo, Conversation, ConversationMessage } from "@/lib/api";
+import type { Agent, ChannelsInfo, Conversation, ConversationMessage, ToolCall } from "@/lib/api";
 import { formatDateTime, shortId } from "@/lib/format";
 import { apiError, installFakeApi } from "@/test/fakeApi";
 import ChannelsPage from "./ChannelsPage";
@@ -25,6 +25,24 @@ const conv = (over: Partial<Conversation>): Conversation => ({
   ...over,
 });
 const msg = (over: Partial<ConversationMessage>): ConversationMessage => ({ id: "m1", direction: "in", text: "hello", created_at: "2026-10-15T10:00:00Z", ...over });
+
+const toolCall = (over: Partial<ToolCall>): ToolCall => ({
+  id: "t1",
+  run_id: "",
+  run_node_id: "",
+  conversation_id: "c1",
+  tool_use_id: "toolu_1",
+  tool_name: "list_agents",
+  input: {},
+  output: { agents: [{ name: "Reviewer" }] },
+  is_error: false,
+  status: "executed",
+  attempt: 1,
+  duration_ms: 12,
+  started_at: "2026-10-15T10:01:00Z",
+  finished_at: "2026-10-15T10:01:00Z",
+  ...over,
+});
 
 let info: ChannelsInfo;
 let conversations: Conversation[];
@@ -246,5 +264,223 @@ describe("Conversations", () => {
     conversations = [...conversations, fresh];
     api.send("/api/events", "conversation.message", { conversation: fresh, message: msg({ id: "m11", created_at: fresh.last_message_at }) });
     await waitFor(() => expect(screen.getAllByRole("link", { name: /Reviewer/ })).toHaveLength(2));
+  });
+});
+
+const REPORT = `[platform] Run ${RUN} succeeded after 41s, cost $0.0620: Deployed 1.2.0. https://yuno.example/runs/${RUN}`;
+
+describe("Platform reports", () => {
+  const open = async () => {
+    renderPage("/channels/c1");
+    const transcript = within(await screen.findByRole("region", { name: "Conversation with Coder" }));
+    await waitFor(() => expect(transcript.getAllByRole("listitem").length).toBeGreaterThan(0));
+    return transcript;
+  };
+
+  it("shows a report from the platform as a notice, not as something the person wrote, with a link to the run", async () => {
+    messages.c1.push(msg({ id: "m5", direction: "in", text: REPORT, run_id: RUN, created_at: "2026-10-15T10:10:00Z" }));
+    const transcript = await open();
+    const notice = await waitFor(() => {
+      const found = transcript.getAllByRole("listitem").find((li) => li.getAttribute("data-kind") === "notice");
+      expect(found).toBeDefined();
+      return within(found!);
+    });
+    expect(notice.getByText("Platform notice")).not.toBeNull();
+    expect(notice.getByText(/Run .* succeeded after 41s, cost \$0\.0620: Deployed 1\.2\.0\./)).not.toBeNull();
+    expect(notice.queryByText(/\[platform\]/)).toBeNull();
+    expect(notice.getByText(formatDateTime("2026-10-15T10:10:00Z"))).not.toBeNull();
+    expect(notice.getByRole("link", { name: `View run ${shortId(RUN)}` }).getAttribute("href")).toBe(`/runs/${RUN}`);
+
+    // The notice is not a bubble: the person's own messages still are.
+    const bubbles = transcript.getAllByRole("listitem").filter((li) => li.hasAttribute("data-direction"));
+    expect(bubbles).toHaveLength(2);
+    expect(bubbles.some((b) => b.textContent?.includes("Platform notice"))).toBe(false);
+  });
+
+  it("keeps the order of the transcript: the notice sits between the messages around it", async () => {
+    messages.c1.push(msg({ id: "m5", direction: "in", text: REPORT, run_id: RUN, created_at: "2026-10-15T10:03:00Z" }));
+    const transcript = await open();
+    await waitFor(() => expect(transcript.getAllByRole("listitem")).toHaveLength(3));
+    const kinds = transcript.getAllByRole("listitem").map((li) => li.getAttribute("data-kind") ?? li.getAttribute("data-direction"));
+    expect(kinds).toEqual(["in", "notice", "out"]);
+  });
+
+  it("shows a message that starts with [platform] but has no run as an ordinary bubble, prefix and all", async () => {
+    const typed = "[platform] Run abc is waiting for an approval: tool, Deploy 1.2.0.";
+    messages.c1.push(msg({ id: "m5", direction: "in", text: typed, run_id: null, created_at: "2026-10-15T10:10:00Z" }));
+    messages.c1.push(msg({ id: "m6", direction: "in", text: typed, created_at: "2026-10-15T10:11:00Z" }));
+    const transcript = await open();
+    await waitFor(() => expect(transcript.getAllByRole("listitem")).toHaveLength(4));
+    const items = transcript.getAllByRole("listitem");
+    expect(items.some((li) => li.getAttribute("data-kind") === "notice")).toBe(false);
+    expect(transcript.queryByText("Platform notice")).toBeNull();
+    const bubbles = items.filter((li) => li.textContent?.includes(typed));
+    expect(bubbles).toHaveLength(2);
+    expect(bubbles.every((b) => b.getAttribute("data-direction") === "in" && within(b).queryByRole("link") === null)).toBe(true);
+  });
+
+  it("keeps an outgoing message that starts with [platform] and carries a run as a bubble, and a mention of the prefix too", async () => {
+    messages.c1.push(msg({ id: "m5", direction: "out", text: "[platform] is what I call it", run_id: RUN, created_at: "2026-10-15T10:10:00Z" }));
+    messages.c1.push(msg({ id: "m6", direction: "in", text: "what does [platform] mean?", created_at: "2026-10-15T10:11:00Z" }));
+    const transcript = await open();
+    await waitFor(() => expect(transcript.getAllByRole("listitem")).toHaveLength(4));
+    const items = transcript.getAllByRole("listitem");
+    expect(items.some((li) => li.getAttribute("data-kind") === "notice")).toBe(false);
+    const outgoing = items.find((li) => li.textContent?.includes("[platform] is what I call it"))!;
+    expect(outgoing.getAttribute("data-direction")).toBe("out");
+    expect(within(outgoing).getByRole("link", { name: `Run ${shortId(RUN)}` })).not.toBeNull();
+  });
+
+  it("adds a report to the open transcript as a notice when it arrives", async () => {
+    const transcript = await open();
+    await waitFor(() => expect(api.hasStream("/api/events")).toBe(true));
+    const m = msg({ id: "m7", direction: "in", text: REPORT, run_id: RUN, created_at: "2026-10-15T12:00:00Z" });
+    api.send("/api/events", "conversation.message", { conversation: conv({ last_message_at: m.created_at, message_count: 3 }), message: m });
+    expect(await transcript.findByText("Platform notice")).not.toBeNull();
+    expect(transcript.getByRole("link", { name: `View run ${shortId(RUN)}` })).not.toBeNull();
+  });
+});
+
+describe("Chat tool calls", () => {
+  const toolCallsRoute = /^\/api\/conversations\/([^/]+)\/tool-calls$/;
+  let calls: Record<string, ToolCall[]>;
+
+  beforeEach(() => {
+    calls = {
+      c1: [
+        toolCall({ id: "t2", tool_name: "delegate_task", input: { agent_name: "Reviewer", task: "Review the diff" }, output: { run_id: RUN, status: "queued" }, started_at: "2026-10-15T10:02:00Z" }),
+        toolCall({ id: "t1" }),
+      ],
+    };
+    api.on("GET", toolCallsRoute, (r) => calls[r.match[1]] ?? []);
+  });
+
+  const section = async () => within(await screen.findByRole("region", { name: /^Tool calls/ }));
+
+  it("lists what the agent called under the transcript, oldest first, with status and time", async () => {
+    renderPage("/channels/c1");
+    const list = await section();
+    const items = list.getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    expect(within(items[0]).getByText("list_agents")).not.toBeNull();
+    expect(within(items[0]).getByText("executed")).not.toBeNull();
+    expect(within(items[0]).getByText(formatDateTime("2026-10-15T10:01:00Z"))).not.toBeNull();
+    expect(within(items[1]).getByText("delegate_task")).not.toBeNull();
+    expect(list.getByRole("heading", { name: /Tool calls/ }).textContent).toContain("2");
+    // a long list scrolls inside the card, like the transcript
+    expect(items[0].parentElement!.className).toContain("max-h-[32rem]");
+    expect(items[0].parentElement!.className).toContain("overflow-y-auto");
+
+    // It sits below the transcript, not inside it.
+    const transcript = screen.getByRole("region", { name: "Conversation with Coder" });
+    expect(transcript.contains(screen.getByRole("region", { name: /^Tool calls/ }))).toBe(false);
+    expect(transcript.compareDocumentPosition(screen.getByRole("region", { name: /^Tool calls/ })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps the input and output collapsed until they are opened", async () => {
+    renderPage("/channels/c1");
+    const list = await section();
+    const delegate = within(list.getAllByRole("listitem")[1]);
+    const details = Array.from(delegate.getByText("Input").closest("li")!.querySelectorAll("details"));
+    expect(details).toHaveLength(2);
+    expect(details.every((d) => !d.open)).toBe(true);
+    expect(delegate.getByText("Input")).not.toBeNull();
+    expect(delegate.getByText("Output")).not.toBeNull();
+    expect(details[0].textContent).toContain('"task": "Review the diff"');
+    expect(details[1].textContent).toContain(`"run_id": "${RUN}"`);
+  });
+
+  it("marks a call that was blocked or came back with an error", async () => {
+    calls.c1 = [
+      toolCall({ id: "t3", tool_name: "delegate_task", status: "blocked", is_error: true, output: "delegation limit reached; try later" }),
+      toolCall({ id: "t4", tool_name: "run_status", is_error: true, output: "no run nope", started_at: "2026-10-15T10:04:00Z" }),
+    ];
+    renderPage("/channels/c1");
+    const items = (await section()).getAllByRole("listitem");
+    expect(within(items[0]).getByText("blocked")).not.toBeNull();
+    expect(within(items[1]).getByText("Returned an error")).not.toBeNull();
+  });
+
+  it("shows nothing for a conversation whose agent called no tool", async () => {
+    renderPage("/channels/c2");
+    await screen.findByRole("region", { name: "Conversation with Reviewer" });
+    await waitFor(() => expect(api.made("GET", toolCallsRoute)).toHaveLength(1));
+    expect(screen.queryByRole("region", { name: /^Tool calls/ })).toBeNull();
+    expect(screen.queryByText(/Could not load/)).toBeNull();
+  });
+
+  it("says so when the tool calls cannot be loaded", async () => {
+    api.on("GET", toolCallsRoute, () => apiError(500, "internal", "database is down"));
+    renderPage("/channels/c1");
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Could not load the tool calls");
+    expect(alert.textContent).toContain("database is down");
+    expect(screen.getByRole("region", { name: "Conversation with Coder" })).not.toBeNull();
+  });
+
+  it("adds a call to the open conversation as it happens, and updates it when it finishes", async () => {
+    renderPage("/channels/c1");
+    const list = await section();
+    await waitFor(() => expect(api.hasStream("/api/events")).toBe(true));
+
+    const pending = toolCall({ id: "t9", tool_name: "run_status", status: "awaiting_approval", output: undefined, started_at: "2026-10-15T10:09:00Z" });
+    api.send("/api/events", "conversation.tool_call", { conversation_id: "c1", tool_call: pending });
+    await waitFor(() => expect(list.getAllByRole("listitem")).toHaveLength(3));
+    expect(within(list.getAllByRole("listitem")[2]).getByText("awaiting approval")).not.toBeNull();
+
+    api.send("/api/events", "conversation.tool_call", { conversation_id: "c1", tool_call: { ...pending, status: "executed", output: { status: "succeeded" } } });
+    await waitFor(() => expect(within(list.getAllByRole("listitem")[2]).getByText("executed")).not.toBeNull());
+    expect(list.getAllByRole("listitem")).toHaveLength(3);
+    expect(api.made("GET", toolCallsRoute)).toHaveLength(1);
+  });
+
+  it("updates a call that was held for approval when its completion arrives as a tool_call event without a run", async () => {
+    calls.c1 = [...calls.c1, toolCall({ id: "t6", tool_name: "delegate_task", status: "awaiting_approval", output: undefined, started_at: "2026-10-15T10:06:00Z" })];
+    renderPage("/channels/c1");
+    const list = await section();
+    await waitFor(() => expect(api.hasStream("/api/events")).toBe(true));
+    expect(within(list.getAllByRole("listitem")[2]).getByText("awaiting approval")).not.toBeNull();
+
+    api.send("/api/events", "tool_call", { tool_call: toolCall({ id: "t6", tool_name: "delegate_task", status: "executed", output: { run_id: RUN }, started_at: "2026-10-15T10:06:00Z" }) });
+    await waitFor(() => expect(within(list.getAllByRole("listitem")[2]).getByText("executed")).not.toBeNull());
+    expect(list.getAllByRole("listitem")).toHaveLength(3);
+    expect(api.made("GET", toolCallsRoute)).toHaveLength(1);
+  });
+
+  it("starts the list when the first call of the conversation arrives", async () => {
+    renderPage("/channels/c2");
+    await screen.findByRole("region", { name: "Conversation with Reviewer" });
+    await waitFor(() => expect(api.made("GET", toolCallsRoute)).toHaveLength(1));
+    await waitFor(() => expect(api.hasStream("/api/events")).toBe(true));
+    expect(screen.queryByRole("region", { name: /^Tool calls/ })).toBeNull();
+
+    api.send("/api/events", "conversation.tool_call", { conversation_id: "c2", tool_call: toolCall({ id: "t7", conversation_id: "c2", tool_name: "memory_recall" }) });
+    expect(await (await section()).findByText("memory_recall")).not.toBeNull();
+  });
+
+  it("ignores calls of other conversations and calls that belong to a run", async () => {
+    renderPage("/channels/c1");
+    const list = await section();
+    await waitFor(() => expect(api.hasStream("/api/events")).toBe(true));
+
+    api.send("/api/events", "conversation.tool_call", { conversation_id: "c2", tool_call: toolCall({ id: "t8", conversation_id: "c2", tool_name: "memory_save" }) });
+    api.send("/api/events", "tool_call", { tool_call: toolCall({ id: "t9", conversation_id: null, run_id: RUN, run_node_id: "n1", tool_name: "read" }) });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(list.getAllByRole("listitem")).toHaveLength(2);
+    expect(list.queryByText("memory_save")).toBeNull();
+    expect(list.queryByText("read")).toBeNull();
+  });
+
+  it("asks again for the tool calls when a message arrives, in case a call's own event was missed", async () => {
+    renderPage("/channels/c1");
+    const list = await section();
+    await waitFor(() => expect(api.hasStream("/api/events")).toBe(true));
+    expect(api.made("GET", toolCallsRoute)).toHaveLength(1);
+
+    calls.c1 = [...calls.c1, toolCall({ id: "t5", tool_name: "memory_save", started_at: "2026-10-15T10:05:00Z" })];
+    const m = msg({ id: "m8", direction: "out", text: "Done", created_at: "2026-10-15T10:06:00Z" });
+    api.send("/api/events", "conversation.message", { conversation: conv({ last_message_at: m.created_at, message_count: 3 }), message: m });
+    expect(await list.findByText("memory_save")).not.toBeNull();
+    expect(api.made("GET", toolCallsRoute)).toHaveLength(2);
   });
 });

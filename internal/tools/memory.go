@@ -15,7 +15,9 @@ import (
 )
 
 // Memory tools (DESIGN 5.7 table, 5.10): an agent's own facts, scope agent this wave.
-// Retention, eviction and recall order are internal/memory's.
+// Retention, eviction and recall order are internal/memory's. Both also work in a
+// conversation, with the agent's chat token (DESIGN 5.15 rule 2): the schemas require
+// neither token and the MCP gate requires exactly one.
 const (
 	MemorySaveName   = "memory_save"
 	MemoryRecallName = "memory_recall"
@@ -24,22 +26,24 @@ const (
 var memorySaveSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "run_token": {"type": "string", "description": "The run token from the task message."},
+    "run_token": {"type": "string", "description": "The run token from the task message. In a conversation, pass chat_token instead."},
+    "chat_token": {"type": "string", "description": "Your chat token from AGENTS.md, only when you are chatting with a person and have no run token."},
     "key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "What the fact is about; saving the same key again replaces it."},
     "value": {"type": "string", "minLength": 1, "maxLength": 2048, "description": "The fact, at most 2048 bytes."},
     "ttl_days": {"type": "integer", "minimum": 0, "maximum": 3650, "description": "Forget the fact after this many days; default from the agent's memory policy (30 days unless set)."}
   },
-  "required": ["run_token", "key", "value"],
+  "required": ["key", "value"],
   "additionalProperties": false
 }`)
 
 var memoryRecallSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "run_token": {"type": "string", "description": "The run token from the task message."},
+    "run_token": {"type": "string", "description": "The run token from the task message. In a conversation, pass chat_token instead."},
+    "chat_token": {"type": "string", "description": "Your chat token from AGENTS.md, only when you are chatting with a person and have no run token."},
     "query": {"type": "string", "maxLength": 500, "description": "Words that must all appear in a saved key or value; empty returns the newest facts."}
   },
-  "required": ["run_token", "query"],
+  "required": ["query"],
   "additionalProperties": false
 }`)
 
@@ -69,11 +73,12 @@ type MemorySaved func(ctx context.Context, call Call)
 func NewMemorySave(pool *pgxpool.Pool, saved MemorySaved) *Tool {
 	return &Tool{
 		Name:        MemorySaveName,
-		Description: "Remember a fact for your future runs under a short key. Saving an existing key replaces its value.",
+		Description: "Remember a fact for your future runs and conversations under a short key. Saving an existing key replaces its value.",
 		InputSchema: memorySaveSchema,
 		Risk:        RiskComputational,
 		Hits:        HitsPostgres,
 		Timeout:     5 * time.Second,
+		Chat:        true,
 		Exec: func(ctx context.Context, call Call) (Result, error) {
 			var in struct {
 				Key     string `json:"key"`
@@ -122,12 +127,13 @@ func NewMemorySave(pool *pgxpool.Pool, saved MemorySaved) *Tool {
 func NewMemoryRecall(pool *pgxpool.Pool, maxOutputBytes int) *Tool {
 	return &Tool{
 		Name:        MemoryRecallName,
-		Description: "Look up facts you saved in earlier runs. Returns up to twenty that contain all the words of the query, newest first.",
+		Description: "Look up facts you saved earlier. Returns up to twenty that contain all the words of the query, newest first.",
 		InputSchema: memoryRecallSchema,
 		Risk:        RiskReadOnly,
 		Hits:        HitsPostgres,
 		Timeout:     5 * time.Second,
 		Untrusted:   true,
+		Chat:        true,
 		Exec: func(ctx context.Context, call Call) (Result, error) {
 			var in struct {
 				Query string `json:"query"`

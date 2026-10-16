@@ -165,6 +165,8 @@ type fakeEngine struct {
 
 	// tokens are the live run tokens ResolveRunToken knows.
 	tokens map[string]engine.RunContext
+	// chats are the chat tokens ResolveChatToken knows.
+	chats map[string]engine.ChatContext
 	// Approvals: requestErr fails RequestApproval; waitOutcome scripts WaitApproval
 	// ("approve", "reject", "expire", "timeout"; "" answers ErrNotImplemented) with
 	// waitReason; decideErr overrides DecideApproval.
@@ -255,6 +257,13 @@ func (f *fakeEngine) ResolveRunToken(token string) (engine.RunContext, bool) {
 	defer f.mu.Unlock()
 	rc, ok := f.tokens[token]
 	return rc, ok
+}
+
+func (f *fakeEngine) ResolveChatToken(token string) (engine.ChatContext, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cc, ok := f.chats[token]
+	return cc, ok
 }
 
 func (f *fakeEngine) AcceptFinish(_ context.Context, token string, result json.RawMessage) error {

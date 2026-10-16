@@ -21,6 +21,7 @@ import (
 	"yuno/internal/guardrails"
 	"yuno/internal/memory"
 	"yuno/internal/store"
+	"yuno/internal/tools"
 )
 
 // PlatformToolPrefix is how OpenClaw names the tools of the MCP server registered as
@@ -30,7 +31,8 @@ const PlatformToolPrefix = "yuno__"
 // PlatformTools are the tools the api serves over MCP (DESIGN 5.7 table). An allowlist
 // entry with one of these names is materialised with PlatformToolPrefix; every other
 // name is an OpenClaw built-in and keeps its name.
-var PlatformTools = []string{"finish", "http_fetch", "memory_save", "memory_recall", "deploy_release", "gitlab_create_mr"}
+var PlatformTools = []string{"finish", "http_fetch", "memory_save", "memory_recall", "deploy_release", "gitlab_create_mr",
+	"list_agents", "list_workflows", "delegate_task", "run_status"}
 
 // FinishTool is the platform tool every managed agent must be able to call.
 const FinishTool = PlatformToolPrefix + "finish"
@@ -52,6 +54,36 @@ const AgentsMD = "You run on the Yuno platform. Work only inside the directory r
 // has no task, run token or run directory, and the rules above are about runs.
 const ChatRule = "When you are chatting with a person on a channel and their message carries no run_token, " +
 	"answer the person directly and keep to your role: do not call yuno__finish and do not work in a run directory."
+
+// chatSection is AGENTS.md's "## Chatting" section (DESIGN 5.15 rule 15) for an agent
+// that may call chat-capable platform tools: how to pass its chat token, which tools
+// work in a conversation, and that the run tools do not. allow is the agent's effective
+// tools.allow; "" when it holds no chat-capable tool. The token makes the file, and so
+// the desired-state hash, change when it is rotated.
+func chatSection(a *store.Agent, allow []string) string {
+	var chat []string
+	for _, t := range allow {
+		if tools.IsChatTool(t) && strings.HasPrefix(t, PlatformToolPrefix) {
+			chat = append(chat, t)
+		}
+	}
+	if len(chat) == 0 || a.ChatToken == "" {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n## Chatting\n\n")
+	sb.WriteString("When you are chatting with a person (their message carries no run_token), you can call these platform tools: ")
+	sb.WriteString(strings.Join(chat, ", "))
+	sb.WriteString(". In every such call pass the field chat_token with the value " + a.ChatToken +
+		" instead of run_token; it identifies you to the platform and works only for these tools. " +
+		"The run tools, such as " + FinishTool + ", are not available in a conversation.")
+	if slices.Contains(chat, PlatformToolPrefix+tools.DelegateTaskName) {
+		sb.WriteString(" A message that starts with [platform] comes from the platform, not from the person: " +
+			"it reports on a run you delegated.")
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
 
 // MemoryMD is the MEMORY.md written in wave 1 (facts arrive in wave 3, DESIGN 5.10).
 const MemoryMD = "# Memory\n"
@@ -230,9 +262,10 @@ func plan(stateDir string, a *store.Agent, skills []store.Skill) desired {
 	sorted := slices.Clone(skills)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 	names := make([]string, 0, len(sorted))
+	allow, _ := toolLists(a)
 	files := map[string]string{
 		"SOUL.md":   soulMD(a),
-		"AGENTS.md": AgentsMD,
+		"AGENTS.md": AgentsMD + chatSection(a, allow),
 		"MEMORY.md": MemoryMD,
 	}
 	for _, s := range sorted {

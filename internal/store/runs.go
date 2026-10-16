@@ -19,7 +19,7 @@ var ErrDuplicateTrigger = errors.New("a run for this trigger already exists")
 const runColumns = `id, workflow_id, workflow_version, workflow_snapshot, trigger, trigger_ref, status, input, state,
 	limits, current_node, resume_node_visit_id, step_count, tool_call_count, attempt, cancel_requested, cancel_by,
 	failure_reason, cost_usd_micros, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, paused_at,
-	paused_total_ms, created_at, started_at, finished_at, updated_at`
+	paused_total_ms, created_at, started_at, finished_at, updated_at, reported_at`
 
 func CreateRun(ctx context.Context, q Querier, r *Run) error {
 	if r.ID == "" {
@@ -282,8 +282,16 @@ func ListModelCalls(ctx context.Context, q Querier, runID string) ([]ModelCall, 
 }
 
 const toolCallColumns = `id, run_id, run_node_id, model_call_id, tool_use_id, tool_name, input, output, is_error, status,
-	idempotency_key, attempt, duration_ms, started_at, finished_at`
+	idempotency_key, attempt, duration_ms, started_at, finished_at, conversation_id`
 
+// toolCallSelect reads a tool call for scanning. A chat-time call has no run or node
+// visit (DESIGN 5.15 rule 3): they read as "".
+const toolCallSelect = `id, COALESCE(run_id, '') AS run_id, COALESCE(run_node_id, '') AS run_node_id, model_call_id,
+	tool_use_id, tool_name, input, output, is_error, status, idempotency_key, attempt, duration_ms, started_at, finished_at,
+	conversation_id`
+
+// InsertToolCall stores a tool call; an empty RunID and RunNodeID are stored as NULL (a
+// chat-time call).
 func InsertToolCall(ctx context.Context, q Querier, t *ToolCall) error {
 	if t.ID == "" {
 		t.ID = NewID()
@@ -298,9 +306,9 @@ func InsertToolCall(ctx context.Context, q Querier, t *ToolCall) error {
 		t.Output = json.RawMessage(`null`)
 	}
 	_, err := q.Exec(ctx, `INSERT INTO tool_calls (`+toolCallColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		VALUES ($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		t.ID, t.RunID, t.RunNodeID, t.ModelCallID, t.ToolUseID, t.ToolName, t.Input, t.Output, t.IsError, t.Status,
-		t.IdempotencyKey, t.Attempt, t.DurationMs, t.StartedAt, t.FinishedAt)
+		t.IdempotencyKey, t.Attempt, t.DurationMs, t.StartedAt, t.FinishedAt, t.ConversationID)
 	return err
 }
 
@@ -316,7 +324,7 @@ func UpdateToolCall(ctx context.Context, q Querier, t *ToolCall) error {
 
 // GetToolCallByUseID finds the row for an OpenClaw toolCallId within a run.
 func GetToolCallByUseID(ctx context.Context, q Querier, runID, toolUseID string) (*ToolCall, error) {
-	rows, err := q.Query(ctx, `SELECT `+toolCallColumns+` FROM tool_calls WHERE run_id=$1 AND tool_use_id=$2 ORDER BY id DESC LIMIT 1`, runID, toolUseID)
+	rows, err := q.Query(ctx, `SELECT `+toolCallSelect+` FROM tool_calls WHERE run_id=$1 AND tool_use_id=$2 ORDER BY id DESC LIMIT 1`, runID, toolUseID)
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +336,7 @@ func GetToolCallByUseID(ctx context.Context, q Querier, runID, toolUseID string)
 }
 
 func ListToolCalls(ctx context.Context, q Querier, runID string) ([]ToolCall, error) {
-	rows, err := q.Query(ctx, `SELECT `+toolCallColumns+` FROM tool_calls WHERE run_id=$1 ORDER BY started_at NULLS LAST, id`, runID)
+	rows, err := q.Query(ctx, `SELECT `+toolCallSelect+` FROM tool_calls WHERE run_id=$1 ORDER BY started_at NULLS LAST, id`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -409,7 +417,8 @@ const approvalColumns = `id, run_id, run_node_id, tool_call_id, kind, node_id, m
 // approvalSelect reads an approval for scanning. One raised in a conversation has no
 // run or run node (DESIGN 5.8 rule 5): they read as "", with conversation_id set.
 const approvalSelect = `id, COALESCE(run_id, '') AS run_id, COALESCE(run_node_id, '') AS run_node_id, tool_call_id, kind,
-	node_id, message, status, external_id, requested_at, decided_at, decided_by, reason, expires_at, conversation_id`
+	node_id, message, status, external_id, requested_at, decided_at, decided_by, reason, expires_at, conversation_id,
+	reported_at`
 
 func InsertApproval(ctx context.Context, q Querier, a *Approval) error {
 	if a.ID == "" {

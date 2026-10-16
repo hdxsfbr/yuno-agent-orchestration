@@ -128,9 +128,12 @@ type Agent struct {
 	Thinking         string            `db:"thinking" json:"thinking"`
 	ExecPolicy       ExecPolicy        `db:"exec_policy" json:"exec_policy"`
 	MaterializedHash string            `db:"materialized_hash" json:"materialized_hash"`
-	CreatedAt        time.Time         `db:"created_at" json:"created_at"`
-	UpdatedAt        time.Time         `db:"updated_at" json:"updated_at"`
-	DeletedAt        *time.Time        `db:"deleted_at" json:"deleted_at,omitempty"`
+	// ChatToken identifies the agent's chat-time platform tool calls (DESIGN 5.15 rule
+	// 1). It is never serialised: the API, events and logs do not carry it.
+	ChatToken string     `db:"chat_token" json:"-"`
+	CreatedAt time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt time.Time  `db:"updated_at" json:"updated_at"`
+	DeletedAt *time.Time `db:"deleted_at" json:"deleted_at,omitempty"`
 }
 
 type Skill struct {
@@ -160,6 +163,9 @@ type Approval struct {
 	// ConversationID is set, and RunID empty, for an approval raised in a conversation
 	// (DESIGN 5.8 rule 5).
 	ConversationID *string `db:"conversation_id" json:"conversation_id,omitempty"`
+	// ReportedAt is when the approval was announced in the conversation that delegated
+	// its run (DESIGN 5.15 rule 10); nil when it was not.
+	ReportedAt *time.Time `db:"reported_at" json:"reported_at,omitempty"`
 }
 
 type Workflow struct {
@@ -169,9 +175,12 @@ type Workflow struct {
 	Definition  json.RawMessage `db:"definition" json:"definition"`
 	Version     int             `db:"version" json:"version"`
 	TemplateKey *string         `db:"template_key" json:"template_key,omitempty"`
-	CreatedAt   time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt   time.Time       `db:"updated_at" json:"updated_at"`
-	DeletedAt   *time.Time      `db:"deleted_at" json:"deleted_at,omitempty"`
+	// FromTemplate is the key of the template the workflow was instantiated from
+	// (DESIGN 5.15 rule 13); nil for workflows built from scratch.
+	FromTemplate *string    `db:"from_template" json:"from_template,omitempty"`
+	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time  `db:"updated_at" json:"updated_at"`
+	DeletedAt    *time.Time `db:"deleted_at" json:"deleted_at,omitempty"`
 }
 
 type Run struct {
@@ -204,6 +213,9 @@ type Run struct {
 	StartedAt         *time.Time      `db:"started_at" json:"started_at,omitempty"`
 	FinishedAt        *time.Time      `db:"finished_at" json:"finished_at,omitempty"`
 	UpdatedAt         time.Time       `db:"updated_at" json:"updated_at"`
+	// ReportedAt is when a channel-triggered run's outcome was sent back into its
+	// conversation (DESIGN 5.15 rule 9); nil when it was not.
+	ReportedAt *time.Time `db:"reported_at" json:"reported_at,omitempty"`
 	// AgentNames and Models are not columns; FillRunParticipants sets them for list views.
 	AgentNames []string `db:"-" json:"agent_names,omitempty"`
 	Models     []string `db:"-" json:"models,omitempty"`
@@ -247,10 +259,14 @@ type ModelCall struct {
 	FinishedAt       *time.Time `db:"finished_at" json:"finished_at,omitempty"`
 }
 
+// ToolCall is one recorded tool call. A chat-time platform tool call (DESIGN 5.15 rule
+// 3) has no run: RunID and RunNodeID read as "" and ConversationID names the calling
+// agent's most recent conversation, or is nil when it has none.
 type ToolCall struct {
 	ID             string          `db:"id" json:"id"`
 	RunID          string          `db:"run_id" json:"run_id"`
 	RunNodeID      string          `db:"run_node_id" json:"run_node_id"`
+	ConversationID *string         `db:"conversation_id" json:"conversation_id,omitempty"`
 	ModelCallID    *string         `db:"model_call_id" json:"model_call_id,omitempty"`
 	ToolUseID      string          `db:"tool_use_id" json:"tool_use_id"`
 	ToolName       string          `db:"tool_name" json:"tool_name"`

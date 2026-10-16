@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -473,5 +474,45 @@ func TestBindLearnsBotName(t *testing.T) {
 	_, body := do(t, ts, http.MethodGet, "/api/channels", "")
 	if v := decodeChannels(t, body); v.Telegram.BotUsername != "yuno_test_bot" {
 		t.Fatalf("GET /api/channels after the bind: %s", body)
+	}
+}
+
+// DESIGN 5.15 rule 14: the seed binds through the Channels page's own bind code:
+// materialised first, stored, applied with a restart; refused while another agent is
+// bound, which it never changes.
+func TestSharedBindTelegram(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	clearBinding := func() {
+		if _, err := pool.Exec(ctx, `DELETE FROM channel_bindings`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clearBinding()
+	t.Cleanup(clearBinding)
+	gw := newChannelGateway()
+	eng := &fakeEngine{pool: pool}
+	cfg := testConfig()
+	cfg.TelegramMode = "polling"
+	sh := NewShared(Deps{Cfg: cfg, Pool: pool, Engine: eng, Gateway: gw})
+	chief, other := channelAgent(t, "Chief of Staff"), channelAgent(t, "Coder")
+
+	if err := sh.BindTelegram(ctx, chief.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(eng.materialized) != 1 || eng.materialized[0] != chief.ID {
+		t.Fatalf("materialised = %v", eng.materialized)
+	}
+	bindings, dm := gw.telegram()
+	if len(bindings) != 1 || bindings[0].(map[string]any)["agentId"] != "t-"+chief.ID || dm != "allowlist" || gw.restarts != 1 {
+		t.Fatalf("gateway: bindings %v, dmPolicy %v, restarts %d", bindings, dm, gw.restarts)
+	}
+	err := sh.BindTelegram(ctx, other.ID)
+	var bound *boundError
+	if !errors.As(err, &bound) || bound.cur.AgentID != chief.ID {
+		t.Fatalf("second agent: %v", err)
+	}
+	if b, err := store.GetChannelBinding(ctx, pool, store.ChannelTelegram); err != nil || b.AgentID != chief.ID || gw.restarts != 1 {
+		t.Fatalf("binding changed: %+v %v, restarts %d", b, err, gw.restarts)
 	}
 }

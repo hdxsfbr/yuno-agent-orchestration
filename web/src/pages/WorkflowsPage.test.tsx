@@ -100,6 +100,15 @@ describe("WorkflowsPage list", () => {
     expect(within(row).getByRole("button", { name: "Delete Release train" })).not.toBeNull();
   });
 
+  it("marks a workflow that names the template it came from, whichever field the API uses", async () => {
+    const resolved = { nodes: [{ id: "c", kind: "agent" as const, agent_id: "a1" }], edges: [] };
+    workflows = [wf({ id: "w1", name: "Release train", from_template: "dev_pipeline", definition: resolved }), wf({ id: "w3", name: "Hand made", definition: resolved })];
+    renderPage();
+    const row = (await screen.findByRole("link", { name: "Release train" })).closest("tr")!;
+    expect(within(row).getByText("From template").getAttribute("title")).toBe("Made from the dev_pipeline template");
+    expect(within(screen.getByRole("link", { name: "Hand made" }).closest("tr")!).queryByText("From template")).toBeNull();
+  });
+
   it("offers New workflow and says so when there are none", async () => {
     workflows = [];
     renderPage();

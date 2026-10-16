@@ -17,7 +17,10 @@ type toolView struct {
 	TimeoutSeconds  int             `json:"timeout_seconds"`
 	MaxAttempts     int             `json:"max_attempts,omitempty"`
 	UntrustedOutput bool            `json:"untrusted_output"`
-	Source          tools.Source    `json:"source"`
+	// Chat marks a tool an agent may call while chatting with a person (DESIGN 5.15
+	// rule 2).
+	Chat   bool         `json:"chat"`
+	Source tools.Source `json:"source"`
 }
 
 func newToolView(t *tools.Tool, src tools.Source) toolView {
@@ -30,6 +33,7 @@ func newToolView(t *tools.Tool, src tools.Source) toolView {
 		TimeoutSeconds:  t.TimeoutS,
 		MaxAttempts:     t.MaxAttempts,
 		UntrustedOutput: t.Untrusted,
+		Chat:            t.Chat,
 		Source:          src,
 	}
 }

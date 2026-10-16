@@ -1,16 +1,58 @@
 // Package seed creates the demo agents the shipped workflow templates name
-// (DESIGN 5.6 rule 9): `yuno seed` is idempotent and never overwrites an agent an
-// operator has edited, so it only creates the ones whose name is missing.
+// (DESIGN 5.6 rule 9) and the Chief of Staff who coordinates them (DESIGN 5.15 rules 12
+// to 14): `yuno seed` is idempotent and never overwrites an agent an operator has
+// edited, so it only creates the ones whose name is missing; it instantiates each
+// shipped template once, and binds the Chief of Staff to Telegram only while nothing is
+// bound.
 package seed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"yuno/internal/config"
+	"yuno/internal/engine"
+	"yuno/internal/httpapi"
+	"yuno/internal/openclaw"
 	"yuno/internal/store"
+	"yuno/internal/tools"
+)
+
+// ChiefName is the seeded coordinator's name (DESIGN 5.15 rule 12).
+const ChiefName = "Chief of Staff"
+
+// ChiefPrompt is the Chief of Staff's system prompt (DESIGN 5.15 rule 12).
+const ChiefPrompt = "You are the Chief of Staff, the only agent the person talks to. Never do the work yourself: " +
+	"hand every task to the agent or workflow that fits it. Before delegating, call list_agents and list_workflows " +
+	"to see who and what is available. Delegate with delegate_task and a complete, self-contained task, since the " +
+	"agent you choose sees nothing of this conversation. Then tell the person what you delegated, to whom, and the " +
+	"run id. When a message that starts with [platform] arrives, it reports on a run you delegated: relay the " +
+	"outcome to the person in one or two sentences. Use run_status when the person asks how a run is going, and " +
+	"memory_save and memory_recall to keep what the person wants you to remember."
+
+// Chief is the seeded Chief of Staff (DESIGN 5.15 rule 12): the six chat-capable tools
+// and no exec. Memory is on, or OpenClaw would not offer memory_save and memory_recall
+// (DESIGN 5.10 edge case).
+var Chief = store.Agent{
+	Name: ChiefName, Role: "Coordinator", Model: "claude-opus-5-5", SystemPrompt: ChiefPrompt,
+	ToolAllowlist: append([]string(nil), tools.ChatToolNames...),
+	MemoryPolicy:  store.MemoryPolicy{Enabled: true},
+}
+
+// TemplateKeys are the shipped templates the seed instantiates once each (DESIGN 5.15
+// rule 13): the Dev pipeline and the Research pipeline.
+var TemplateKeys = []string{"dev_pipeline", "research_pipeline"}
+
+// Gateway dial for the binding: the api has been up for a while when `make run` seeds,
+// so a gateway that does not answer within the window is reported, not waited for.
+const (
+	gatewayDialWindow = time.Minute
+	bindAttempts      = 3
+	bindRetryWait     = 2 * time.Second
 )
 
 // Agents are the demo agents, one per template role. Models follow DESIGN section 10:
@@ -58,9 +100,13 @@ var Agents = []store.Agent{
 			"do not support: a one-paragraph summary, findings, trade-offs and a recommendation.",
 		ToolAllowlist: []string{"read", "write", "ls", "finish"},
 	},
+	Chief,
 }
 
-// Run creates every missing demo agent and reports what it did.
+// Run creates every missing demo agent, instantiates the templates no workflow was made
+// from yet, binds the Chief of Staff when Telegram is on and unbound, and reports what
+// it did. A template or binding step that cannot be done is logged and skipped, so a
+// seed without the api or the gateway still creates the agents.
 func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	pool, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -72,7 +118,167 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		return err
 	}
 	log.Info("seed: demo agents", "created", strings.Join(created, ","), "existing", strings.Join(existing, ","))
+
+	// Each failing template was logged by Templates; the ones that worked are reported.
+	made, _ := Templates(ctx, pool, httpapi.NewShared(httpapi.Deps{Cfg: cfg, Log: log, Pool: pool}), log)
+	log.Info("seed: workflows from templates", "created", strings.Join(made, ","))
+
+	if !telegramOn(cfg) {
+		return nil
+	}
+	if _, err := store.GetChannelBinding(ctx, pool, store.ChannelTelegram); err == nil {
+		log.Info("seed: telegram already bound; the binding is kept")
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("seed: read the telegram binding: %w", err)
+	}
+	// The connection lives as long as its context: the window bounds the dial only.
+	connCtx, closeConn := context.WithCancel(ctx)
+	defer closeConn()
+	giveUp := time.AfterFunc(gatewayDialWindow, closeConn)
+	gw, err := openclaw.Dial(connCtx, openclaw.DialConfig{
+		URL: cfg.OpenClawGatewayURL, Token: cfg.OpenClawGatewayToken, Version: config.Version, RetryRefused: true,
+	}, log)
+	giveUp.Stop()
+	if err != nil {
+		log.Warn("seed: telegram not bound: the gateway did not answer; bind on the Channels page or seed again", "error", err)
+		return nil
+	}
+	eng := engine.New(engine.Deps{Cfg: cfg, Log: log, Pool: pool, Gateway: gw, StateDir: cfg.OpenClawStateDir})
+	sh := httpapi.NewShared(httpapi.Deps{Cfg: cfg, Log: log, Pool: pool, Engine: eng, Gateway: gw})
+	bound, err := BindChief(ctx, pool, retryBinder{sh})
+	switch {
+	case err != nil:
+		log.Warn("seed: telegram not bound; bind on the Channels page or seed again", "error", err)
+	case bound:
+		log.Info("seed: telegram bound to the Chief of Staff")
+	}
 	return nil
+}
+
+func telegramOn(cfg config.Config) bool {
+	return cfg.TelegramMode == "polling" || cfg.TelegramMode == "webhook"
+}
+
+// Instantiator creates a workflow from a template (httpapi.Shared in production).
+type Instantiator interface {
+	InstantiateTemplate(ctx context.Context, key, name string) (*store.Workflow, error)
+}
+
+// Binder binds an agent to Telegram (httpapi.Shared in production).
+type Binder interface {
+	BindTelegram(ctx context.Context, agentID string) error
+}
+
+// Templates instantiates each of TemplateKeys that no live workflow was made from yet
+// (DESIGN 5.15 rule 13), so delegate_task has workflows to name, and returns the names
+// of the workflows it created. A live workflow (not a template) with the template's
+// name counts as made from it: copies made before workflows recorded their template. A
+// template the api has not loaded yet is skipped with a warning (templates load at api
+// start). Every key is tried; the error lists each one that failed.
+func Templates(ctx context.Context, q store.Querier, in Instantiator, log *slog.Logger) ([]string, error) {
+	var made []string
+	var errs []error
+	for _, key := range TemplateKeys {
+		name, err := instantiateOnce(ctx, q, in, key, log)
+		if err != nil {
+			log.Warn("seed: template not instantiated", "key", key, "error", err)
+			errs = append(errs, fmt.Errorf("template %s: %w", key, err))
+			continue
+		}
+		if name != "" {
+			made = append(made, name)
+		}
+	}
+	return made, errors.Join(errs...)
+}
+
+// instantiateOnce creates the workflow of one template unless one exists, and returns
+// its name ("" when nothing was created).
+func instantiateOnce(ctx context.Context, q store.Querier, in Instantiator, key string, log *slog.Logger) (string, error) {
+	done, err := store.WorkflowFromTemplateExists(ctx, q, key)
+	if err != nil || done {
+		return "", err
+	}
+	tpl, err := store.GetWorkflowByTemplateKey(ctx, q, key)
+	if errors.Is(err, store.ErrNotFound) {
+		log.Warn("seed: template not loaded yet; start the api, then seed again", "key", key)
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	all, err := store.ListWorkflows(ctx, q)
+	if err != nil {
+		return "", err
+	}
+	for _, wf := range all {
+		if wf.TemplateKey == nil && wf.Name == tpl.Name {
+			return "", nil
+		}
+	}
+	wf, err := in.InstantiateTemplate(ctx, key, "")
+	if err != nil {
+		return "", err
+	}
+	return wf.Name, nil
+}
+
+// BindChief binds the Chief of Staff to Telegram when no agent is bound (DESIGN 5.15
+// rule 14) and reports whether it did. An existing binding, to any agent, is never
+// changed; without a Chief of Staff nothing is bound.
+func BindChief(ctx context.Context, q store.Querier, b Binder) (bool, error) {
+	if _, err := store.GetChannelBinding(ctx, q, store.ChannelTelegram); err == nil {
+		return false, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return false, fmt.Errorf("read the telegram binding: %w", err)
+	}
+	chief, err := findAgent(ctx, q, ChiefName)
+	if err != nil {
+		return false, err
+	}
+	if chief == nil {
+		return false, nil
+	}
+	if err := b.BindTelegram(ctx, chief.ID); err != nil {
+		return false, fmt.Errorf("bind %s: %w", ChiefName, err)
+	}
+	return true, nil
+}
+
+// findAgent returns the oldest live agent with the name, ignoring case, or nil.
+func findAgent(ctx context.Context, q store.Querier, name string) (*store.Agent, error) {
+	agents, err := store.ListAgents(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list agents: %w", err)
+	}
+	for i := range agents {
+		if strings.EqualFold(strings.TrimSpace(agents[i].Name), name) {
+			return &agents[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// retryBinder tries a bind a few times: at `make run` the api's own agent sync may be
+// materialising the new Chief of Staff at the same moment.
+type retryBinder struct{ b Binder }
+
+func (r retryBinder) BindTelegram(ctx context.Context, agentID string) error {
+	var err error
+	for i := 0; i < bindAttempts; i++ {
+		err = r.b.BindTelegram(ctx, agentID)
+		if err == nil || errors.Is(err, store.ErrChannelBound) {
+			// Another agent answers the channel: retrying cannot change that.
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(bindRetryWait):
+		}
+	}
+	return err
 }
 
 // Seed creates the demo agents whose name is missing. It returns the names created and

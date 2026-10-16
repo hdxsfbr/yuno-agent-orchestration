@@ -164,6 +164,9 @@ type HistoryEntry struct {
 	ToolCallID string `json:"toolCallId,omitempty"`
 	ToolName   string `json:"toolName,omitempty"`
 	IsError    bool   `json:"isError,omitempty"`
+	// IdempotencyKey is set on a user entry injected with chat.send: the send's key plus
+	// ":user" [probed 2026-10-16].
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
 
 // Meta is the __openclaw block of a transcript entry.

@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { cancelRun, isTerminalStatus, type Run } from "@/lib/api";
+import { Link } from "react-router";
+import { cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, type Run } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, shortId } from "@/lib/format";
 import type { Connection } from "@/lib/useEventStream";
 import Button from "../Button";
 import { Card } from "../Card";
 import ConnectionIndicator from "../ConnectionIndicator";
-import { RunStatusBadge } from "../Badge";
+import { Badge, RunStatusBadge } from "../Badge";
 import { InlineError, errorText } from "../QueryState";
 
 function Item({ label, children, title }: { label: string; children: ReactNode; title?: string }) {
@@ -15,6 +16,26 @@ function Item({ label, children, title }: { label: string; children: ReactNode; 
       <dt className="text-xs uppercase tracking-wide text-zinc-500">{label}</dt>
       <dd className="mt-0.5 text-sm font-medium tabular-nums">{children}</dd>
     </div>
+  );
+}
+
+/** The Trigger value: where a delegated run came from, or the trigger and its reference. */
+function TriggerValue({ run }: { run: Run }) {
+  if (isDelegatedRun(run)) {
+    const conversation = delegatedConversationId(run);
+    return conversation ? (
+      <Link to={`/channels/${encodeURIComponent(conversation)}`} className="underline">
+        Delegated from a conversation
+      </Link>
+    ) : (
+      <>Delegated</>
+    );
+  }
+  return (
+    <>
+      {run.trigger}
+      {run.trigger_ref ? <span className="ml-1.5 font-mono text-xs font-normal text-zinc-500">{run.trigger_ref}</span> : null}
+    </>
   );
 }
 
@@ -42,6 +63,7 @@ export default function RunHeader({ run, connection, now, onRunChange }: Props) 
                 Run <span className="font-mono">{shortId(run.id)}</span>
               </h1>
               <RunStatusBadge status={run.status} />
+              {isDelegatedRun(run) ? <Badge tone="blue">Delegated</Badge> : null}
             </div>
             <p className="mt-1 break-all font-mono text-xs text-zinc-500">{run.id}</p>
           </div>
@@ -68,8 +90,7 @@ export default function RunHeader({ run, connection, now, onRunChange }: Props) 
 
         <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-6">
           <Item label="Trigger">
-            {run.trigger}
-            {run.trigger_ref ? <span className="ml-1.5 font-mono text-xs font-normal text-zinc-500">{run.trigger_ref}</span> : null}
+            <TriggerValue run={run} />
           </Item>
           {run.current_node && !terminal ? (
             <Item label="Current node">

@@ -12,7 +12,7 @@ import (
 
 // GetToolCall returns one tool call by id, or ErrNotFound.
 func GetToolCall(ctx context.Context, q Querier, id string) (*ToolCall, error) {
-	rows, err := q.Query(ctx, `SELECT `+toolCallColumns+` FROM tool_calls WHERE id=$1`, id)
+	rows, err := q.Query(ctx, `SELECT `+toolCallSelect+` FROM tool_calls WHERE id=$1`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -29,7 +29,7 @@ func ListToolCallsByIDs(ctx context.Context, q Querier, ids []string) (map[strin
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := q.Query(ctx, `SELECT `+toolCallColumns+` FROM tool_calls WHERE id = ANY($1)`, ids)
+	rows, err := q.Query(ctx, `SELECT `+toolCallSelect+` FROM tool_calls WHERE id = ANY($1)`, ids)
 	if err != nil {
 		return nil, err
 	}

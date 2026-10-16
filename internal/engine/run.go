@@ -155,6 +155,8 @@ func (e *Engine) finishRun(ctx context.Context, runID string, res outcome, rootS
 		msg += ": " + res.reason
 	}
 	e.logEvent(ctx, runID, level, msg)
+	// DESIGN 5.15 rule 9: a run delegated from a conversation reports how it ended.
+	e.afterTerminal(ctx, run)
 }
 
 // transition moves a run from its current status to `to`, checking the state machine.

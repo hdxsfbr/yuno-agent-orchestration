@@ -33,6 +33,13 @@ type PlatformDeps struct {
 	MemorySaved MemorySaved
 	// MaxOutputBytes is the cap the MCP server applies to every result (0: none).
 	MaxOutputBytes int
+	// Delegator queues delegate_task's runs (DESIGN 5.15 rule 6); nil leaves the tool
+	// unable to run.
+	Delegator Delegator
+	// PublicBaseURL prefixes the run links delegate_task and run_status return.
+	PublicBaseURL string
+	// DelegationLimiter is delegate_task's rate limit; nil builds the default one.
+	DelegationLimiter *DelegationLimiter
 }
 
 // NewPlatformRegistry returns the platform tools served over MCP (DESIGN 5.7).
@@ -43,6 +50,10 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 	r.Register(NewHTTPFetch(d.Fetch))
 	r.Register(NewMemorySave(d.Pool, d.MemorySaved))
 	r.Register(NewMemoryRecall(d.Pool, d.MaxOutputBytes))
+	r.Register(NewListAgents(d.Pool))
+	r.Register(NewListWorkflows(d.Pool))
+	r.Register(NewDelegateTask(ChiefDeps{Pool: d.Pool, Delegator: d.Delegator, PublicBaseURL: d.PublicBaseURL, Limiter: d.DelegationLimiter}))
+	r.Register(NewRunStatus(d.Pool, d.PublicBaseURL))
 	if d.GitLab != nil {
 		r.Register(NewGitLabCreateMR(*d.GitLab))
 	}

@@ -355,7 +355,7 @@ func OpenRootSpan(ctx context.Context, q Querier, runID string) (string, error) 
 // GetAgentForRun loads an agent even when it was deleted after the run started: a
 // run continues with the agents its snapshot names (DESIGN 5.6 edge cases).
 func GetAgentForRun(ctx context.Context, q Querier, id string) (*Agent, error) {
-	rows, err := q.Query(ctx, `SELECT `+agentColumns+` FROM agents WHERE id = $1`, id)
+	rows, err := q.Query(ctx, `SELECT `+agentSelect+` FROM agents WHERE id = $1`, id)
 	if err != nil {
 		return nil, err
 	}

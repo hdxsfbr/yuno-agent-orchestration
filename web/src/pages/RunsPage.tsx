@@ -1,16 +1,39 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router";
-import { RUN_STATUSES, isTerminalStatus, listRuns, type RunStatus } from "@/lib/api";
+import { RUN_STATUSES, delegatedConversationId, isDelegatedRun, isTerminalStatus, listRuns, type Run, type RunStatus } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, humanize, shortId } from "@/lib/format";
 import { useNow } from "@/lib/useNow";
 import { useRefreshOnEvents } from "@/lib/useRefreshOnEvents";
-import { RunStatusBadge } from "@/components/Badge";
+import { Badge, RunStatusBadge } from "@/components/Badge";
 import { cardClass, PageHeader } from "@/components/Card";
 import ConnectionIndicator from "@/components/ConnectionIndicator";
 import { control } from "@/components/fields";
 import { EmptyState, Loading, QueryError } from "@/components/QueryState";
 
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** How a run started: the trigger as a word, or a Delegated badge with a way back to the conversation. */
+function TriggerCell({ run }: { run: Run }) {
+  if (!isDelegatedRun(run)) {
+    return (
+      <>
+        {run.trigger}
+        {run.trigger === "channel" && run.trigger_ref ? <span className="ml-1.5 font-mono text-xs text-zinc-500">{run.trigger_ref}</span> : null}
+      </>
+    );
+  }
+  const conversation = delegatedConversationId(run);
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2">
+      <Badge tone="blue">Delegated</Badge>
+      {conversation ? (
+        <Link to={`/channels/${encodeURIComponent(conversation)}`} className="text-xs underline" title="Open the conversation this run was delegated from">
+          Conversation
+        </Link>
+      ) : null}
+    </span>
+  );
+}
 
 function parseStatus(value: string | null): RunStatus | undefined {
   return RUN_STATUSES.find((s) => s === value);
@@ -101,7 +124,9 @@ export default function RunsPage() {
                   <td className="px-4 py-2.5">
                     <RunStatusBadge status={r.status} />
                   </td>
-                  <td className="px-4 py-2.5">{r.trigger}</td>
+                  <td className="px-4 py-2.5">
+                    <TriggerCell run={r} />
+                  </td>
                   <td className="whitespace-nowrap px-4 py-2.5 text-zinc-600 dark:text-zinc-400">{formatDateTime(r.created_at)}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums">{formatCount(r.step_count)}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums">{formatMicros(r.cost_usd_micros)}</td>

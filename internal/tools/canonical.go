@@ -11,6 +11,10 @@ import (
 // RunTokenField is the input field every platform tool carries (DESIGN 5.7 rule 3).
 const RunTokenField = "run_token"
 
+// ChatTokenField is the input field a chat-time call carries instead of run_token
+// (DESIGN 5.15 rule 1).
+const ChatTokenField = "chat_token"
+
 // CanonicalJSON re-encodes a JSON document with object keys sorted, no insignificant
 // whitespace, numbers as written and no HTML escaping (DESIGN 5.4 rule 1), so inputs
 // that differ only in key order or spacing encode identically.

@@ -20,6 +20,9 @@ var secretValuePatterns = []*regexp.Regexp{
 	// Run tokens (DESIGN 5.14 rule 7) bind platform tool calls to a node visit; logs and
 	// stored transcripts never keep one. Minted lowercase, matched in either case.
 	regexp.MustCompile(`(?i)\br_[a-z2-7]{24}\b`),
+	// Chat tokens (DESIGN 5.15 rule 1) identify an agent's chat-time tool calls; like run
+	// tokens they never reach logs, traces, stored inputs or the UI.
+	regexp.MustCompile(`(?i)\bc_[a-z2-7]{32}\b`),
 }
 
 // Keys whose whole value is a secret regardless of shape. Deliberately does not match

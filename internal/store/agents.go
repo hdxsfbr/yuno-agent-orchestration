@@ -3,9 +3,12 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"yuno/internal/runtoken"
 )
 
 // ErrNotFound is returned by every Get when the row does not exist (or is soft-deleted).
@@ -14,6 +17,10 @@ var ErrNotFound = errors.New("not found")
 const agentColumns = `id, name, role, system_prompt, model, effort, max_tokens, tool_allowlist,
 	interaction_rules, limits, guardrails, memory_policy, channels, openclaw_agent_id, skills,
 	thinking, exec_policy, materialized_hash, created_at, updated_at, deleted_at`
+
+// agentSelect reads an agent for scanning: agentColumns plus the chat token, "" until
+// the backfill has filled a row that predates it.
+const agentSelect = agentColumns + `, COALESCE(chat_token, '') AS chat_token`
 
 func normalizeAgent(a *Agent) {
 	if a.ToolAllowlist == nil {
@@ -36,23 +43,28 @@ func normalizeAgent(a *Agent) {
 	}
 }
 
+// CreateAgent stores a new agent with a fresh chat token (DESIGN 5.15 rule 1) unless
+// the caller set one.
 func CreateAgent(ctx context.Context, q Querier, a *Agent) error {
 	if a.ID == "" {
 		a.ID = NewID()
 	}
+	if a.ChatToken == "" {
+		a.ChatToken = runtoken.NewChat()
+	}
 	normalizeAgent(a)
 	now := time.Now().UTC()
 	a.CreatedAt, a.UpdatedAt = now, now
-	_, err := q.Exec(ctx, `INSERT INTO agents (`+agentColumns+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NULL)`,
+	_, err := q.Exec(ctx, `INSERT INTO agents (`+agentColumns+`, chat_token)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NULL,$21)`,
 		a.ID, a.Name, a.Role, a.SystemPrompt, a.Model, a.Effort, a.MaxTokens, a.ToolAllowlist,
 		a.InteractionRules, a.Limits, a.Guardrails, a.MemoryPolicy, a.Channels, a.OpenClawAgentID, a.Skills,
-		a.Thinking, a.ExecPolicy, a.MaterializedHash, a.CreatedAt, a.UpdatedAt)
+		a.Thinking, a.ExecPolicy, a.MaterializedHash, a.CreatedAt, a.UpdatedAt, a.ChatToken)
 	return err
 }
 
 func GetAgent(ctx context.Context, q Querier, id string) (*Agent, error) {
-	rows, err := q.Query(ctx, `SELECT `+agentColumns+` FROM agents WHERE id = $1 AND deleted_at IS NULL`, id)
+	rows, err := q.Query(ctx, `SELECT `+agentSelect+` FROM agents WHERE id = $1 AND deleted_at IS NULL`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +77,7 @@ func GetAgent(ctx context.Context, q Querier, id string) (*Agent, error) {
 
 // GetAgentByOpenClawID finds the agent behind an OpenClaw agent id (events carry those).
 func GetAgentByOpenClawID(ctx context.Context, q Querier, openclawID string) (*Agent, error) {
-	rows, err := q.Query(ctx, `SELECT `+agentColumns+` FROM agents WHERE openclaw_agent_id = $1 AND deleted_at IS NULL`, openclawID)
+	rows, err := q.Query(ctx, `SELECT `+agentSelect+` FROM agents WHERE openclaw_agent_id = $1 AND deleted_at IS NULL`, openclawID)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +89,7 @@ func GetAgentByOpenClawID(ctx context.Context, q Querier, openclawID string) (*A
 }
 
 func ListAgents(ctx context.Context, q Querier) ([]Agent, error) {
-	rows, err := q.Query(ctx, `SELECT `+agentColumns+` FROM agents WHERE deleted_at IS NULL ORDER BY created_at`)
+	rows, err := q.Query(ctx, `SELECT `+agentSelect+` FROM agents WHERE deleted_at IS NULL ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +140,7 @@ func DeleteAgent(ctx context.Context, q Querier, id string) error {
 // ListAgentsWithDeleted is ListAgents plus the soft-deleted rows, for reconciling the
 // runtime with the platform: a deleted agent still owns its OpenClaw id.
 func ListAgentsWithDeleted(ctx context.Context, q Querier) ([]Agent, error) {
-	rows, err := q.Query(ctx, `SELECT `+agentColumns+` FROM agents ORDER BY created_at`)
+	rows, err := q.Query(ctx, `SELECT `+agentSelect+` FROM agents ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -192,4 +204,59 @@ func ListAgentChannels(ctx context.Context, q Querier) (map[string][]string, err
 		out[id] = append(out[id], ch)
 	}
 	return out, rows.Err()
+}
+
+// GetAgentByChatToken returns the live agent that owns a chat token (DESIGN 5.15 rule
+// 1); ErrNotFound for an unknown token, a deleted agent's or "".
+func GetAgentByChatToken(ctx context.Context, q Querier, token string) (*Agent, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, ErrNotFound
+	}
+	rows, err := q.Query(ctx, `SELECT `+agentSelect+` FROM agents WHERE chat_token = $1 AND deleted_at IS NULL`, token)
+	if err != nil {
+		return nil, err
+	}
+	a, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Agent])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return a, err
+}
+
+// SetAgentChatToken replaces an agent's chat token (a rotation); the next
+// materialisation writes the new one into AGENTS.md, since it is part of the desired
+// state.
+func SetAgentChatToken(ctx context.Context, q Querier, id, token string) error {
+	tag, err := q.Exec(ctx, `UPDATE agents SET chat_token = $2, updated_at = now() WHERE id = $1`, id, token)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// BackfillChatTokens gives every agent without a chat token a fresh one and returns how
+// many it filled: the rows created before migration 0008. It runs after every Migrate,
+// so a process that starts on an older database fills them once.
+func BackfillChatTokens(ctx context.Context, q Querier) (int, error) {
+	rows, err := q.Query(ctx, `SELECT id FROM agents WHERE chat_token IS NULL`)
+	if err != nil {
+		return 0, err
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, id := range ids {
+		tag, err := q.Exec(ctx, `UPDATE agents SET chat_token = $2 WHERE id = $1 AND chat_token IS NULL`, id, runtoken.NewChat())
+		if err != nil {
+			return n, err
+		}
+		n += int(tag.RowsAffected())
+	}
+	return n, nil
 }

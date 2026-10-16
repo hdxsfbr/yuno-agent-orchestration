@@ -263,3 +263,16 @@ instance. docs/test-results.md records the CI run.
 pipelines; the coordinator set `DEPLOY_AUTO` and proved it with pipeline 57577, whose
 deploy job started on its own after the test job and put that commit on the public
 instance. Every push to `main` from here on tests and deploys itself.
+
+**Wave 5: the Chief of Staff (2026-10-16).** Andre asked for one agent to talk to that
+knows the others and delegates. The coordinator wrote the design (fifteen rules, five
+product decisions Andre approved; D-036) after reading the gateway's code for an identity
+on MCP calls (none) and for a way to deliver a reply to Telegram (`chat.send` with
+`deliver`), probed the latter live with `make probe-deliver`, then briefed two agents:
+backend on Opus 5.5 (chat-token gate, four tools, report-back, seed, migration; 163 tool
+uses, 30 min) and frontend on Sonnet 5.5 (badges, notices, tool-call list; 54 tool uses,
+8 min). The usual reviewer (codex) was out of quota, so two fresh Claude agents on a model
+different from each author reviewed instead; the coordinator filtered their 20 findings
+(docs/reviews/wave5-review.md), one fix pass per part followed, and the backend agent
+correctly declined one fix whose premise was wrong. The coordinator ran the suite, lint
+and the image builds itself before the single wave commit; CI tested and deployed it.

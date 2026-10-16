@@ -9,6 +9,10 @@ import RunsPage from "./RunsPage";
 
 const DONE = "01a14161-d5ef-7d96-ba96-a45d5d4bb0f2";
 const QUEUED = "01a14162-0000-7000-8000-000000000001";
+const DELEGATED = "01a14163-0000-7000-8000-000000000002";
+const DELEGATED_BARE = "01a14164-0000-7000-8000-000000000003";
+const OTHER_REF = "01a14165-0000-7000-8000-000000000004";
+const ODD_ID = "01a14166-0000-7000-8000-000000000005";
 
 const base = (over: Partial<Run>): Run => ({
   id: DONE,
@@ -31,6 +35,10 @@ const base = (over: Partial<Run>): Run => ({
 const runs: Run[] = [
   base({ agent_names: ["Coder"], models: ["claude-sonnet-5-5"] }),
   base({ id: QUEUED, status: "queued", step_count: 0, tool_call_count: 0, cost_usd_micros: 0, started_at: undefined, finished_at: undefined }),
+  base({ id: DELEGATED, trigger: "channel", trigger_ref: "conversation:c1", agent_names: ["Reviewer"] }),
+  base({ id: DELEGATED_BARE, trigger: "channel", trigger_ref: "" }),
+  base({ id: OTHER_REF, trigger: "channel", trigger_ref: "telegram:1001" }),
+  base({ id: ODD_ID, trigger: "channel", trigger_ref: "conversation:a/b c" }),
 ];
 
 function json(body: unknown, status = 200) {
@@ -72,6 +80,11 @@ function RunMarker() {
   return <p>run page {id}</p>;
 }
 
+function ConversationMarker() {
+  const { conversationId } = useParams();
+  return <p>conversation page {conversationId}</p>;
+}
+
 function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -80,6 +93,7 @@ function renderPage() {
         <Routes>
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:id" element={<RunMarker />} />
+          <Route path="/channels/:conversationId" element={<ConversationMarker />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -106,6 +120,63 @@ describe("RunsPage", () => {
     const row = (await screen.findByTitle(DONE)).closest("tr")!;
     fireEvent.click(within(row).getByText("manual"));
     expect(await screen.findByText(`run page ${DONE}`)).not.toBeNull();
+  });
+});
+
+describe("RunsPage delegated runs", () => {
+  const triggerCell = async (id: string) => within((await screen.findByTitle(id)).closest("tr")!).getAllByRole("cell")[4];
+
+  it("shows a run an agent delegated from a conversation as Delegated, with a link back to that conversation", async () => {
+    renderPage();
+    const cell = within(await triggerCell(DELEGATED));
+    expect(cell.getByText("Delegated")).not.toBeNull();
+    expect(cell.queryByText("channel")).toBeNull();
+    expect(cell.getByRole("link", { name: "Conversation" }).getAttribute("href")).toBe("/channels/c1");
+  });
+
+  it("opens the conversation, not the run, when its link is clicked", async () => {
+    renderPage();
+    fireEvent.click(within(await triggerCell(DELEGATED)).getByRole("link", { name: "Conversation" }));
+    expect(await screen.findByText("conversation page c1")).not.toBeNull();
+    expect(screen.queryByText(`run page ${DELEGATED}`)).toBeNull();
+  });
+
+  it("still opens the run from the rest of the row", async () => {
+    renderPage();
+    const row = (await screen.findByTitle(DELEGATED)).closest("tr")!;
+    fireEvent.click(within(row).getByText("Delegated"));
+    expect(await screen.findByText(`run page ${DELEGATED}`)).not.toBeNull();
+  });
+
+  it("shows Delegated without a link when the run has no conversation", async () => {
+    renderPage();
+    const cell = within(await triggerCell(DELEGATED_BARE));
+    expect(cell.getByText("Delegated")).not.toBeNull();
+    expect(cell.queryByRole("link")).toBeNull();
+  });
+
+  it("shows a channel run whose reference names no conversation as the trigger with its reference, not as delegated", async () => {
+    renderPage();
+    const cell = within(await triggerCell(OTHER_REF));
+    expect(cell.getByText("channel")).not.toBeNull();
+    const ref = cell.getByText("telegram:1001");
+    expect(ref.className).toContain("font-mono");
+    expect(cell.queryByText("Delegated")).toBeNull();
+    expect(cell.queryByRole("link")).toBeNull();
+  });
+
+  it("encodes the conversation id in the link", async () => {
+    renderPage();
+    const cell = within(await triggerCell(ODD_ID));
+    expect(cell.getByRole("link", { name: "Conversation" }).getAttribute("href")).toBe("/channels/a%2Fb%20c");
+  });
+
+  it("leaves other triggers as they are", async () => {
+    renderPage();
+    const cell = within(await triggerCell(DONE));
+    expect(cell.getByText("manual")).not.toBeNull();
+    expect(cell.queryByText("Delegated")).toBeNull();
+    expect(cell.queryByRole("link")).toBeNull();
   });
 });
 

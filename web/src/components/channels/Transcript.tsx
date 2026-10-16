@@ -10,6 +10,36 @@ export const channelLabel = (channel: string) => channel.charAt(0).toUpperCase()
 
 export const chatName = (c: Pick<Conversation, "display_name" | "external_chat_id">) => c.display_name || c.external_chat_id;
 
+const PLATFORM_PREFIX = "[platform]";
+
+/**
+ * A report the platform sent into the conversation (a delegated run finished or needs an approval).
+ * Reports always carry their run; a message with the prefix but no run is something a person typed.
+ */
+export const isPlatformNotice = (m: Pick<ConversationMessage, "direction" | "text" | "run_id">) =>
+  m.direction === "in" && !!m.run_id && m.text.trimStart().startsWith(PLATFORM_PREFIX);
+
+const noticeText = (text: string) => text.trimStart().slice(PLATFORM_PREFIX.length).trim();
+
+function Notice({ message }: { message: ConversationMessage }) {
+  return (
+    <li data-kind="notice" className="flex justify-center">
+      <div className="w-full max-w-[90%] rounded-lg border border-zinc-200 bg-zinc-50 px-3.5 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900">
+        <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">Platform notice</p>
+        <p className="mt-0.5 whitespace-pre-wrap break-words text-zinc-700 dark:text-zinc-300">{noticeText(message.text)}</p>
+        <p className="mt-1 flex items-center gap-2 text-[11px] text-zinc-500">
+          <time dateTime={message.created_at}>{formatDateTime(message.created_at)}</time>
+          {message.run_id ? (
+            <Link to={`/runs/${message.run_id}`} className="font-mono underline" title={message.run_id}>
+              View run {shortId(message.run_id)}
+            </Link>
+          ) : null}
+        </p>
+      </div>
+    </li>
+  );
+}
+
 function Bubble({ message, who }: { message: ConversationMessage; who: string }) {
   const incoming = message.direction === "in";
   return (
@@ -59,9 +89,13 @@ export default function Transcript({ conversation }: { conversation: Conversatio
         {q.data && messages.length === 0 ? <EmptyState>No messages in this conversation yet.</EmptyState> : null}
         {messages.length > 0 ? (
           <ul className="space-y-2">
-            {messages.map((m) => (
-              <Bubble key={m.id} message={m} who={m.direction === "in" ? chatName(conversation) : conversation.agent_name} />
-            ))}
+            {messages.map((m) =>
+              isPlatformNotice(m) ? (
+                <Notice key={m.id} message={m} />
+              ) : (
+                <Bubble key={m.id} message={m} who={m.direction === "in" ? chatName(conversation) : conversation.agent_name} />
+              ),
+            )}
           </ul>
         ) : null}
         <div ref={end} />

@@ -124,8 +124,10 @@ func (e *Engine) RequestApproval(ctx context.Context, req ApprovalRequest) (*sto
 			v.log.Warn("store gateway approval id failed", "approval_id", a.ID, "error", err)
 		}
 	}
+	var run *store.Run
 	err := v.do(ctx, func() {
 		wctx := context.WithoutCancel(ctx)
+		run = v.run
 		span := e.startSpan(wctx, a.RunID, &v.nodeSpan, "approval_wait", "tool approval "+req.ToolName, now, nil,
 			map[string]any{"approval_id": a.ID, "kind": store.ApprovalKindTool, "tool": req.ToolName, "tool_call_id": req.ToolCallID})
 		e.waitMu.Lock()
@@ -146,6 +148,7 @@ func (e *Engine) RequestApproval(ctx context.Context, req ApprovalRequest) (*sto
 		return nil, err
 	}
 	e.logEvent(ctx, a.RunID, "info", fmt.Sprintf("%s waits for approval", req.ToolName), "node_id", a.NodeID, "approval_id", a.ID)
+	e.afterApproval(ctx, run) // DESIGN 5.15 rule 10
 	return a, nil
 }
 
@@ -642,6 +645,7 @@ func (e *Engine) closeWaitingRun(ctx context.Context, run *store.Run, reason, ap
 	}
 	e.emit(ctx, run.ID, "run.status", map[string]any{"run": run})
 	e.logEvent(ctx, run.ID, "warn", "run "+run.Status+": "+reason)
+	e.afterTerminal(ctx, run) // DESIGN 5.15 rule 9
 }
 
 // listenGateway takes decisions made on OpenClaw's own approval surfaces (DESIGN 5.3

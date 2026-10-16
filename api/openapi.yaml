@@ -74,10 +74,13 @@ paths:
         `data`. Send `Last-Event-ID` to replay missed events. A comment line is sent every
         15 seconds as a heartbeat. Event types: run.status, node.status, model_call,
         tool_call, approval.requested, approval.decided, agent_message, log,
-        schedule.fired (`{schedule, run}`, filed under the run it created), and
+        schedule.fired (`{schedule, run}`, filed under the run it created),
         conversation.message (`{conversation, message}`: a Conversation and a
-        ConversationMessage, platform-wide, no run). An approval raised in a conversation
-        has no run; its approval.requested and approval.decided carry `conversation_id`.
+        ConversationMessage, platform-wide, no run), and conversation.tool_call
+        (`{conversation_id, tool_call}`: a ToolCall an agent made while chatting, with its
+        chat token; platform-wide, no run; `conversation_id` is null when the agent had no
+        conversation). An approval raised in a conversation has no run; its
+        approval.requested and approval.decided carry `conversation_id`.
       responses:
         "200": { description: event stream, content: { text/event-stream: { schema: { type: string } } } }
   /api/runs/{id}/events:
@@ -487,6 +490,25 @@ paths:
           content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ConversationMessage" } } } }
         "404": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
+  /api/conversations/{id}/tool-calls:
+    get:
+      tags: [channels]
+      summary: The platform tool calls the conversation's agent made while chatting, oldest first
+      description: |
+        Calls made with the agent's chat token (DESIGN 5.15): `list_agents`,
+        `list_workflows`, `delegate_task`, `run_status`, `memory_save` and
+        `memory_recall`, recorded against the agent's most recent conversation. They
+        have no run (`run_id` and `run_node_id` are empty); the input is redacted, the
+        chat token included. The newest `limit` calls are returned.
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: limit, in: query, schema: { type: integer, default: 500, minimum: 1, maximum: 1000 } }
+      responses:
+        "200":
+          description: tool calls
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ToolCall" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
 
   /api/skills:
     get:
@@ -773,7 +795,7 @@ components:
         files: { type: array, items: { type: string } }
     Tool:
       type: object
-      required: [name, description, risk, hits, timeout_seconds, source]
+      required: [name, description, risk, hits, timeout_seconds, chat, source]
       properties:
         name: { type: string }
         description: { type: string }
@@ -783,6 +805,7 @@ components:
         timeout_seconds: { type: integer }
         max_attempts: { type: integer }
         untrusted_output: { type: boolean }
+        chat: { type: boolean, description: "an agent may call it while chatting with a person, with its chat token instead of a run token (list_agents, list_workflows, delegate_task, run_status, memory_save, memory_recall); false for every other tool" }
         source: { type: string, enum: [platform, openclaw], description: platform tools are served over MCP; openclaw tools are the runtime's built-ins }
     RunCreate:
       type: object
@@ -825,7 +848,7 @@ components:
         workflow_id: { type: string }
         workflow_version: { type: integer }
         trigger: { type: string, enum: [manual, schedule, channel, eval] }
-        trigger_ref: { type: string, description: "schedule: the occurrence fired, <schedule id>@<occurrence time, RFC 3339 UTC>; eval: the case id" }
+        trigger_ref: { type: string, description: "schedule: the occurrence fired, <schedule id>@<occurrence time, RFC 3339 UTC>; channel: conversation:<conversation id> for a run an agent delegated while chatting (absent when it had no conversation); eval: the case id" }
         status: { type: string, enum: [queued, running, waiting_approval, succeeded, failed, cancelled, timed_out] }
         input: { type: object }
         state: { type: object }
@@ -854,6 +877,7 @@ components:
         started_at: { type: string, format: date-time }
         finished_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        reported_at: { type: string, format: date-time, description: "when a channel run's outcome was sent back into its conversation; absent otherwise" }
     RunNode:
       type: object
       required: [id, run_id, node_id, visit, iteration, status]
@@ -898,8 +922,9 @@ components:
       required: [id, run_id, run_node_id, tool_use_id, tool_name, input, is_error, status, attempt, duration_ms]
       properties:
         id: { type: string }
-        run_id: { type: string }
-        run_node_id: { type: string }
+        run_id: { type: string, description: "empty for a call made while chatting (chat token)" }
+        run_node_id: { type: string, description: "empty for a call made while chatting (chat token)" }
+        conversation_id: { type: string, description: "set on a call made while chatting: the agent's most recent conversation; absent when it had none, and on run calls" }
         model_call_id: { type: string }
         tool_use_id: { type: string }
         tool_name: { type: string }
@@ -953,6 +978,7 @@ components:
         reason: { type: string }
         expires_at: { type: string, format: date-time }
         conversation_id: { type: string, description: "set, with run_id and run_node_id empty, for an exec approval raised in a conversation" }
+        reported_at: { type: string, format: date-time, description: "when the approval was announced in the conversation that delegated its run; absent otherwise" }
     Trace:
       type: object
       required: [run, nodes, model_calls, tool_calls, spans, agent_messages, approvals]
@@ -1040,6 +1066,7 @@ components:
         definition: { $ref: "#/components/schemas/WorkflowDefinition" }
         version: { type: integer }
         template_key: { type: string, description: set on template rows and the hidden quick-run workflows }
+        from_template: { type: string, description: "the key of the template the workflow was instantiated from; absent for workflows built from scratch" }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     WorkflowValidateRequest:
@@ -1119,5 +1146,5 @@ components:
         external_message_id: { type: string }
         text: { type: string }
         usage: { type: [object, "null"], description: "the model usage of an answer (out), null otherwise" }
-        run_id: { type: [string, "null"], description: always null; conversation turns are not runs }
+        run_id: { type: [string, "null"], description: "the run a [platform] report the engine injected is about (direction in); null for everything the person and the agent wrote, since conversation turns are not runs" }
         created_at: { type: string, format: date-time }

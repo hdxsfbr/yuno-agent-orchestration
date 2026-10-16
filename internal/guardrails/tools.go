@@ -132,7 +132,10 @@ func canonicalInput(input json.RawMessage) string {
 		return string(input)
 	}
 	if m, ok := v.(map[string]any); ok {
+		// The identity fields bind the call to a run or a conversation; patterns are
+		// about what the call asks for (DESIGN 5.15 rule 1 for chat_token).
 		delete(m, tools.RunTokenField)
+		delete(m, tools.ChatTokenField)
 	}
 	b, err := json.Marshal(v)
 	if err != nil {

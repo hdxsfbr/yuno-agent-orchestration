@@ -73,6 +73,7 @@ export default function WorkflowsPage() {
             <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
               {q.data.map((w) => {
                 const isTemplate = isShippedTemplate(w);
+                const madeFrom = w.template_key || w.from_template;
                 return (
                   <tr key={w.id} className="hover:bg-zinc-50 dark:hover:bg-zinc-800/40">
                     <td className="px-4 py-2.5">
@@ -80,7 +81,7 @@ export default function WorkflowsPage() {
                         <Link to={`/workflows/${w.id}`} className="font-medium hover:underline">
                           {w.name}
                         </Link>
-                        {isTemplate ? <Badge tone="blue">Template</Badge> : w.template_key ? <Badge tone="zinc" title={`Made from the ${w.template_key} template`}>From template</Badge> : null}
+                        {isTemplate ? <Badge tone="blue">Template</Badge> : madeFrom ? <Badge tone="zinc" title={`Made from the ${madeFrom} template`}>From template</Badge> : null}
                       </div>
                       {w.description ? <p className="mt-0.5 max-w-xl truncate text-xs text-zinc-500" title={w.description}>{w.description}</p> : null}
                     </td>

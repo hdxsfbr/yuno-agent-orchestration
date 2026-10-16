@@ -48,6 +48,20 @@ type RunContext struct {
 	InteractionRules map[string]string
 }
 
+// ChatContext is what a chat token resolves to (DESIGN 5.15 rule 1): the agent that
+// owns it, where its workspace is, and its most recent conversation, the one with the
+// latest message ("" when it has none), which chat-time tool calls are recorded
+// against (rule 3) and delegated runs report back to (rule 6).
+type ChatContext struct {
+	AgentID          string
+	AgentName        string
+	OpenClawAgentID  string
+	Workspace        string
+	ConversationID   string
+	ToolAllowlist    []string
+	InteractionRules map[string]string
+}
+
 // ErrInvalidRunToken is returned for unknown, expired or finished tokens.
 var ErrInvalidRunToken = errors.New("invalid run token")
 
@@ -129,6 +143,9 @@ type Service interface {
 	Cancel(ctx context.Context, runID, by string) (*store.Run, error)
 	// ResolveRunToken maps a token to its run context; ok=false when invalid.
 	ResolveRunToken(token string) (RunContext, bool)
+	// ResolveChatToken maps a chat token to its agent and most recent conversation
+	// (DESIGN 5.15 rule 1); ok=false for an unknown token or a deleted agent's.
+	ResolveChatToken(token string) (ChatContext, bool)
 	// AcceptFinish validates result against the node's output schema, stores it and
 	// tells the engine the node is done. Returns *FinishValidationError on schema
 	// failure (the caller returns the message to the model) or ErrInvalidRunToken.

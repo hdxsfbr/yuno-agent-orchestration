@@ -214,3 +214,53 @@ describe("RunDetailPage", () => {
     expect(screen.getByRole("button", { name: "Retry" })).not.toBeNull();
   });
 });
+
+describe("RunDetailPage trigger", () => {
+  const trigger = async () => {
+    const header = within(await screen.findByRole("region", { name: "Run summary" }));
+    return within(header.getByText("Trigger").closest("div")!);
+  };
+
+  it("says a run was delegated from a conversation and links to it", async () => {
+    trace = { ...trace, run: run({ trigger: "channel", trigger_ref: "conversation:c1" }) };
+    renderPage();
+    const value = await trigger();
+    expect(value.getByRole("link", { name: "Delegated from a conversation" }).getAttribute("href")).toBe("/channels/c1");
+    expect(value.queryByText("conversation:c1")).toBeNull();
+    expect(within(screen.getByRole("region", { name: "Run summary" })).getByRole("heading", { level: 1 }).parentElement!.textContent).toContain("Delegated");
+  });
+
+  it("says Delegated, without a link, when the run has no conversation", async () => {
+    trace = { ...trace, run: run({ trigger: "channel", trigger_ref: "" }) };
+    renderPage();
+    const value = await trigger();
+    expect(value.getByText("Delegated")).not.toBeNull();
+    expect(value.queryByRole("link")).toBeNull();
+  });
+
+  it("shows a channel trigger whose reference names no conversation as it is, not as delegated", async () => {
+    trace = { ...trace, run: run({ trigger: "channel", trigger_ref: "telegram:1001" }) };
+    renderPage();
+    const value = await trigger();
+    expect(value.getByText("channel")).not.toBeNull();
+    expect(value.getByText("telegram:1001").className).toContain("font-mono");
+    expect(value.queryByRole("link")).toBeNull();
+    expect(within(screen.getByRole("region", { name: "Run summary" })).queryByText("Delegated")).toBeNull();
+  });
+
+  it("encodes the conversation id in the link", async () => {
+    trace = { ...trace, run: run({ trigger: "channel", trigger_ref: "conversation:a/b c" }) };
+    renderPage();
+    const value = await trigger();
+    expect(value.getByRole("link", { name: "Delegated from a conversation" }).getAttribute("href")).toBe("/channels/a%2Fb%20c");
+  });
+
+  it("shows any other trigger as it is", async () => {
+    trace = { ...trace, run: run({ trigger: "schedule", trigger_ref: "s1@2026-10-15T10:00:00Z" }) };
+    renderPage();
+    const value = await trigger();
+    expect(value.getByText("schedule")).not.toBeNull();
+    expect(value.getByText("s1@2026-10-15T10:00:00Z")).not.toBeNull();
+    expect(value.queryByText("Delegated")).toBeNull();
+  });
+});

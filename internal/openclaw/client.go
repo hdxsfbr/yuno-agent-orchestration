@@ -83,12 +83,15 @@ func CallAs(ctx context.Context, c Client, method string, params any, v any) err
 
 // ---- payload shapes the engine relies on [probed unless noted] ----------------------
 
-// ChatSendParams are the params of chat.send.
+// ChatSendParams are the params of chat.send. Deliver sends the agent's reply to the
+// session's channel (Telegram): the injected message is a user turn of the session and
+// the reply reaches the chat [probed 2026-10-16, scripts/openclaw-probe-deliver.mjs].
 type ChatSendParams struct {
 	SessionKey     string `json:"sessionKey"`
 	AgentID        string `json:"agentId"`
 	Message        string `json:"message"`
 	IdempotencyKey string `json:"idempotencyKey"`
+	Deliver        bool   `json:"deliver,omitempty"`
 }
 
 type ChatSendResult struct {

@@ -163,10 +163,15 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	for schema, props := range map[string][]string{
-		"Approval":            {"conversation_id"},
+		"Approval":            {"conversation_id", "reported_at"},
 		"Status":              {"scheduler"},
 		"Conversation":        {"session_key", "message_count", "last_message_at"},
-		"ConversationMessage": {"direction", "text", "usage"},
+		"ConversationMessage": {"direction", "text", "usage", "run_id"},
+		// DESIGN 5.15 (wave 5).
+		"ToolCall": {"conversation_id"},
+		"Tool":     {"chat"},
+		"Run":      {"reported_at"},
+		"Workflow": {"from_template"},
 	} {
 		ref := doc.Components.Schemas[schema]
 		if ref == nil || ref.Value == nil {
@@ -180,8 +185,12 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 		}
 	}
 	events := doc.Paths.Find("/api/events")
-	if events == nil || events.Get == nil || !strings.Contains(events.Get.Description, "conversation.message") {
-		t.Error("GET /api/events does not document the conversation.message event")
+	if events == nil || events.Get == nil || !strings.Contains(events.Get.Description, "conversation.message") ||
+		!strings.Contains(events.Get.Description, "conversation.tool_call") {
+		t.Error("GET /api/events does not document the conversation events")
+	}
+	if p := doc.Paths.Find("/api/conversations/{id}/tool-calls"); p == nil || p.Get == nil {
+		t.Error("GET /api/conversations/{id}/tool-calls is not documented")
 	}
 }
 

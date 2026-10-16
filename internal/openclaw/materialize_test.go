@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"yuno/internal/obs"
 	"yuno/internal/store"
 )
 
@@ -448,5 +449,63 @@ func TestAgentsMDChatRule(t *testing.T) {
 		if !strings.Contains(md, want) {
 			t.Errorf("AGENTS.md lacks %q:\n%s", want, md)
 		}
+	}
+}
+
+// DESIGN 5.15 rule 15: AGENTS.md has a "## Chatting" section only for an agent that may
+// call a chat-capable tool: the tools that work in a conversation, its chat token, and
+// that the run tools do not. The token is part of the desired state; logs redact it.
+func TestAgentsMDChattingSection(t *testing.T) {
+	dir := t.TempDir()
+	const token = "c_abcdefghijklmnopqrstuvwxyz234567"
+	chief := &store.Agent{ID: "0199f0a2-0000-7000-8000-00000000c0de", Name: "Chief", ChatToken: token,
+		ToolAllowlist: []string{"list_agents", "delegate_task", "run_status", "memory_save", "memory_recall"}}
+	md := plan(dir, chief, nil).Files["AGENTS.md"]
+	if !strings.HasPrefix(md, AgentsMD) {
+		t.Fatalf("the operating rules come first:\n%s", md)
+	}
+	for _, want := range []string{"\n## Chatting\n\n", "yuno__delegate_task, yuno__list_agents, yuno__run_status.",
+		"pass the field chat_token with the value " + token + " instead of run_token", "yuno__finish, are not available in a conversation",
+		"starts with [platform] comes from the platform"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("AGENTS.md lacks %q:\n%s", want, md)
+		}
+	}
+	// Memory is off, so OpenClaw does not offer the memory tools: AGENTS.md does not either.
+	if strings.Contains(md, "memory_save") || strings.Contains(md, "memory_recall") {
+		t.Errorf("denied tools listed:\n%s", md)
+	}
+	if strings.Contains(obs.Redact(md), token) {
+		t.Fatal("the redactor does not cover the chat token in AGENTS.md")
+	}
+
+	for name, allow := range map[string][]string{
+		"no chat tool":                {"read", "exec", "finish"},
+		"only tools memory-off hides": {"memory_save", "memory_recall", "read"},
+	} {
+		a := &store.Agent{ID: "0199f0a2-0000-7000-8000-00000000c0df", Name: "Coder", ChatToken: token, ToolAllowlist: allow}
+		if got := plan(dir, a, nil).Files["AGENTS.md"]; got != AgentsMD {
+			t.Errorf("%s: AGENTS.md = %q", name, got)
+		}
+	}
+	memoryOn := &store.Agent{ID: "0199f0a2-0000-7000-8000-00000000c0e0", Name: "Notes", ChatToken: token,
+		ToolAllowlist: []string{"memory_recall"}, MemoryPolicy: store.MemoryPolicy{Enabled: true}}
+	if md := plan(dir, memoryOn, nil).Files["AGENTS.md"]; !strings.Contains(md, "these platform tools: yuno__memory_recall.") ||
+		strings.Contains(md, "[platform]") {
+		t.Errorf("memory-only chat section:\n%s", md)
+	}
+
+	// A rotated token re-materialises the chat agent and no other.
+	h := DesiredHash(dir, chief, nil)
+	rotated := *chief
+	rotated.ChatToken = "c_zyxwvutsrqponmlkjihgfedcba765432"
+	if DesiredHash(dir, &rotated, nil) == h {
+		t.Fatal("a rotated chat token does not change the desired state")
+	}
+	coder := &store.Agent{ID: "0199f0a2-0000-7000-8000-00000000c0e1", Name: "Coder", ChatToken: token, ToolAllowlist: []string{"exec"}}
+	h = DesiredHash(dir, coder, nil)
+	coder.ChatToken = rotated.ChatToken
+	if DesiredHash(dir, coder, nil) != h {
+		t.Fatal("an agent without chat tools re-materialises on a token rotation")
 	}
 }

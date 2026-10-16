@@ -138,8 +138,7 @@ func (s *Server) instantiateTemplate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "template not found", nil)
 		return
 	}
-	tpl, err := store.GetWorkflowByTemplateKey(r.Context(), s.pool, key)
-	if err != nil {
+	if _, err := store.GetWorkflowByTemplateKey(r.Context(), s.pool, key); err != nil {
 		s.storeError(w, r, "template", err)
 		return
 	}
@@ -147,7 +146,29 @@ func (s *Server) instantiateTemplate(w http.ResponseWriter, r *http.Request) {
 	if !decodeOptionalBody(w, r, &in) {
 		return
 	}
-	name := strings.TrimSpace(in.Name)
+	wf, fe, err := s.instantiate(r.Context(), key, in.Name)
+	switch {
+	case err != nil:
+		s.storeError(w, r, "template", err)
+		return
+	case len(fe) > 0:
+		writeValidation(w, "the template cannot be instantiated", fe)
+		return
+	}
+	s.respondWorkflow(w, r, wf.ID, http.StatusCreated)
+}
+
+// instantiate is the instantiation code the API and the seed share (DESIGN 5.6 rule 9,
+// 5.15 rule 13): the template's definition with every agent_name resolved, checked like
+// any saved workflow, stored as a new workflow named name (the template's name when
+// empty) that records the template it came from. Problems with the result are field
+// errors; an unknown template is store.ErrNotFound.
+func (s *Server) instantiate(ctx context.Context, key, name string) (*store.Workflow, fieldErrors, error) {
+	tpl, err := store.GetWorkflowByTemplateKey(ctx, s.pool, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	name = strings.TrimSpace(name)
 	if name == "" {
 		name = tpl.Name
 	}
@@ -155,31 +176,28 @@ func (s *Server) instantiateTemplate(w http.ResponseWriter, r *http.Request) {
 	if len([]rune(name)) > maxWorkflowName {
 		fe.add("name", "must be at most %d characters", maxWorkflowName)
 	}
-	def, nameErrs, err := s.resolveAgentNames(r.Context(), tpl.Definition)
+	def, nameErrs, err := s.resolveAgentNames(ctx, tpl.Definition)
 	if err != nil {
-		s.internalError(w, r, "instantiate template", err)
-		return
+		return nil, nil, fmt.Errorf("instantiate template: %w", err)
 	}
 	fe = append(fe, nameErrs...)
 	if len(fe) == 0 {
-		defErrs, err := s.checkDefinition(r.Context(), def, definitionRules{agents: true})
+		defErrs, err := s.checkDefinition(ctx, def, definitionRules{agents: true})
 		if err != nil {
-			s.internalError(w, r, "instantiate template", err)
-			return
+			return nil, nil, fmt.Errorf("instantiate template: %w", err)
 		}
 		fe = append(fe, defErrs...)
 	}
 	if len(fe) > 0 {
-		writeValidation(w, "the template cannot be instantiated", fe)
-		return
+		return nil, fe, nil
 	}
-	wf := &store.Workflow{Name: name, Description: tpl.Description, Definition: def}
-	if err := store.CreateWorkflow(r.Context(), s.pool, wf); err != nil {
-		s.internalError(w, r, "instantiate template", err)
-		return
+	from := key
+	wf := &store.Workflow{Name: name, Description: tpl.Description, Definition: def, FromTemplate: &from}
+	if err := store.CreateWorkflow(ctx, s.pool, wf); err != nil {
+		return nil, nil, fmt.Errorf("instantiate template: %w", err)
 	}
 	s.log.Info("workflow template instantiated", "key", key, "workflow_id", wf.ID)
-	s.respondWorkflow(w, r, wf.ID, http.StatusCreated)
+	return wf, nil, nil
 }
 
 // resolveAgentNames replaces agent_name with agent_id on every agent node, keeping

@@ -2,7 +2,8 @@
 //
 //	yuno api            HTTP API, run engine, scheduler, OpenClaw client, MCP server, model proxy
 //	yuno migrate        apply database migrations and exit
-//	yuno seed           create the demo agents the workflow templates name (idempotent)
+//	yuno seed           create the demo agents and the Chief of Staff, instantiate the
+//	                    shipped templates once, bind the chief to Telegram when unbound (idempotent)
 //	yuno openclaw-init  write the baseline openclaw.json into the state directory and exit
 //	yuno deploytarget   local release store the deploy tool publishes to
 //	yuno eval           run the evaluation suite and write a report

@@ -110,7 +110,7 @@ lint: web-deps ## go vet, staticcheck, eslint, tsc
 migrate: ## Apply database migrations
 	$(COMPOSE) run --rm api migrate
 
-seed: ## Create the demo agents the workflow templates name (templates load at api start)
+seed: ## Create the demo agents, the Chief of Staff, both template workflows, and bind the Chief to Telegram when nothing is bound (idempotent)
 	$(COMPOSE) run --rm api seed
 
 eval: env ## Run the evaluation suite against the running stack (offline by default: EVAL_PROVIDER=scripted)

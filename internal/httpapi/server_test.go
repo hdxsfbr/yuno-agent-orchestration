@@ -5,10 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	"yuno/internal/openclaw"
+	"yuno/internal/tools"
 )
 
 func newRecorder() *httptest.ResponseRecorder { return httptest.NewRecorder() }
@@ -89,7 +91,8 @@ func TestListTools(t *testing.T) {
 	for _, tv := range got {
 		names = append(names, string(tv.Source)+":"+tv.Name)
 	}
-	want := "platform:deploy_release platform:finish platform:http_fetch platform:memory_recall platform:memory_save " +
+	want := "platform:delegate_task platform:deploy_release platform:finish platform:http_fetch platform:list_agents " +
+		"platform:list_workflows platform:memory_recall platform:memory_save platform:run_status " +
 		"openclaw:apply_patch openclaw:edit openclaw:exec openclaw:ls openclaw:process openclaw:read openclaw:write"
 	if strings.Join(names, " ") != want {
 		t.Fatalf("tools = %v", names)
@@ -98,25 +101,43 @@ func TestListTools(t *testing.T) {
 		risk, hits string
 		timeout    int
 		untrusted  bool
+		chat       bool
 	}{
-		"deploy_release": {"side_effecting", "local_service", 30, false},
-		"finish":         {"computational", "postgres", 5, false},
-		"http_fetch":     {"read_only", "external", 15, true},
-		"memory_recall":  {"read_only", "postgres", 5, true},
-		"memory_save":    {"computational", "postgres", 5, false},
+		"delegate_task":  {"computational", "postgres", 15, false, true},
+		"deploy_release": {"side_effecting", "local_service", 30, false, false},
+		"finish":         {"computational", "postgres", 5, false, false},
+		"http_fetch":     {"read_only", "external", 15, true, false},
+		"list_agents":    {"read_only", "postgres", 5, false, true},
+		"list_workflows": {"read_only", "postgres", 5, false, true},
+		"memory_recall":  {"read_only", "postgres", 5, true, true},
+		"memory_save":    {"computational", "postgres", 5, false, true},
+		"run_status":     {"read_only", "postgres", 5, false, true},
 	}
+	var chat []string
 	for _, tv := range got {
 		if tv.Source == "openclaw" {
-			if tv.Hits != "openclaw" || tv.Description == "" {
+			if tv.Hits != "openclaw" || tv.Description == "" || tv.Chat {
 				t.Fatalf("built-in = %+v", tv)
 			}
 			continue
 		}
 		w := table[tv.Name]
 		if string(tv.Risk) != w.risk || string(tv.Hits) != w.hits || tv.TimeoutSeconds != w.timeout ||
-			tv.UntrustedOutput != w.untrusted || len(tv.InputSchema) == 0 {
+			tv.UntrustedOutput != w.untrusted || tv.Chat != w.chat || len(tv.InputSchema) == 0 {
 			t.Errorf("%s = %+v", tv.Name, tv)
 		}
+		if tv.Chat {
+			chat = append(chat, tv.Name)
+		}
+	}
+	// DESIGN 5.15 rule 2: the registry's chat flags are the list the materialiser and
+	// the seed use.
+	if !slices.Equal(chat, tools.ChatToolNames) {
+		t.Fatalf("chat tools = %v, want %v", chat, tools.ChatToolNames)
+	}
+	// The chat field is on the wire for every entry (the UI's contract).
+	if !strings.Contains(string(body), `"chat":false`) || !strings.Contains(string(body), `"chat":true`) {
+		t.Fatalf("chat field missing: %s", body)
 	}
 }
 

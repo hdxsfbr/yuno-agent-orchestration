@@ -321,6 +321,9 @@ func (m *convMirror) mirror(ctx context.Context, s *convSession, raw json.RawMes
 	if dir == store.DirectionOut && h.Usage != nil {
 		msg.Usage, _ = json.Marshal(h.Usage)
 	}
+	if dir == store.DirectionIn {
+		msg.RunID = m.reportedRun(ctx, h.IdempotencyKey)
+	}
 	inserted, err := store.InsertConversationMessage(ctx, m.e.deps.Pool, msg)
 	if err != nil {
 		m.log.Warn("store conversation message failed", "conversation_id", s.conv.ID, "error", err)
@@ -334,6 +337,24 @@ func (m *convMirror) mirror(ctx context.Context, s *convSession, raw json.RawMes
 		s.conv = c
 	}
 	m.e.emit(ctx, "", EventConversationMessage, map[string]any{"conversation": s.conv, "message": msg})
+}
+
+// reportedRun returns the run a platform report was about when the user entry is one
+// the engine injected (DESIGN 5.15 rule 11): its idempotency key is the report's key
+// plus ":user" [probed]. Entries the person sent, and reports about a run that no longer
+// exists, link to no run.
+func (m *convMirror) reportedRun(ctx context.Context, idempotencyKey string) *string {
+	id, ok := reportRunID(idempotencyKey)
+	if !ok {
+		return nil
+	}
+	if _, err := store.GetRun(ctx, m.e.deps.Pool, id); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			m.log.Warn("read the reported run failed", "run_id", id, "error", err)
+		}
+		return nil
+	}
+	return &id
 }
 
 // onApproval mirrors an exec approval raised by a conversation turn (DESIGN 5.8 rule

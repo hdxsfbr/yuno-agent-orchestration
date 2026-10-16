@@ -152,58 +152,105 @@ func (s *Server) bindTelegram(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, "invalid binding", fieldErrors{{Path: "agent_id", Message: "required"}})
 		return
 	}
-	ctx := r.Context()
-	a, err := store.GetAgent(ctx, s.pool, in.AgentID)
-	if err != nil {
+	_, err := s.bindAgent(r.Context(), in.AgentID, obs.RequestID(r.Context()))
+	var bound *boundError
+	var apply *applyError
+	switch {
+	case err == nil:
+	case errors.As(err, &bound):
+		writeBound(w, bound.cur)
+		return
+	case errors.Is(err, errEngineUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "engine_unavailable", errEngineUnavailable.Error(), nil)
+		return
+	case errors.Is(err, errRuntimeSetup):
+		writeError(w, http.StatusBadGateway, "gateway_error", errRuntimeSetup.Error(), nil)
+		return
+	case errors.As(err, &apply):
+		writeError(w, http.StatusBadGateway, "gateway_error",
+			"saved, but the runtime did not take the change; it is applied again when the api reconnects",
+			map[string]string{"binding_id": apply.bindingID})
+		return
+	case errors.Is(err, store.ErrNotFound):
 		s.storeError(w, r, "agent", err)
 		return
-	}
-	if cur, err := store.GetChannelBinding(ctx, s.pool, store.ChannelTelegram); err == nil && cur.AgentID != a.ID {
-		writeBound(w, cur)
-		return
-	}
-	if a.OpenClawAgentID == nil || *a.OpenClawAgentID == "" {
-		if s.engine == nil {
-			writeError(w, http.StatusServiceUnavailable, "engine_unavailable", errEngineUnavailable.Error(), nil)
-			return
-		}
-		if _, err := s.engine.MaterializeAgent(ctx, a.ID); err != nil {
-			s.log.Warn("materialise agent before binding failed", "agent_id", a.ID, "error", err)
-			writeError(w, http.StatusBadGateway, "gateway_error", "the agent could not be set up on the runtime", nil)
-			return
-		}
-		if a, err = store.GetAgent(ctx, s.pool, a.ID); err != nil {
-			s.storeError(w, r, "agent", err)
-			return
-		}
-		if a.OpenClawAgentID == nil || *a.OpenClawAgentID == "" {
-			writeError(w, http.StatusBadGateway, "gateway_error", "the agent could not be set up on the runtime", nil)
-			return
-		}
-	}
-	b, err := store.BindChannel(ctx, s.pool, store.ChannelTelegram, a.ID)
-	if errors.Is(err, store.ErrChannelBound) {
-		if cur, gerr := store.GetChannelBinding(ctx, s.pool, store.ChannelTelegram); gerr == nil {
-			writeBound(w, cur)
-			return
-		}
-	}
-	if err != nil {
+	default:
 		s.internalError(w, r, "bind telegram", err)
 		return
 	}
-	if !s.applyTelegram(w, r, *a.OpenClawAgentID, "yuno: telegram bound to "+a.Name, b.ID) {
-		return
-	}
-	// The bound agent answers people from its workspace, MEMORY.md included.
-	s.renderMemory(ctx, a)
 	go func() { // the bot username, for the Channels page
 		lctx, cancel := context.WithTimeout(context.Background(), botLearnWindow)
 		defer cancel()
 		s.learnBotUsername(lctx)
 	}()
-	s.log.Info("telegram bound", "agent_id", a.ID, "openclaw_agent_id", *a.OpenClawAgentID)
 	s.writeChannels(w, r)
+}
+
+// Failures of bindAgent the handler answers with their own status.
+var errRuntimeSetup = errors.New("the agent could not be set up on the runtime")
+
+// boundError is bindAgent's refusal while another agent answers the channel (409); it
+// is a store.ErrChannelBound for callers outside this package (the seed).
+type boundError struct{ cur *store.ChannelBinding }
+
+func (e *boundError) Error() string { return "telegram is bound to " + e.cur.AgentName }
+func (e *boundError) Unwrap() error { return store.ErrChannelBound }
+
+// applyError is a binding stored but not taken by the gateway (502 with its id).
+type applyError struct {
+	bindingID string
+	err       error
+}
+
+func (e *applyError) Error() string { return "apply telegram binding: " + e.err.Error() }
+func (e *applyError) Unwrap() error { return e.err }
+
+// bindAgent is the bind code the Channels page and the seed share (DESIGN 5.8 rule 3,
+// 5.15 rule 14): refuse while another live agent is bound, materialise the agent when
+// it has no OpenClaw id yet, store the binding, apply it on the gateway (a config patch
+// and the gateway restart it needs), and render the agent's MEMORY.md, since it now
+// answers people from its workspace. requestID tags the log lines of an HTTP request.
+func (s *Server) bindAgent(ctx context.Context, agentID, requestID string) (*store.Agent, error) {
+	a, err := store.GetAgent(ctx, s.pool, agentID)
+	if err != nil {
+		return nil, err
+	}
+	if cur, err := store.GetChannelBinding(ctx, s.pool, store.ChannelTelegram); err == nil && cur.AgentID != a.ID {
+		return nil, &boundError{cur: cur}
+	}
+	if a.OpenClawAgentID == nil || *a.OpenClawAgentID == "" {
+		if s.engine == nil {
+			return nil, errEngineUnavailable
+		}
+		if _, err := s.engine.MaterializeAgent(ctx, a.ID); err != nil {
+			s.log.Warn("materialise agent before binding failed", "agent_id", a.ID, "error", err)
+			return nil, errRuntimeSetup
+		}
+		if a, err = store.GetAgent(ctx, s.pool, a.ID); err != nil {
+			return nil, err
+		}
+		if a.OpenClawAgentID == nil || *a.OpenClawAgentID == "" {
+			return nil, errRuntimeSetup
+		}
+	}
+	// From here on a caller that goes away must not leave a binding stored and not
+	// applied, or a patch applied without its restart.
+	wctx := context.WithoutCancel(ctx)
+	b, err := store.BindChannel(wctx, s.pool, store.ChannelTelegram, a.ID)
+	if errors.Is(err, store.ErrChannelBound) {
+		if cur, gerr := store.GetChannelBinding(wctx, s.pool, store.ChannelTelegram); gerr == nil {
+			return nil, &boundError{cur: cur}
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := s.applyTelegram(wctx, *a.OpenClawAgentID, "yuno: telegram bound to "+a.Name, requestID); err != nil {
+		return nil, &applyError{bindingID: b.ID, err: err}
+	}
+	s.renderMemory(wctx, a)
+	s.log.Info("telegram bound", "agent_id", a.ID, "openclaw_agent_id", *a.OpenClawAgentID)
+	return a, nil
 }
 
 // unbindTelegram removes the binding and closes the channel to direct messages (D-025).
@@ -213,7 +260,10 @@ func (s *Server) unbindTelegram(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "unbind telegram", err)
 		return
 	}
-	if !s.applyTelegram(w, r, "", "yuno: telegram unbound", "") {
+	// A client that goes away must not leave a patch applied without its restart.
+	if err := s.applyTelegram(context.WithoutCancel(r.Context()), "", "yuno: telegram unbound", obs.RequestID(r.Context())); err != nil {
+		writeError(w, http.StatusBadGateway, "gateway_error",
+			"saved, but the runtime did not take the change; it is applied again when the api reconnects", nil)
 		return
 	}
 	if removed {
@@ -228,26 +278,20 @@ func writeBound(w http.ResponseWriter, cur *store.ChannelBinding) {
 		map[string]string{"agent_id": cur.AgentID, "agent_name": cur.AgentName})
 }
 
-// applyTelegram pushes the binding to the gateway; it answers 502 itself on failure.
-func (s *Server) applyTelegram(w http.ResponseWriter, r *http.Request, openclawAgentID, reason, bindingID string) bool {
-	// A client that goes away must not leave a patch applied without its restart.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), channels.ApplyTimeout)
+// applyTelegram pushes the binding to the gateway (ApplyTimeout at most); the caller
+// answers a failure.
+func (s *Server) applyTelegram(ctx context.Context, openclawAgentID, reason, requestID string) error {
+	ctx, cancel := context.WithTimeout(ctx, channels.ApplyTimeout)
 	defer cancel()
 	res, err := channels.ApplyTelegram(ctx, s.gateway, openclawAgentID, reason)
 	if err != nil {
-		s.log.Warn("apply telegram binding on the gateway failed", "request_id", obs.RequestID(r.Context()), "error", err)
-		var details any
-		if bindingID != "" {
-			details = map[string]string{"binding_id": bindingID}
-		}
-		writeError(w, http.StatusBadGateway, "gateway_error",
-			"saved, but the runtime did not take the change; it is applied again when the api reconnects", details)
-		return false
+		s.log.Warn("apply telegram binding on the gateway failed", "request_id", requestID, "error", err)
+		return err
 	}
 	if res.Changed {
 		s.log.Info("telegram binding applied on the gateway", "openclaw_agent_id", openclawAgentID, "restart", res.Restart)
 	}
-	return true
+	return nil
 }
 
 func (s *Server) writeChannels(w http.ResponseWriter, r *http.Request) {

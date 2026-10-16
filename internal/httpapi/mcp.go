@@ -77,16 +77,26 @@ type gatePending struct {
 }
 
 // callPlatformTool is the gate every platform tool call goes through (DESIGN 5.3 rules
-// 5–8, 5.4 rule 1, 5.7 rules 3–4, 5.11 rules 3–4): resolve the run token, refuse tools
-// the agent may not use or its guardrails block, validate the input, refuse input a
-// guardrail pattern matches, compute the idempotency key for side effects, record
-// the authoritative tool_calls row, then execute directly (auto) or behind a human
-// approval (require_approval). It returns the model's text and whether it is an error.
+// 5–8, 5.4 rule 1, 5.7 rules 3–4, 5.11 rules 3–4, 5.15 rules 1–3): resolve the run token
+// or the chat token, refuse tools the agent may not use or its guardrails block,
+// validate the input, refuse input a guardrail pattern matches, compute the idempotency
+// key for side effects, record the authoritative tool_calls row, then execute directly
+// (auto) or behind a human approval (require_approval). It returns the model's text and
+// whether it is an error.
 func (s *Server) callPlatformTool(ctx context.Context, t *tools.Tool, args json.RawMessage) (string, bool) {
 	if len(strings.TrimSpace(string(args))) == 0 {
 		args = json.RawMessage(`{}`)
 	}
-	token := runTokenOf(args)
+	token, chatToken := tokenOf(args, tools.RunTokenField), tokenOf(args, tools.ChatTokenField)
+	switch {
+	case token != "" && chatToken != "":
+		// DESIGN 5.15 rule 1: a call is either a run's or a conversation's.
+		return errBothTokens, true
+	case chatToken != "":
+		return s.callChatTool(ctx, t, chatToken, args)
+	case token == "" && t.Chat:
+		return errBothTokens, true
+	}
 	if token == "" {
 		// Without a token there is no run to record against; the schema message names
 		// the missing field.
@@ -104,48 +114,97 @@ func (s *Server) callPlatformTool(ctx context.Context, t *tools.Tool, args json.
 	}
 	g := &gateCall{s: s, t: t, rc: rc, token: token, args: args, start: time.Now().UTC(),
 		log: s.log.With("run_id", rc.RunID, "node_id", rc.NodeID, "tool", t.Name)}
+	g.agentID, g.allowlist, g.rules = rc.AgentID, rc.ToolAllowlist, rc.InteractionRules
+	g.call = tools.Call{
+		RunID: rc.RunID, NodeVisitID: rc.RunNodeID, NodeID: rc.NodeID, AgentID: rc.AgentID,
+		OpenClawAgentID: rc.OpenClawAgentID, Workspace: s.workspace(rc.OpenClawAgentID),
+	}
 	return g.run(ctx)
 }
 
-// gateCall is one platform tool call on its way through the gate.
+// Model-facing refusals of the chat-token path (DESIGN 5.15 rules 1 and 2).
+const (
+	errBothTokens       = "one of run_token or chat_token"
+	errInvalidChatToken = "invalid chat token"
+)
+
+// callChatTool is the gate for a call that carries a chat token (DESIGN 5.15 rules 1 to
+// 3): the agent that owns the token is the caller, the call has no run and is recorded
+// against the agent's most recent conversation, and only chat-capable tools answer.
+// It shares the policy, guardrail, validation and recording steps with run calls; a
+// chat-capable tool is never side-effecting, so there is no idempotency key.
+func (s *Server) callChatTool(ctx context.Context, t *tools.Tool, token string, args json.RawMessage) (string, bool) {
+	if s.engine == nil {
+		return t.Name + " failed with an internal error; try the call again", true
+	}
+	cc, ok := s.engine.ResolveChatToken(token)
+	if !ok {
+		return errInvalidChatToken, true
+	}
+	g := &gateCall{s: s, t: t, chat: &cc, args: args, start: time.Now().UTC(),
+		log: s.log.With("agent_id", cc.AgentID, "conversation_id", cc.ConversationID, "tool", t.Name)}
+	g.agentID, g.allowlist, g.rules = cc.AgentID, cc.ToolAllowlist, cc.InteractionRules
+	g.call = tools.Call{
+		AgentID: cc.AgentID, OpenClawAgentID: cc.OpenClawAgentID, Workspace: cc.Workspace,
+		Chat: true, ConversationID: cc.ConversationID,
+	}
+	text, isErr := g.run(ctx)
+	g.log.Info("chat tool call", "status", g.row.Status, "is_error", isErr)
+	return text, isErr
+}
+
+// gateCall is one platform tool call on its way through the gate: a run's (rc and
+// token set) or a conversation's (chat set).
 type gateCall struct {
 	s     *Server
 	t     *tools.Tool
 	rc    engine.RunContext
+	chat  *engine.ChatContext
 	token string
 	args  json.RawMessage
 	start time.Time
 	log   *slog.Logger
 	row   *store.ToolCall
 	call  tools.Call
+	// The calling agent and the allowlist and interaction rules that apply to it.
+	agentID   string
+	allowlist []string
+	rules     map[string]string
 }
 
 func (g *gateCall) run(ctx context.Context) (string, bool) {
-	s, t, rc := g.s, g.t, g.rc
-	g.call = tools.Call{
-		RunID: rc.RunID, NodeVisitID: rc.RunNodeID, NodeID: rc.NodeID, AgentID: rc.AgentID,
-		OpenClawAgentID: rc.OpenClawAgentID, Workspace: s.workspace(rc.OpenClawAgentID),
-		Input: g.args, ToolCallID: store.NewID(),
-	}
+	s, t := g.s, g.t
+	g.call.Input = g.args
+	g.call.ToolCallID = store.NewID()
 	g.call.ToolUseID = "mcp-" + store.NewID()
 	g.row = &store.ToolCall{
-		ID: g.call.ToolCallID, RunID: rc.RunID, RunNodeID: rc.RunNodeID, ToolUseID: g.call.ToolUseID,
+		ID: g.call.ToolCallID, RunID: g.call.RunID, RunNodeID: g.call.NodeVisitID, ToolUseID: g.call.ToolUseID,
 		ToolName: t.Name, Input: obs.RedactJSON(g.args), StartedAt: &g.start,
 	}
+	if g.chat != nil && g.chat.ConversationID != "" {
+		conv := g.chat.ConversationID
+		g.row.ConversationID = &conv
+	}
+	if g.chat != nil && !t.Chat {
+		// DESIGN 5.15 rule 2: refused before validation, whose message would ask for a
+		// run token.
+		g.log.Warn("platform tool refused: not available in a conversation")
+		return g.finish(ctx, store.ToolBlocked, tools.Result{IsError: true, Text: t.Name + " is not available in a conversation"}, 1)
+	}
 
-	policy := tools.EffectivePolicy(t, rc.InteractionRules)
-	if !tools.Permitted(t.Name, rc.ToolAllowlist) || policy == tools.PolicyBlocked {
-		g.log.Warn("platform tool refused: blocked for this agent", "agent_id", rc.AgentID)
+	policy := tools.EffectivePolicy(t, g.rules)
+	if !tools.Permitted(t.Name, g.allowlist) || policy == tools.PolicyBlocked {
+		g.log.Warn("platform tool refused: blocked for this agent", "agent_id", g.agentID)
 		return g.finish(ctx, store.ToolBlocked, tools.Result{IsError: true, Text: fmt.Sprintf("tool %s is blocked for this agent", t.Name)}, 1)
 	}
-	guard, err := s.agentGuardrails(ctx, rc.AgentID)
+	guard, err := s.agentGuardrails(ctx, g.agentID)
 	if err != nil {
 		// Guardrails that cannot be read are not skipped.
-		g.log.Error("load guardrails failed", "agent_id", rc.AgentID, "error", err)
+		g.log.Error("load guardrails failed", "agent_id", g.agentID, "error", err)
 		return g.finish(ctx, store.ToolFailed, tools.Result{IsError: true, Text: t.Name + " failed with an internal error; try the call again"}, 1)
 	}
 	if guardrails.ToolBlocked(guard, t.Name) {
-		g.log.Warn("platform tool refused: blocked by guardrail", "agent_id", rc.AgentID)
+		g.log.Warn("platform tool refused: blocked by guardrail", "agent_id", g.agentID)
 		return g.finish(ctx, store.ToolBlocked, tools.Result{IsError: true, Text: fmt.Sprintf("tool %s is blocked for this agent", t.Name)}, 1)
 	}
 	if err := t.ValidateInput(g.args); err != nil {
@@ -155,11 +214,15 @@ func (g *gateCall) run(ctx context.Context) (string, bool) {
 		return g.finish(ctx, store.ToolFailed, tools.Result{IsError: true, Text: err.Error()}, 1)
 	}
 	if p, blocked := guardrails.MatchInput(guard, t.Name, g.args); blocked {
-		g.log.Warn("platform tool refused: input blocked by guardrail", "agent_id", rc.AgentID, "guardrail", guardrails.PatternName(p))
+		g.log.Warn("platform tool refused: input blocked by guardrail", "agent_id", g.agentID, "guardrail", guardrails.PatternName(p))
 		return g.finish(ctx, store.ToolBlocked, tools.Result{IsError: true, Text: guardrails.BlockedMessage(p)}, 1)
 	}
 	if t.Risk == tools.RiskSideEffecting {
-		key, err := tools.IdempotencyKey(rc.RunID, rc.RunNodeID, t.Name, g.args)
+		if g.chat != nil {
+			// No chat-capable tool is side-effecting; a key needs a run and a visit.
+			return g.finish(ctx, store.ToolBlocked, tools.Result{IsError: true, Text: t.Name + " is not available in a conversation"}, 1)
+		}
+		key, err := tools.IdempotencyKey(g.rc.RunID, g.rc.RunNodeID, t.Name, g.args)
 		if err != nil {
 			return g.finish(ctx, store.ToolFailed, tools.Result{IsError: true, Text: "invalid input: " + err.Error()}, 1)
 		}
@@ -167,6 +230,13 @@ func (g *gateCall) run(ctx context.Context) (string, bool) {
 		g.row.IdempotencyKey = &key
 	}
 	if policy == tools.PolicyRequireApproval {
+		if g.chat != nil {
+			// An approval pauses a run, and a conversation has none: an operator who
+			// gates this tool for the agent gets no ungated chat-time calls either.
+			g.log.Warn("platform tool refused: needs an approval, which a conversation cannot wait for")
+			return g.finish(ctx, store.ToolBlocked, tools.Result{IsError: true,
+				Text: t.Name + " needs a human approval for this agent, which cannot be asked for in a conversation"}, 1)
+		}
 		return g.gated(ctx)
 	}
 	out, err := s.effects.Execute(ctx, t, g.call)
@@ -180,7 +250,10 @@ func (g *gateCall) run(ctx context.Context) (string, bool) {
 		res = tools.Result{Output: tools.WithFields(res.Output, map[string]any{"policy": tools.PolicyAuto})}
 	}
 	status := store.ToolExecuted
-	if res.IsError {
+	switch {
+	case res.Blocked:
+		status = store.ToolBlocked
+	case res.IsError:
 		status = store.ToolFailed
 	}
 	return g.finish(ctx, status, res, out.Attempts)
@@ -311,6 +384,11 @@ func (g *gateCall) insert(ctx context.Context) error {
 	if err := store.InsertToolCall(wctx, g.s.pool, g.row); err != nil {
 		return err
 	}
+	if g.row.RunID == "" {
+		// A chat-time call counts toward no run; the Channels page follows it.
+		g.s.emit(wctx, "", eventConversationToolCall, map[string]any{"conversation_id": g.row.ConversationID, "tool_call": g.row})
+		return nil
+	}
 	run, err := store.AddRunUsageReturning(wctx, g.s.pool, g.row.RunID, 0, 1, 0, 0, 0, 0, 0)
 	if err != nil {
 		g.log.Warn("count tool call failed", "error", err)
@@ -318,6 +396,11 @@ func (g *gateCall) insert(ctx context.Context) error {
 	g.s.emitToolCall(wctx, g.row, run)
 	return nil
 }
+
+// eventConversationToolCall is the SSE event for a recorded chat-time tool call
+// (DESIGN 5.15 rule 3): platform-wide, with the conversation's id (null when the agent
+// has none).
+const eventConversationToolCall = "conversation.tool_call"
 
 func (g *gateCall) modelJSON(v any) string {
 	b, _ := json.Marshal(v)
@@ -344,13 +427,14 @@ func (s *Server) emitToolCall(ctx context.Context, row *store.ToolCall, run *sto
 	s.emit(ctx, row.RunID, "tool_call", payload)
 }
 
-// runTokenOf returns the run_token string in a call's arguments, or "".
-func runTokenOf(args json.RawMessage) string {
+// tokenOf returns the string in a call's arguments under field (run_token or
+// chat_token), or "".
+func tokenOf(args json.RawMessage, field string) string {
 	var in map[string]any
 	if json.Unmarshal(args, &in) != nil {
 		return ""
 	}
-	tok, _ := in[tools.RunTokenField].(string)
+	tok, _ := in[field].(string)
 	return strings.TrimSpace(tok)
 }
 

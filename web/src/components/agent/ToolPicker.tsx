@@ -74,6 +74,7 @@ type GroupProps = {
 function Group({ title, tools, selected, errors, onToggle, onPolicy, hideMeta }: GroupProps) {
   if (tools.length === 0) return null;
   const allowed = tools.filter((t) => selected[t.name]).length;
+  const hasChat = tools.some((t) => t.chat);
   return (
     <fieldset>
       <legend className="mb-2 flex w-full items-baseline justify-between text-sm font-medium">
@@ -82,6 +83,7 @@ function Group({ title, tools, selected, errors, onToggle, onPolicy, hideMeta }:
           {allowed} of {tools.length} allowed
         </span>
       </legend>
+      {hasChat ? <p className="mb-2 text-xs text-zinc-500">Tools marked Chat can also be used when the agent is talking with someone in a conversation.</p> : null}
       <ul className="divide-y divide-zinc-200 rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-800">
         {tools.map((t) => (
           <ToolRow
@@ -130,6 +132,7 @@ function ToolRow({ tool, allowed, policy, errors, onToggle, onPolicy, hideMeta }
             <>
               <Badge tone={riskTone[tool.risk]}>{humanize(tool.risk)}</Badge>
               <Badge>{tool.source === "platform" ? "platform" : "OpenClaw"}</Badge>
+              {tool.chat ? <Badge tone="orange" title="Works in a conversation">Chat</Badge> : null}
             </>
           )}
         </label>

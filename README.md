@@ -191,6 +191,20 @@ Per-agent model settings: `thinking` is the reasoning control on OpenClaw (the a
 OpenClaw has no counterpart to `effort`; the API still accepts the field for
 compatibility, but it changes nothing and the agent form no longer offers it.
 
+## Talking to the platform: the Chief of Staff
+
+One agent is meant to be talked to: the seeded Chief of Staff, which `make run` binds to
+Telegram when nothing else is bound. It never does the work itself. In a conversation it
+can call six platform tools (DESIGN 5.15): `list_agents` and `list_workflows` to know the
+roster, `delegate_task` to start a run for one agent with a task or for a workflow with
+input, `run_status` to read a run, and the memory tools. Every delegated run is an ordinary
+run: traced, limited, its side effects gated by approvals in the UI. When such a run ends,
+or stops for an approval, the platform posts a one-line report into the Chief's chat
+session and the Chief relays it; the Channels page shows the report with a link to the
+run, and the Runs page marks delegated runs. Chat-time calls identify the agent with a
+per-agent chat token written into its instructions (the gateway sends no caller identity);
+only those six tools accept it, and it is redacted everywhere like run tokens.
+
 ## Layout
 
 ```

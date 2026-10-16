@@ -101,3 +101,9 @@ derived gateway image adds only the static Docker CLI.
 - No OpenTelemetry export; spans live in Postgres and the UI.
 - The eval suite's private cases need the network or a human and are not part of
   `make eval`'s default public split.
+- Chat tokens (the identity of an agent's chat-time tool calls, DESIGN 5.15) are
+  long-lived, stored in plain text in the database and written into the agent's
+  `AGENTS.md`; they are redacted everywhere like run tokens, but a database dump or a
+  workspace read yields them. Rotating one means re-materialising the agent.
+- `require_approval` on a chat-capable tool disables it in conversations rather than
+  gating it, since a conversation has no run to pause; approvals stay in the UI.

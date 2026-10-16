@@ -1073,6 +1073,9 @@ func (v *visit) onApproval(ctx context.Context, sa openclaw.SessionApprovalEvent
 			}
 			return
 		}
+		if sa.Phase != "terminal" {
+			e.afterApproval(ctx, v.run) // DESIGN 5.15 rule 10
+		}
 	}
 	if sa.Phase != "terminal" || a.Status != "pending" {
 		return
@@ -1539,7 +1542,10 @@ func (v *visit) acceptFinish(ctx context.Context, result json.RawMessage) error 
 	if err := json.Compact(&buf, result); err != nil {
 		return &FinishValidationError{Message: "result is not valid JSON"}
 	}
-	out := json.RawMessage(buf.Bytes())
+	// The result is stored on the node and merged into runs.state, which the API and the
+	// trace serve: credentials and tokens an agent echoes are redacted first (DESIGN
+	// 5.12 rule 4, 5.15 rule 1).
+	out := json.RawMessage(obs.RedactJSON(buf.Bytes()))
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {

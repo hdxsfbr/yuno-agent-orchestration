@@ -330,6 +330,7 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("DELETE /api/channels/telegram/binding", s.unbindTelegram)
 	mux.HandleFunc("GET /api/conversations", s.listConversations)
 	mux.HandleFunc("GET /api/conversations/{id}/messages", s.listConversationMessages)
+	mux.HandleFunc("GET /api/conversations/{id}/tool-calls", s.listConversationToolCalls)
 
 	mux.Handle("/mcp", s.mcpHandler())
 
@@ -481,6 +482,8 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 		Pool:           d.Pool,
 		MemorySaved:    s.memorySaved,
 		MaxOutputBytes: cfg.ToolOutputMaxBytes,
+		Delegator:      delegator{s},
+		PublicBaseURL:  cfg.PublicBaseURL,
 		Deploy: tools.DeployConfig{
 			TargetURL:       cfg.DeployTargetURL,
 			MaxBytes:        int64(cfg.DeployTargetMaxMB) << 20,

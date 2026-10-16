@@ -95,6 +95,15 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, log *slog.Logger) error {
 		}
 		log.Info("migration applied", "name", name)
 	}
+	// Agents created before migration 0008 get their chat token here, once (DESIGN 5.15
+	// rule 1): a one-off backfill in Go, since the token is minted by runtoken.
+	filled, err := BackfillChatTokens(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("backfill chat tokens: %w", err)
+	}
+	if filled > 0 {
+		log.Info("chat tokens backfilled", "agents", filled)
+	}
 	return nil
 }
 

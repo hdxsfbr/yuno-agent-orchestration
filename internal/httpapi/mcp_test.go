@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"yuno/internal/engine"
+	"yuno/internal/tools"
 )
 
 // bearer adds an Authorization header to every request.
@@ -68,12 +69,20 @@ func TestMCPListsTools(t *testing.T) {
 			Properties           map[string]any `json:"properties"`
 		}
 		if err := json.Unmarshal(schema, &s); err != nil || s.Type != "object" || s.AdditionalProperties ||
-			s.Properties["run_token"] == nil || !slices.Contains(s.Required, "run_token") {
+			s.Properties["run_token"] == nil {
 			t.Errorf("%s input schema = %s", tool.Name, schema)
+		}
+		// A chat-capable tool takes run_token or chat_token and requires neither: the
+		// gate requires exactly one (DESIGN 5.15 rule 1). Every other tool needs a run.
+		if chat := tools.IsChatTool(tool.Name); chat != (s.Properties["chat_token"] != nil) ||
+			chat == slices.Contains(s.Required, "run_token") || slices.Contains(s.Required, "chat_token") {
+			t.Errorf("%s token fields = %s", tool.Name, schema)
 		}
 	}
 	slices.Sort(names)
-	if want := []string{"deploy_release", "finish", "http_fetch", "memory_recall", "memory_save"}; !slices.Equal(names, want) {
+	want := []string{"delegate_task", "deploy_release", "finish", "http_fetch", "list_agents", "list_workflows",
+		"memory_recall", "memory_save", "run_status"}
+	if !slices.Equal(names, want) {
 		t.Fatalf("tools = %v, want %v", names, want)
 	}
 }

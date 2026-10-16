@@ -9,7 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const workflowColumns = `id, name, description, definition, version, template_key, created_at, updated_at, deleted_at`
+const workflowColumns = `id, name, description, definition, version, template_key, created_at, updated_at, deleted_at,
+	from_template`
 
 func CreateWorkflow(ctx context.Context, q Querier, w *Workflow) error {
 	if w.ID == "" {
@@ -23,9 +24,17 @@ func CreateWorkflow(ctx context.Context, q Querier, w *Workflow) error {
 	}
 	now := time.Now().UTC()
 	w.CreatedAt, w.UpdatedAt = now, now
-	_, err := q.Exec(ctx, `INSERT INTO workflows (`+workflowColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL)`,
-		w.ID, w.Name, w.Description, w.Definition, w.Version, w.TemplateKey, w.CreatedAt, w.UpdatedAt)
+	_, err := q.Exec(ctx, `INSERT INTO workflows (`+workflowColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9)`,
+		w.ID, w.Name, w.Description, w.Definition, w.Version, w.TemplateKey, w.CreatedAt, w.UpdatedAt, w.FromTemplate)
 	return err
+}
+
+// WorkflowFromTemplateExists reports whether a live workflow was instantiated from the
+// template with key (DESIGN 5.15 rule 13).
+func WorkflowFromTemplateExists(ctx context.Context, q Querier, key string) (bool, error) {
+	var ok bool
+	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM workflows WHERE from_template = $1 AND deleted_at IS NULL)`, key).Scan(&ok)
+	return ok, err
 }
 
 func GetWorkflow(ctx context.Context, q Querier, id string) (*Workflow, error) {

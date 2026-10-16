@@ -12,7 +12,8 @@ afterEach(cleanup);
 const tools: Tool[] = [
   { name: "read", description: "Read a file", risk: "read_only", hits: "none", timeout_seconds: 10, source: "openclaw" },
   { name: "deploy_release", description: "Deploy a release", risk: "side_effecting", hits: "external", timeout_seconds: 60, source: "platform" },
-  { name: "memory_recall", description: "Recall facts", risk: "read_only", hits: "postgres", timeout_seconds: 10, source: "platform" },
+  { name: "memory_recall", description: "Recall facts", risk: "read_only", hits: "postgres", timeout_seconds: 10, source: "platform", chat: true },
+  { name: "delegate_task", description: "Hand a task to another agent", risk: "computational", hits: "postgres", timeout_seconds: 30, source: "platform", chat: true },
 ];
 
 const skills: Skill[] = [
@@ -29,13 +30,13 @@ const saved = (over: Partial<Agent>): Agent => ({
   ...over,
 });
 
-function setup(over: { serverErrors?: FieldErrors; formError?: string; agent?: Agent; telegram?: ReactNode; memoryFacts?: ReactNode } = {}) {
+function setup(over: { serverErrors?: FieldErrors; formError?: string; agent?: Agent; telegram?: ReactNode; memoryFacts?: ReactNode; tools?: Tool[] } = {}) {
   const onSubmit = vi.fn<(input: AgentInput) => void>();
   render(
     <MemoryRouter>
       <AgentForm
         agent={over.agent}
-        tools={{ data: tools, isLoading: false, error: null, refetch: () => undefined }}
+        tools={{ data: over.tools ?? tools, isLoading: false, error: null, refetch: () => undefined }}
         skills={{ data: skills, isLoading: false, error: null, refetch: () => undefined }}
         saving={false}
         serverErrors={over.serverErrors ?? {}}
@@ -135,6 +136,51 @@ describe("AgentForm tools", () => {
     const input = onSubmit.mock.calls[0][0];
     expect(input.tool_allowlist).toEqual(["deploy_release", "read"]);
     expect(input.interaction_rules).toEqual({ deploy_release: "auto" });
+  });
+});
+
+describe("AgentForm chat tools", () => {
+  const toolRow = (name: string) => within(screen.getByText(name).closest("li")!);
+
+  it("marks the tools that also work in a conversation with a Chat badge", () => {
+    setup();
+    expect(screen.getAllByText("Chat")).toHaveLength(2);
+    expect(toolRow("delegate_task").getByText("Chat")).not.toBeNull();
+    expect(toolRow("memory_recall").getByText("Chat")).not.toBeNull();
+    expect(toolRow("deploy_release").queryByText("Chat")).toBeNull();
+    expect(toolRow("read").queryByText("Chat")).toBeNull();
+    // the badge sits beside the risk and source, which stay, in a colour of its own
+    expect(toolRow("delegate_task").getByText("computational")).not.toBeNull();
+    expect(toolRow("delegate_task").getByText("platform")).not.toBeNull();
+    const chat = toolRow("delegate_task").getByText("Chat").className;
+    for (const other of ["computational", "platform"]) expect(toolRow("delegate_task").getByText(other).className).not.toBe(chat);
+    expect(toolRow("memory_recall").getByText("read only").className).not.toBe(toolRow("memory_recall").getByText("Chat").className);
+  });
+
+  it("says once, in a line, what Chat means", () => {
+    setup();
+    const hint = screen.getAllByText("Tools marked Chat can also be used when the agent is talking with someone in a conversation.");
+    expect(hint).toHaveLength(1);
+    // it belongs to the platform tools, where the Chat tools are
+    expect(hint[0].closest("fieldset")!.textContent).toContain("Platform tools");
+    expect(hint[0].closest("fieldset")!.textContent).not.toContain("OpenClaw built-ins");
+  });
+
+  it("shows neither badge nor hint when no tool works in a conversation", () => {
+    setup({ tools: tools.map((t) => ({ ...t, chat: undefined })) });
+    expect(screen.queryByText("Chat")).toBeNull();
+    expect(screen.queryByText(/talking with someone in a conversation/)).toBeNull();
+  });
+
+  it("allows a chat tool like any other tool", () => {
+    const { onSubmit } = setup();
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: "Chief" } });
+    fireEvent.click(screen.getByLabelText(/^delegate_task/));
+    expect((screen.getByLabelText("Policy for delegate_task") as HTMLSelectElement).value).toBe("auto");
+    submit();
+    const input = onSubmit.mock.calls[0][0];
+    expect(input.tool_allowlist).toEqual(["delegate_task"]);
+    expect(input.interaction_rules).toEqual({});
   });
 });
 

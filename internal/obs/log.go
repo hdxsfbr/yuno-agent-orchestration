@@ -27,6 +27,12 @@ func NewLogger(level string) *slog.Logger {
 	return slog.New(&redactingHandler{inner: inner})
 }
 
+// RedactingHandler wraps inner so every message and attribute passes through Redact,
+// as NewLogger's handler does (tests capture redacted logs with it).
+func RedactingHandler(inner slog.Handler) slog.Handler {
+	return &redactingHandler{inner: inner}
+}
+
 type redactingHandler struct {
 	inner slog.Handler
 }

@@ -32,6 +32,7 @@ type Engine struct {
 	waitMu  sync.Mutex
 	waiters map[string]*approvalWaiter // tool approval id → the MCP call waiting for it
 	bg      sync.WaitGroup             // side effects executed after a late approval
+	reports sync.WaitGroup             // report-back sends in flight (report.go)
 
 	// execute runs one claimed run; tests replace it to observe claims.
 	execute func(ctx context.Context, run *store.Run)
@@ -114,6 +115,8 @@ func (e *Engine) Start(ctx context.Context) error {
 	}()
 	e.log.Info("engine started", "workers", workers)
 	wg.Wait()
+	// Reports still being sent finish before the engine stops (DESIGN 5.15 rule 9).
+	e.reports.Wait()
 	return nil
 }
 
@@ -157,23 +160,32 @@ func (e *Engine) worker(ctx context.Context, n int) {
 func (e *Engine) sweeper(ctx context.Context) {
 	t := time.NewTicker(e.sweepInterval)
 	defer t.Stop()
+	// Reports a previous process claimed nothing for are sent now (DESIGN 5.15).
+	e.sweepReports(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
-		if e.deps.Cfg.EngineStaleAfter <= 0 {
-			continue
-		}
-		requeued, failed, err := store.RequeueStaleRuns(ctx, e.deps.Pool, e.deps.Cfg.EngineStaleAfter)
-		if err != nil {
-			e.log.Warn("stale-run sweep failed", "error", err)
-			continue
-		}
-		if requeued > 0 || failed > 0 {
-			e.log.Warn("stale runs swept", "requeued", requeued, "failed", failed)
-		}
+		e.sweepStale(ctx)
+		// After the stale-run sweep, so a run it failed is reported in the same tick.
+		e.sweepReports(ctx)
+	}
+}
+
+// sweepStale re-queues or fails runs a lost worker left running (DESIGN 5.1 rule 8).
+func (e *Engine) sweepStale(ctx context.Context) {
+	if e.deps.Cfg.EngineStaleAfter <= 0 {
+		return
+	}
+	requeued, failed, err := store.RequeueStaleRuns(ctx, e.deps.Pool, e.deps.Cfg.EngineStaleAfter)
+	if err != nil {
+		e.log.Warn("stale-run sweep failed", "error", err)
+		return
+	}
+	if requeued > 0 || failed > 0 {
+		e.log.Warn("stale runs swept", "requeued", requeued, "failed", failed)
 	}
 }
 
@@ -440,6 +452,7 @@ func (e *Engine) Cancel(ctx context.Context, runID, by string) (*store.Run, erro
 		if done, err := store.TransitionRun(ctx, e.deps.Pool, runID, []string{store.RunQueued}, store.RunCancelled, &reason, e.clock.Now()); err == nil {
 			e.emit(ctx, runID, "run.status", map[string]any{"run": done})
 			e.log.Info("run cancelled before start", "run_id", runID, "by", by)
+			e.afterTerminal(ctx, done)
 			return done, nil
 		}
 	}

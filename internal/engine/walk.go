@@ -419,6 +419,7 @@ func (w *walk) approvalNode(ctx context.Context, node *workflow.Node) (string, *
 	e.emit(ctx, w.run.ID, "run.status", map[string]any{"run": run})
 	e.emit(ctx, w.run.ID, "approval.requested", map[string]any{"approval": a})
 	e.logEvent(ctx, w.run.ID, "info", "waiting for approval at "+node.ID, "node_id", node.ID, "approval_id", a.ID)
+	e.afterApproval(ctx, run) // DESIGN 5.15 rule 10
 	o := w.applyPendingCancel(ctx, run)
 	return "", &o
 }

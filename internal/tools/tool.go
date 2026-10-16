@@ -56,6 +56,11 @@ type Call struct {
 	// artifacts live under runs/<run_id>/ (DESIGN section 4).
 	OpenClawAgentID string
 	Workspace       string
+	// Chat marks a chat-time call (DESIGN 5.15): it carried a chat token, has no run or
+	// node visit, and ConversationID is the calling agent's most recent conversation
+	// ("" when it has none).
+	Chat           bool
+	ConversationID string
 }
 
 // Result is what goes back to the model. Output is JSON; Text is a convenience for
@@ -66,6 +71,9 @@ type Result struct {
 	IsError bool
 	// Transient marks an error the retry policy may retry (DESIGN 5.5 rule 4).
 	Transient bool
+	// Blocked marks an error result that is a refusal rather than a failure, such as
+	// delegate_task's rate limit (DESIGN 5.15 rule 6): the call is recorded as blocked.
+	Blocked bool
 }
 
 // ModelText is what the model sees: Output as JSON text when set, else Text.
@@ -97,7 +105,10 @@ type Tool struct {
 	TimeoutS    int             `json:"timeout_seconds"`
 	MaxAttempts int             `json:"max_attempts"`
 	Untrusted   bool            `json:"untrusted_output"`
-	Exec        Executor        `json:"-"`
+	// Chat marks a tool an agent may call while chatting with a person, with its chat
+	// token instead of a run token (DESIGN 5.15 rule 2).
+	Chat bool     `json:"chat"`
+	Exec Executor `json:"-"`
 	// OnInvalidInput, when set, is told about a call refused by the input schema before
 	// the refusal goes back to the model (finish counts it as a rejected attempt).
 	OnInvalidInput func(ctx context.Context, call Call, message string) `json:"-"`

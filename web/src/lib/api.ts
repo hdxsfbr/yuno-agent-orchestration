@@ -289,11 +289,31 @@ export type Tool = {
   max_attempts?: number;
   untrusted_output?: boolean;
   source: ToolSource;
+  /** True for the tools an agent can also call while it talks to someone in a conversation. */
+  chat?: boolean;
 };
 
 export const RUN_STATUSES = ["queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "timed_out"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 export type RunTrigger = "manual" | "schedule" | "channel" | "eval";
+
+const CONVERSATION_REF = "conversation:";
+
+/**
+ * The id of the conversation a run was delegated from: a run started from a conversation has
+ * trigger "channel" and trigger_ref "conversation:<id>". Undefined for any other run, and
+ * for a delegated run whose caller had no conversation (an empty ref).
+ */
+export function delegatedConversationId(run: Pick<Run, "trigger" | "trigger_ref">): string | undefined {
+  if (run.trigger !== "channel") return undefined;
+  const ref = run.trigger_ref?.trim() ?? "";
+  if (!ref.startsWith(CONVERSATION_REF)) return undefined;
+  return ref.slice(CONVERSATION_REF.length).trim() || undefined;
+}
+
+/** A run started from a conversation: trigger "channel" with a conversation reference, or with none. Any other reference is shown as it is. */
+export const isDelegatedRun = (run: Pick<Run, "trigger" | "trigger_ref">): boolean =>
+  run.trigger === "channel" && (!!delegatedConversationId(run) || !run.trigger_ref?.trim());
 
 export type Run = {
   id: string;
@@ -321,6 +341,8 @@ export type Run = {
   /** Models the run's model calls used, first appearance first; the list endpoint fills it. */
   models?: string[];
   paused_total_ms?: number;
+  /** When the outcome of a delegated run was reported into its conversation. */
+  reported_at?: string | null;
   created_at: string;
   started_at?: string;
   finished_at?: string;
@@ -378,8 +400,11 @@ export type ToolCallStatus = "executed" | "awaiting_approval" | "approved" | "re
 
 export type ToolCall = {
   id: string;
+  /** Empty ("") for a call an agent made in a conversation, which is not part of a run. */
   run_id: string;
   run_node_id: string;
+  /** Set for a call made in a conversation. */
+  conversation_id?: string | null;
   model_call_id?: string;
   tool_use_id: string;
   tool_name: string;
@@ -432,6 +457,8 @@ export type Approval = {
   decided_by?: string;
   reason?: string;
   expires_at: string;
+  /** When the request was reported into the conversation of a delegated run. */
+  reported_at?: string | null;
 };
 
 export type Trace = {
@@ -500,6 +527,8 @@ export type Workflow = WorkflowInput & {
   id: string;
   version: number;
   template_key?: string;
+  /** The template this workflow was made from. */
+  from_template?: string;
   created_at: string;
   updated_at: string;
 };
@@ -645,7 +674,7 @@ export type ConversationMessage = {
   id: string;
   direction: "in" | "out";
   text: string;
-  /** Set when the message belongs to a workflow run. */
+  /** Set on a platform report: the run whose outcome or approval the message announces. */
   run_id?: string | null;
   created_at: string;
 };
@@ -694,8 +723,13 @@ export const bindTelegram = async (agentId: string) =>
 export const unbindTelegram = () => api<ChannelsInfo | undefined>("/api/channels/telegram/binding", withBody("DELETE"));
 
 export const listConversations = async () => (await api<Conversation[] | null>("/api/conversations")) ?? [];
+
 export const listConversationMessages = async (id: string) =>
   (await api<ConversationMessage[] | null>(`/api/conversations/${seg(id)}/messages`)) ?? [];
+
+/** The tool calls an agent made in a conversation, oldest first. */
+export const listConversationToolCalls = async (id: string) =>
+  (await api<ToolCall[] | null>(`/api/conversations/${seg(id)}/tool-calls`)) ?? [];
 
 // Go encodes a nil map as null; the form treats the input as always present.
 const normalizeSchedule = (s: Schedule): Schedule => ({ ...s, input: s.input ?? {} });

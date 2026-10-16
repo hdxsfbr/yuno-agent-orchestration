@@ -1047,6 +1047,54 @@ counts. T5.14.5 abort ends the turn within 10 s. T5.14.6 proxy injects the key, 
 `display`, records the request id (httptest upstream). T5.14.7 scripted provider streams
 a tool call OpenClaw executes (compose integration). T5.14.8 reasoning events are dropped.
 
+### 5.15 Chief of Staff: chat-time tools, delegation and report-back
+
+The full design with inputs, edge cases, failure handling and tests is
+`docs/briefs/wave5/00-design-chief-of-staff.md` (approved 2026-10-16, D-036). The rules:
+
+1. A platform tool call carrying `chat_token` instead of `run_token` resolves to the
+   agent that owns the token (`agents.chat_token`, generated at creation, never returned
+   by the API, redacted); an unknown token answers `invalid chat token`; both tokens
+   answer `one of run_token or chat_token`.
+2. Only chat-capable tools accept a chat token: `list_agents`, `list_workflows`,
+   `delegate_task`, `run_status`, `memory_save`, `memory_recall`; others answer
+   `<tool> is not available in a conversation`.
+3. A chat tool call is a `tool_calls` row with `run_id` null and `conversation_id` the
+   agent's most recent conversation (null when none), redacted and capped like run calls.
+4. `list_agents` returns every agent but the caller (name, role, model, allowlist, bound
+   channel); `list_workflows` returns workflows, not templates (name, description, agent
+   names, `input_schema`).
+5. `delegate_task` takes exactly one of `agent_name` + `task` or `workflow_name` +
+   `input` (validated against `input_schema`); names match case-insensitively; unknown
+   names and self-delegation are tool errors with the texts in the brief.
+6. `delegate_task` triggers a run with `Trigger = channel`, `TriggerRef =
+   conversation:<id>` (empty without a conversation), default limits, and returns
+   `{run_id, status, url}`; at most 10 delegations per agent per 10 minutes, the 11th
+   answers `delegation limit reached; try later` and is recorded `blocked`.
+7. `delegate_task` is computational, policy `auto` by default, overridable by interaction
+   rules. In a conversation there is no run to pause, so require_approval on a
+   chat-capable tool refuses the chat call (recorded blocked); the policy gates run calls
+   as usual.
+8. `run_status` returns status, trigger, times, duration, steps, tool calls, cost, final
+   state (4 KB cap), failure reason, and a pending approval's kind and message; unknown
+   id answers `no run <id>`.
+9. A channel-triggered run reaching a terminal status sends one `[platform] Run <id>
+   <status> after <duration>, cost $<x>: <outcome>. <url>` into its conversation's
+   session with `chat.send {deliver: true}` [probed: the text is a user turn, the reply
+   is delivered to Telegram], exactly once (`runs.reported_at`), one attempt, never
+   without a conversation ref.
+10. Entering `waiting_approval` sends one `[platform] Run <id> is waiting for an
+    approval: <kind>, <message>. Decide it at <url>` per approval
+    (`approvals.reported_at`); approvals are decided in the UI.
+11. Those messages are mirrored like inbound messages with `run_id` set.
+12. The seeded `Chief of Staff` (Coordinator, `claude-opus-5-5`, the six chat tools, no
+    exec) carries the coordinator prompt from the brief.
+13. Seeding instantiates both templates when no workflow carries their template key.
+14. Seeding binds the Chief of Staff when Telegram is enabled and nothing is bound; it
+    never changes an existing binding.
+15. The materialiser writes a `## Chatting` section into `AGENTS.md` only for agents whose
+    allowlist holds a chat-capable tool.
+
 ## 6. HTTP API summary
 
 Errors: `{error: {code, message, details?}}`; validation failures are 422 with
@@ -1058,7 +1106,7 @@ materialisation failure after a successful write is 502 with the row id in detai
 As revision 1 plus: `GET/POST /skills`, `GET/PUT/DELETE /skills/{id}`;
 `GET /agents/{id}/runtime` (materialised OpenClaw state: config entry, exec policy, files);
 `POST /agents/{id}/materialize`; `GET /channels`, `PUT/DELETE /channels/telegram/binding`,
-`GET /conversations`, `GET /conversations/{id}/messages`; `GET/POST /schedules`,
+`GET /conversations`, `GET /conversations/{id}/messages`, `GET /conversations/{id}/tool-calls`; `GET/POST /schedules`,
 `GET/PUT/DELETE /schedules/{id}`; `GET/POST /skills`, `GET/PUT/DELETE /skills/{id}`;
 `GET /agents/{id}/memory`, `DELETE /agents/{id}/memory/{factId}`; `POST /mcp` (MCP, bearer); `/model-proxy/*` (bearer or
 loopback only); `GET /openclaw/status` (gateway connection, scopes, version).
@@ -1085,52 +1133,6 @@ or delay form with the browser zone as default, input from the workflow's schema
 Skills (list, editor, read-only name on edit), the agent page's saved facts, guardrail
 pattern errors and Telegram line, and Status panels for OpenClaw and the scheduler.
 Binding lives on Channels, not on the agent form.
-
-### 5.15 Chief of Staff: chat-time tools, delegation and report-back
-
-The full design with inputs, edge cases, failure handling and tests is
-`docs/briefs/wave5/00-design-chief-of-staff.md` (approved 2026-10-16, D-036). The rules:
-
-1. A platform tool call carrying `chat_token` instead of `run_token` resolves to the
-   agent that owns the token (`agents.chat_token`, generated at creation, never returned
-   by the API, redacted); an unknown token answers `invalid chat token`; both tokens
-   answer `one of run_token or chat_token`.
-2. Only chat-capable tools accept a chat token: `list_agents`, `list_workflows`,
-   `delegate_task`, `run_status`, `memory_save`, `memory_recall`; others answer
-   `<tool> is not available in a conversation`.
-3. A chat tool call is a `tool_calls` row with `run_id` null and `conversation_id` the
-   agent's most recent conversation (null when none), redacted and capped like run calls.
-4. `list_agents` returns every agent but the caller (name, role, model, allowlist, bound
-   channel); `list_workflows` returns workflows, not templates (name, description, agent
-   names, `input_schema`).
-5. `delegate_task` takes exactly one of `agent_name` + `task` or `workflow_name` +
-   `input` (validated against `input_schema`); names match case-insensitively; unknown
-   names and self-delegation are tool errors with the texts in the brief.
-6. `delegate_task` triggers a run with `Trigger = channel`, `TriggerRef =
-   conversation:<id>` (empty without a conversation), default limits, and returns
-   `{run_id, status, url}`; at most 10 delegations per agent per 10 minutes, the 11th
-   answers `delegation limit reached; try later` and is recorded `blocked`.
-7. `delegate_task` is computational, policy `auto` by default, overridable by interaction
-   rules.
-8. `run_status` returns status, trigger, times, duration, steps, tool calls, cost, final
-   state (4 KB cap), failure reason, and a pending approval's kind and message; unknown
-   id answers `no run <id>`.
-9. A channel-triggered run reaching a terminal status sends one `[platform] Run <id>
-   <status> after <duration>, cost $<x>: <outcome>. <url>` into its conversation's
-   session with `chat.send {deliver: true}` [probed: the text is a user turn, the reply
-   is delivered to Telegram], exactly once (`runs.reported_at`), one attempt, never
-   without a conversation ref.
-10. Entering `waiting_approval` sends one `[platform] Run <id> is waiting for an
-    approval: <kind>, <message>. Decide it at <url>` per approval
-    (`approvals.reported_at`); approvals are decided in the UI.
-11. Those messages are mirrored like inbound messages with `run_id` set.
-12. The seeded `Chief of Staff` (Coordinator, `claude-opus-5-5`, the six chat tools, no
-    exec) carries the coordinator prompt from the brief.
-13. Seeding instantiates both templates when no workflow carries their template key.
-14. Seeding binds the Chief of Staff when Telegram is enabled and nothing is bound; it
-    never changes an existing binding.
-15. The materialiser writes a `## Chatting` section into `AGENTS.md` only for agents whose
-    allowlist holds a chat-capable tool.
 
 ## 8. Docker and Makefile
 

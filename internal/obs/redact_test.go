@@ -25,6 +25,11 @@ func TestRedact(t *testing.T) {
 		{"not a run token: too long", "r_abcdefghijklmnopqrstuvwxy", "r_abcdefghijklmnopqrstuvwxy"},
 		{"not a run token: inside a word", "attr_abcdefghijklmnopqrstuvwx", "attr_abcdefghijklmnopqrstuvwx"},
 		{"not a run token: base32 has no 0, 1, 8, 9", "r_abcdefghijklmnopqrstuv01", "r_abcdefghijklmnopqrstuv01"},
+		{"chat token", "chat_token: c_abcdefghijklmnopqrstuvwxyz234567\n", "chat_token: [redacted]\n"},
+		{"chat token, upper case", "C_ABCDEFGHIJKLMNOPQRSTUVWXYZ234567.", "[redacted]."},
+		{"chat token in json", `{"t":"c_abcdefghijklmnopqrstuvwxyz234567"}`, `{"t":"[redacted]"}`},
+		{"not a chat token: too short", "c_abcdefghijklmnopqrstuvwxyz23456", "c_abcdefghijklmnopqrstuvwxyz23456"},
+		{"not a chat token: inside a word", "abc_abcdefghijklmnopqrstuvwxyz234567", "abc_abcdefghijklmnopqrstuvwxyz234567"},
 	}
 	for _, c := range cases {
 		if got := Redact(c.in); got != c.want {
@@ -34,7 +39,8 @@ func TestRedact(t *testing.T) {
 }
 
 func TestIsSecretKey(t *testing.T) {
-	yes := []string{"token", "api_key", "apiKey", "TELEGRAM_BOT_TOKEN", "webhook_secret", "password", "authorization", "x-token"}
+	yes := []string{"token", "api_key", "apiKey", "TELEGRAM_BOT_TOKEN", "webhook_secret", "password", "authorization", "x-token",
+		"run_token", "chat_token"}
 	no := []string{"idempotency_key", "key", "run_id", "tokens", "input_tokens", "keyboard", "monkey"}
 	for _, k := range yes {
 		if !IsSecretKey(k) {
