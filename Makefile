@@ -8,7 +8,7 @@ WEB_PORT     ?= 8080
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env run smoke probe-openclaw stop down clean logs ps test test-go test-web \
+.PHONY: help env run smoke probe-openclaw stop down clean logs ps test test-go test-web web-deps \
         test-integration lint tidy install migrate seed eval eval-baseline eval-final \
         tunnel build openclaw-shell openclaw-logs openclaw-validate prune-sandboxes
 
@@ -93,10 +93,13 @@ test-race: ## Engine and event hub under the race detector (cgo: gcc installed i
 test-integration: ## Live tests against the running gateway (serial: the packages patch gateway config)
 	$(GO) go test -tags integration -p 1 ./internal/openclaw/ ./internal/engine/ -run TestIntegration -count=1
 
-test-web: env ## Frontend tests
+web-deps: ## Install the UI's dependencies into web/node_modules (pnpm, frozen lockfile; a no-op when current)
+	$(NODE) pnpm install --frozen-lockfile --prefer-offline
+
+test-web: env web-deps ## Frontend tests
 	$(NODE) pnpm test
 
-lint: ## go vet, staticcheck, eslint, tsc
+lint: web-deps ## go vet, staticcheck, eslint, tsc
 	$(GO) go vet ./...
 	$(GO) sh -c 'go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...'
 	$(NODE) pnpm lint
