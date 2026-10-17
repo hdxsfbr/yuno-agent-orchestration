@@ -24,9 +24,9 @@ coordinator session over ssh (the API token stayed on the host; nothing printed)
 | a Dev pipeline run naming the project | `project_clone` span: `main` at depth 1 in 619 ms, toolchain `python`; Coder added `power(base, exponent)` with tests; Reviewer approved; the gate and the merge request card were approved from the API within the tool's wait (no late grant this time); the Deployer's title was `Add power(base, exponent) function with tests` (46 characters); run succeeded in 62 s at $0.17 with 11 steps and 8 tool calls |
 | the merge request | `yuno-playground!2` from branch `yuno/e8dfa53268bd` against `main` |
 
-Not verified here: a Telegram message to the Chief of Staff naming the playground
-project (only the operator can send one); the Chief's `list_projects` and the project
-on `delegate_task` are covered by the unit tests and the seeded prompt.
+The last check, a Telegram message to the Chief of Staff naming the playground
+project, was sent by Andre the same evening and reported as working; the Chief's
+`list_projects` and the project on `delegate_task` are also covered by the unit tests.
 
 # Test results, 2026-10-17 (project repository, DESIGN 5.16)
 
