@@ -3,9 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
-import type { Schedule, ScheduleInput, Workflow } from "@/lib/api";
+import type { Project, Schedule, ScheduleInput, Workflow } from "@/lib/api";
 import { formatDateTime, shortId } from "@/lib/format";
 import { apiError, installFakeApi } from "@/test/fakeApi";
+import { project } from "@/test/fixtures";
 import SchedulesPage from "./SchedulesPage";
 
 const RUN = "01a14161-d5ef-7d96-ba96-a45d5d4bb0f2";
@@ -38,6 +39,7 @@ const schedule = (over: Partial<Schedule>): Schedule => ({
 
 let workflows: Workflow[];
 let schedules: Schedule[];
+let projects: Project[];
 let api: ReturnType<typeof installFakeApi>;
 
 beforeEach(() => {
@@ -50,7 +52,13 @@ beforeEach(() => {
     workflow({ id: "w2", name: "Release train" }),
     workflow({ id: "w3", name: "Dev pipeline", template_key: "dev_pipeline", definition: { nodes: [{ id: "c", kind: "agent", agent_name: "Coder" }], edges: [] } }),
     workflow({ id: "w4", name: "Weekly digest", definition: { nodes: [], edges: [], input_schema: { type: "object", properties: { topic: { type: "string" } } } } }),
+    workflow({
+      id: "w5",
+      name: "Dev pipeline (ours)",
+      definition: { nodes: [], edges: [], project: true, input_schema: { type: "object", properties: { task: { type: "string" } }, required: ["task"] } },
+    }),
   ];
+  projects = [project({}), project({ id: "p2", name: "docs-site" })];
   schedules = [
     schedule({}),
     schedule({
@@ -71,6 +79,7 @@ beforeEach(() => {
   api = installFakeApi();
   api.on("GET", "/api/workflows", () => workflows);
   api.on("GET", "/api/schedules", () => schedules);
+  api.on("GET", "/api/projects", () => projects);
 });
 
 afterEach(() => {
@@ -88,6 +97,8 @@ function renderPage() {
           <Route path="/schedules" element={<SchedulesPage />} />
           <Route path="/runs/:id" element={<p>run page</p>} />
           <Route path="/workflows" element={<p>workflows page</p>} />
+          <Route path="/projects" element={<p>projects page</p>} />
+          <Route path="/projects/:id" element={<p>project page</p>} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -411,5 +422,138 @@ describe("live updates", () => {
     api.send("/api/events", "schedule.fired", { schedule: fired, run: { id: RUN } });
     await waitFor(() => expect(once.getByRole("link", { name: `Run ${shortId(RUN)}` })).not.toBeNull());
     expect((once.getByRole("switch") as HTMLInputElement).checked).toBe(false);
+  });
+});
+
+describe("a schedule on a project", () => {
+  const onProject = (over: Partial<Schedule> = {}): Schedule =>
+    schedule({ id: "s5", workflow_id: "w5", cron_expr: "0 7 * * *", tz: "UTC", project_id: "p1", project_name: "yuno-playground", input: { task: "ship" }, ...over });
+
+  it("lists the project's name, linking to its page, and a dash for a schedule without one", async () => {
+    schedules = [...schedules, onProject()];
+    renderPage();
+    const r = await row(/Enable Dev pipeline \(ours\)/);
+    await waitFor(() => expect(r.getByRole("link", { name: "yuno-playground" }).getAttribute("href")).toBe("/projects/p1"));
+    const cron = await row(/Enable Nightly report \(0 9/);
+    expect(cron.getByText("—")).not.toBeNull();
+    fireEvent.click(r.getByRole("link", { name: "yuno-playground" }));
+    expect(await screen.findByText("project page")).not.toBeNull();
+  });
+
+  it("shows a renamed project under its new name, and a deleted one by its stored name, marked and no longer a link", async () => {
+    projects = [project({ name: "playground-2" })];
+    schedules = [onProject(), onProject({ id: "s6", cron_expr: "0 9 * * *", project_id: "p9", project_name: "old-project" })];
+    renderPage();
+    const renamed = await row(/Enable Dev pipeline \(ours\) \(0 7/);
+    await waitFor(() => expect(renamed.getByRole("link", { name: "playground-2" })).not.toBeNull());
+    const gone = await row(/Enable Dev pipeline \(ours\) \(0 9/);
+    expect(gone.getByText("old-project")).not.toBeNull();
+    expect(gone.getByText("Deleted")).not.toBeNull();
+    expect(gone.queryByRole("link", { name: "old-project" })).toBeNull();
+  });
+
+  it("sends the project with the enabled toggle", async () => {
+    api.on("PUT", /^\/api\/schedules\/([^/]+)$/, (r) => ({ ...schedules.find((s) => s.id === r.match[1])!, ...(r.body as ScheduleInput) }));
+    schedules = [onProject()];
+    renderPage();
+    const r = await row(/Enable Dev pipeline/);
+    fireEvent.click(r.getByRole("switch"));
+    await waitFor(() => expect(api.made("PUT", "/api/schedules/s5")).toHaveLength(1));
+    expect(api.made("PUT", "/api/schedules/s5")[0].body).toEqual({
+      workflow_id: "w5",
+      project_id: "p1",
+      kind: "cron",
+      cron_expr: "0 7 * * *",
+      tz: "UTC",
+      enabled: false,
+      input: { task: "ship" },
+    });
+  });
+
+  it("offers a required Project select once a workflow that works on one is chosen, and sends the choice", async () => {
+    api.on("POST", "/api/schedules", (r) => ({ ...schedule({ id: "s9" }), ...(r.body as ScheduleInput) }));
+    renderPage();
+    const d = await openNew();
+    await waitFor(() => expect(d.getByRole("option", { name: "Dev pipeline (ours)" })).not.toBeNull());
+    expect(d.queryByLabelText(/^Project/)).toBeNull();
+    fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w5" } });
+    const select = (await d.findByLabelText(/^Project/)) as HTMLSelectElement;
+    expect(select.parentElement?.textContent).toContain("*");
+    expect(Array.from(select.options).map((o) => o.textContent)).toEqual(["Choose a project", "yuno-playground", "docs-site"]);
+    expect(select.value).toBe("");
+    fireEvent.change(d.getByLabelText(/^Cron expression/), { target: { value: "0 7 * * *" } });
+    fireEvent.change(d.getByLabelText(/^task/), { target: { value: "ship" } });
+    fireEvent.click(d.getByRole("button", { name: "Create schedule" }));
+    expect(await d.findByText("Choose a project", { selector: "p" })).not.toBeNull();
+    expect(d.getByLabelText(/^Project/).getAttribute("aria-invalid")).toBe("true");
+    expect(api.made("POST", "/api/schedules")).toHaveLength(0);
+
+    fireEvent.change(d.getByLabelText(/^Project/), { target: { value: "p2" } });
+    fireEvent.click(d.getByRole("button", { name: "Create schedule" }));
+    await waitFor(() => expect(api.made("POST", "/api/schedules")).toHaveLength(1));
+    expect(api.made("POST", "/api/schedules")[0].body).toEqual({
+      workflow_id: "w5",
+      project_id: "p2",
+      kind: "cron",
+      cron_expr: "0 7 * * *",
+      tz: BROWSER_ZONE,
+      enabled: true,
+      input: { task: "ship" },
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("sends no project for a workflow that does not work on one", async () => {
+    api.on("POST", "/api/schedules", (r) => ({ ...schedule({ id: "s9" }), ...(r.body as ScheduleInput) }));
+    renderPage();
+    const d = await openNew();
+    await waitFor(() => expect(d.getByRole("option", { name: "Release train" })).not.toBeNull());
+    fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w2" } });
+    fireEvent.change(d.getByLabelText(/^Cron expression/), { target: { value: "0 * * * *" } });
+    fireEvent.click(d.getByRole("button", { name: "Create schedule" }));
+    await waitFor(() => expect(api.made("POST", "/api/schedules")).toHaveLength(1));
+    expect(api.made("POST", "/api/schedules")[0].body).not.toHaveProperty("project_id");
+  });
+
+  it("sends the user to the Projects page when none exists, and cannot save", async () => {
+    projects = [];
+    renderPage();
+    const d = await openNew();
+    await waitFor(() => expect(d.getByRole("option", { name: "Dev pipeline (ours)" })).not.toBeNull());
+    fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w5" } });
+    const sentence = await d.findByText(/This workflow works on a project repository/);
+    expect(within(sentence).getByRole("link", { name: "Projects page" }).getAttribute("href")).toBe("/projects");
+    expect(d.queryByLabelText(/^Project/)).toBeNull();
+    expect((d.getByRole("button", { name: "Create schedule" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("puts the API's refusal of the project next to the select", async () => {
+    api.on("POST", "/api/schedules", () => apiError(422, "validation_failed", "validation failed", [{ path: "project_id", message: "no project with id p2" }]));
+    renderPage();
+    const d = await openNew();
+    await waitFor(() => expect(d.getByRole("option", { name: "Dev pipeline (ours)" })).not.toBeNull());
+    fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w5" } });
+    fireEvent.change(await d.findByLabelText(/^Project/), { target: { value: "p2" } });
+    fireEvent.change(d.getByLabelText(/^Cron expression/), { target: { value: "0 7 * * *" } });
+    fireEvent.change(d.getByLabelText(/^task/), { target: { value: "ship" } });
+    fireEvent.click(d.getByRole("button", { name: "Create schedule" }));
+    await waitFor(() => expect(d.getByLabelText(/^Project/).parentElement?.textContent).toContain("no project with id p2"));
+    expect(d.getByLabelText(/^Project/).getAttribute("aria-invalid")).toBe("true");
+    expect(d.queryByText("project_id: no project with id p2")).toBeNull();
+    expect(screen.getByRole("dialog")).not.toBeNull();
+  });
+
+  it("opens an existing schedule on its project, and forgets it when another workflow is chosen", async () => {
+    schedules = [onProject()];
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: /Edit Dev pipeline/ }));
+    const d = await dialog();
+    await waitFor(() => expect((d.getByLabelText(/^Project/) as HTMLSelectElement).value).toBe("p1"));
+    expect((d.getByLabelText(/^task/) as HTMLInputElement).value).toBe("ship");
+
+    fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w2" } });
+    expect(d.queryByLabelText(/^Project/)).toBeNull();
+    fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w5" } });
+    expect((d.getByLabelText(/^Project/) as HTMLSelectElement).value).toBe("");
   });
 });

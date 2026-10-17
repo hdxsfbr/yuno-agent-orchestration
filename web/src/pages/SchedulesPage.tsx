@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import { deleteSchedule, listWorkflows, updateSchedule, type Schedule } from "@/lib/api";
 import { formatDateTime, shortId } from "@/lib/format";
 import { KIND_LABEL, describeWhen, scheduleToInput } from "@/lib/schedule";
+import { useProjects } from "@/lib/useProjects";
 import { replaceSchedule, schedulesKey, useScheduleEvents, useSchedules } from "@/lib/useSchedules";
 import { Badge } from "@/components/Badge";
 import Button from "@/components/Button";
@@ -17,6 +18,7 @@ export default function SchedulesPage() {
   const qc = useQueryClient();
   const q = useSchedules();
   const workflows = useQuery({ queryKey: ["workflows"], queryFn: listWorkflows });
+  const projects = useProjects();
   const connection = useScheduleEvents();
   const [editing, setEditing] = useState<Schedule | "new" | null>(null);
   const [deleting, setDeleting] = useState<Schedule | null>(null);
@@ -24,6 +26,9 @@ export default function SchedulesPage() {
   // The live name wins (a rename shows at once); the stored one covers a workflow that is gone.
   const workflowName = (s: Schedule) => workflows.data?.find((w) => w.id === s.workflow_id)?.name || s.workflow_name || (workflows.data ? "Deleted workflow" : shortId(s.workflow_id));
   const workflowGone = (s: Schedule) => !!workflows.data && !workflows.data.some((w) => w.id === s.workflow_id);
+  // The same for the project the runs work on: a schedule without one shows nothing.
+  const projectName = (s: Schedule) => (s.project_id ? projects.data?.find((p) => p.id === s.project_id)?.name || s.project_name || shortId(s.project_id) : "");
+  const projectGone = (s: Schedule) => !!s.project_id && !!projects.data && !projects.data.some((p) => p.id === s.project_id);
 
   const toggle = useMutation({
     mutationFn: (s: Schedule) => updateSchedule(s.id, { ...scheduleToInput(s), enabled: !s.enabled }),
@@ -60,10 +65,11 @@ export default function SchedulesPage() {
       {q.data && q.data.length === 0 ? <EmptyState>No schedules yet. Schedule a workflow to run on a repeating cadence or once at a set time.</EmptyState> : null}
       {q.data && q.data.length > 0 ? (
         <div className={`${cardClass} overflow-x-auto`}>
-          <table className="w-full min-w-[60rem] text-left text-sm">
+          <table className="w-full min-w-[66rem] text-left text-sm">
             <thead className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
               <tr>
                 <th className="px-4 py-2.5 font-medium">Workflow</th>
+                <th className="px-4 py-2.5 font-medium">Project</th>
                 <th className="px-4 py-2.5 font-medium">Schedule</th>
                 <th className="px-4 py-2.5 font-medium">Time zone</th>
                 <th className="px-4 py-2.5 font-medium">Next run</th>
@@ -91,6 +97,22 @@ export default function SchedulesPage() {
                         )}
                         {gone && s.workflow_name ? <Badge tone="orange">Deleted</Badge> : null}
                       </div>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      {s.project_id ? (
+                        <div className="flex items-center gap-2">
+                          {projectGone(s) ? (
+                            <span>{projectName(s)}</span>
+                          ) : (
+                            <Link to={`/projects/${encodeURIComponent(s.project_id)}`} className="hover:underline">
+                              {projectName(s)}
+                            </Link>
+                          )}
+                          {projectGone(s) ? <Badge tone="orange">Deleted</Badge> : null}
+                        </div>
+                      ) : (
+                        <span className="text-zinc-500">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5">
                       <div className="flex items-center gap-2">

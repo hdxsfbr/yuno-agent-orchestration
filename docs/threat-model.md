@@ -147,7 +147,5 @@ derived gateway image adds only the static Docker CLI.
 - Projects are cloned at depth 1 from their default branch; the merge request flattens
   the agent's changes into one commit by Yuno. A project run with sandbox network on is
   a trusted-repository mode (above). An agent that edits its checkout's `.git` directory
-  only breaks its own `git diff`; the platform does not read that directory. Schedules
-  do not name a project, so a scheduled run of a workflow that opts in fails its
-  validation when it fires. Project tokens are only as safe as `PROJECT_TOKEN_KEY` in
-  `.env` (above).
+  only breaks its own `git diff`; the platform does not read that directory. Project
+  tokens are only as safe as `PROJECT_TOKEN_KEY` in `.env` (above).

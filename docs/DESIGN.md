@@ -608,7 +608,8 @@ Out of scope: our own webhook adapter (revision 1), group chats, media.
 Purpose: fire workflow runs on a cron cadence or once after a delay, durably, exactly once
 per tick.
 
-Inputs: `schedules` rows; `SCHEDULER_TICK` (default 10 s).
+Inputs: `schedules` rows, with the project their runs work on (rule 6);
+`SCHEDULER_TICK` (default 10 s).
 
 Units: cron expressions are 5-field standard (`robfig/cron` `ParseStandard`), interpreted
 in the schedule's `tz` (IANA name, default `UTC`); `run_at` is an absolute UTC timestamp.
@@ -634,6 +635,22 @@ Rules:
 4. A schedule whose workflow is deleted is disabled at the next tick with
    `last_error = "workflow deleted"`.
 5. Minimum cron interval is 1 minute (standard cron has no seconds field).
+6. A schedule names the project its runs work on: `schedules.project_id` (nullable,
+   references `projects`; migration 0011), checked on create and update exactly as a
+   run request's `project_id` is (5.17 rule 4, the engine's own check): required for
+   a workflow whose definition has `project: true`, refused for one without it, an
+   unknown or deleted id refused, each a 422 detail on `project_id` with the engine's
+   message. An update that leaves `project_id` out keeps the stored one, except one
+   that changes `workflow_id`, which drops it (the project goes with the workflow
+   choice); an empty string clears it. The tick passes the id in the trigger request,
+   so the engine checks it again and snapshots the project onto the run like a manual
+   request's; a project deleted since the schedule was saved refuses the occurrence
+   like any trigger-time validation failure (failure handling below) and refuses the
+   schedule's next update until another project is chosen. The representation carries
+   `project_id` and `project_name` (joined like `workflow_name`; it survives the
+   project's deletion); the list shows the project's name linking to its page, marked
+   when the project is gone, and the form shows the Run dialog's project selector
+   (5.17 rule 13) when the chosen workflow opts in.
 
 Edge cases: DST transitions follow `time.LoadLocation` semantics; a 02:30 daily schedule in
 a zone that skips 02:30 fires at the next valid instant per the cron library. Two API
@@ -653,7 +670,13 @@ Tests: T5.9.1 cron next-run at both sides of a boundary. T5.9.2 delay fires once
 disables. T5.9.3 downtime across 3 occurrences → one run. T5.9.4 invalid cron → 422.
 T5.9.5 deleted workflow → disabled with error. T5.9.6 tz `America/Sao_Paulo` vs UTC give
 different `next_run_at` for the same expression. T5.9.7 a firing whose schedule update
-was lost re-fires once and creates no second run.
+was lost re-fires once and creates no second run. T5.9.8 a schedule on a project: the
+store round trip with the joined name, kept after the project's deletion; the API's
+422 details on `project_id` (required, refused, unknown, deleted) and the update
+rules; the tick passes the id; a scheduled Dev pipeline run on a project is queued
+through the engine with the project's snapshot and a definition that opts in, and
+refused with the reason once the project is deleted; the dialog's selector and the
+list's column.
 
 Out of scope: per-second schedules, schedule pausing UI beyond the enabled toggle.
 
@@ -1380,9 +1403,8 @@ Rules:
    workflow without the flag it is refused (422 `project_id: the workflow does not
    use a project`), and a quick run takes it optionally, its one-node definition
    getting `project: true` when it does. An unknown or deleted id is 422
-   `project_id: no project with id X`. A schedule carries no project (out of scope),
-   so a scheduled run of a workflow that opts in fails validation when it fires and
-   the schedule's `last_error` says so.
+   `project_id: no project with id X`. A schedule names its project under the same
+   rule when it is saved and passes it to the trigger when it fires (5.9 rule 6).
 5. **Check.** `POST /api/projects/{id}/check` verifies the stored token against the
    provider without a clone: GitLab `GET <api base>` (the project: its
    `default_branch`, and the token's access level under `permissions.project_access`
@@ -1534,9 +1556,9 @@ page lists projects; the approval card's ended-run note. T5.17.9 `GET /api/tools
 `open_merge_request` always (supersedes T5.16.8); `TestEnvExampleAndComposeCoverConfig`
 covers `PROJECT_TOKEN_KEY`.
 
-Out of scope: a schedule naming a project; per-agent projects; a project's own default
-limits; more than one token per project; GitHub Apps; validating a changed repository
-URL against the runs that used the project.
+Out of scope: per-agent projects; a project's own default limits; more than one token
+per project; GitHub Apps; validating a changed repository URL against the runs that
+used the project.
 
 ## 6. HTTP API summary
 
@@ -1582,7 +1604,9 @@ Binding lives on Channels, not on the agent form.
 Wave 7 as built (5.17): the Projects tab (list, one form for create and edit with a
 write-only token field, Check, Delete), the project selector in the workflow Run dialog
 and the quick-run dialog, the project link on the runs list and the run header, the
-projects list on Status, and the ended-run note on tool approval cards.
+projects list on Status, and the ended-run note on tool approval cards. Then (5.9 rule
+6) the same project selector in the schedule form when the chosen workflow opts in,
+and a Project column on Schedules linking to the project's page.
 
 ## 8. Docker and Makefile
 
