@@ -135,14 +135,20 @@ func (s *Scheduler) fire(ctx context.Context, d *store.DueSchedule, now time.Tim
 		}
 	}
 	// The run is keyed by the occurrence it fires, so firing it again after the schedule
-	// update was lost finds that run instead of creating a second one.
+	// update was lost finds that run instead of creating a second one. The schedule's
+	// project goes with the request (rule 6); the engine checks it against the workflow
+	// and snapshots it onto the run like a manual request's.
 	ref := store.ScheduleOccurrenceRef(d.ID, *d.NextRunAt)
-	run, err := s.Engine.Trigger(ctx, engine.TriggerRequest{
+	req := engine.TriggerRequest{
 		WorkflowID: d.WorkflowID,
 		Input:      d.Input,
 		Trigger:    store.TriggerSchedule,
 		TriggerRef: ref,
-	})
+	}
+	if d.ProjectID != nil {
+		req.ProjectID = *d.ProjectID
+	}
+	run, err := s.Engine.Trigger(ctx, req)
 	var ve *engine.ValidationError
 	var rl *guardrails.RateLimitError
 	switch {

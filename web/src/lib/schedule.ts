@@ -9,6 +9,8 @@ export const KIND_LABEL: Record<ScheduleKind, string> = { cron: "Repeats", delay
 
 export type ScheduleFormState = {
   workflowId: string;
+  /** The project the runs work on; only sent when the workflow opts in. */
+  projectId: string;
   kind: ScheduleKind;
   cronExpr: string;
   tz: string;
@@ -65,6 +67,7 @@ export function describeWhen(s: Pick<Schedule, "kind" | "cron_expr" | "run_at">)
 export function scheduleToInput(s: Schedule): ScheduleInput {
   return {
     workflow_id: s.workflow_id,
+    ...(s.project_id ? { project_id: s.project_id } : {}),
     kind: s.kind,
     ...(s.kind === "cron" ? { cron_expr: s.cron_expr } : { run_at: s.run_at }),
     tz: s.tz,
@@ -88,12 +91,16 @@ export function scheduleErrors(details: unknown): FieldErrors {
 
 export type BuiltSchedule = { value?: ScheduleInput; errors: FieldErrors };
 
-/** The request for the form, or the problems that stop it. `fields` come from the workflow's input schema. */
-export function buildSchedule(f: ScheduleFormState, fields: InputField[]): BuiltSchedule {
+/**
+ * The request for the form, or the problems that stop it. `fields` come from the workflow's input
+ * schema; `needsProject` says the workflow works on a project, which the request then names.
+ */
+export function buildSchedule(f: ScheduleFormState, fields: InputField[], needsProject = false): BuiltSchedule {
   const errors: FieldErrors = {};
   const add = (path: string, message: string) => (errors[path] ??= []).push(message);
 
   if (!f.workflowId) add("workflow_id", "A workflow is required");
+  if (needsProject && !f.projectId) add("project_id", "Choose a project");
   if (!f.tz.trim()) add("tz", "Choose a time zone");
   let runAt: string | undefined;
   if (f.kind === "cron") {
@@ -119,6 +126,7 @@ export function buildSchedule(f: ScheduleFormState, fields: InputField[]): Built
     errors,
     value: {
       workflow_id: f.workflowId,
+      ...(needsProject ? { project_id: f.projectId } : {}),
       kind: f.kind,
       ...(f.kind === "cron" ? { cron_expr: f.cronExpr.trim() } : { run_at: runAt }),
       tz: f.tz,

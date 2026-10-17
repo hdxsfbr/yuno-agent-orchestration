@@ -255,6 +255,20 @@ func stripReasoning(messages json.RawMessage) json.RawMessage {
 	return b
 }
 
+// validationDetails turns the engine's "path: message" lines into details; a line
+// without a path is a detail on the body.
+func validationDetails(msgs []string) fieldErrors {
+	var fe fieldErrors
+	for _, m := range msgs {
+		path, msg, ok := strings.Cut(m, ": ")
+		if !ok {
+			path, msg = "", m
+		}
+		fe = append(fe, fieldError{Path: path, Message: msg})
+	}
+	return fe
+}
+
 // omitNull turns a JSON null into an absent value for omitempty fields.
 func omitNull(raw json.RawMessage) json.RawMessage {
 	if string(bytes.TrimSpace(raw)) == "null" {
@@ -271,15 +285,7 @@ func (s *Server) engineError(w http.ResponseWriter, r *http.Request, err error) 
 	var rl *guardrails.RateLimitError
 	switch {
 	case errors.As(err, &ve):
-		var fe fieldErrors
-		for _, m := range ve.Messages {
-			path, msg, ok := strings.Cut(m, ": ")
-			if !ok {
-				path, msg = "", m
-			}
-			fe = append(fe, fieldError{Path: path, Message: msg})
-		}
-		writeValidation(w, "invalid run", fe)
+		writeValidation(w, "invalid run", validationDetails(ve.Messages))
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error(), nil)
 	case errors.As(err, &rl):

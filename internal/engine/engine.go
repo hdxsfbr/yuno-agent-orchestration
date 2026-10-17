@@ -40,8 +40,8 @@ type Engine struct {
 	projects *project.Resolver
 	sbxMu    sync.Mutex
 	sbxHolds map[string]int
-	bg      sync.WaitGroup             // side effects executed after a late approval
-	reports sync.WaitGroup             // report-back sends in flight (report.go)
+	bg       sync.WaitGroup // side effects executed after a late approval
+	reports  sync.WaitGroup // report-back sends in flight (report.go)
 
 	// execute runs one claimed run; tests replace it to observe claims.
 	execute func(ctx context.Context, run *store.Run)
@@ -404,10 +404,17 @@ func (e *Engine) Trigger(ctx context.Context, req TriggerRequest) (*store.Run, e
 	return e.queueRun(ctx, wf, def, input, req, agents, proj, "agent_id", a.ID)
 }
 
-// projectForRequest resolves a run request's project (DESIGN 5.17 rule 4): required
-// when the definition opts in, refused when it does not, and a live project when one is
-// named. The messages are path-qualified validation failures.
+// projectForRequest is ProjectForRequest on the engine's pool.
 func (e *Engine) projectForRequest(ctx context.Context, id string, optsIn bool) (*store.Project, []string, error) {
+	return ProjectForRequest(ctx, e.deps.Pool, id, optsIn)
+}
+
+// ProjectForRequest resolves a run request's project (DESIGN 5.17 rule 4): required
+// when the definition opts in, refused when it does not, and a live project when one is
+// named. The messages are path-qualified validation failures ("project_id: ..."). The
+// schedule handlers check a schedule's project with it when it is saved, so a schedule
+// is refused exactly as its run would be when it fires (DESIGN 5.9 rule 6).
+func ProjectForRequest(ctx context.Context, q store.Querier, id string, optsIn bool) (*store.Project, []string, error) {
 	id = strings.TrimSpace(id)
 	switch {
 	case id == "" && optsIn:
@@ -417,7 +424,7 @@ func (e *Engine) projectForRequest(ctx context.Context, id string, optsIn bool) 
 	case !optsIn:
 		return nil, []string{"project_id: the workflow does not use a project"}, nil
 	}
-	p, err := store.GetProject(ctx, e.deps.Pool, id)
+	p, err := store.GetProject(ctx, q, id)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, []string{"project_id: no project with id " + id}, nil
 	}

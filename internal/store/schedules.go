@@ -17,11 +17,15 @@ const (
 )
 
 // Schedule fires runs of a workflow on a cron cadence or once at run_at (DESIGN 5.9).
-// NextRunAt is nil while the schedule is disabled.
+// NextRunAt is nil while the schedule is disabled. ProjectID is the project its runs
+// work on (rule 6), nil for a workflow without one; ProjectName is joined for the list
+// and survives the project's deletion like WorkflowName.
 type Schedule struct {
 	ID           string          `db:"id" json:"id"`
 	WorkflowID   string          `db:"workflow_id" json:"workflow_id"`
 	WorkflowName string          `db:"workflow_name" json:"workflow_name"`
+	ProjectID    *string         `db:"project_id" json:"project_id,omitempty"`
+	ProjectName  *string         `db:"project_name" json:"project_name,omitempty"`
 	Kind         string          `db:"kind" json:"kind"`
 	CronExpr     *string         `db:"cron_expr" json:"cron_expr,omitempty"`
 	TZ           string          `db:"tz" json:"tz"`
@@ -53,11 +57,15 @@ type ScheduleOutcome struct {
 	At        time.Time
 }
 
-// The workflow name is joined for the list and the form; a soft-deleted workflow keeps
-// its name so the schedule still says what it ran.
-const scheduleSelect = `SELECT s.id, s.workflow_id, COALESCE(w.name, '') AS workflow_name, s.kind, s.cron_expr,
-	s.tz, s.run_at, s.enabled, s.next_run_at, s.last_run_at, s.last_run_id, s.last_error, s.input, s.created_at,
-	s.updated_at FROM schedules s LEFT JOIN workflows w ON w.id = s.workflow_id`
+// The workflow and project names are joined for the list and the form; a soft-deleted
+// workflow or project keeps its name so the schedule still says what it ran.
+const scheduleColumns = `s.id, s.workflow_id, COALESCE(w.name, '') AS workflow_name, s.project_id, p.name AS project_name,
+	s.kind, s.cron_expr, s.tz, s.run_at, s.enabled, s.next_run_at, s.last_run_at, s.last_run_id, s.last_error, s.input,
+	s.created_at, s.updated_at`
+
+const scheduleJoins = ` FROM schedules s LEFT JOIN workflows w ON w.id = s.workflow_id LEFT JOIN projects p ON p.id = s.project_id`
+
+const scheduleSelect = `SELECT ` + scheduleColumns + scheduleJoins
 
 func CreateSchedule(ctx context.Context, q Querier, s *Schedule) error {
 	if s.ID == "" {
@@ -68,10 +76,10 @@ func CreateSchedule(ctx context.Context, q Querier, s *Schedule) error {
 	}
 	now := time.Now().UTC()
 	s.CreatedAt, s.UpdatedAt = now, now
-	_, err := q.Exec(ctx, `INSERT INTO schedules (id, workflow_id, kind, cron_expr, tz, run_at, enabled, next_run_at,
+	_, err := q.Exec(ctx, `INSERT INTO schedules (id, workflow_id, project_id, kind, cron_expr, tz, run_at, enabled, next_run_at,
 		last_run_at, last_run_id, last_error, input, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
-		s.ID, s.WorkflowID, s.Kind, s.CronExpr, s.TZ, s.RunAt, s.Enabled, s.NextRunAt,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)`,
+		s.ID, s.WorkflowID, s.ProjectID, s.Kind, s.CronExpr, s.TZ, s.RunAt, s.Enabled, s.NextRunAt,
 		s.LastRunAt, s.LastRunID, s.LastError, s.Input, now)
 	return err
 }
@@ -105,8 +113,8 @@ func ListSchedules(ctx context.Context, q Querier) ([]Schedule, error) {
 func UpdateSchedule(ctx context.Context, q Querier, s *Schedule) error {
 	s.UpdatedAt = time.Now().UTC()
 	tag, err := q.Exec(ctx, `UPDATE schedules SET workflow_id=$2, kind=$3, cron_expr=$4, tz=$5, run_at=$6, enabled=$7,
-		next_run_at=$8, last_error=$9, input=$10, updated_at=$11 WHERE id=$1`,
-		s.ID, s.WorkflowID, s.Kind, s.CronExpr, s.TZ, s.RunAt, s.Enabled, s.NextRunAt, s.LastError, s.Input, s.UpdatedAt)
+		next_run_at=$8, last_error=$9, input=$10, updated_at=$11, project_id=$12 WHERE id=$1`,
+		s.ID, s.WorkflowID, s.Kind, s.CronExpr, s.TZ, s.RunAt, s.Enabled, s.NextRunAt, s.LastError, s.Input, s.UpdatedAt, s.ProjectID)
 	if err != nil {
 		return err
 	}
@@ -152,10 +160,8 @@ func ScheduleIDOfRef(ref string) string {
 // locks them for the caller's transaction; rows another transaction holds are skipped
 // (DESIGN 5.9 rule 2), so two processes never fire the same row.
 func LockDueSchedules(ctx context.Context, tx pgx.Tx, now time.Time, limit int) ([]DueSchedule, error) {
-	rows, err := tx.Query(ctx, `SELECT s.id, s.workflow_id, COALESCE(w.name, '') AS workflow_name, s.kind, s.cron_expr,
-		s.tz, s.run_at, s.enabled, s.next_run_at, s.last_run_at, s.last_run_id, s.last_error, s.input, s.created_at,
-		s.updated_at, (w.id IS NULL OR w.deleted_at IS NOT NULL) AS workflow_gone
-		FROM schedules s LEFT JOIN workflows w ON w.id = s.workflow_id
+	rows, err := tx.Query(ctx, `SELECT `+scheduleColumns+`, (w.id IS NULL OR w.deleted_at IS NOT NULL) AS workflow_gone`+
+		scheduleJoins+`
 		WHERE s.enabled AND s.next_run_at <= $1
 		ORDER BY s.next_run_at, s.id LIMIT $2
 		FOR UPDATE OF s SKIP LOCKED`, now, limit)

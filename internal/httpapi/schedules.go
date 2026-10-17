@@ -28,16 +28,21 @@ var scheduleNow = func() time.Time { return time.Now().UTC() }
 // the enabled toggle is {"enabled": false}; the read-only Schedule fields are accepted
 // and ignored so a client can PUT back what it fetched.
 type scheduleInput struct {
-	WorkflowID *string         `json:"workflow_id"`
-	Kind       *string         `json:"kind"`
-	CronExpr   *string         `json:"cron_expr"`
-	TZ         *string         `json:"tz"`
-	RunAt      *string         `json:"run_at"`
-	Enabled    *bool           `json:"enabled"`
-	Input      json.RawMessage `json:"input"`
+	WorkflowID *string `json:"workflow_id"`
+	// ProjectID names the project the schedule's runs work on (DESIGN 5.9 rule 6):
+	// required for a workflow that opts in, refused for one that does not; an empty
+	// string clears it.
+	ProjectID *string         `json:"project_id"`
+	Kind      *string         `json:"kind"`
+	CronExpr  *string         `json:"cron_expr"`
+	TZ        *string         `json:"tz"`
+	RunAt     *string         `json:"run_at"`
+	Enabled   *bool           `json:"enabled"`
+	Input     json.RawMessage `json:"input"`
 
 	ID           json.RawMessage `json:"id"`
 	WorkflowName json.RawMessage `json:"workflow_name"`
+	ProjectName  json.RawMessage `json:"project_name"`
 	NextRunAt    json.RawMessage `json:"next_run_at"`
 	LastRunAt    json.RawMessage `json:"last_run_at"`
 	LastRunID    json.RawMessage `json:"last_run_id"`
@@ -46,13 +51,27 @@ type scheduleInput struct {
 	UpdatedAt    json.RawMessage `json:"updated_at"`
 }
 
-// apply merges the input onto sc, validates the result (DESIGN 5.9 rule 1) and sets
-// next_run_at from now. A cron expression or zone the parser refuses is reported with
-// the parser's message.
+// apply merges the input onto sc, validates the result (DESIGN 5.9 rules 1 and 6) and
+// sets next_run_at from now. A cron expression or zone the parser refuses is reported
+// with the parser's message; the project is checked against the workflow the way the
+// trigger will.
 func (s *Server) applySchedule(ctx context.Context, in *scheduleInput, sc *store.Schedule, now time.Time) (fieldErrors, error) {
 	var fe fieldErrors
+	prevWorkflow := sc.WorkflowID
 	if in.WorkflowID != nil {
 		sc.WorkflowID = strings.TrimSpace(*in.WorkflowID)
+	}
+	switch {
+	case in.ProjectID != nil:
+		if id := strings.TrimSpace(*in.ProjectID); id == "" {
+			sc.ProjectID = nil
+		} else {
+			sc.ProjectID = &id
+		}
+	case sc.WorkflowID != prevWorkflow:
+		// The project goes with the workflow choice: an update that moves the schedule
+		// to another workflow without naming a project drops the stored one.
+		sc.ProjectID = nil
 	}
 	if in.Kind != nil {
 		sc.Kind = *in.Kind
@@ -112,11 +131,30 @@ func (s *Server) applySchedule(ctx context.Context, in *scheduleInput, sc *store
 	if err != nil {
 		return nil, err
 	}
+	// A definition that does not parse is the workflow's problem and is left to the
+	// trigger, which records it on the schedule.
+	var def *workflow.Definition
+	if wf != nil {
+		def, _ = workflow.Parse(wf.Definition)
+	}
+	if def != nil {
+		// The same check the trigger makes (DESIGN 5.17 rule 4), so a schedule the
+		// engine would refuse at fire time is refused when it is saved (rule 6).
+		var projectID string
+		if sc.ProjectID != nil {
+			projectID = *sc.ProjectID
+		}
+		_, msgs, err := engine.ProjectForRequest(ctx, s.pool, projectID, def.Project)
+		if err != nil {
+			return nil, err
+		}
+		fe = append(fe, validationDetails(msgs)...)
+	}
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(sc.Input, &obj) != nil {
 		fe.add("input", "must be an object")
-	} else if wf != nil {
-		fe = append(fe, scheduleInputErrors(wf, sc.Input)...)
+	} else if def != nil {
+		fe = append(fe, scheduleInputErrors(def, sc.Input)...)
 	}
 	if len(fe) > 0 {
 		return fe, nil
@@ -161,11 +199,7 @@ var schedulePrinter = message.NewPrinter(language.English)
 // scheduleInputErrors checks the input against the workflow's input_schema the way
 // the trigger will (DESIGN 5.6 rule 11): one detail per violated field, input.<field>.
 // A schema that does not compile is the workflow's problem and is left to the trigger.
-func scheduleInputErrors(wf *store.Workflow, input json.RawMessage) fieldErrors {
-	def, err := workflow.Parse(wf.Definition)
-	if err != nil {
-		return nil
-	}
+func scheduleInputErrors(def *workflow.Definition, input json.RawMessage) fieldErrors {
 	if t := bytes.TrimSpace(def.InputSchema); len(t) == 0 || string(t) == "null" {
 		return nil
 	}

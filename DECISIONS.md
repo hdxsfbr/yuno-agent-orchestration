@@ -6,6 +6,23 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-17
 
+**D-039 A schedule names the project its runs work on.** (Andre, 2026-10-17)
+`schedules.project_id` (migration 0011) is checked when the schedule is created or
+updated with the rule a run request's `project_id` follows (D-038), through the
+engine's own check: required for a workflow that opts in, refused for one that does
+not, an unknown or deleted id refused, each a 422 detail on `project_id`. The tick
+passes the id in the trigger request, so the engine checks it again and snapshots the
+project onto the run like a manual request's. The schedule form shows the Run dialog's
+project selector when the chosen workflow opts in and the Schedules list names the
+project. Why: the seeded Dev pipeline opts in, so every schedule of it failed at its
+first firing with `project_id: required` in `last_error`, the limitation D-038 left;
+refusing the schedule when it is saved tells the operator at once rather than at the
+first tick, and the project is part of what the schedule runs, not something each
+occurrence rediscovers. Cost: a project deleted after the schedule was saved refuses
+the next occurrence (`last_error` names it) and the schedule's next update until
+another project is chosen; an update that moves a schedule to another workflow drops
+its project unless it names one. Design: `docs/DESIGN.md` 5.9 rule 6.
+
 **D-038 Projects are records created in the UI; a run names its project; tokens are
 encrypted at rest; `PROJECT_*` only bootstraps.** (Andre, 2026-10-17) The single
 environment-configured project of D-037 becomes a `projects` table an operator fills in
@@ -28,8 +45,8 @@ redeploy; records with a write-only, encrypted token keep the credential on the 
 side (D-037's rule) while making projects a product object. Cost: one more secret in
 `.env` (`PROJECT_TOKEN_KEY`), whose loss makes every stored token unreadable (the check
 says so and the operator enters the tokens again); schedules do not name a project yet,
-so a scheduled run of a project workflow fails its validation until they do. Design:
-`docs/DESIGN.md` 5.17.
+so a scheduled run of a project workflow fails its validation until they do (D-039
+adds it). Design: `docs/DESIGN.md` 5.17.
 
 **D-037 Projects are git repositories configured by environment variables; toolchains
 come from the repository and run in prebuilt generic images; sandbox network is a

@@ -228,6 +228,11 @@ func TestOpenAPIConformanceWave3B(t *testing.T) {
 	body := run(step{http.MethodPost, "/api/schedules", `{"workflow_id":"` + wf.ID + `","kind":"cron","cron_expr":"*/30 * * * *","tz":"UTC","input":{"task":"t"}}`, http.StatusCreated})
 	sc := decodeSchedule(t, body)
 	t.Cleanup(func() { _ = store.DeleteSchedule(ctx, pool, sc.ID) })
+	onProject := projectScheduleWorkflow(t)
+	p := seedProject(t, nil, "conformance-sched-"+uniqueSuffix(), "")
+	body = run(step{http.MethodPost, "/api/schedules", `{"workflow_id":"` + onProject.ID + `","project_id":"` + p.ID + `","kind":"cron","cron_expr":"0 9 * * *","input":{"task":"t"}}`, http.StatusCreated})
+	withProject := decodeSchedule(t, body)
+	t.Cleanup(func() { _ = store.DeleteSchedule(ctx, pool, withProject.ID) })
 	body = run(step{http.MethodPost, "/api/skills", `{"name":"` + skillName + `","description":"d","body":"b"}`, http.StatusCreated})
 	sk := decodeSkill(t, body)
 	for _, st := range []step{
@@ -238,6 +243,8 @@ func TestOpenAPIConformanceWave3B(t *testing.T) {
 		{http.MethodPut, "/api/schedules/" + sc.ID, `{"enabled":false}`, http.StatusOK},
 		{http.MethodPut, "/api/schedules/" + sc.ID, `{"kind":"delay","run_at":"2099-11-01T00:00:00Z","enabled":true}`, http.StatusOK},
 		{http.MethodPut, "/api/schedules/" + sc.ID, `{"tz":"Nowhere/Land"}`, http.StatusUnprocessableEntity},
+		{http.MethodGet, "/api/schedules/" + withProject.ID, "", http.StatusOK},
+		{http.MethodPost, "/api/schedules", `{"workflow_id":"` + onProject.ID + `","kind":"cron","cron_expr":"0 9 * * *","input":{"task":"t"}}`, http.StatusUnprocessableEntity},
 		{http.MethodGet, "/api/skills", "", http.StatusOK},
 		{http.MethodGet, "/api/skills/" + sk.ID, "", http.StatusOK},
 		{http.MethodPut, "/api/skills/" + sk.ID, `{"name":"` + skillName + `","body":"new"}`, http.StatusOK},
@@ -253,5 +260,118 @@ func TestOpenAPIConformanceWave3B(t *testing.T) {
 		{http.MethodDelete, "/api/schedules/" + sc.ID, "", http.StatusNotFound},
 	} {
 		run(st)
+	}
+}
+
+// projectScheduleWorkflow is scheduleWorkflow with project: true (DESIGN 5.17 rule 4).
+func projectScheduleWorkflow(t *testing.T) *store.Workflow {
+	t.Helper()
+	def := strings.TrimSuffix(strings.TrimSpace(validDefinition(testAgent(t, "sched-project-agent"))), "}") + `,"project":true}`
+	wf := &store.Workflow{Name: "scheduled on a project", Definition: json.RawMessage(def)}
+	mustDo(t, store.CreateWorkflow(context.Background(), testPool, wf))
+	return wf
+}
+
+// DESIGN 5.9 rule 6: a schedule names its project exactly as a run does (5.17 rule 4):
+// required for a workflow that opts in, refused for one that does not, an unknown or
+// deleted id refused, every one a 422 detail on project_id with the engine's message.
+// The representation carries project_id and project_name; an update keeps the project
+// when the body leaves it out, clears it with an empty string, and drops it when the
+// workflow changes.
+func TestScheduleProject(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	_, ts := newTestServer(t, pool, &fakeEngine{pool: pool}, nil)
+	pinScheduleClock(t, "2099-10-15T08:00:00Z")
+	plain := scheduleWorkflow(t)
+	needs := projectScheduleWorkflow(t)
+	p := seedProject(t, nil, "Sched "+uniqueSuffix(), "")
+	gone := seedProject(t, nil, "Gone "+uniqueSuffix(), "")
+	mustDo(t, store.DeleteProject(ctx, pool, gone.ID))
+	rest := `,"kind":"cron","cron_expr":"0 9 * * *","input":{"task":"t"}}`
+	for _, tc := range []struct {
+		name, body string
+		want       map[string]string
+	}{
+		{"required", `{"workflow_id":"` + needs.ID + `"` + rest, map[string]string{"project_id": "required; the workflow works on a project repository"}},
+		{"required, empty", `{"workflow_id":"` + needs.ID + `","project_id":" "` + rest, map[string]string{"project_id": "required; the workflow works on a project repository"}},
+		{"refused", `{"workflow_id":"` + plain.ID + `","project_id":"` + p.ID + `"` + rest, map[string]string{"project_id": "the workflow does not use a project"}},
+		{"unknown", `{"workflow_id":"` + needs.ID + `","project_id":"nope"` + rest, map[string]string{"project_id": "no project with id nope"}},
+		{"deleted", `{"workflow_id":"` + needs.ID + `","project_id":"` + gone.ID + `"` + rest, map[string]string{"project_id": "no project with id " + gone.ID}},
+		{"with the input", `{"workflow_id":"` + needs.ID + `","kind":"cron","cron_expr":"0 9 * * *","input":{"task":5}}`,
+			map[string]string{"project_id": "required; the workflow works on a project repository", "input.task": "got number, want string"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body := do(t, ts, http.MethodPost, "/api/schedules", tc.body)
+			if code != http.StatusUnprocessableEntity {
+				t.Fatalf("status %d: %s", code, body)
+			}
+			var fe []fieldError
+			mustDo(t, json.Unmarshal(decodeError(t, body).Error.Details, &fe))
+			got := map[string]string{}
+			for _, f := range fe {
+				got[f.Path] = f.Message
+			}
+			for path, msg := range tc.want {
+				if got[path] != msg {
+					t.Errorf("%s: %q, want %q (all: %v)", path, got[path], msg, got)
+				}
+			}
+		})
+	}
+
+	// A valid request stores the trimmed id; the representation names the project.
+	code, body := do(t, ts, http.MethodPost, "/api/schedules", `{"workflow_id":"`+needs.ID+`","project_id":" `+p.ID+` "`+rest)
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %s", code, body)
+	}
+	s := decodeSchedule(t, body)
+	t.Cleanup(func() { _ = store.DeleteSchedule(ctx, pool, s.ID) })
+	if s.ProjectID == nil || *s.ProjectID != p.ID || s.ProjectName == nil || *s.ProjectName != p.Name {
+		t.Fatalf("created = %+v", s)
+	}
+	code, body = do(t, ts, http.MethodGet, "/api/schedules", "")
+	var list []store.Schedule
+	mustDo(t, json.Unmarshal(body, &list))
+	if i := slices.IndexFunc(list, func(x store.Schedule) bool { return x.ID == s.ID }); code != http.StatusOK || i < 0 || list[i].ProjectName == nil || *list[i].ProjectName != p.Name {
+		t.Fatalf("list: %d %s", code, body)
+	}
+
+	// A body that leaves project_id out keeps it (the enabled toggle).
+	code, body = do(t, ts, http.MethodPut, "/api/schedules/"+s.ID, `{"enabled":false}`)
+	if got := decodeSchedule(t, body); code != http.StatusOK || got.ProjectID == nil || *got.ProjectID != p.ID || got.Enabled {
+		t.Fatalf("toggle: %d %s", code, body)
+	}
+	// PUT back what was fetched: the read-only project_name is accepted.
+	_, body = do(t, ts, http.MethodGet, "/api/schedules/"+s.ID, "")
+	if code, body = do(t, ts, http.MethodPut, "/api/schedules/"+s.ID, string(body)); code != http.StatusOK {
+		t.Fatalf("put back: %d %s", code, body)
+	}
+	// Clearing it on a workflow that needs one is refused.
+	code, body = do(t, ts, http.MethodPut, "/api/schedules/"+s.ID, `{"project_id":""}`)
+	if code != http.StatusUnprocessableEntity || !strings.Contains(string(body), "required; the workflow works on a project repository") {
+		t.Fatalf("clear on a project workflow: %d %s", code, body)
+	}
+	// Moving to a workflow without naming a project drops the stored one.
+	code, body = do(t, ts, http.MethodPut, "/api/schedules/"+s.ID, `{"workflow_id":"`+plain.ID+`"}`)
+	if got := decodeSchedule(t, body); code != http.StatusOK || got.ProjectID != nil || got.ProjectName != nil || strings.Contains(string(body), "project") {
+		t.Fatalf("move to a plain workflow: %d %s", code, body)
+	}
+	// And back: the project workflow needs one again, named with the move.
+	if code, body = do(t, ts, http.MethodPut, "/api/schedules/"+s.ID, `{"workflow_id":"`+needs.ID+`"}`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("move back without a project: %d %s", code, body)
+	}
+	code, body = do(t, ts, http.MethodPut, "/api/schedules/"+s.ID, `{"workflow_id":"`+needs.ID+`","project_id":"`+p.ID+`"}`)
+	if got := decodeSchedule(t, body); code != http.StatusOK || got.ProjectID == nil || *got.ProjectID != p.ID {
+		t.Fatalf("move back with a project: %d %s", code, body)
+	}
+	// A project deleted since the schedule was saved refuses the next update too.
+	mustDo(t, store.DeleteProject(ctx, pool, p.ID))
+	code, body = do(t, ts, http.MethodPut, "/api/schedules/"+s.ID, `{"enabled":true}`)
+	if code != http.StatusUnprocessableEntity || !strings.Contains(string(body), "no project with id "+p.ID) {
+		t.Fatalf("toggle on a deleted project: %d %s", code, body)
+	}
+	if got, _ := store.GetSchedule(ctx, pool, s.ID); got.ProjectName == nil || *got.ProjectName != p.Name {
+		t.Fatalf("the deleted project's name is gone from the schedule: %+v", got)
 	}
 }

@@ -5,6 +5,7 @@ import { ApiError, createSchedule, listWorkflows, updateSchedule, type Schedule,
 import { errorsFor, type FieldErrors } from "@/lib/agentForm";
 import { draftFromInput, emptyDraft, inputFields } from "@/lib/runInput";
 import { browserTimeZone, buildSchedule, scheduleErrors, timeZones, toLocalInput, type ScheduleFormState } from "@/lib/schedule";
+import { projectsKey, useProjects } from "@/lib/useProjects";
 import { isShippedTemplate } from "@/lib/workflow";
 import Button from "../Button";
 import InputFields from "../InputFields";
@@ -19,6 +20,7 @@ function initialState(workflows: Workflow[], schedule?: Schedule): ScheduleFormS
   const fields = inputFields(wf?.definition.input_schema);
   return {
     workflowId: schedule?.workflow_id ?? "",
+    projectId: schedule?.project_id ?? "",
     kind: schedule?.kind ?? "cron",
     cronExpr: schedule?.cron_expr ?? "",
     tz: schedule?.tz || browserTimeZone(),
@@ -43,6 +45,13 @@ function ScheduleForm({ workflows, schedule, onClose }: FormProps) {
   const zones = useMemo(() => toOptions(timeZones(form.tz, browserTimeZone())), [form.tz]);
   const set = (patch: Partial<ScheduleFormState>) => setForm((f) => ({ ...f, ...patch }));
 
+  // A workflow that opts in works on a project, which the schedule names for its runs.
+  const needsProject = !!workflow?.definition.project;
+  const projects = useProjects(needsProject);
+  // A project deleted since it was chosen no longer counts as chosen.
+  const projectId = projects.data?.some((p) => p.id === form.projectId) ? form.projectId : "";
+  const noProjects = needsProject && !!projects.data && projects.data.length === 0;
+
   const save = useMutation({
     mutationFn: (input: ScheduleInput) => (schedule ? updateSchedule(schedule.id, input) : createSchedule(input)),
     onSuccess: () => {
@@ -53,6 +62,8 @@ function ScheduleForm({ workflows, schedule, onClose }: FormProps) {
       if (err instanceof ApiError && err.status === 422) {
         setServerErrors(scheduleErrors(err.details));
         setFormError(err.message);
+        // A refused project may be one that was just deleted: show the current list.
+        if (needsProject) void qc.invalidateQueries({ queryKey: projectsKey });
       } else {
         setFormError(errorText(err));
       }
@@ -64,13 +75,13 @@ function ScheduleForm({ workflows, schedule, onClose }: FormProps) {
     if (save.isPending) return;
     setServerErrors({});
     setFormError(null);
-    const built = buildSchedule(form, fields);
+    const built = buildSchedule({ ...form, projectId }, fields, needsProject);
     setClientErrors(built.errors);
     if (built.value) save.mutate(built.value);
   };
 
   const errors = (path: string) => [...errorsFor(clientErrors, path), ...errorsFor(serverErrors, path)];
-  const known = new Set(["workflow_id", "kind", "cron_expr", "tz", "run_at", "enabled", "input"]);
+  const known = new Set(["workflow_id", "project_id", "kind", "cron_expr", "tz", "run_at", "enabled", "input"]);
   const unplaced = Object.entries(serverErrors)
     .filter(([k]) => !known.has(k.split(".")[0]))
     .flatMap(([k, m]) => m.map((x) => (k ? `${k}: ${x}` : x)));
@@ -94,7 +105,7 @@ function ScheduleForm({ workflows, schedule, onClose }: FormProps) {
           errors={errors("workflow_id")}
           onChange={(id) => {
             const next = workflows.find((w) => w.id === id);
-            set({ workflowId: id, draft: emptyDraft(inputFields(next?.definition.input_schema)), whole: "{}" });
+            set({ workflowId: id, projectId: "", draft: emptyDraft(inputFields(next?.definition.input_schema)), whole: "{}" });
           }}
           options={[
             { value: "", label: "Choose a workflow" },
@@ -103,6 +114,32 @@ function ScheduleForm({ workflows, schedule, onClose }: FormProps) {
           ]}
         />
       )}
+
+      {needsProject ? (
+        noProjects ? (
+          <p className="text-sm">
+            This workflow works on a project repository. Create one on the{" "}
+            <Link to="/projects" className="underline">
+              Projects page
+            </Link>{" "}
+            first.
+          </p>
+        ) : projects.error ? (
+          <QueryError what="the projects" error={projects.error} onRetry={() => void projects.refetch()} />
+        ) : projects.data ? (
+          <SelectField
+            label="Project"
+            required
+            value={projectId}
+            onChange={(v) => set({ projectId: v })}
+            options={[{ value: "", label: "Choose a project" }, ...projects.data.map((p) => ({ value: p.id, label: p.name }))]}
+            hint="Each run works on a checkout of this project's repository."
+            errors={errors("project_id")}
+          />
+        ) : (
+          <Loading label="Loading projects…" />
+        )
+      ) : null}
 
       <SelectField
         label="Runs"
@@ -165,7 +202,7 @@ function ScheduleForm({ workflows, schedule, onClose }: FormProps) {
         <Button onClick={onClose} disabled={save.isPending}>
           Cancel
         </Button>
-        <Button type="submit" variant="primary" disabled={save.isPending || choices.length === 0}>
+        <Button type="submit" variant="primary" disabled={save.isPending || choices.length === 0 || (needsProject && !projects.data?.length)}>
           {save.isPending ? "Saving…" : schedule ? "Save changes" : "Create schedule"}
         </Button>
       </div>

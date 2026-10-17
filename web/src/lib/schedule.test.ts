@@ -5,6 +5,7 @@ import { inputFields } from "./runInput";
 
 const form = (over: Partial<ScheduleFormState> = {}): ScheduleFormState => ({
   workflowId: "w1",
+  projectId: "",
   kind: "cron",
   cronExpr: "0 9 * * *",
   tz: "Europe/London",
@@ -74,6 +75,14 @@ describe("buildSchedule", () => {
     expect(buildSchedule(form({ kind: "delay", runAt: "" }), []).errors).toHaveProperty("run_at");
   });
 
+  it("names the project only for a workflow that works on one, and asks for it when none is chosen", () => {
+    expect(buildSchedule(form({ projectId: "p1" }), []).value).not.toHaveProperty("project_id");
+    expect(buildSchedule(form({ projectId: "p1" }), [], true).value?.project_id).toBe("p1");
+    const missing = buildSchedule(form({ projectId: "" }), [], true);
+    expect(missing.value).toBeUndefined();
+    expect(missing.errors).toEqual({ project_id: ["Choose a project"] });
+  });
+
   it("reads the whole input as a JSON object when the workflow has no fields", () => {
     expect(buildSchedule(form({ whole: '{"a":1}' }), []).value?.input).toEqual({ a: 1 });
     expect(buildSchedule(form({ whole: "[1]" }), []).errors.input).toEqual(["The input must be a JSON object"]);
@@ -118,6 +127,15 @@ describe("schedule display and round trip", () => {
 
   it("turns a schedule back into a request without the fields the server owns", () => {
     expect(scheduleToInput(base)).toEqual({ workflow_id: "w1", kind: "cron", cron_expr: "0 9 * * *", tz: "UTC", enabled: true, input: { topic: "x" } });
+    expect(scheduleToInput({ ...base, project_id: "p1", project_name: "yuno-playground" })).toEqual({
+      workflow_id: "w1",
+      project_id: "p1",
+      kind: "cron",
+      cron_expr: "0 9 * * *",
+      tz: "UTC",
+      enabled: true,
+      input: { topic: "x" },
+    });
     expect(scheduleToInput({ ...base, kind: "delay", cron_expr: undefined, run_at: "2026-10-20T15:00:00Z", input: null as unknown as Record<string, unknown> })).toEqual({
       workflow_id: "w1",
       kind: "delay",

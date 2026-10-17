@@ -776,6 +776,8 @@ export type ScheduleKind = "cron" | "delay";
 
 export type ScheduleInput = {
   workflow_id: string;
+  /** The project the schedule's runs work on: required for a workflow that opts in, refused for one that does not. */
+  project_id?: string;
   kind: ScheduleKind;
   cron_expr?: string;
   tz: string;
@@ -788,6 +790,8 @@ export type Schedule = ScheduleInput & {
   id: string;
   /** The workflow's name as the API joined it; it survives the workflow's deletion. */
   workflow_name?: string;
+  /** The project's name as the API joined it; it survives the project's deletion. */
+  project_name?: string;
   next_run_at?: string | null;
   last_run_at?: string | null;
   last_run_id?: string | null;
