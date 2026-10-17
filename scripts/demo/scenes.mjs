@@ -64,6 +64,114 @@ export async function scene02(page) {
   await pause(page, 2000);
 }
 
+// ---- scene 03, first part: the project the pipeline works on ---------------------------------------
+
+/** Whether the workflow scene 3 runs works on a project (its definition's `project` flag, DESIGN 5.17). */
+async function pipelineNeedsProject(page) {
+  const named = (list, name) => (list ?? []).find((w) => w.name === name);
+  // A new copy (LIVE=1) is made from the template; otherwise the existing copy decides, or the template when there is none.
+  const copy = cfg.live && process.env.NEW_COPY !== "0" ? undefined : named(await apiGet(page, "/api/workflows"), cfg.pipelineWorkflow);
+  const workflow = copy ?? named(await apiGet(page, "/api/workflow-templates"), cfg.pipelineTemplate);
+  return !!workflow?.definition?.project;
+}
+
+/** A project's row on the Projects page, by name. */
+const projectRow = (page, name) => page.locator("tbody tr").filter({ has: page.getByRole("link", { name, exact: true }) }).first();
+
+/**
+ * The Projects page: the repository the pipeline works on, registered with a token that can push. LIVE=1
+ * creates the project, or shows the one that already has its name (a previous take, or the api's
+ * bootstrap), and runs Check; a dry run fills the form and cancels. Returns the name of a project the run
+ * can pick, or "" when none exists. The token only goes into the form's password field: the footage
+ * shows dots, and nothing here prints it.
+ */
+async function setupProject(page) {
+  const rec = recordingOf(page);
+  const name = cfg.projectName;
+  const existing = name ? projectRow(page, name) : null;
+  const exists = !!existing && (await existing.count()) > 0;
+
+  if (exists && cfg.live) {
+    log(rec.scene, `project ${name} exists: reusing it (delete it first to record its creation)`);
+    await pointAt(page, existing.getByRole("link", { name, exact: true }), 3000);
+    await checkProject(page, name);
+    return name;
+  }
+  if (cfg.live && (!cfg.projectRepoUrl || !cfg.projectToken)) {
+    throw new Error("the workflow works on a project: set PROJECT_REPO_URL and PROJECT_GIT_TOKEN in .env, or DEMO_PROJECT_NAME to an existing project's name");
+  }
+  if (!cfg.projectRepoUrl) {
+    rec.warnings.push("PROJECT_REPO_URL is not set, so the New project form is not filled");
+    return exists ? name : "";
+  }
+  if (!name) {
+    // The name comes from the repository path; a URL without one needs DEMO_PROJECT_NAME.
+    if (cfg.live) throw new Error("PROJECT_REPO_URL has no repository path to name the project after: set DEMO_PROJECT_NAME");
+    rec.warnings.push("PROJECT_REPO_URL has no repository path, so the project's name is left empty");
+  }
+
+  await clickOn(page, page.getByRole("button", { name: "New project", exact: true }));
+  const dialog = page.getByRole("dialog", { name: "New project" });
+  await dialog.waitFor();
+  await pause(page, 1200);
+  await typeInto(page, dialog.getByLabel("Name"), name);
+  await typeInto(page, dialog.getByLabel("Repository URL"), cfg.projectRepoUrl);
+  if (cfg.projectBranch) await typeInto(page, dialog.getByLabel("Default branch"), cfg.projectBranch);
+  if (cfg.projectToken) await typeInto(page, dialog.getByLabel("Access token"), cfg.projectToken, { delay: 10 });
+  else rec.warnings.push("PROJECT_GIT_TOKEN is not set, so the token field is left empty");
+  if (cfg.projectDescription) await typeInto(page, dialog.getByLabel("Description"), cfg.projectDescription);
+  await pause(page, 1500);
+
+  if (!cfg.live) {
+    // Dry run: everything up to, not including, the click that creates the project.
+    await clickOn(page, dialog.getByRole("button", { name: "Cancel", exact: true }));
+    return exists ? name : "";
+  }
+  await clickOn(page, dialog.getByRole("button", { name: "Create project", exact: true }));
+  await dialog.waitFor({ state: "hidden", timeout: 30_000 });
+  await projectRow(page, name).waitFor({ timeout: 30_000 });
+  await pause(page, 2500);
+  await checkProject(page, name);
+  return name;
+}
+
+/** Check on the project's row: the provider is asked whether the token is accepted and can push, without a clone. */
+async function checkProject(page, name) {
+  await soft(page, "project check", async () => {
+    await clickOn(page, projectRow(page, name).getByRole("button", { name: `Check ${name}`, exact: true }));
+    // The answer is a status line under the row; the api bounds the check to ten seconds.
+    const result = page.locator("tbody").getByRole("status").first();
+    await result.waitFor({ timeout: 30_000 });
+    log(recordingOf(page).scene, `project check: ${((await result.textContent()) ?? "").trim()}`);
+    await pause(page, 3500);
+  });
+}
+
+/**
+ * Picks the project in the Run dialog of a workflow that asks for one: `wanted` (the project scene 3 set
+ * up), else the first project offered. Returns the name picked, or "" when the dialog does not ask or no
+ * project exists.
+ */
+async function pickProject(page, dialog, wanted) {
+  const rec = recordingOf(page);
+  const select = dialog.getByRole("combobox", { name: /^Project/ });
+  const none = dialog.getByText("works on a project repository");
+  // The list of projects may still be loading when the dialog opens.
+  await select.or(none).first().waitFor({ timeout: 10_000 }).catch(() => {});
+  if (!(await select.count())) {
+    if (await none.count()) rec.warnings.push("no project exists, so the run form cannot name one: create one on the Projects page first");
+    return "";
+  }
+  const offered = (await select.locator("option").evaluateAll((els) => els.map((o) => ({ value: o.value, label: (o.textContent ?? "").trim() })))).filter((o) => o.value !== "");
+  const choice = offered.find((o) => o.label === wanted) ?? offered[0];
+  if (!choice) return "";
+  if (wanted && choice.label !== wanted) rec.warnings.push(`project ${wanted} is not offered: picking ${choice.label}`);
+  await pointAt(page, select, 800);
+  await select.selectOption({ value: choice.value });
+  await pause(page, 1500);
+  return choice.label;
+}
+
 // ---- scene 03: a workflow from a template -----------------------------------------------------
 
 /**
@@ -93,7 +201,23 @@ export async function scene03(page) {
   await open(page, "/workflows", heading(page, "Workflows"));
   const fromTemplate = page.getByRole("button", { name: "From template", exact: true });
   await fromTemplate.waitFor();
-  trimLoad(page);
+  // A workflow that works on a project (the dev pipeline does) names one when its run starts, so the
+  // scene registers the project first; another workflow stays on the Workflows page.
+  let project = "";
+  const needsProject = await pipelineNeedsProject(page);
+  if (needsProject) {
+    await clickOn(page, nav(page, "Projects"), { before: 0, after: 0 });
+    await heading(page, "Projects").waitFor();
+    await page.getByRole("button", { name: "New project", exact: true }).waitFor();
+    trimLoad(page);
+    await pause(page, 2000);
+    project = await setupProject(page);
+    await clickOn(page, nav(page, "Workflows"));
+    await heading(page, "Workflows").waitFor();
+    await fromTemplate.waitFor();
+  } else {
+    trimLoad(page);
+  }
   await pause(page, 1500);
 
   // The template drawer. With LIVE=1 a new editable copy is made from it (NEW_COPY=0 reuses one).
@@ -150,6 +274,8 @@ export async function scene03(page) {
   await clickOn(page, page.getByRole("button", { name: "Run", exact: true }));
   const dialog = page.getByRole("dialog", { name: rx(`Run ${name}`) });
   await dialog.waitFor();
+  // The project the run works on comes first, when the workflow asks for one.
+  const picked = await pickProject(page, dialog, project);
   // The dev pipeline's input is "task"; another workflow (a dry run against one) may name its field differently.
   const taskField = (await dialog.getByLabel("task").count()) ? dialog.getByLabel("task") : dialog.locator("textarea, input:not([type=checkbox])").first();
   await typeInto(page, taskField, cfg.pipelineTask);
@@ -159,6 +285,7 @@ export async function scene03(page) {
     await clickOn(page, dialog.getByRole("button", { name: "Cancel", exact: true }));
     return;
   }
+  if (needsProject && !picked) throw new Error("the run form offers no project to run on");
   await clickOn(page, dialog.getByRole("button", { name: "Start run", exact: true }));
   await page.waitForURL(/\/runs\/[^/]+$/);
   writeState({ run_id: runIdFromUrl(page), recorded_at: new Date().toISOString() });
@@ -220,24 +347,28 @@ export async function scene04(page) {
     await page.goBack();
     await runHeader(page).waitFor();
 
-    // Deployer asks to run a side-effecting tool: the call itself blocks.
-    const pendingDeploy = page.locator("article").filter({ hasText: "deploy_release" }).filter({ has: page.getByRole("button", { name: "Approve", exact: true }) });
-    await waitCut(page, "deployer calls deploy_release, which waits for approval", () => pendingDeploy.first().waitFor(patience));
+    // Deployer asks to run a side-effecting tool: the call itself blocks. On a project it opens a merge
+    // request; a run without one publishes a release.
+    const pendingDeploy = page.locator("article").filter({ hasText: /open_merge_request|deploy_release/ }).filter({ has: page.getByRole("button", { name: "Approve", exact: true }) });
+    await waitCut(page, "deployer calls its side-effecting tool, which waits for approval", () => pendingDeploy.first().waitFor(patience));
     const deploy = pendingDeploy.first();
+    const tool = /open_merge_request/.test((await deploy.textContent()) ?? "") ? "open_merge_request" : "deploy_release";
+    const opensRequest = tool === "open_merge_request";
     await scrollTo(page, deploy, { offset: 120, dwell: 4500 });
-    await decide(page, deploy, "Approve", "release looks right");
-    await waitCut(page, "release is published and the run finishes", () => runStatus(page).filter({ hasText: /succeeded/i }).waitFor(patience));
+    await decide(page, deploy, "Approve", opensRequest ? "merge request looks right" : "release looks right");
+    await waitCut(page, opensRequest ? "the merge request is opened and the run finishes" : "release is published and the run finishes", () =>
+      runStatus(page).filter({ hasText: /succeeded/i }).waitFor(patience));
     await soft(page, "failed or cancelled run", async () => {
       if (!/succeeded/i.test((await runStatus(page).textContent()) ?? "")) throw new Error("the run did not succeed");
     });
     await pause(page, 2000);
 
-    // The release URL is in the deploy_release call's output.
-    await soft(page, "release url", async () => {
+    // The merge request's address (or the release URL) is in the tool call's output.
+    await soft(page, `${tool} output`, async () => {
       const node = nodeCard(page, "deployer");
       await scrollTo(page, node, { dwell: 1500 });
-      // The Output of the deploy_release call itself (not of an earlier call in the same node).
-      const call = node.locator("li").filter({ hasText: /Tool call\s*deploy_release/ }).first();
+      // The Output of the side-effecting call itself (not of an earlier call in the same node).
+      const call = node.locator("li").filter({ hasText: new RegExp(`Tool call\\s*${tool}`) }).first();
       await clickOn(page, call.locator("summary").filter({ hasText: /^Output/ }).first());
       await pause(page, 4500);
     });
@@ -246,6 +377,15 @@ export async function scene04(page) {
   // The trace: counters and cost, the timeline, the state, the messages, the logs.
   await scrollTop(page, 1500);
   await pointAt(page, runHeader(page), 4500);
+  // A run on a project: the project it worked on, and the merge request it opened, in the summary.
+  await soft(page, "project and merge request", async () => {
+    const header = runHeader(page);
+    const project = header.getByText("Project", { exact: true });
+    if (!(await project.count())) return;
+    await pointAt(page, project, 2500);
+    const request = header.getByRole("link", { name: /^(Merge|Pull) request/ });
+    if (await request.count()) await pointAt(page, request, 3000);
+  });
   await soft(page, "timeline", () => scrollTo(page, heading(page, "Timeline", 2), { dwell: 4500 }));
   await soft(page, "first node card", () => scrollTo(page, page.locator('section[aria-label^="Node "]').first(), { offset: 80, dwell: 4500 }));
   await soft(page, "state panel", () => scrollTo(page, heading(page, "State", 2), { dwell: 4500 }));

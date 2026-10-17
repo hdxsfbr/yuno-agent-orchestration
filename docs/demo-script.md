@@ -29,35 +29,40 @@ form shows what was materialised into the runtime.
 
 Narration: "An agent is configured entirely from the user interface, without touching code. The Agents page lists the six demo agents with the channel each one is bound to and its live state. Opening the Coder shows every dimension the brief names: its role and system prompt, the model, the tools it may use and, for each tool, whether it runs on its own, needs a human approval, or is blocked. Below that are the operating limits, the guardrails for cost, rate and blocked inputs, the memory policy with retention, the skills it can load, its exec policy, and the Telegram line. Saving pushes all of this into OpenClaw, and the runtime card shows what the gateway actually holds, including the markdown files that define the agent there."
 
-## 3. Building a workflow from a template (60 s)
+## 3. A project, and a workflow from a template (75 s)
 
-On screen: Workflows page; "From template" drawer; instantiate the dev pipeline; the
-builder opens: start → coder → reviewer, the `changes_requested` edge back to coder with
-its condition, the `approved` edge to the human gate, then deployer → end; open the
-reviewer node (task template, output schema with the verdict enum), the edge condition
-editor, the limits panel (loop visits 3); Validate; Run with the task "implement a
+On screen: Projects page; New project: the name, the repository URL, the default branch
+and the access token (a password field, so dots on screen); Create project; Check on the
+new row answers that the token is accepted and can push. Then the Workflows page; "From
+template" drawer; instantiate the dev pipeline; the builder opens: start → coder →
+reviewer, the `changes_requested` edge back to coder with its condition, the `approved`
+edge to the human gate, then deployer → end; open the reviewer node (task template,
+output schema with the verdict enum), the edge condition editor, the limits panel (loop
+visits 3); Validate; Run: the dialog asks for the project, then the task "implement a
 function that returns the nth Fibonacci number, with tests".
 
-Viewer learns: the loop is data (an edge with a condition), the approval gate is a node,
-the task is a template over typed state; templates are copied, then edited.
+Viewer learns: a pipeline that works on code names a project, whose token is stored
+write-only and encrypted; the loop is data (an edge with a condition), the approval gate
+is a node, the task is a template over typed state; templates are copied, then edited.
 
-Narration: "Workflows are graphs. From the Workflows page, the templates drawer offers two shipped pipelines; instantiating the dev pipeline makes an editable copy. In the builder you can see Coder, then Reviewer, then a human gate, then Deployer. The feedback loop is nothing more than an edge from Reviewer back to Coder with a condition on the reviewer's typed verdict; the other edge leads to the gate when the verdict is approved. Each agent node has a task template over the run input and the state so far, and an output schema the agent's result must satisfy. The limits panel bounds the loop. Nothing about Coder or Reviewer is hard-coded in the engine. Validation reports problems on the node or edge they belong to. I'll run it with a small task: a Fibonacci function with tests."
+Narration: "A pipeline that works on code starts from a project: a git repository registered on the Projects page with its address and a token that can push. The token is stored encrypted and never shown again; Check asks the provider whether it is accepted and can push. Workflows are graphs. From the Workflows page, the templates drawer offers two shipped pipelines; instantiating the dev pipeline makes an editable copy. In the builder you can see Coder, then Reviewer, then a human gate, then Deployer. The feedback loop is nothing more than an edge from Reviewer back to Coder with a condition on the reviewer's typed verdict; the other edge leads to the gate when the verdict is approved. Each agent node has a task template over the run input and the state so far, and an output schema the agent's result must satisfy. The limits panel bounds the loop. Nothing about Coder or Reviewer is hard-coded in the engine. Validation reports problems on the node or edge they belong to. The dev pipeline works on a project, so the run names one. I'll run it on that repository with a small task: a Fibonacci function with tests."
 
 ## 4. A successful run, live (150 s after cuts)
 
-On screen: the run page as it happens: node Coder running, model calls and sandboxed
-`exec` tool calls appearing, the agent message from coder to reviewer, Reviewer's
-verdict; the human gate: run waiting, the Approvals inbox badge; approve in the inbox
-(reason "looks good"); Deployer calls `deploy_release`, which blocks on a second
-approval (a side-effecting tool); approve it; the deploy target's release URL; the run
-succeeds. Then the trace: per-call tokens and cost, cache columns, the state panel, the
-agent messages section, the logs.
+On screen: the run page as it happens: the project and the toolchain in the summary,
+node Coder running in a checkout of the repository, model calls and sandboxed `exec`
+tool calls appearing, the agent message from coder to reviewer, Reviewer's verdict; the
+human gate: run waiting, the Approvals inbox badge; approve in the inbox (reason "looks
+good"); Deployer calls `open_merge_request`, which blocks on a second approval (a
+side-effecting tool); approve it; the merge request's address in the tool's output and
+its link in the run summary; the run succeeds. Then the trace: per-call tokens and cost,
+cache columns, the state panel, the agent messages section, the logs.
 
-Viewer learns: two agents cooperated through typed state, every tool call and model call
-is recorded with tokens and cost, both kinds of approval blocked until a human decided,
-the side effect ran once.
+Viewer learns: two agents cooperated through typed state on a real repository, every
+tool call and model call is recorded with tokens and cost, both kinds of approval
+blocked until a human decided, the side effect ran once and left a merge request.
 
-Narration: "This is the run, live. The Coder's turn executes in OpenClaw: each model call appears with its tokens and cost, and each tool call with its input and output, including the exec calls that run the tests inside the agent's Docker sandbox. When the Coder finishes, its typed output becomes part of the run state and a message to the Reviewer, which you can see in the agent messages section. The Reviewer reads the code, runs the tests itself, and approves. The run now stops at the human gate: it is waiting, the Approvals badge lights up, and the inbox shows exactly what is being approved. I approve it with a reason. The Deployer starts and calls the deploy tool. That tool is side-effecting, so the call itself blocks until a human decides; the second approval shows the full input, the version and the files. Once approved, the deploy runs exactly once under its idempotency key, the release lands on the local deploy target, and the run succeeds. The trace keeps everything: every call, every token, every cent, the state, and the messages between the agents."
+Narration: "This is the run, live, on the project's repository, cloned into the Coder's workspace. The Coder's turn executes in OpenClaw: each model call appears with its tokens and cost, and each tool call with its input and output, including the exec calls that run the tests inside the agent's Docker sandbox. When the Coder finishes, its typed output becomes part of the run state and a message to the Reviewer, which you can see in the agent messages section. The Reviewer reads the code, runs the tests itself, and approves. The run now stops at the human gate: it is waiting, the Approvals badge lights up, and the inbox shows exactly what is being approved. I approve it with a reason. The Deployer starts and asks to open a merge request. That tool is side-effecting, so the call itself blocks until a human decides; the second approval shows the full input, the title and the description. Once approved, the platform commits the checkout on a branch, pushes it and opens the merge request exactly once under the run's idempotency key, the run succeeds, and the request is linked from the run page. The trace keeps everything: every call, every token, every cent, the state, and the messages between the agents."
 
 ## 5. A handled failure (40 s)
 
@@ -117,9 +122,15 @@ interface. Thanks for watching."
 ## Recording notes
 
 - Pre-flight: the stack at the final commit (`make run`, `make smoke`), the six seeded
-  agents, a fresh dev-pipeline copy from the template, the Coder bound on Channels, no
-  leftover runs from a dry run on the first screen (filter the Runs list or seed a clean
+  agents, a fresh dev-pipeline copy from the template, the project's repository and token
+  in `.env` (`PROJECT_REPO_URL`, `PROJECT_GIT_TOKEN`; scene 3 creates the project, or
+  reuses the one that already has its name), the Coder bound on Channels, no leftover
+  runs from a dry run on the first screen (filter the Runs list or seed a clean
   database), the Telegram phone ready for scene 7.
+- The dev pipeline works on a project. A workflow that does not opt in
+  (`DEMO_PIPELINE_WORKFLOW`) skips the Projects page and ends with `deploy_release` on the
+  local deploy target instead of a merge request; the recorder handles both, and the
+  narration above describes the project path.
 - Scene 7 needs a human on the phone during capture; scene 8 is time-bound (the
   schedule fires two minutes after creation); record the time-free scenes first.
 - Capture: Playwright in a container, 1440x900, one WebM per scene, `SCENES=04,06` to

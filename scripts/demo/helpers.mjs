@@ -10,6 +10,16 @@ export const VIEWPORT = { width: 1440, height: 900 };
 const flag = (v) => v === "1" || v === "true" || v === "yes";
 const num = (v, d) => (Number.isFinite(Number(v)) && v !== undefined && v !== "" ? Number(v) : d);
 
+/** The last segment of a repository URL's path without ".git": the name the api's bootstrap gives a project. */
+export function repoName(url) {
+  try {
+    const segments = new URL((url || "").trim()).pathname.split("/").filter(Boolean);
+    return (segments.pop() || "").replace(/\.git$/i, "");
+  } catch {
+    return "";
+  }
+}
+
 export const cfg = {
   baseUrl: (process.env.BASE_URL || "http://web:80").replace(/\/+$/, ""),
   // The token is only ever put on requests to baseUrl's origin by installAuth(); never printed.
@@ -39,6 +49,14 @@ export const cfg = {
   // The template the drawer offers, and the name of the editable copy the builder scene opens.
   pipelineTemplate: process.env.PIPELINE_TEMPLATE || "Dev pipeline",
   pipelineWorkflow: process.env.PIPELINE_WORKFLOW || process.env.PIPELINE_TEMPLATE || "Dev pipeline",
+  // The project a workflow that opts in (the dev pipeline) works on: the repository and a token that can push,
+  // read from .env as the api's bootstrap reads them. The token only ever goes into the form's password field;
+  // it is never printed. The project is named after the repository path, as the bootstrap names it.
+  projectRepoUrl: (process.env.PROJECT_REPO_URL || "").trim(),
+  projectToken: process.env.PROJECT_GIT_TOKEN || "",
+  projectName: (process.env.PROJECT_NAME || "").trim() || repoName(process.env.PROJECT_REPO_URL),
+  projectBranch: (process.env.PROJECT_DEFAULT_BRANCH || "").trim(),
+  projectDescription: (process.env.PROJECT_DESCRIPTION || "").trim(),
   // Where the long waits stop being patient. Generous: a real model is slow, and the wait is cut.
   runTimeoutMs: num(process.env.RUN_TIMEOUT_MS, 15 * 60_000),
   phoneTimeoutMs: num(process.env.PHONE_TIMEOUT_MS, 10 * 60_000),

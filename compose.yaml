@@ -348,7 +348,9 @@ services:
   # Demo recorder (scripts/demo/README.md): drives the UI in a real browser, one WebM per scene.
   # It joins the default network and reaches the UI as http://web:80. API_TOKEN comes from .env
   # through the environment and is attached to API requests by the browser; it is not written
-  # anywhere. Run it with `make demo-record` (--no-deps: it never touches the running stack).
+  # anywhere. PROJECT_REPO_URL and PROJECT_GIT_TOKEN (the api's bootstrap inputs) are the project
+  # the dev-pipeline scene registers; the token is only typed into the page's password field.
+  # Run it with `make demo-record` (--no-deps: it never touches the running stack).
   demo:
     profiles: ["tools"]
     image: mcr.microsoft.com/playwright:v1.49.1-noble
@@ -375,6 +377,11 @@ services:
       PIPELINE_TASK: ${DEMO_PIPELINE_TASK:-}
       PIPELINE_TEMPLATE: ${DEMO_PIPELINE_TEMPLATE:-}
       PIPELINE_WORKFLOW: ${DEMO_PIPELINE_WORKFLOW:-}
+      PROJECT_REPO_URL: ${PROJECT_REPO_URL:-}
+      PROJECT_GIT_TOKEN: ${PROJECT_GIT_TOKEN:-}
+      PROJECT_DEFAULT_BRANCH: ${PROJECT_DEFAULT_BRANCH:-}
+      PROJECT_NAME: ${DEMO_PROJECT_NAME:-}
+      PROJECT_DESCRIPTION: ${DEMO_PROJECT_DESCRIPTION:-}
       SCHEDULE_WORKFLOW: ${DEMO_SCHEDULE_WORKFLOW:-}
       STEP_LIMIT_TASK: ${DEMO_STEP_LIMIT_TASK:-}
       REJECT_TASK: ${DEMO_REJECT_TASK:-}
