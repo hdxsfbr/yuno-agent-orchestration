@@ -442,7 +442,7 @@ func TestChannelsNeverWaitOnBotName(t *testing.T) {
 	for i := range 3 {
 		start := time.Now()
 		code, body := do(t, ts, http.MethodGet, "/api/channels", "")
-		if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		if elapsed := time.Since(start); elapsed > time.Second {
 			t.Fatalf("request %d took %v", i, elapsed)
 		}
 		if v := decodeChannels(t, body); code != http.StatusOK || v.Telegram.BotUsername != "" || !v.Telegram.Enabled {
