@@ -90,3 +90,24 @@ defect found and fixed afterwards: the conversation mirror dropped an assistant 
 followed two parallel tool calls (the gateway announces such a turn first with only its
 tool calls, then with its text under the same message id; the mirror marked the id seen
 too early). The review is `docs/reviews/wave5-review.md`.
+
+## Wave 6 (project repositories) live verification, 2026-10-17
+
+Public instance at `b5b8f64` with `PROJECT_*` pointing at a private playground project on
+the same GitLab (`andrebatista/yuno-playground`: a two-function Python package with
+tests), sandbox network off. A Dev pipeline run started from the API with the task "add a
+multiply function with tests":
+
+| Step | Result |
+|---|---|
+| clone | `project_clone` span: main at depth 1 in 638 ms, toolchain `python` |
+| Coder | added `multiply` and four test cases on the checkout, `python -m pytest` 3 passed |
+| Reviewer | read `git diff main`, re-ran the tests, approved |
+| gate | approved in the UI by the operator |
+| Deployer | called `open_merge_request`; the tool approval was not answered within the gate's nine-minute wait, the Deployer finished with `pending_approval` and the run succeeded |
+| late grant | the operator approved the tool card afterwards; the engine executed the call itself: branch `yuno/014865386a60`, merge request !1 against `main`, recorded under `pending_effects` and `side_effects` |
+
+Cost of the run: $0.18. The merge request's diff is the four lines of `multiply` and
+eight lines of tests; its description carries what changed, the test runs and the review
+verdict. One nit for later: the Deployer used the whole task text as the merge request's
+title.

@@ -144,6 +144,7 @@ droplet or a workstation with the same installer and tag `yuno-ci` works.
 | Sign-in | the `API_TOKEN` in the operator's `.env.prod` (never in the repository) |
 | Telegram | webhook registered at `https://143.110.128.97.sslip.io/telegram-webhook`. Bound to the Chief of Staff since wave 5 (rebound from Coder through the API on 2026-10-16). Verified live on 2026-10-17: the Chief listed the roster, delegated a task to Coder (run succeeded in 25 s, $0.06), relayed the platform's report one second after the run ended, and answered a follow-up with `run_status`. The bot has one webhook, so this instance owns the bot while it runs; an unbound channel drops messages |
 | Memory | about 1.7 GB used of 8 GB idle, the gateway 1 GB of its 4 GB cap |
+| Project | `PROJECT_*` set to `andrebatista/yuno-playground` (private, GitLab, a project access token named `yuno-deployer` with `api` and `write_repository`, Developer role, expires 2026-11-16), sandbox network off; first merge request opened by the Dev pipeline on 2026-10-17 (docs/test-results.md) |
 
 Four things bit on the first runs and are now in the scripts: a fresh droplet holds the apt
 lock for cloud-init's first pass (the bootstrap waits for it), `make` was missing (installed),

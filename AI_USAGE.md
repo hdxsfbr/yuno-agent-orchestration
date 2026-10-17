@@ -302,3 +302,10 @@ from a fresh private clone that receives the working tree as files; a test plant
 a hook and checks it never ran. Tests run against local bare repositories with the real
 git (no network), httptest fakes for both providers, and the fake gateway; `make
 test-go`, `make test-web` and `make lint` were green before the merge.
+
+**Wave 6 verification (2026-10-17).** The coordinator created the playground project and
+its scoped access token through the GitLab API at Andre's request, wired the public
+instance to it, and ran one Dev pipeline on it; Andre approved the gate and, after the
+tool approval had timed out and the run had ended, the merge-request card, which the
+engine executed as a late grant. The first real merge request opened by the platform is
+`yuno-playground!1`.
