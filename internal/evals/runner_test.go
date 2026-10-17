@@ -67,9 +67,11 @@ type fakeAPI struct {
 	// Knobs.
 	outcomes      map[string]outcome // by case id; the default is a successful run
 	stuck         map[string]bool    // case ids whose run never finishes
-	failAgentFor  map[string]bool    // case ids whose agent creation returns 500
-	pollErrors    int                // number of leading run polls that return 500
-	cancelLag     int                // polls a cancelled run stays non-terminal for
+	stuckSeen     chan struct{}      // closed when a stuck run is first polled
+	stuckOnce     sync.Once
+	failAgentFor  map[string]bool // case ids whose agent creation returns 500
+	pollErrors    int             // number of leading run polls that return 500
+	cancelLag     int             // polls a cancelled run stays non-terminal for
 	alwaysPollErr bool
 	readyFailures int
 
@@ -97,7 +99,7 @@ func newFakeAPI() *fakeAPI {
 			"002-step-limit":      {status: store.RunFailed, reason: "step limit 2 exceeded", steps: 3},
 			"003-cancel":          {status: store.RunSucceeded, steps: 4},
 		},
-		stuck: map[string]bool{}, failAgentFor: map[string]bool{},
+		stuck: map[string]bool{}, stuckSeen: make(chan struct{}), failAgentFor: map[string]bool{},
 		workflows: map[string]WorkflowRequest{}, workflowErrors: map[string]*fakeAPIError{}, plans: map[string]approvalPlan{},
 	}
 }
@@ -273,6 +275,7 @@ func (f *fakeAPI) advance(run *fakeRun) {
 	run.polls++
 	run.status = store.RunRunning
 	if f.stuck[run.caseID] {
+		f.stuckOnce.Do(func() { close(f.stuckSeen) })
 		run.steps = 1
 		return
 	}
@@ -648,7 +651,12 @@ func TestRunnerStopsWhenTheContextEnds(t *testing.T) {
 	f.stuck["001-quick-run-happy"] = true
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		time.Sleep(60 * time.Millisecond)
+		// Cancel once the stuck case is actually running, not after a fixed delay: on a
+		// slow machine a fixed delay fired before any case had started (CI, 2026-10-17).
+		select {
+		case <-f.stuckSeen:
+		case <-time.After(5 * time.Second):
+		}
 		cancel()
 	}()
 	results, err := fastRunner(testConfig(srv.URL)).Execute(ctx, legacyCases(t))
