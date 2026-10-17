@@ -3,11 +3,13 @@ import { useMutation } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, mergeRequestOf, type Run, type ToolCall } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, shortId } from "@/lib/format";
+import { toolchainLabel } from "@/lib/project";
 import type { Connection } from "@/lib/useEventStream";
 import Button from "../Button";
 import { Card } from "../Card";
 import ConnectionIndicator from "../ConnectionIndicator";
 import { Badge, RunStatusBadge } from "../Badge";
+import ProjectLink, { hasProject } from "../project/ProjectLink";
 import { InlineError, errorText } from "../QueryState";
 
 function Item({ label, children, title }: { label: string; children: ReactNode; title?: string }) {
@@ -49,8 +51,6 @@ type Props = {
   onRunChange: (run: Run) => void;
 };
 
-const TOOLCHAIN_LABEL: Record<string, string> = { go: "Go", node: "Node", python: "Python", default: "default image" };
-
 export default function RunHeader({ run, connection, now, toolCalls = [], onRunChange }: Props) {
   const cancel = useMutation({ mutationFn: () => cancelRun(run.id), onSuccess: onRunChange });
   const terminal = isTerminalStatus(run.status);
@@ -72,7 +72,7 @@ export default function RunHeader({ run, connection, now, toolCalls = [], onRunC
               {isDelegatedRun(run) ? <Badge tone="blue">Delegated</Badge> : null}
               {run.toolchain ? (
                 <Badge tone="zinc" title="The toolchain read from the project checkout; the sandbox image follows it">
-                  Toolchain: {TOOLCHAIN_LABEL[run.toolchain] ?? run.toolchain}
+                  Toolchain: {toolchainLabel(run.toolchain)}
                 </Badge>
               ) : null}
               {mergeRequest ? (
@@ -109,6 +109,11 @@ export default function RunHeader({ run, connection, now, toolCalls = [], onRunC
           <Item label="Trigger">
             <TriggerValue run={run} />
           </Item>
+          {hasProject(run) ? (
+            <Item label="Project">
+              <ProjectLink run={run} className="underline" />
+            </Item>
+          ) : null}
           {run.current_node && !terminal ? (
             <Item label="Current node">
               <span className="font-mono">{run.current_node}</span>

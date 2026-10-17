@@ -7,8 +7,10 @@ Rules referenced as 5.x are in `docs/DESIGN.md`; decisions as D-nnn in `DECISION
 ## Assets
 
 - The operator's credentials: the model provider key, the Telegram bot token, the
-  platform tokens (`API_TOKEN`, `YUNO_MCP_TOKEN`, `OPENCLAW_GATEWAY_TOKEN`), the optional
-  GitLab token, and the project repository token (`PROJECT_GIT_TOKEN`).
+  platform tokens (`API_TOKEN`, `YUNO_MCP_TOKEN`, `OPENCLAW_GATEWAY_TOKEN`,
+  `PROJECT_TOKEN_KEY`), the optional GitLab token, and the git token of every project
+  (stored in the database AES-GCM encrypted under `PROJECT_TOKEN_KEY`; `PROJECT_GIT_TOKEN`
+  only bootstraps the first project).
 - The host: Docker socket, the state directory with every agent's workspace, Postgres.
 - The side effects: releases on the deploy target, merge requests on GitLab, branches
   and merge or pull requests on the project repository, outbound Telegram messages.
@@ -63,16 +65,17 @@ Docker socket into the gateway container is root-equivalent on the host; the gat
 trusted code from a pinned image, but a gateway compromise is a host compromise.
 Exec guardrail patterns do not reach the sandbox (D-028).
 
-**Project repository with sandbox network on (DESIGN 5.16, D-037).** With
-`PROJECT_SANDBOX_NETWORK=true` the sandboxes of project runs get a bridge network so
-agents can install the project's dependencies. That is a deliberate widening of the
+**Project repository with sandbox network on (DESIGN 5.16, D-037).** With a project's
+network opt-in (the page's switch, or `PROJECT_SANDBOX_NETWORK=true` for the bootstrapped
+one) the sandboxes of its runs get a bridge network so agents can install the project's
+dependencies. That is a deliberate widening of the
 sandbox boundary: anything injected into the repository (a README, a test, a
 dependency's install script, a package the lockfile names) runs in a container that
 can reach the internet, so it can exfiltrate whatever the sandbox holds (the checkout,
 the agent's workspace, the task text) and can call any service, and side effects
 inside the sandbox are not gated by the approval gate (D-028 applies). The container
 can also reach the host's published ports, which is why `API_TOKEN` matters on any host
-with the opt-in. Mitigation: off by default; the opt-in is per platform, for one
+with the opt-in. Mitigation: off by default; the opt-in is per project, for a
 repository the operator trusts; the token never enters the sandbox (the checkout's
 `.git/config` has the bare URL, the api's git gets the token through its environment
 only); the api never executes anything from the checkout (no hooks, no config: the
@@ -84,6 +87,17 @@ client in the hands of whatever the model reads; use it only with repositories w
 contents you would run on your own machine. With network off the clone still happens
 and the only widening is the checkout's content in the agent's workspace, which the
 untrusted-content rules already cover.
+
+**Project tokens at rest (DESIGN 5.17 rule 2, D-038).** A project's git token is the
+credential that pushes branches and opens merge requests. Mitigation: it is written
+through the API only, never returned (`token_set` is the only trace of it in any
+response), redacted wherever a token shape could appear, and stored AES-256-GCM
+encrypted under SHA-256 of `PROJECT_TOKEN_KEY` with the project id as additional data,
+so a database dump without the `.env` yields no token and a blob cannot be moved to
+another project's row; the api reads a token only when a run clones or pushes and when
+the operator presses Check. Residual risk: the key lives in `.env` next to the other
+platform secrets, so whoever reads the host's `.env` and the database has every token;
+a lost key is a re-entry of every token, not a breach.
 
 **Secrets in logs, traces, fixtures or the repository.** Mitigation: the log handler
 redacts keys, tokens and anything shaped like a provider key or a Telegram token (5.12
@@ -130,8 +144,10 @@ derived gateway image adds only the static Docker CLI.
   workspace read yields them. Rotating one means re-materialising the agent.
 - `require_approval` on a chat-capable tool disables it in conversations rather than
   gating it, since a conversation has no run to pause; approvals stay in the UI.
-- One project per platform, cloned at depth 1 from its default branch; the merge
-  request flattens the agent's changes into one commit by Yuno. A project run with
-  sandbox network on is a trusted-repository mode (above). An agent that edits its
-  checkout's `.git` directory only breaks its own `git diff`; the platform does not read
-  that directory.
+- Projects are cloned at depth 1 from their default branch; the merge request flattens
+  the agent's changes into one commit by Yuno. A project run with sandbox network on is
+  a trusted-repository mode (above). An agent that edits its checkout's `.git` directory
+  only breaks its own `git diff`; the platform does not read that directory. Schedules
+  do not name a project, so a scheduled run of a workflow that opts in fails its
+  validation when it fires. Project tokens are only as safe as `PROJECT_TOKEN_KEY` in
+  `.env` (above).

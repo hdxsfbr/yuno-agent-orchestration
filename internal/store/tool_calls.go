@@ -88,3 +88,27 @@ func GetVisitAgent(ctx context.Context, q Querier, runNodeID string) (*VisitAgen
 	}
 	return &v, nil
 }
+
+// MergeRequestRef is the request an executed open_merge_request call opened or found
+// (DESIGN 5.16 rule 12, 5.17 rules 8 and 10).
+type MergeRequestRef struct {
+	URL      string
+	Provider string
+}
+
+// MergeRequestOfRun returns the newest executed open_merge_request call's request for a
+// run, or nil when it has none.
+func MergeRequestOfRun(ctx context.Context, q Querier, runID string) (*MergeRequestRef, error) {
+	var ref MergeRequestRef
+	err := q.QueryRow(ctx, `SELECT output->>'url', COALESCE(output->>'provider', '') FROM tool_calls
+		WHERE run_id=$1 AND tool_name IN ('open_merge_request', 'yuno__open_merge_request') AND status='executed'
+		  AND NOT is_error AND jsonb_typeof(output) = 'object' AND output ? 'url'
+		ORDER BY finished_at DESC NULLS LAST, started_at DESC LIMIT 1`, runID).Scan(&ref.URL, &ref.Provider)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil || ref.URL == "" {
+		return nil, err
+	}
+	return &ref, nil
+}

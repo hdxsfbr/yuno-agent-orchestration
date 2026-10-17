@@ -13,6 +13,8 @@ const DELEGATED = "01a14163-0000-7000-8000-000000000002";
 const DELEGATED_BARE = "01a14164-0000-7000-8000-000000000003";
 const OTHER_REF = "01a14165-0000-7000-8000-000000000004";
 const ODD_ID = "01a14166-0000-7000-8000-000000000005";
+const PROJECT_RUN = "01a14167-0000-7000-8000-000000000006";
+const SNAPSHOT_ONLY = "01a14168-0000-7000-8000-000000000007";
 
 const base = (over: Partial<Run>): Run => ({
   id: DONE,
@@ -39,6 +41,15 @@ const runs: Run[] = [
   base({ id: DELEGATED_BARE, trigger: "channel", trigger_ref: "" }),
   base({ id: OTHER_REF, trigger: "channel", trigger_ref: "telegram:1001" }),
   base({ id: ODD_ID, trigger: "channel", trigger_ref: "conversation:a/b c" }),
+  base({
+    id: PROJECT_RUN,
+    project_id: "p1",
+    project: { name: "yuno-playground", repo_url: "https://gitlab.com/g/p.git", provider: "gitlab", default_branch: "main", sandbox_network: false },
+  }),
+  base({
+    id: SNAPSHOT_ONLY,
+    project: { name: "old-name", repo_url: "https://gitlab.com/g/o.git", provider: "gitlab", default_branch: "main", sandbox_network: false },
+  }),
 ];
 
 function json(body: unknown, status = 200) {
@@ -80,6 +91,11 @@ function RunMarker() {
   return <p>run page {id}</p>;
 }
 
+function ProjectMarker() {
+  const { id } = useParams();
+  return <p>project page {id}</p>;
+}
+
 function ConversationMarker() {
   const { conversationId } = useParams();
   return <p>conversation page {conversationId}</p>;
@@ -93,6 +109,7 @@ function renderPage() {
         <Routes>
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:id" element={<RunMarker />} />
+          <Route path="/projects/:id" element={<ProjectMarker />} />
           <Route path="/channels/:conversationId" element={<ConversationMarker />} />
         </Routes>
       </MemoryRouter>
@@ -123,6 +140,33 @@ describe("RunsPage", () => {
     expect(within(queued).queryByTitle(/Toolchain/)).toBeNull();
   });
 
+  it("names the project of a run, linking to its page, and shows a dash for a run without one", async () => {
+    renderPage();
+    const column = (await screen.findAllByRole("columnheader")).findIndex((h) => h.textContent === "Project");
+    expect(column).toBeGreaterThan(-1);
+    const cell = (id: string) => within(screen.getByTitle(id).closest("tr")!).getAllByRole("cell")[column];
+
+    const link = within(cell(PROJECT_RUN)).getByRole("link", { name: "yuno-playground" });
+    expect(link.getAttribute("href")).toBe("/projects/p1");
+    expect(cell(DONE).textContent).toBe("—");
+    expect(cell(QUEUED).textContent).toBe("—");
+  });
+
+  it("shows the snapshot's name without a link when the run has no project id", async () => {
+    renderPage();
+    const cell = within((await screen.findByTitle(SNAPSHOT_ONLY)).closest("tr")!).getByText("old-name").closest("td")!;
+    expect(cell.textContent).toBe("old-name");
+    expect(within(cell).queryByRole("link")).toBeNull();
+  });
+
+  it("opens the project, not the run, when the project's link is clicked", async () => {
+    renderPage();
+    const row = (await screen.findByTitle(PROJECT_RUN)).closest("tr")!;
+    fireEvent.click(within(row).getByRole("link", { name: "yuno-playground" }));
+    expect(await screen.findByText("project page p1")).not.toBeNull();
+    expect(screen.queryByText(`run page ${PROJECT_RUN}`)).toBeNull();
+  });
+
   it("opens the run when any cell of its row is clicked", async () => {
     renderPage();
     const row = (await screen.findByTitle(DONE)).closest("tr")!;
@@ -132,7 +176,7 @@ describe("RunsPage", () => {
 });
 
 describe("RunsPage delegated runs", () => {
-  const triggerCell = async (id: string) => within((await screen.findByTitle(id)).closest("tr")!).getAllByRole("cell")[4];
+  const triggerCell = async (id: string) => within((await screen.findByTitle(id)).closest("tr")!).getAllByRole("cell")[5];
 
   it("shows a run an agent delegated from a conversation as Delegated, with a link back to that conversation", async () => {
     renderPage();

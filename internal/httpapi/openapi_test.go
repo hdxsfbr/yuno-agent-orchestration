@@ -95,7 +95,9 @@ func TestOpenAPIConformance(t *testing.T) {
 	router := contract(t)
 	fe := &fakeEngine{pool: pool}
 	tplDir := t.TempDir()
-	srv, ts := newTestServerDeps(t, Deps{Cfg: testConfig(), Pool: pool, Gateway: adminGateway(), TemplatesDir: tplDir}, fe)
+	_, checkTransport := newFakeProvider(t)
+	srv, ts := newTestServerDeps(t, Deps{Cfg: testConfig(), Pool: pool, Gateway: adminGateway(), TemplatesDir: tplDir,
+		CheckTransport: checkTransport}, fe)
 	conformanceTemplates(t, srv, tplDir)
 
 	// A run with one of every trace row, so the trace exercises every schema.
@@ -126,6 +128,7 @@ func TestOpenAPIConformance(t *testing.T) {
 		{http.MethodPost, "/api/evals/scripts", `{"script_id":"conf-1","steps":[{"text":"hi"}]}`, http.StatusNoContent},
 	}
 	steps = append(steps, workflowConformanceSteps(t, run.ID)...)
+	steps = append(steps, projectConformanceSteps(t)...)
 	var agentID string
 	for _, st := range steps {
 		code, body := checkConformance(t, router, ts.URL, st.method, st.path, st.body, st.want < 300)
@@ -155,6 +158,34 @@ func TestOpenAPIConformance(t *testing.T) {
 	}
 }
 
+// projectConformanceSteps exercises every projects path (DESIGN 5.17 rule 3), and a
+// run that names a project for the Run schema's project members.
+func projectConformanceSteps(t *testing.T) []conformanceStep {
+	t.Helper()
+	sfx := uniqueSuffix()
+	p := seedProject(t, testCipher(t), "conf-"+sfx, acceptedTokenPrefix+sfx)
+	run := projectRun(t, p)
+	gone := seedProject(t, testCipher(t), "conf-gone-"+sfx, acceptedTokenPrefix+sfx)
+	repo := `"repo_url":"https://gitlab.test/group/conf-` + sfx + `.git"`
+	return []conformanceStep{
+		{http.MethodGet, "/api/projects", "", http.StatusOK},
+		{http.MethodGet, "/api/projects/" + p.ID, "", http.StatusOK},
+		{http.MethodGet, "/api/projects/no-such-project", "", http.StatusNotFound},
+		{http.MethodGet, "/api/runs/" + run.ID, "", http.StatusOK},
+		{http.MethodPost, "/api/projects", `{"name":"conf-new-` + sfx + `",` + repo + `,"provider":"","default_branch":"main",
+			"sandbox_network":true,"description":"d","token":"` + acceptedTokenPrefix + sfx + `"}`, http.StatusCreated},
+		{http.MethodPost, "/api/projects", `{"name":"",` + repo + `}`, http.StatusUnprocessableEntity},
+		{http.MethodPut, "/api/projects/" + p.ID, `{"name":"conf-` + sfx + `",` + repo + `,"provider":"gitlab","description":"edited"}`, http.StatusOK},
+		{http.MethodPut, "/api/projects/" + p.ID, `{"name":"conf-` + sfx + `","repo_url":"http://gitlab.test/x"}`, http.StatusUnprocessableEntity},
+		{http.MethodPut, "/api/projects/no-such-project", `{"name":"x",` + repo + `}`, http.StatusNotFound},
+		{http.MethodPost, "/api/projects/" + p.ID + "/check", "", http.StatusOK},
+		{http.MethodPost, "/api/projects/no-such-project/check", "", http.StatusNotFound},
+		{http.MethodDelete, "/api/projects/" + gone.ID, "", http.StatusNoContent},
+		{http.MethodDelete, "/api/projects/" + gone.ID, "", http.StatusNotFound},
+		{http.MethodGet, "/api/projects/" + gone.ID, "", http.StatusNotFound},
+	}
+}
+
 // Response validation accepts properties a schema does not list, so the fields and the
 // event the channel and scheduler work added are checked to be documented.
 func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
@@ -170,8 +201,13 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 		// DESIGN 5.15 (wave 5).
 		"ToolCall": {"conversation_id"},
 		"Tool":     {"chat"},
-		"Run":      {"reported_at"},
+		"Run":      {"reported_at", "toolchain", "project_id", "project"},
 		"Workflow": {"from_template"},
+		// DESIGN 5.17 (wave 7).
+		"ProjectSettings": {"name", "repo_url", "provider", "default_branch", "sandbox_network"},
+		"ProjectLastRun":  {"id", "status", "toolchain", "created_at", "finished_at"},
+		"ProjectInput":    {"name", "repo_url", "provider", "default_branch", "sandbox_network", "description", "token"},
+		"ProjectCheck":    {"ok", "message", "default_branch", "branch_exists", "can_push", "checked_at"},
 	} {
 		ref := doc.Components.Schemas[schema]
 		if ref == nil || ref.Value == nil {
@@ -183,6 +219,13 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 				t.Errorf("schema %s does not document %s", schema, p)
 			}
 		}
+	}
+	// DESIGN 5.17 rules 7 and 12: Status lost its project; ApprovalItem has run_status.
+	if doc.Components.Schemas["Status"].Value.Properties["project"] != nil {
+		t.Error("schema Status still documents project")
+	}
+	if item := doc.Components.Schemas["ApprovalItem"].Value; len(item.AllOf) != 2 || item.AllOf[1].Value.Properties["run_status"] == nil {
+		t.Error("schema ApprovalItem does not document run_status")
 	}
 	events := doc.Paths.Find("/api/events")
 	if events == nil || events.Get == nil || !strings.Contains(events.Get.Description, "conversation.message") ||

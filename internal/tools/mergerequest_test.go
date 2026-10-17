@@ -27,6 +27,10 @@ type fakeGitHub struct {
 	auth     string
 	failPR   int
 	branches func() []string
+	// refuse answers every request 401; noPush reports permissions.push false (the
+	// project check, DESIGN 5.17 rule 5).
+	refuse bool
+	noPush bool
 }
 
 func newFakeGitHub(t *testing.T, bare string) (*fakeGitHub, *httptest.Server) {
@@ -38,8 +42,19 @@ func newFakeGitHub(t *testing.T, bare string) (*fakeGitHub, *httptest.Server) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		g.auth = r.Header.Get("Authorization")
+		if g.refuse {
+			writeJSONTest(w, 401, map[string]string{"message": "Bad credentials"})
+			return
+		}
+		if r.URL.EscapedPath() != repo && !strings.HasPrefix(r.URL.EscapedPath(), repo+"/") {
+			writeJSONTest(w, 404, map[string]string{"message": "Not Found"})
+			return
+		}
 		p := strings.TrimPrefix(r.URL.EscapedPath(), repo)
 		switch {
+		case r.Method == http.MethodGet && p == "":
+			writeJSONTest(w, 200, map[string]any{"name": "demo", "default_branch": "main",
+				"permissions": map[string]bool{"admin": false, "push": !g.noPush, "pull": true}})
 		case r.Method == http.MethodGet && strings.HasPrefix(p, "/branches/"):
 			name := unescape(strings.TrimPrefix(p, "/branches/"))
 			if !slices.Contains(g.branches(), name) {
@@ -79,6 +94,26 @@ func newFakeGitHub(t *testing.T, bare string) (*fakeGitHub, *httptest.Server) {
 	return g, srv
 }
 
+// staticProjects is a ProjectResolver that answers every run with one project, or
+// with an error.
+type staticProjects struct {
+	pc  project.Config
+	err error
+}
+
+func (s staticProjects) ForRunID(context.Context, string) (*project.Config, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	pc := s.pc
+	return &pc, nil
+}
+
+// forProject is a tool configured for one project (tests).
+func forProject(pc project.Config, apiBase, repoPath string) *Tool {
+	return NewOpenMergeRequest(MergeRequestConfig{Projects: staticProjects{pc: pc}, APIBase: apiBase, RepoPath: repoPath})
+}
+
 // gitlabOnBare makes the fake GitLab report the branches of a bare repository, since
 // the tool pushes with git rather than through the commits API.
 func gitlabOnBare(t *testing.T, g *fakeGitLab, bare string) {
@@ -112,7 +147,7 @@ func TestOpenMergeRequestGitLab(t *testing.T) {
 	must(t, os.MkdirAll(filepath.Join(checkout, "node_modules", "x"), 0o755))
 	must(t, os.WriteFile(filepath.Join(checkout, "node_modules", "x", "i.js"), []byte("x"), 0o644))
 
-	tool := NewOpenMergeRequest(MergeRequestConfig{Project: pc, APIBase: srv.URL + "/api/v4/projects/group%2Fdemo"})
+	tool := forProject(pc, srv.URL+"/api/v4/projects/group%2Fdemo", "")
 	if tool.Risk != RiskSideEffecting || tool.Hits != HitsExternal || tool.Name != OpenMergeRequestName {
 		t.Fatalf("tool = %s %s/%s", tool.Name, tool.Risk, tool.Hits)
 	}
@@ -178,7 +213,7 @@ func TestOpenMergeRequestRetryAfterPartialFailure(t *testing.T) {
 	pc := project.Config{RepoURL: bare, Token: "t", DefaultBranch: "main", Provider: project.ProviderGitLab}
 	ws, checkout := checkoutFor(t, pc, "r")
 	must(t, os.WriteFile(filepath.Join(checkout, "a.txt"), []byte("b"), 0o644))
-	tool := NewOpenMergeRequest(MergeRequestConfig{Project: pc, APIBase: srv.URL + "/api/v4/projects/group%2Fdemo"})
+	tool := forProject(pc, srv.URL+"/api/v4/projects/group%2Fdemo", "")
 	call := Call{RunID: "r", Workspace: ws, IdempotencyKey: strings.Repeat("f", 64),
 		Input: json.RawMessage(`{"run_token":"r","title":"T","description":""}`)}
 	res, _ := tool.Invoke(context.Background(), call)
@@ -201,7 +236,7 @@ func TestOpenMergeRequestModelErrors(t *testing.T) {
 	g, srv := newFakeGitLab(t)
 	gitlabOnBare(t, g, bare)
 	pc := project.Config{RepoURL: bare, Token: "t", DefaultBranch: "main", Provider: project.ProviderGitLab}
-	tool := NewOpenMergeRequest(MergeRequestConfig{Project: pc, APIBase: srv.URL + "/api/v4/projects/group%2Fdemo"})
+	tool := forProject(pc, srv.URL+"/api/v4/projects/group%2Fdemo", "")
 	input := json.RawMessage(`{"run_token":"r","title":"T","description":""}`)
 
 	ws := t.TempDir()
@@ -231,6 +266,35 @@ func TestOpenMergeRequestModelErrors(t *testing.T) {
 	if _, err := tool.Invoke(context.Background(), Call{RunID: "r2", Workspace: ws2, Input: input}); err == nil {
 		t.Fatal("no idempotency key must be an internal error")
 	}
+
+	// DESIGN 5.17 rule 6: a run without a project is told so; a project whose token
+	// does not open is an error result naming the Projects page, never a secret.
+	none := NewOpenMergeRequest(MergeRequestConfig{Projects: staticProjects{err: project.ErrNoProject}})
+	res, err = none.Invoke(context.Background(), Call{RunID: "r2", Workspace: ws2, IdempotencyKey: strings.Repeat("4", 64), Input: input})
+	if err != nil || !res.IsError || res.Text != "this run has no project" {
+		t.Fatalf("no project: %+v %v", res, err)
+	}
+	unreadable := NewOpenMergeRequest(MergeRequestConfig{Projects: staticProjects{err: fmt.Errorf("project: %w", project.ErrCannotRead)}})
+	res, err = unreadable.Invoke(context.Background(), Call{RunID: "r2", Workspace: ws2, IdempotencyKey: strings.Repeat("5", 64), Input: input})
+	if err != nil || !res.IsError || !strings.Contains(res.Text, "enter it again on the Projects page") || res.Transient {
+		t.Fatalf("unreadable token: %+v %v", res, err)
+	}
+	unconfigured := NewOpenMergeRequest(MergeRequestConfig{})
+	if res, err := unconfigured.Invoke(context.Background(), Call{RunID: "r2", Workspace: ws2, IdempotencyKey: strings.Repeat("6", 64), Input: input}); err != nil || !res.IsError || res.Text != "this run has no project" {
+		t.Fatalf("no resolver: %+v %v", res, err)
+	}
+	// DESIGN 5.17 rule 11: the title is a commit subject, capped at 72 characters.
+	NewRegistry().Register(tool)
+	long := `{"run_token":"r","title":"` + strings.Repeat("x", 73) + `","description":""}`
+	if err := tool.ValidateInput(json.RawMessage(long)); err == nil || !strings.Contains(err.Error(), "title") {
+		t.Fatalf("a 73-character title passed: %v", err)
+	}
+	if err := tool.ValidateInput(json.RawMessage(`{"run_token":"r","title":"` + strings.Repeat("x", 72) + `","description":""}`)); err != nil {
+		t.Fatalf("a 72-character title refused: %v", err)
+	}
+	if !strings.Contains(tool.Description, "at most 72 characters") || !strings.Contains(tool.Description, "never the task text") {
+		t.Fatalf("description does not say how to title: %q", tool.Description)
+	}
 }
 
 // T5.16.5 (GitHub): the same flow against the pull request API, head qualified by the
@@ -244,9 +308,9 @@ func TestOpenMergeRequestGitHub(t *testing.T) {
 	gitCfg.RepoURL = bare
 	ws, checkout := checkoutFor(t, gitCfg, "run-7")
 	must(t, os.WriteFile(filepath.Join(checkout, "README.md"), []byte("# demo\nmore\n"), 0o644))
-	tool := NewOpenMergeRequest(MergeRequestConfig{Project: gitCfg, APIBase: srv.URL + "/repos/owner/demo", RepoPath: "owner/demo"})
-	if !strings.Contains(tool.Description, "pull request") || !strings.Contains(tool.Message(json.RawMessage(`{"title":"X"}`)), "Open pull request") {
-		t.Fatalf("description/message not GitHub-worded: %q", tool.Description)
+	tool := forProject(gitCfg, srv.URL+"/repos/owner/demo", "owner/demo")
+	if !strings.Contains(tool.Description, "pull request (GitHub)") {
+		t.Fatalf("description does not name both providers: %q", tool.Description)
 	}
 	call := Call{RunID: "run-7", Workspace: ws, IdempotencyKey: strings.Repeat("ab", 32),
 		Input: json.RawMessage(`{"run_token":"r","title":"More readme","description":"body"}`)}
@@ -275,20 +339,13 @@ func TestOpenMergeRequestGitHub(t *testing.T) {
 	}
 }
 
-func TestOpenMergeRequestRegisteredOnlyWithAProject(t *testing.T) {
-	if _, ok := NewPlatformRegistry(PlatformDeps{}).Get(OpenMergeRequestName); ok {
-		t.Fatal("registered without a project")
-	}
-	pc := project.Config{RepoURL: "https://gitlab.com/g/p.git", Token: "t", DefaultBranch: "main", Provider: project.ProviderGitLab}
-	r := NewPlatformRegistry(PlatformDeps{MergeRequest: &MergeRequestConfig{Project: pc}})
-	tool, ok := r.Get(OpenMergeRequestName)
+func TestOpenMergeRequestRegisteredAlways(t *testing.T) {
+	// T5.17.9: the project comes from the run, so the tool exists without any project.
+	tool, ok := NewPlatformRegistry(PlatformDeps{}).Get(OpenMergeRequestName)
 	if !ok {
-		t.Fatal("not registered with a project")
+		t.Fatal("open_merge_request not registered without a project")
 	}
-	if tool.TimeoutS != 120 || tool.MaxAttempts != 2 {
-		t.Fatalf("timeout %d attempts %d", tool.TimeoutS, tool.MaxAttempts)
-	}
-	if err := tool.ValidateInput(json.RawMessage(`{"run_token":"r","title":"","description":""}`)); err == nil {
-		t.Fatal("an empty title must be refused")
+	if tool.Risk != RiskSideEffecting {
+		t.Fatalf("risk = %s", tool.Risk)
 	}
 }

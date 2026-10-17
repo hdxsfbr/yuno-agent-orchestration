@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { listApprovals, type Approval, type ApprovalItem, type ApprovalStatus, type SSEEvent } from "./api";
+import { isTerminalStatus, listApprovals, type Approval, type ApprovalItem, type ApprovalStatus, type RunStatus, type SSEEvent } from "./api";
 import { useEventStream, type Connection } from "./useEventStream";
 
 /** One cache entry per status filter; "all" is the unfiltered list. */
@@ -40,6 +40,10 @@ export function useApprovalEvents(): Connection {
         const a = (e.data as { approval?: Approval } | null)?.approval;
         if (a?.id) decided(a);
         else void qc.invalidateQueries({ queryKey: ["approvals"] });
+      } else if (e.event === "run.status") {
+        // A tool approval outlives its run; the card then says that approving still executes the call.
+        const status = (e.data as { run?: { status?: RunStatus } } | null)?.run?.status;
+        if (status && isTerminalStatus(status)) void qc.invalidateQueries({ queryKey: ["approvals"] });
       }
     },
     [qc, decided],

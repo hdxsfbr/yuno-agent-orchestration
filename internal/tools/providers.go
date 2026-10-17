@@ -10,6 +10,14 @@ import (
 	"strings"
 )
 
+// ProviderClient is the HTTP client every provider call uses: a 3xx answer is returned
+// as it is rather than followed, so a token header never travels to another host (Go
+// drops Authorization on a cross-host redirect but not GitLab's PRIVATE-TOKEN). A nil
+// transport is the default one.
+func ProviderClient(transport http.RoundTripper) *http.Client {
+	return &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+}
+
 // apiClient sends JSON requests to a provider's REST API. A non-2xx answer is an
 // *errAPIStatus with the status returned alongside, so callers can treat 404 as
 // "absent"; transport failures are classified for the retry policy (httperr.go).

@@ -18,23 +18,30 @@ import (
 // 5.16 rule 10, D-037): GitLab or GitHub behind one interface.
 const OpenMergeRequestName = "open_merge_request"
 
-// MergeRequestConfig is what open_merge_request needs; the tool is registered only when
-// the project is configured.
+// ProjectResolver gives the tool the project of the run that calls it (DESIGN 5.17
+// rule 6); the project package's Resolver implements it.
+type ProjectResolver interface {
+	ForRunID(ctx context.Context, runID string) (*project.Config, error)
+}
+
+// MergeRequestConfig is what open_merge_request needs. The tool is registered always:
+// the project comes from the calling run.
 type MergeRequestConfig struct {
-	Project project.Config
-	// APIBase and RepoPath override Project.APIBase() and Project.Path() (tests point
+	Projects ProjectResolver
+	// APIBase and RepoPath override the project's APIBase() and Path() (tests point
 	// them at a fake while git talks to a local repository).
 	APIBase  string
 	RepoPath string
 	Client   *http.Client
 }
 
+// The title is capped at 72 characters, a commit subject (DESIGN 5.17 rule 11).
 var mergeRequestSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "run_token": {"type": "string", "description": "The run token from the task message."},
-    "title": {"type": "string", "minLength": 1, "maxLength": 255, "description": "Title of the merge request; also the commit message."},
-    "description": {"type": "string", "maxLength": 20000, "description": "Description of the merge request: what changed and why, how it was tested."}
+    "title": {"type": "string", "minLength": 1, "maxLength": 72, "description": "A short summary of the change, like a commit subject (at most 72 characters), never the task text; it is also the commit message."},
+    "description": {"type": "string", "maxLength": 20000, "description": "The detail: what changed and why, how it was tested, anything the reviewer should know."}
   },
   "required": ["run_token", "title", "description"],
   "additionalProperties": false
@@ -69,37 +76,24 @@ type requestProvider interface {
 }
 
 // NewOpenMergeRequest builds open_merge_request: commit the run's checkout on the key's
-// branch and push it from the api, then open the request against the default branch.
-// A second call with the same key finds the branch (no second push) and the open
-// request (no second one) and reports replayed.
+// branch and push it from the api, then open the request against the default branch
+// of the run's project (DESIGN 5.17 rule 6). A second call with the same key finds the
+// branch (no second push) and the open request (no second one) and reports replayed.
 func NewOpenMergeRequest(cfg MergeRequestConfig) *Tool {
-	client := cfg.Client
-	if client == nil {
-		client = &http.Client{}
+	if cfg.Client == nil {
+		cfg.Client = ProviderClient(nil)
 	}
-	base, path := cfg.APIBase, cfg.RepoPath
-	if base == "" {
-		base = cfg.Project.APIBase()
-	}
-	if path == "" {
-		path = cfg.Project.Path()
-	}
-	var p requestProvider
-	switch cfg.Project.Provider {
-	case project.ProviderGitHub:
-		p = &githubProvider{api: &apiClient{what: "github", client: client, authorize: bearerAuth(cfg.Project.Token)}, base: base, owner: ownerOf(path)}
-	default:
-		p = &gitlabProvider{api: &apiClient{what: "gitlab", client: client, authorize: privateTokenAuth(cfg.Project.Token)}, base: base}
-	}
-	m := &mergeRequest{cfg: cfg, provider: p}
-	what := cfg.Project.RequestName()
+	m := &mergeRequest{cfg: cfg}
 	return &Tool{
 		Name: OpenMergeRequestName,
-		Description: "Propose the changes in the project checkout (runs/<run_id>/repo/) as a " + what + " against the " +
-			"project's default branch: the platform commits the working tree, pushes a branch and opens the " + what +
-			" with your title and description. Needs a human approval unless the operator allowed it to run " +
-			"automatically. Returns the " + what + " number and URL; if a human has not decided yet it returns status " +
-			"pending_approval, and if they refused it returns status rejected with a reason.",
+		Description: "Propose the changes in the project checkout (runs/<run_id>/repo/) as a merge request (GitLab) " +
+			"or pull request (GitHub) against the project's default branch: the platform commits the working " +
+			"tree, pushes a branch and opens the request with your title and description. The title is a short " +
+			"summary of the change, like a commit subject (at most 72 characters), never the task text; put " +
+			"what changed and why and how it was tested in the description. Needs a human approval unless " +
+			"the operator allowed it to run automatically. Returns the request's number and URL; if a human " +
+			"has not decided yet it returns status pending_approval, and if they refused it returns status " +
+			"rejected with a reason.",
 		InputSchema: mergeRequestSchema,
 		Risk:        RiskSideEffecting,
 		Hits:        HitsExternal,
@@ -107,15 +101,31 @@ func NewOpenMergeRequest(cfg MergeRequestConfig) *Tool {
 		Describe: func(input json.RawMessage) string {
 			var in mergeRequestInput
 			_ = json.Unmarshal(input, &in)
-			return fmt.Sprintf("Open %s %q in %s", what, in.Title, path)
+			return fmt.Sprintf("Open merge request %q (a pull request on GitHub) on the run's project", in.Title)
 		},
 		Exec: m.exec,
 	}
 }
 
 type mergeRequest struct {
-	cfg      MergeRequestConfig
-	provider requestProvider
+	cfg MergeRequestConfig
+}
+
+// providerFor builds the provider client of one project (DESIGN 5.16 rule 11).
+func (m *mergeRequest) providerFor(pc *project.Config) requestProvider {
+	base, path := m.cfg.APIBase, m.cfg.RepoPath
+	if base == "" {
+		base = pc.APIBase()
+	}
+	if path == "" {
+		path = pc.Path()
+	}
+	switch pc.Provider {
+	case project.ProviderGitHub:
+		return &githubProvider{api: &apiClient{what: "github", client: m.cfg.Client, authorize: bearerAuth(pc.Token)}, base: base, owner: ownerOf(path)}
+	default:
+		return &gitlabProvider{api: &apiClient{what: "gitlab", client: m.cfg.Client, authorize: privateTokenAuth(pc.Token)}, base: base}
+	}
 }
 
 func (m *mergeRequest) exec(ctx context.Context, call Call) (Result, error) {
@@ -126,12 +136,24 @@ func (m *mergeRequest) exec(ctx context.Context, call Call) (Result, error) {
 	if call.IdempotencyKey == "" {
 		return Result{}, errors.New("open_merge_request: no idempotency key")
 	}
+	if m.cfg.Projects == nil {
+		return Result{}, &ModelError{Message: project.ErrNoProject.Error()}
+	}
+	pc, err := m.cfg.Projects.ForRunID(ctx, call.RunID)
+	if errors.Is(err, project.ErrNoProject) {
+		return Result{}, &ModelError{Message: err.Error()}
+	}
+	if err != nil {
+		// A token that does not open, a project row gone: the operator fixes it on the
+		// Projects page; the text carries no secret (the resolver's errors never do).
+		return Result{IsError: true, Text: err.Error()}, nil
+	}
 	checkout, err := checkoutDir(call.Workspace, call.RunID)
 	if err != nil {
 		return Result{}, err
 	}
 	branch := GitLabBranch(call.IdempotencyKey)
-	res, err := m.run(ctx, in, checkout, branch)
+	res, err := m.run(ctx, pc, m.providerFor(pc), in, checkout, branch)
 	var se *errAPIStatus
 	if errors.As(err, &se) {
 		return se.res, nil
@@ -139,9 +161,8 @@ func (m *mergeRequest) exec(ctx context.Context, call Call) (Result, error) {
 	return res, err
 }
 
-func (m *mergeRequest) run(ctx context.Context, in mergeRequestInput, checkout, branch string) (Result, error) {
-	pc := m.cfg.Project
-	exists, err := m.provider.branchExists(ctx, branch)
+func (m *mergeRequest) run(ctx context.Context, pc *project.Config, provider requestProvider, in mergeRequestInput, checkout, branch string) (Result, error) {
+	exists, err := provider.branchExists(ctx, branch)
 	if err != nil {
 		return Result{}, err
 	}
@@ -156,14 +177,14 @@ func (m *mergeRequest) run(ctx context.Context, in mergeRequestInput, checkout, 
 			return Result{IsError: true, Text: "propose the changes: " + err.Error()}, nil
 		}
 	}
-	open, err := m.provider.findOpen(ctx, branch)
+	open, err := provider.findOpen(ctx, branch)
 	if err != nil {
 		return Result{}, err
 	}
 	if open != nil {
 		return JSONResult(mergeRequestOutput{Number: open.Number, URL: open.URL, Branch: branch, Provider: string(pc.Provider), Replayed: true}), nil
 	}
-	ref, err := m.provider.create(ctx, branch, pc.DefaultBranch, in.Title, in.Description)
+	ref, err := provider.create(ctx, branch, pc.DefaultBranch, in.Title, in.Description)
 	if err != nil {
 		return Result{}, err
 	}

@@ -54,14 +54,17 @@ type Config struct {
 	GitLabProjectID string
 	GitLabToken     string
 
-	// Project repository (DESIGN 5.16 rule 1): the git repository runs opted in with
-	// `project: true` work on. The token is write-only: never returned by the API,
-	// redacted wherever it could appear.
+	// Project repository bootstrap (DESIGN 5.16 rule 1, 5.17 rule 9): at the first start
+	// these become the first project record; projects are then edited in the UI. The
+	// token is write-only: never returned by the API, redacted wherever it could appear.
 	ProjectRepoURL        string
 	ProjectGitToken       string
 	ProjectDefaultBranch  string
 	ProjectProvider       string // gitlab | github; "" means by host (github.com → github)
 	ProjectSandboxNetwork bool
+	// ProjectTokenKey encrypts every project's git token at rest (DESIGN 5.17 rule 2);
+	// generated into .env by scripts/ensure-env.sh. Empty: no token can be stored.
+	ProjectTokenKey string
 
 	// API and engine.
 	APIToken           string
@@ -129,6 +132,7 @@ func FromEnv() Config {
 		ProjectDefaultBranch:  env("PROJECT_DEFAULT_BRANCH", "main"),
 		ProjectProvider:       strings.ToLower(env("PROJECT_PROVIDER", "")),
 		ProjectSandboxNetwork: envBool("PROJECT_SANDBOX_NETWORK", false),
+		ProjectTokenKey:       env("PROJECT_TOKEN_KEY", ""),
 
 		APIToken:           env("API_TOKEN", ""),
 		EngineWorkers:      envInt("ENGINE_WORKERS", 4),

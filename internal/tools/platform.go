@@ -29,9 +29,9 @@ type PlatformDeps struct {
 	Fetch  FetchConfig
 	// GitLab registers gitlab_create_mr when set (D-010).
 	GitLab *GitLabConfig
-	// MergeRequest registers open_merge_request when set: the project repository is
-	// configured (DESIGN 5.16 rule 10).
-	MergeRequest *MergeRequestConfig
+	// Projects resolves a run's project for open_merge_request (DESIGN 5.17 rule 6);
+	// nil leaves the tool answering that no run has a project.
+	Projects ProjectResolver
 	// MemorySaved runs after every memory_save; nil skips it.
 	MemorySaved MemorySaved
 	// MaxOutputBytes is the cap the MCP server applies to every result (0: none).
@@ -55,14 +55,13 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 	r.Register(NewMemoryRecall(d.Pool, d.MaxOutputBytes))
 	r.Register(NewListAgents(d.Pool))
 	r.Register(NewListWorkflows(d.Pool))
+	r.Register(NewListProjects(d.Pool))
 	r.Register(NewDelegateTask(ChiefDeps{Pool: d.Pool, Delegator: d.Delegator, PublicBaseURL: d.PublicBaseURL, Limiter: d.DelegationLimiter}))
 	r.Register(NewRunStatus(d.Pool, d.PublicBaseURL))
 	if d.GitLab != nil {
 		r.Register(NewGitLabCreateMR(*d.GitLab))
 	}
-	if d.MergeRequest != nil {
-		r.Register(NewOpenMergeRequest(*d.MergeRequest))
-	}
+	r.Register(NewOpenMergeRequest(MergeRequestConfig{Projects: d.Projects}))
 	return r
 }
 

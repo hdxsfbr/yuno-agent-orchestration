@@ -190,6 +190,33 @@ describe("approvals on the run page", () => {
     expect(card.getByText(/Input to deploy_release/).closest("details")!.querySelector("pre")!.textContent).toContain('"version": "1.2.0"');
   });
 
+  it.each([
+    ["succeeded", true],
+    ["failed", true],
+    ["cancelled", true],
+    ["timed_out", true],
+    ["running", false],
+    ["waiting_approval", false],
+  ] as const)("a pending tool approval on a run that is %s shows the ended-run note: %s", async (status, shown) => {
+    trace.run = run({ status });
+    trace.approvals = [approval({ kind: "tool", message: "Open the merge request" })];
+    renderPage();
+    const card = within((await section("Approvals")).getByRole("article"));
+    if (shown) expect(card.getByRole("note").textContent).toBe("This run has already ended. Approving still executes the call; rejecting discards it.");
+    else expect(card.queryByRole("note")).toBeNull();
+  });
+
+  it("shows no ended-run note on a workflow step of an ended run, nor once the late request is decided", async () => {
+    trace.run = run({ status: "failed" });
+    trace.approvals = [
+      approval({ id: "ap-node" }),
+      approval({ id: "ap-done", kind: "tool", status: "approved", decided_at: "2026-10-15T10:06:00Z", decided_by: "api" }),
+    ];
+    renderPage();
+    await section("Approvals");
+    expect(screen.queryByRole("note")).toBeNull();
+  });
+
   it("offers Approve always for a command approval only", async () => {
     trace.approvals = [approval({ kind: "exec", message: "pip install requests" })];
     renderPage();

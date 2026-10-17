@@ -62,7 +62,7 @@ func needDB(t *testing.T) *pgxpool.Pool {
 		t.Skip("DATABASE_URL not set")
 	}
 	if _, err := testPool.Exec(context.Background(), `TRUNCATE agents, workflows, runs, schedules, channel_bindings,
-		conversations, conversation_messages CASCADE`); err != nil {
+		conversations, conversation_messages, projects CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	return testPool

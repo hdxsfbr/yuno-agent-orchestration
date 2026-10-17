@@ -48,6 +48,9 @@ type Deps struct {
 	Recorder *events.Recorder
 	// FetchTransport is http_fetch's transport; nil means the default.
 	FetchTransport http.RoundTripper
+	// CheckTransport is the project check's transport (DESIGN 5.17 rule 5); nil means
+	// the default.
+	CheckTransport http.RoundTripper
 	// TemplatesDir holds the workflow templates loaded at start (DESIGN 5.6 rule 9).
 	TemplatesDir string
 }
@@ -62,7 +65,13 @@ type Server struct {
 	scripts model.ScriptStore
 	tools   *tools.Registry
 	effects *tools.Service
-	rec     *events.Recorder
+	// cipher seals project tokens (DESIGN 5.17 rule 2), nil without PROJECT_TOKEN_KEY;
+	// projects resolves a run's project for the tools and the check.
+	cipher   *project.Cipher
+	projects *project.Resolver
+	// checkClient talks to the providers for POST /api/projects/{id}/check.
+	checkClient *http.Client
+	rec         *events.Recorder
 	// templatesDir is where LoadTemplates reads workflow templates.
 	templatesDir string
 	startedAt    time.Time
@@ -91,6 +100,7 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	if err := store.Migrate(ctx, pool, log); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
+	bootstrapProject(ctx, pool, cfg, log)
 
 	hub := events.NewHub()
 	rec := &events.Recorder{Hub: hub, Append: func(ctx context.Context, runID, typ string, data json.RawMessage) (int64, error) {
@@ -250,6 +260,13 @@ func New(d Deps) (*Server, error) {
 		}}
 	}
 	s.templatesDir = d.TemplatesDir
+	if c, err := project.NewCipher(d.Cfg.ProjectTokenKey); err == nil {
+		s.cipher = c
+	} else if !errors.Is(err, project.ErrNoKey) {
+		return nil, fmt.Errorf("project token key: %w", err)
+	}
+	s.projects = &project.Resolver{DB: d.Pool, Cipher: s.cipher}
+	s.checkClient = tools.ProviderClient(d.CheckTransport)
 	s.tools = tools.NewPlatformRegistry(s.platformDeps(d))
 	s.effects = &tools.Service{
 		Pool:           d.Pool,
@@ -322,6 +339,13 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/skills/{id}", s.getSkill)
 	mux.HandleFunc("PUT /api/skills/{id}", s.updateSkill)
 	mux.HandleFunc("DELETE /api/skills/{id}", s.deleteSkill)
+	// Projects (DESIGN 5.17 rule 3).
+	mux.HandleFunc("GET /api/projects", s.listProjects)
+	mux.HandleFunc("POST /api/projects", s.createProject)
+	mux.HandleFunc("GET /api/projects/{id}", s.getProject)
+	mux.HandleFunc("PUT /api/projects/{id}", s.updateProject)
+	mux.HandleFunc("DELETE /api/projects/{id}", s.deleteProject)
+	mux.HandleFunc("POST /api/projects/{id}/check", s.checkProject)
 	mux.HandleFunc("GET /api/agents/{id}/memory", s.listAgentMemory)
 	mux.HandleFunc("DELETE /api/agents/{id}/memory/{factId}", s.deleteAgentMemory)
 
@@ -397,17 +421,6 @@ type statusResponse struct {
 	Runs      map[string]int64 `json:"runs"`
 	SSEClient int              `json:"sse_clients"`
 	Scheduler schedulerStatus  `json:"scheduler"`
-	Project   projectStatus    `json:"project"`
-}
-
-// projectStatus is the configured project repository (DESIGN 5.16 rule 1), without
-// its token, which the API never returns.
-type projectStatus struct {
-	Configured     bool   `json:"configured"`
-	RepoURL        string `json:"repo_url,omitempty"`
-	DefaultBranch  string `json:"default_branch,omitempty"`
-	Provider       string `json:"provider,omitempty"`
-	SandboxNetwork bool   `json:"sandbox_network"`
 }
 
 // schedulerStatus is how often the scheduler checks and when the next enabled schedule
@@ -433,10 +446,6 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		SSEClient: s.hub.Subscribers(),
 		Scheduler: schedulerStatus{TickSeconds: tick.Seconds()},
 	}
-	if pc, err := project.FromConfig(s.cfg); err == nil {
-		resp.Project = projectStatus{Configured: true, RepoURL: pc.RepoURL, DefaultBranch: pc.DefaultBranch,
-			Provider: string(pc.Provider), SandboxNetwork: pc.SandboxNetwork}
-	}
 	if s.pool != nil {
 		if next, err := store.NextScheduleDue(ctx, s.pool); err == nil && next != nil {
 			at := next.UTC()
@@ -456,6 +465,25 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// bootstrapProject creates the project PROJECT_* describe at the first start of an
+// install that predates the Projects page (DESIGN 5.17 rule 9). It logs and carries on:
+// nothing when there is nothing to do or the project exists, a warning when the
+// setting is wrong or PROJECT_TOKEN_KEY is missing.
+func bootstrapProject(ctx context.Context, q store.Querier, cfg config.Config, log *slog.Logger) {
+	c, err := project.NewCipher(cfg.ProjectTokenKey)
+	if err != nil && !errors.Is(err, project.ErrNoKey) {
+		log.Warn("project not bootstrapped from PROJECT_*", "error", err)
+		return
+	}
+	p, created, err := project.Bootstrap(ctx, q, c, cfg)
+	switch {
+	case err != nil:
+		log.Warn("project not bootstrapped from PROJECT_*", "error", err)
+	case created:
+		log.Info("project bootstrapped from PROJECT_*", "project_id", p.ID, "name", p.Name, "repo_url", p.RepoURL)
+	}
 }
 
 // refreshMCPAfterStart waits until this process answers on its own listener, then asks
@@ -518,10 +546,9 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 			MaxBytes: int64(cfg.DeployTargetMaxMB) << 20,
 		}
 	}
-	// open_merge_request exists only with a configured project (DESIGN 5.16 rule 10);
-	// the engine logs what is wrong with an incomplete setting.
-	if pc, err := project.FromConfig(cfg); err == nil {
-		pd.MergeRequest = &tools.MergeRequestConfig{Project: pc}
+	// open_merge_request takes the project from the calling run (DESIGN 5.17 rule 6).
+	if d.Pool != nil {
+		pd.Projects = s.projects
 	}
 	return pd
 }

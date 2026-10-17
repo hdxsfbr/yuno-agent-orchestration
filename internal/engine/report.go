@@ -243,8 +243,43 @@ func (e *Engine) runReportText(ctx context.Context, run *store.Run) string {
 		}
 	}
 	outcome = obs.Truncate(obs.Redact(outcome), reportOutcomeMax)
-	return fmt.Sprintf("[platform] Run %s %s after %s, cost $%s: %s %s", run.ID, run.Status, reportDuration(end.Sub(start)),
+	text := fmt.Sprintf("[platform] Run %s %s after %s, cost $%s: %s %s", run.ID, run.Status, reportDuration(end.Sub(start)),
 		reportCost(run.CostUSDMicros), sentence(outcome), tools.RunURL(e.deps.Cfg.PublicBaseURL, run.ID))
+	// DESIGN 5.17 rule 10: the request the run opened, when it did before this report.
+	if mr, err := store.MergeRequestOfRun(ctx, e.deps.Pool, run.ID); err != nil {
+		e.log.Warn("read the run's merge request for the report failed", "run_id", run.ID, "error", err)
+	} else if mr != nil {
+		text += " " + requestLabel(mr.Provider) + ": " + mr.URL
+	}
+	return text
+}
+
+// requestLabel is what the provider calls the thing open_merge_request opened.
+func requestLabel(provider string) string {
+	if provider == "github" {
+		return "Pull request"
+	}
+	return "Merge request"
+}
+
+// reportLateMergeRequest tells the conversation about a merge request a late grant
+// opened after the run was reported (DESIGN 5.17 rule 10): once, one attempt, under
+// the key report-<run id>-effect-<tool call id>; the gateway dedupes a repeat.
+func (e *Engine) reportLateMergeRequest(ctx context.Context, runID, toolCallID string, output json.RawMessage) {
+	var out struct {
+		URL      string `json:"url"`
+		Provider string `json:"provider"`
+	}
+	if json.Unmarshal(output, &out) != nil || out.URL == "" {
+		return
+	}
+	run, err := store.GetRun(ctx, e.deps.Pool, runID)
+	if err != nil || !reportsTo(run) || run.ReportedAt == nil {
+		return // the run's own report, still to come, carries the URL
+	}
+	convID, _ := store.ConversationOfRun(run)
+	text := fmt.Sprintf("[platform] Run %s: %s opened after the run ended: %s", run.ID, strings.ToLower(requestLabel(out.Provider)), out.URL)
+	e.sendReport(ctx, run.ID, convID, "effect-"+toolCallID, text)
 }
 
 // sentence ends s with a full stop unless it already ends a sentence.

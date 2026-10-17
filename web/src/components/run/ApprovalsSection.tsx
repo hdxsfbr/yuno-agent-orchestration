@@ -1,4 +1,4 @@
-import type { Approval, RunStatus, ToolCall } from "@/lib/api";
+import { isTerminalStatus, type Approval, type RunStatus, type ToolCall } from "@/lib/api";
 import ApprovalCard from "../approval/ApprovalCard";
 
 type Props = {
@@ -32,7 +32,12 @@ export default function ApprovalsSection({ approvals, toolCalls, runStatus, onDe
       <ul className="space-y-3">
         {ordered(approvals).map((a) => (
           <li key={a.id}>
-            <ApprovalCard approval={a} toolCall={a.tool_call_id ? toolCalls.find((c) => c.id === a.tool_call_id) : undefined} onDecided={onDecided} />
+            <ApprovalCard
+              approval={a}
+              toolCall={a.tool_call_id ? toolCalls.find((c) => c.id === a.tool_call_id) : undefined}
+              runEnded={isTerminalStatus(runStatus)}
+              onDecided={onDecided}
+            />
           </li>
         ))}
       </ul>

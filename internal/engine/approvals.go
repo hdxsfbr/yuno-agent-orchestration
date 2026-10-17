@@ -11,6 +11,7 @@ import (
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
 	"yuno/internal/store"
+	"yuno/internal/tools"
 )
 
 // Approvals (DESIGN 5.3): one table, three kinds. Exec approvals come from the gateway
@@ -499,6 +500,11 @@ func (e *Engine) settleUnwaited(ctx context.Context, a *store.Approval) {
 		}
 		e.emit(ctx, a.RunID, "run.status", map[string]any{"run": run})
 		e.logEvent(ctx, a.RunID, "info", fmt.Sprintf("side effect settled after approval: %s", status), "approval_id", a.ID, "tool_call_id", toolCallID)
+		if status == "executed" {
+			if row, err := store.GetToolCall(ctx, e.deps.Pool, toolCallID); err == nil && tools.PlainName(row.ToolName) == tools.OpenMergeRequestName {
+				e.reportLateMergeRequest(ctx, a.RunID, toolCallID, output)
+			}
+		}
 	}()
 }
 

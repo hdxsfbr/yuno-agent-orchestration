@@ -58,6 +58,10 @@ func needDB(t *testing.T) *pgxpool.Pool {
 
 const testMCPToken = "mcp-test-token-0123456789"
 
+// testProjectTokenKey is a fixed PROJECT_TOKEN_KEY, so the project handlers have a
+// cipher (DESIGN 5.17 rule 2).
+const testProjectTokenKey = "test-project-token-key-not-a-secret-0123456789"
+
 func testConfig() config.Config {
 	return config.Config{
 		MCPToken:                testMCPToken,
@@ -65,6 +69,7 @@ func testConfig() config.Config {
 		EngineWorkers:           2,
 		AnthropicBaseURL:        "http://127.0.0.1:1",
 		ModelProxyRatePerMinute: 60,
+		ProjectTokenKey:         testProjectTokenKey,
 	}
 }
 

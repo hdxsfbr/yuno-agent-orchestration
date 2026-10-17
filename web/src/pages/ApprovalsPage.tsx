@@ -1,5 +1,5 @@
 import { useSearchParams } from "react-router";
-import type { ApprovalItem, ApprovalStatus } from "@/lib/api";
+import { isTerminalStatus, type ApprovalItem, type ApprovalStatus } from "@/lib/api";
 import { humanize } from "@/lib/format";
 import { useApprovalCache, useApprovalEvents, useApprovalList } from "@/lib/useApprovals";
 import ApprovalCard from "@/components/approval/ApprovalCard";
@@ -64,7 +64,7 @@ export default function ApprovalsPage() {
         <ul className="space-y-3">
           {sorted(q.data, filter).map((a) => (
             <li key={a.id}>
-              <ApprovalCard approval={a} toolCall={a.tool_call} showRun onDecided={decided} />
+              <ApprovalCard approval={a} toolCall={a.tool_call} showRun runEnded={!!a.run_status && isTerminalStatus(a.run_status)} onDecided={decided} />
             </li>
           ))}
         </ul>

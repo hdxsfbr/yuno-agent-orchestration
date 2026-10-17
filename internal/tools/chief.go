@@ -23,13 +23,14 @@ import (
 const (
 	ListAgentsName    = "list_agents"
 	ListWorkflowsName = "list_workflows"
+	ListProjectsName  = "list_projects"
 	DelegateTaskName  = "delegate_task"
 	RunStatusName     = "run_status"
 )
 
-// ChatToolNames are the tools callable with a chat token (DESIGN 5.15 rule 2), sorted.
-// The registry marks the same tools Chat; a test keeps the two in step.
-var ChatToolNames = []string{DelegateTaskName, ListAgentsName, ListWorkflowsName, MemoryRecallName, MemorySaveName, RunStatusName}
+// ChatToolNames are the tools callable with a chat token (DESIGN 5.15 rule 2, 5.17 rule
+// 8), sorted. The registry marks the same tools Chat; a test keeps the two in step.
+var ChatToolNames = []string{DelegateTaskName, ListAgentsName, ListProjectsName, ListWorkflowsName, MemoryRecallName, MemorySaveName, RunStatusName}
 
 // IsChatTool reports whether name (with or without the platform prefix) is
 // chat-capable.
@@ -67,7 +68,8 @@ var delegateTaskSchema = json.RawMessage(`{
     "agent_name": {"type": "string", "description": "The name of the agent to hand the task to, as list_agents shows it. Give agent_name with task, or workflow_name with input, never both."},
     "task": {"type": "string", "description": "With agent_name: the complete, self-contained task. The agent sees nothing of your conversation, so include every detail it needs."},
     "workflow_name": {"type": "string", "description": "The name of the workflow to run, as list_workflows shows it."},
-    "input": {"type": "object", "description": "With workflow_name: the workflow's input, matching the input_schema list_workflows shows for it."}
+    "input": {"type": "object", "description": "With workflow_name: the workflow's input, matching the input_schema list_workflows shows for it."},
+    "project": {"type": "string", "description": "The name of the project (a repository) the run works on, as list_projects shows it. Required for a workflow that works on a project repository, not accepted for one that does not; optional with agent_name."}
   },
   "additionalProperties": false
 }`)
@@ -89,6 +91,8 @@ type Delegation struct {
 	Task          string
 	WorkflowID    string
 	Input         json.RawMessage
+	// ProjectID is the project the run works on (DESIGN 5.17 rule 8); "" for none.
+	ProjectID string
 	// TriggerRef is "conversation:<id>" for a call made in a conversation, "" otherwise
 	// (DESIGN 5.15 rule 6).
 	TriggerRef string
@@ -290,6 +294,7 @@ type delegateInput struct {
 	Task         *string         `json:"task"`
 	WorkflowName *string         `json:"workflow_name"`
 	Input        json.RawMessage `json:"input"`
+	Project      *string         `json:"project"`
 }
 
 // errDelegateShape is the model's message for any input that is not exactly one of the
@@ -336,12 +341,18 @@ func NewDelegateTask(d ChiefDeps) *Tool {
 					return Result{}, &ModelError{Message: "cannot delegate to yourself"}
 				}
 				req.AgentID = a.ID
+				if req.ProjectID, err = projectForDelegation(ctx, d.Pool, in.Project, nil); err != nil {
+					return Result{}, err
+				}
 			} else {
 				wf, err := workflowByName(ctx, d.Pool, *in.WorkflowName)
 				if err != nil {
 					return Result{}, err
 				}
 				req.WorkflowID = wf.ID
+				if req.ProjectID, err = projectForDelegation(ctx, d.Pool, in.Project, wf); err != nil {
+					return Result{}, err
+				}
 			}
 			release, ok := limiter.Reserve(call.AgentID)
 			if !ok {
@@ -381,6 +392,113 @@ func delegationOf(in delegateInput) (req Delegation, msg string) {
 		req.Input = in.Input
 	}
 	return req, ""
+}
+
+// projectForDelegation resolves delegate_task's project (DESIGN 5.17 rule 8): a
+// workflow whose definition opts in needs one, one that does not refuses one, an agent
+// takes one optionally; the name matches like agents and workflows. The model's errors
+// list the live projects so it can choose.
+func projectForDelegation(ctx context.Context, pool *pgxpool.Pool, name *string, wf *store.Workflow) (string, error) {
+	given := name != nil && strings.TrimSpace(*name) != ""
+	needs, wfName := false, ""
+	if wf != nil {
+		wfName = wf.Name
+		var def struct {
+			Project bool `json:"project"`
+		}
+		_ = json.Unmarshal(wf.Definition, &def)
+		needs = def.Project
+		if given && !needs {
+			return "", &ModelError{Message: "workflow " + wf.Name + " does not use a project"}
+		}
+	}
+	if !given && !needs {
+		return "", nil
+	}
+	projects, err := store.ListProjects(ctx, pool)
+	if err != nil {
+		return "", err
+	}
+	names := make([]string, 0, len(projects))
+	for _, p := range projects {
+		names = append(names, p.Name)
+	}
+	if !given {
+		if len(names) == 0 {
+			return "", &ModelError{Message: "workflow " + wfName + " needs a project and none exists yet; the operator creates one on the Projects page"}
+		}
+		return "", &ModelError{Message: "workflow " + wfName + " needs a project; choose one of: " + strings.Join(names, ", ")}
+	}
+	want := strings.TrimSpace(*name)
+	for _, p := range projects {
+		if strings.EqualFold(strings.TrimSpace(p.Name), want) {
+			return p.ID, nil
+		}
+	}
+	msg := "no project named " + want
+	if len(names) > 0 {
+		msg += "; choose one of: " + strings.Join(names, ", ")
+	} else {
+		msg += "; none exists yet"
+	}
+	return "", &ModelError{Message: msg}
+}
+
+// NewListProjects builds list_projects (DESIGN 5.17 rule 8): every live project with
+// its last run, so the Chief can match the person's words to a name.
+func NewListProjects(pool *pgxpool.Pool) *Tool {
+	return &Tool{
+		Name: ListProjectsName,
+		Description: "List the projects (git repositories) the platform can work on: name, repository, provider, " +
+			"default branch, whether the sandbox has network access, and the last run on each. Call it to find " +
+			"the project a person names, then pass its name as project to delegate_task; a workflow that works " +
+			"on a project repository needs one.",
+		InputSchema: listAgentsSchema,
+		Risk:        RiskReadOnly,
+		Hits:        HitsPostgres,
+		Timeout:     5 * time.Second,
+		Chat:        true,
+		Exec: func(ctx context.Context, call Call) (Result, error) {
+			if pool == nil {
+				return Result{}, errors.New("list_projects: no database")
+			}
+			projects, err := store.ListProjects(ctx, pool)
+			if err != nil {
+				return Result{}, err
+			}
+			latest, err := store.LatestRunsByProject(ctx, pool)
+			if err != nil {
+				return Result{}, err
+			}
+			type lastRun struct {
+				RunID      string  `json:"run_id"`
+				Status     string  `json:"status"`
+				Toolchain  *string `json:"toolchain,omitempty"`
+				FinishedAt *string `json:"finished_at,omitempty"`
+			}
+			type projectView struct {
+				Name           string   `json:"name"`
+				Repository     string   `json:"repository"`
+				Provider       string   `json:"provider"`
+				DefaultBranch  string   `json:"default_branch"`
+				SandboxNetwork bool     `json:"sandbox_network"`
+				LastRun        *lastRun `json:"last_run"`
+			}
+			out := []projectView{}
+			for _, p := range projects {
+				v := projectView{Name: p.Name, Repository: p.RepoURL, Provider: p.Provider, DefaultBranch: p.DefaultBranch, SandboxNetwork: p.SandboxNetwork}
+				if r, ok := latest[p.ID]; ok {
+					v.LastRun = &lastRun{RunID: r.ID, Status: r.Status, Toolchain: r.Toolchain}
+					if r.FinishedAt != nil {
+						at := r.FinishedAt.UTC().Format(time.RFC3339)
+						v.LastRun.FinishedAt = &at
+					}
+				}
+				out = append(out, v)
+			}
+			return JSONResult(map[string]any{"projects": out}), nil
+		},
+	}
 }
 
 // agentByName finds the live agent with exactly this name, ignoring case; the oldest
@@ -464,6 +582,15 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
 			if run.FailureReason != nil && *run.FailureReason != "" {
 				out["failure_reason"] = *run.FailureReason
 			}
+			// DESIGN 5.17 rule 8: the project and the request the run opened.
+			if run.Project != nil {
+				out["project"] = run.Project.Name
+			}
+			if mr, err := store.MergeRequestOfRun(ctx, pool, run.ID); err != nil {
+				return Result{}, err
+			} else if mr != nil {
+				out["merge_request_url"] = mr.URL
+			}
 			if run.Status == store.RunWaitingApproval {
 				pending, err := store.ListPendingApprovals(ctx, pool, run.ID)
 				if err != nil {
@@ -498,11 +625,15 @@ func describeDelegation(input json.RawMessage) string {
 	if json.Unmarshal(input, &in) != nil {
 		return ""
 	}
+	on := ""
+	if in.Project != nil && strings.TrimSpace(*in.Project) != "" {
+		on = " on project " + strings.TrimSpace(*in.Project)
+	}
 	switch {
 	case in.AgentName != nil && in.Task != nil:
-		return fmt.Sprintf("Delegate to %s: %s", strings.TrimSpace(*in.AgentName), obs.Truncate(*in.Task, 300))
+		return fmt.Sprintf("Delegate to %s%s: %s", strings.TrimSpace(*in.AgentName), on, obs.Truncate(*in.Task, 300))
 	case in.WorkflowName != nil:
-		return "Run the workflow " + strings.TrimSpace(*in.WorkflowName)
+		return "Run the workflow " + strings.TrimSpace(*in.WorkflowName) + on
 	}
 	return ""
 }

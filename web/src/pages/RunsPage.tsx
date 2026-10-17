@@ -8,6 +8,7 @@ import { Badge, RunStatusBadge } from "@/components/Badge";
 import { cardClass, PageHeader } from "@/components/Card";
 import ConnectionIndicator from "@/components/ConnectionIndicator";
 import { control } from "@/components/fields";
+import ProjectLink, { hasProject } from "@/components/project/ProjectLink";
 import { EmptyState, Loading, QueryError } from "@/components/QueryState";
 
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -89,12 +90,13 @@ export default function RunsPage() {
       ) : null}
       {q.data && q.data.length > 0 ? (
         <div className={`${cardClass} overflow-x-auto`}>
-          <table className="w-full min-w-[60rem] text-left text-sm">
+          <table className="w-full min-w-[68rem] text-left text-sm">
             <thead className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
               <tr>
                 <th className="px-4 py-2.5 font-medium">Run</th>
                 <th className="px-4 py-2.5 font-medium">Agent</th>
                 <th className="px-4 py-2.5 font-medium">Model</th>
+                <th className="px-4 py-2.5 font-medium">Project</th>
                 <th className="px-4 py-2.5 font-medium">Status</th>
                 <th className="px-4 py-2.5 font-medium">Trigger</th>
                 <th className="px-4 py-2.5 font-medium">Created</th>
@@ -121,6 +123,7 @@ export default function RunsPage() {
                   </td>
                   <td className="px-4 py-2.5">{r.agent_names?.length ? r.agent_names.join(", ") : "—"}</td>
                   <td className="px-4 py-2.5 font-mono text-xs">{r.models?.length ? r.models.join(", ") : "—"}</td>
+                  <td className="px-4 py-2.5">{hasProject(r) ? <ProjectLink run={r} /> : "—"}</td>
                   <td className="px-4 py-2.5">
                     <span className="inline-flex flex-wrap items-center gap-1.5">
                       <RunStatusBadge status={r.status} />

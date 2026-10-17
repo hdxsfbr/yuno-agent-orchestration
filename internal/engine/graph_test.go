@@ -146,6 +146,9 @@ func devPipeline(t *testing.T, env *testEnv) *store.Workflow {
 	if err := json.Unmarshal(raw, &tpl); err != nil {
 		t.Fatal(err)
 	}
+	// These tests cover the graph; a project run is project_test.go's (DESIGN 5.17 rule 4
+	// would otherwise require a project on every trigger).
+	tpl.Definition.Project = false
 	agents := map[string]string{}
 	for i := range tpl.Definition.Nodes {
 		n := &tpl.Definition.Nodes[i]
@@ -497,7 +500,8 @@ func TestWorkflowTriggerValidation(t *testing.T) {
 	asTemplate := env.createWorkflow(tpl.Definition)
 	_, err = env.e.Trigger(ctx, TriggerRequest{WorkflowID: asTemplate.ID, Input: json.RawMessage(`{"task":"x"}`)})
 	if !errors.As(err, &ve) || !slices.Equal(ve.Messages, []string{"nodes[1].agent_id: template must be instantiated",
-		"nodes[2].agent_id: template must be instantiated", "nodes[4].agent_id: template must be instantiated"}) {
+		"nodes[2].agent_id: template must be instantiated", "nodes[4].agent_id: template must be instantiated",
+		"project_id: required; the workflow works on a project repository"}) {
 		t.Fatalf("template with agent names: %v", err)
 	}
 

@@ -6,6 +6,7 @@ import { MemoryRouter } from "react-router";
 import type { ApprovalItem } from "@/lib/api";
 import { clearToken } from "@/lib/auth";
 import { installFakeApi } from "@/test/fakeApi";
+import { project } from "@/test/fixtures";
 import App from "./App";
 
 const pending = (id: string): ApprovalItem => ({
@@ -49,11 +50,23 @@ function renderApp(path = "/workflows") {
 }
 
 describe("navigation", () => {
-  it("links to every page, Channels, Schedules and Skills included", async () => {
+  it("links to every page, Projects, Channels, Schedules and Skills included", async () => {
     renderApp();
     const nav = within(screen.getByRole("navigation"));
-    expect(nav.getAllByRole("link").map((l) => l.getAttribute("href"))).toEqual(["/agents", "/workflows", "/runs", "/approvals", "/channels", "/schedules", "/skills", "/status"]);
+    expect(nav.getAllByRole("link").map((l) => l.getAttribute("href"))).toEqual(["/agents", "/workflows", "/projects", "/runs", "/approvals", "/channels", "/schedules", "/skills", "/status"]);
     expect(await screen.findByRole("heading", { name: "Workflows" })).not.toBeNull();
+  });
+
+  it("serves the Projects page at /projects and opens a project's form at /projects/<id>", async () => {
+    api.on("GET", "/api/projects", () => [project({})]);
+    renderApp("/projects");
+    expect(await screen.findByRole("heading", { name: "Projects" })).not.toBeNull();
+    expect(await screen.findByRole("link", { name: "yuno-playground" })).not.toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    cleanup();
+
+    renderApp("/projects/p1");
+    expect((await screen.findByRole("dialog", { name: "Edit yuno-playground" })).textContent).toContain("A token is set. Enter a new one to replace it.");
   });
 
   it("badges Approvals with the number of requests waiting and keeps it current", async () => {

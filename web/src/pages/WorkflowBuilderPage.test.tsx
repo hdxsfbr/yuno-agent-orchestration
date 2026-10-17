@@ -282,6 +282,16 @@ describe("editing and saving", () => {
     expect(saved().definition.limits).toEqual({ max_cost_usd: 1.5, max_loop_visits: 5 });
   });
 
+  it("says a run of the workflow names a project", async () => {
+    renderBuilder();
+    await outline();
+    expect(
+      screen.getByText(
+        "Each run of this workflow names a project, chosen when the run starts. The project's repository is cloned into the first agent's run directory, later agents receive the checkout and the Deployer can open a merge request.",
+      ),
+    ).not.toBeNull();
+  });
+
   it("opts the workflow into the project repository and out again, leaving the key out when off", async () => {
     renderBuilder();
     await outline();

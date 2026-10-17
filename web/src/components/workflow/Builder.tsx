@@ -410,7 +410,7 @@ export default function Builder({ workflow }: { workflow?: Workflow }) {
           checked={!!def.project}
           onChange={(v) => edit((d) => (v ? { ...d, project: true } : omitProject(d)), { type: "other", prefix: "project" })}
           label="Runs work on the project repository"
-          hint="When the platform has a project repository configured, each run starts from a fresh checkout of its default branch in the first agent's run directory; later agents receive the checkout and the Deployer can open a merge request. Without one, runs work in their run directory as usual."
+          hint="Each run of this workflow names a project, chosen when the run starts. The project's repository is cloned into the first agent's run directory, later agents receive the checkout and the Deployer can open a merge request."
         />
       </Section>
 

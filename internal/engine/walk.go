@@ -12,6 +12,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"yuno/internal/obs"
+	"yuno/internal/project"
 	"yuno/internal/store"
 	"yuno/internal/workflow"
 )
@@ -178,12 +179,21 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 		v.carryFrom = from
 	}
 	if v.early == nil && w.def.Project {
-		// DESIGN 5.16 rule 2: the flag means "when one is configured".
-		if e.project != nil {
-			v.project = e.project
-		} else if w.run.Toolchain == nil && !w.noProjectLogged {
-			w.noProjectLogged = true
-			e.logEvent(ctx, w.run.ID, "info", "project: no repository configured; running without a checkout")
+		// The project is the run's (DESIGN 5.17 rule 6): its snapshot plus the token read
+		// from the row now, so a replaced token applies and a deleted project finishes.
+		// A run that opted in without naming one (queued before 5.17) runs as 5.16
+		// rule 2 said: without a checkout.
+		switch pc, err := e.projects.ForRun(ctx, w.run); {
+		case err == nil:
+			v.project = pc
+		case errors.Is(err, project.ErrNoProject):
+			if w.run.Toolchain == nil && !w.noProjectLogged {
+				w.noProjectLogged = true
+				e.logEvent(ctx, w.run.ID, "info", "project: no repository configured; running without a checkout")
+			}
+		default:
+			o := failed(store.RunFailed, err.Error())
+			v.early = &o
 		}
 	}
 	e.mu.Lock()

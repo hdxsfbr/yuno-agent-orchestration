@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,16 +21,35 @@ import (
 	"yuno/internal/workflow"
 )
 
-// projectEnv is an engine with a configured project whose remote is a local bare
-// repository (no network), and the default sandbox image name set.
-func projectEnv(t *testing.T, files map[string]string, network bool) (*testEnv, string) {
+// testProjectToken is the token the test projects store (sealed, as the API does).
+const testProjectToken = "glpat-not-a-real-token-00"
+
+// project creates a project row whose remote is repoURL (a local bare repository in
+// these tests) with the token sealed under the engine's key (DESIGN 5.17 rule 2).
+func (env *testEnv) project(repoURL string, network bool) *store.Project {
+	env.t.Helper()
+	// The tail of a UUIDv7 is random; its head is a timestamp two fixtures can share.
+	p := &store.Project{ID: store.NewID(), Name: "demo-" + strings.ReplaceAll(store.NewID(), "-", "")[20:], RepoURL: repoURL, Provider: "gitlab",
+		DefaultBranch: "main", SandboxNetwork: network}
+	blob, err := env.e.projects.Cipher.Seal(p.ID, testProjectToken)
+	if err != nil {
+		env.t.Fatal(err)
+	}
+	if err := store.CreateProject(context.Background(), env.pool, p, blob); err != nil {
+		env.t.Fatal(err)
+	}
+	return p
+}
+
+// projectEnv is an engine with a project whose remote is a local bare repository (no
+// network), and the default sandbox image name set.
+func projectEnv(t *testing.T, files map[string]string, network bool) (*testEnv, string, *store.Project) {
 	t.Helper()
 	bare := projecttest.BareRepo(t, files)
 	env := newEnv(t)
 	env.e.deps.Cfg.OpenClawSandboxImage = "yuno-sandbox:latest"
-	env.e.project = &project.Config{RepoURL: bare, Token: "glpat-not-a-real-token-00", DefaultBranch: "main",
-		Provider: project.ProviderGitLab, SandboxNetwork: network}
-	return env, bare
+	p := env.project(bare, network)
+	return env, bare, p
 }
 
 // sandboxPatches lists the sandbox blocks config.patch set or cleared, in order:
@@ -68,20 +88,24 @@ func sandboxPatches(env *testEnv) []string {
 	return out
 }
 
-// T5.16.3: a two-node project workflow clones into the first agent's workspace before
+// T5.16.3, T5.17.4: a two-node project workflow run queued with a project clones from
+// its snapshot (the token read from the row) into the first agent's workspace before
 // its turn, records the toolchain and the span, selects the sandbox for each visit,
-// carries the checkout to the second agent, whose open_merge_request pushes the edit
-// to the bare repository and opens the request on the fake provider.
+// carries the checkout to the second agent, whose open_merge_request resolves the same
+// project, pushes the edit to the bare repository and opens the request on the fake.
 func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
-	env, bare := projectEnv(t, map[string]string{"README.md": "# demo\n", "go.mod": "module demo\n"}, true)
+	env, bare, p := projectEnv(t, map[string]string{"README.md": "# demo\n", "go.mod": "module demo\n"}, true)
 	ctx := context.Background()
 	coder, deployer := env.agent(nil), env.agent(func(a *store.Agent) { a.Name = "Deployer" })
 	def := line(workflow.Node{ID: "one", AgentID: coder.ID, Task: "write"}, workflow.Node{ID: "two", AgentID: deployer.ID, Task: "propose"})
 	def.Project = true
 	wf := env.createWorkflow(def)
-	run, err := env.e.Trigger(ctx, TriggerRequest{WorkflowID: wf.ID})
+	run, err := env.e.Trigger(ctx, TriggerRequest{WorkflowID: wf.ID, ProjectID: p.ID})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if run.ProjectID == nil || *run.ProjectID != p.ID || run.Project == nil || run.Project.Name != p.Name || run.Project.RepoURL != bare {
+		t.Fatalf("queued run project = %v %+v", run.ProjectID, run.Project)
 	}
 	repoOf := func(p openclaw.ChatSendParams) string {
 		return filepath.Join(env.dir, "workspace-"+sessionAgent(p.SessionKey), "runs", run.ID, "repo")
@@ -124,13 +148,13 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 				t.Errorf("%s task lacks %q:\n%s", node, want, msg)
 			}
 		}
-		if strings.Contains(msg, env.e.project.Token) {
+		if strings.Contains(msg, testProjectToken) {
 			t.Errorf("%s task carries the token", node)
 		}
 	}
 	// The checkout's git config holds the bare URL only.
 	cfg, _ := os.ReadFile(filepath.Join(env.dir, "workspace-"+openclaw.DeriveAgentID(coder.ID), "runs", run.ID, "repo", ".git", "config"))
-	if strings.Contains(string(cfg), "extraheader") || strings.Contains(string(cfg), env.e.project.Token) {
+	if strings.Contains(string(cfg), "extraheader") || strings.Contains(string(cfg), testProjectToken) {
 		t.Fatalf(".git/config:\n%s", cfg)
 	}
 	// One clone span with the toolchain, one log line.
@@ -180,7 +204,7 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	tool := tools.NewOpenMergeRequest(tools.MergeRequestConfig{Project: *env.e.project, APIBase: srv.URL + "/api/v4/projects/g%2Fp"})
+	tool := tools.NewOpenMergeRequest(tools.MergeRequestConfig{Projects: env.e.projects, APIBase: srv.URL + "/api/v4/projects/g%2Fp"})
 	key, err := tools.IdempotencyKey(run.ID, "visit-two", tool.Name, json.RawMessage(`{"title":"Edit the readme","description":"d"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -211,13 +235,16 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 // A clone that fails (the default branch does not exist) fails the run with "project
 // clone:" before any turn starts, and no sandbox block is left behind.
 func TestProjectCloneFailureFailsTheRun(t *testing.T) {
-	env, _ := projectEnv(t, map[string]string{"README.md": "x"}, false)
-	env.e.project.DefaultBranch = "release"
+	env, _, p := projectEnv(t, map[string]string{"README.md": "x"}, false)
+	p.DefaultBranch = "release"
+	if err := store.UpdateProject(context.Background(), env.pool, p); err != nil {
+		t.Fatal(err)
+	}
 	coder := env.agent(nil)
 	def := line(workflow.Node{ID: "one", AgentID: coder.ID, Task: "write"})
 	def.Project = true
 	wf := env.createWorkflow(def)
-	run, err := env.e.Trigger(context.Background(), TriggerRequest{WorkflowID: wf.ID})
+	run, err := env.e.Trigger(context.Background(), TriggerRequest{WorkflowID: wf.ID, ProjectID: p.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +252,7 @@ func TestProjectCloneFailureFailsTheRun(t *testing.T) {
 	if r.Status != store.RunFailed || !strings.HasPrefix(deref(r.FailureReason), "project clone: git clone") {
 		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
 	}
-	if strings.Contains(deref(r.FailureReason), env.e.project.Token) {
+	if strings.Contains(deref(r.FailureReason), testProjectToken) {
 		t.Fatal("the token is in the failure reason")
 	}
 	if n := len(env.fc.sendParams()); n != 0 {
@@ -239,16 +266,22 @@ func TestProjectCloneFailureFailsTheRun(t *testing.T) {
 	}
 }
 
-// An opted-in run on an engine without a configured project runs as before: no
-// checkout, no toolchain, no sandbox block, one log line.
+// A run whose snapshot opts in but names no project (one queued before DESIGN 5.17)
+// runs as 5.16 rule 2 said: no checkout, no toolchain, no sandbox block, one log line.
 func TestProjectFlagWithoutAProject(t *testing.T) {
 	env := newEnv(t)
+	ctx := context.Background()
 	coder := env.agent(nil)
 	def := line(workflow.Node{ID: "one", AgentID: coder.ID, Task: "write"})
 	def.Project = true
+	def.Limits = store.DefaultLimits
 	wf := env.createWorkflow(def)
-	run, err := env.e.Trigger(context.Background(), TriggerRequest{WorkflowID: wf.ID})
+	snap, err := json.Marshal(runSnapshot{Definition: def})
 	if err != nil {
+		t.Fatal(err)
+	}
+	run := &store.Run{WorkflowID: wf.ID, WorkflowVersion: 1, WorkflowSnapshot: snap, Trigger: store.TriggerManual, Limits: store.DefaultLimits}
+	if err := store.CreateRun(ctx, env.pool, run); err != nil {
 		t.Fatal(err)
 	}
 	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
@@ -270,10 +303,10 @@ func TestProjectFlagWithoutAProject(t *testing.T) {
 	}
 }
 
-// A quick run opts in through the request (RunCreate.project); network off selects
+// A quick run opts in by naming a project (DESIGN 5.17 rule 4); network off selects
 // the image with network "none" and says so in the task.
 func TestProjectQuickRun(t *testing.T) {
-	env, _ := projectEnv(t, map[string]string{"package.json": "{}", "pnpm-lock.yaml": ""}, false)
+	env, _, p := projectEnv(t, map[string]string{"package.json": "{}", "pnpm-lock.yaml": ""}, false)
 	a := env.agent(nil)
 	var message string
 	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
@@ -281,7 +314,7 @@ func TestProjectQuickRun(t *testing.T) {
 		go finishThenFinal(t, env, p, `{"summary":"ok"}`)
 		return startedTurn(p)
 	}
-	r := env.triggerAndRun(TriggerRequest{AgentID: a.ID, Task: "look", Project: true})
+	r := env.triggerAndRun(TriggerRequest{AgentID: a.ID, Task: "look", ProjectID: p.ID})
 	if r.Status != store.RunSucceeded || r.Toolchain == nil || *r.Toolchain != "node" {
 		t.Fatalf("run = %s %q toolchain %v", r.Status, deref(r.FailureReason), r.Toolchain)
 	}
@@ -296,10 +329,109 @@ func TestProjectQuickRun(t *testing.T) {
 	if err := json.Unmarshal(r.WorkflowSnapshot, &snap); err != nil || !snap.Project {
 		t.Fatalf("snapshot project flag: %v %v", snap.Project, err)
 	}
-	// Without the flag the same agent runs without a checkout.
+	if r.ProjectID == nil || *r.ProjectID != p.ID || r.Project == nil || r.Project.Name != p.Name {
+		t.Fatalf("run project = %v %+v", r.ProjectID, r.Project)
+	}
+	// The hidden quick-run workflow carries no flag (DESIGN 5.17 edge case).
+	hidden, err := store.GetWorkflowByTemplateKey(context.Background(), env.pool, QuickRunTemplateKey(a.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hiddenDef workflow.Definition
+	if err := json.Unmarshal(hidden.Definition, &hiddenDef); err != nil || hiddenDef.Project {
+		t.Fatalf("hidden workflow project flag = %v %v", hiddenDef.Project, err)
+	}
+	// Without a project the same agent runs without a checkout.
 	r2 := env.triggerAndRun(TriggerRequest{AgentID: a.ID, Task: "look again"})
-	if r2.Status != store.RunSucceeded || r2.Toolchain != nil {
-		t.Fatalf("run 2 = %s toolchain %v", r2.Status, r2.Toolchain)
+	if r2.Status != store.RunSucceeded || r2.Toolchain != nil || r2.ProjectID != nil {
+		t.Fatalf("run 2 = %s toolchain %v project %v", r2.Status, r2.Toolchain, r2.ProjectID)
+	}
+}
+
+// T5.17.4: the trigger refuses a project workflow without a project and a plain
+// workflow with one, and names an unknown or deleted id; a valid request snapshots the
+// settings.
+func TestProjectRequestValidation(t *testing.T) {
+	env, _, p := projectEnv(t, map[string]string{"README.md": "x"}, false)
+	ctx := context.Background()
+	coder := env.agent(nil)
+	needs := line(workflow.Node{ID: "one", AgentID: coder.ID, Task: "write"})
+	needs.Project = true
+	wfNeeds := env.createWorkflow(needs)
+	wfPlain := env.createWorkflow(line(workflow.Node{ID: "one", AgentID: coder.ID, Task: "write"}))
+	gone := env.project(p.RepoURL, false)
+	if err := store.DeleteProject(ctx, env.pool, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		req  TriggerRequest
+		want string
+	}{
+		{"project workflow without a project", TriggerRequest{WorkflowID: wfNeeds.ID}, "project_id: required; the workflow works on a project repository"},
+		{"plain workflow with a project", TriggerRequest{WorkflowID: wfPlain.ID, ProjectID: p.ID}, "project_id: the workflow does not use a project"},
+		{"unknown id", TriggerRequest{WorkflowID: wfNeeds.ID, ProjectID: "nope"}, "project_id: no project with id nope"},
+		{"deleted id", TriggerRequest{WorkflowID: wfNeeds.ID, ProjectID: gone.ID}, "project_id: no project with id " + gone.ID},
+		{"quick run with an unknown id", TriggerRequest{AgentID: coder.ID, Task: "t", ProjectID: "nope"}, "project_id: no project with id nope"},
+	} {
+		_, err := env.e.Trigger(ctx, tc.req)
+		var ve *ValidationError
+		if !errors.As(err, &ve) || !slices.Contains(ve.Messages, tc.want) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
+		}
+	}
+	run, err := env.e.Trigger(ctx, TriggerRequest{WorkflowID: wfNeeds.ID, ProjectID: " " + p.ID + " "})
+	if err != nil || run.ProjectID == nil || *run.ProjectID != p.ID || run.Project == nil || run.Project.RepoURL != p.RepoURL || run.Project.DefaultBranch != "main" {
+		t.Fatalf("valid request: %v %+v", err, run)
+	}
+}
+
+// T5.17.4: a project deleted after the run was queued still clones and reads the
+// row's token (DESIGN 5.17 rule 3); a renamed one keeps the snapshot's name.
+func TestProjectDeletedAfterQueueingStillClones(t *testing.T) {
+	env, _, p := projectEnv(t, map[string]string{"go.mod": "module demo\n"}, false)
+	ctx := context.Background()
+	a := env.agent(nil)
+	run, err := env.e.Trigger(ctx, TriggerRequest{AgentID: a.ID, Task: "look", ProjectID: p.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteProject(ctx, env.pool, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
+		go finishThenFinal(t, env, p, `{"summary":"ok"}`)
+		return startedTurn(p)
+	}
+	r := env.resume(env.e, run.ID)
+	if r.Status != store.RunSucceeded || r.Toolchain == nil || *r.Toolchain != "go" || r.Project == nil || r.Project.Name != p.Name {
+		t.Fatalf("run = %s %q toolchain %v project %+v", r.Status, deref(r.FailureReason), r.Toolchain, r.Project)
+	}
+}
+
+// T5.17.4: a token that does not open (the key changed) fails the run before any turn
+// with DESIGN 5.17 rule 2's reason, which carries no secret.
+func TestProjectUnreadableTokenFailsTheRun(t *testing.T) {
+	env, _, p := projectEnv(t, map[string]string{"go.mod": "module demo\n"}, false)
+	ctx := context.Background()
+	a := env.agent(nil)
+	run, err := env.e.Trigger(ctx, TriggerRequest{AgentID: a.ID, Task: "look", ProjectID: p.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.pool.Exec(ctx, `UPDATE projects SET token_enc=$2 WHERE id=$1`, p.ID, []byte("not-a-blob-sealed-by-us-0000000000")); err != nil {
+		t.Fatal(err)
+	}
+	r := env.resume(env.e, run.ID)
+	want := "project: " + project.ErrCannotRead.Error()
+	if r.Status != store.RunFailed || deref(r.FailureReason) != want {
+		t.Fatalf("run = %s %q, want %q", r.Status, deref(r.FailureReason), want)
+	}
+	if n := len(env.fc.sendParams()); n != 0 {
+		t.Fatalf("%d turns started", n)
+	}
+	if got := sandboxPatches(env); len(got) != 0 {
+		t.Fatalf("sandbox patches = %v", got)
 	}
 }
 

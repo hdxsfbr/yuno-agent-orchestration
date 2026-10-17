@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Yuno Agent Orchestration API
-  version: 0.3.0
+  version: 0.4.0
   description: |
     Control plane for configurable AI agents and multi-agent workflows executed on
     OpenClaw. All endpoints are JSON. When API_TOKEN is set, every /api path except
@@ -26,6 +26,7 @@ tags:
   - name: skills
   - name: memory
   - name: channels
+  - name: projects
 paths:
   /healthz:
     get:
@@ -559,6 +560,71 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
 
+  /api/projects:
+    get:
+      tags: [projects]
+      summary: List projects by name, each with its newest run
+      description: The git token is never returned; `token_set` says one is stored.
+      responses:
+        "200":
+          description: projects
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Project" } } } }
+    post:
+      tags: [projects]
+      summary: Create a project
+      description: |
+        A project is a git repository runs work on (DESIGN 5.17): an https clone URL without
+        credentials, the provider (inferred from the host when left empty), the default branch
+        and a git token with write access, stored encrypted under PROJECT_TOKEN_KEY and never
+        returned. `token` is required here. Without PROJECT_TOKEN_KEY the api answers 503.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProjectInput" } } }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/projects/{id}:
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    get:
+      tags: [projects]
+      summary: Get a project
+      responses:
+        "200": { description: project, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [projects]
+      summary: Replace a project's settings
+      description: A missing or empty `token` keeps the stored one; a new one replaces it. Runs in flight read the token when they clone or push, so a replacement applies to them.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProjectInput" } } }
+      responses:
+        "200": { description: project, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [projects]
+      summary: Delete a project
+      description: A soft delete; runs that name the project keep their snapshot of its settings, and a run in flight still clones and pushes.
+      responses:
+        "204": { description: deleted }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/projects/{id}/check:
+    post:
+      tags: [projects]
+      summary: Verify the stored token against the provider, without a clone
+      description: |
+        Lists the repository through the provider's API with the stored token and reports its
+        default branch, whether the project's default branch exists and whether the token can
+        push to it. Provider refusals and errors are results (`ok: false` with the message), not
+        HTTP errors.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: result, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectCheck" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -593,7 +659,7 @@ components:
             details: {}
     Status:
       type: object
-      required: [version, uptime_s, db_ok, workers, runs, sse_clients, scheduler, project]
+      required: [version, uptime_s, db_ok, workers, runs, sse_clients, scheduler]
       properties:
         version: { type: string }
         uptime_s: { type: integer }
@@ -607,16 +673,6 @@ components:
           properties:
             tick_seconds: { type: number, description: how often the scheduler looks for due schedules }
             next_due_at: { type: [string, "null"], format: date-time, description: "earliest next_run_at of the enabled schedules; null when none is enabled" }
-        project:
-          type: object
-          required: [configured, sandbox_network]
-          description: "the project repository runs with `project: true` work on (PROJECT_* settings); the token is never returned"
-          properties:
-            configured: { type: boolean }
-            repo_url: { type: string, description: "the https clone URL, without credentials" }
-            default_branch: { type: string }
-            provider: { type: string, enum: [gitlab, github] }
-            sandbox_network: { type: boolean, description: "runs on the project get a sandbox with network access (PROJECT_SANDBOX_NETWORK)" }
     OpenClawStatus:
       type: object
       required: [connected, scopes]
@@ -729,6 +785,65 @@ components:
         body: { type: string }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    ProjectSettings:
+      type: object
+      description: A project's settings without its token; also a run's snapshot of the project it works on.
+      required: [name, repo_url, provider, default_branch, sandbox_network]
+      properties:
+        name: { type: string }
+        repo_url: { type: string, description: "the https clone URL, without credentials" }
+        provider: { type: string, enum: [gitlab, github] }
+        default_branch: { type: string }
+        sandbox_network: { type: boolean, description: runs on the project get a sandbox with network access }
+    ProjectLastRun:
+      type: object
+      description: The newest run that names the project.
+      required: [id, status, created_at]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [queued, running, waiting_approval, succeeded, failed, cancelled, timed_out] }
+        toolchain: { type: string, enum: [go, node, python, default] }
+        created_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+    Project:
+      allOf:
+        - $ref: "#/components/schemas/ProjectSettings"
+        - type: object
+          required: [id, description, token_set, created_at, updated_at]
+          properties:
+            id: { type: string }
+            description: { type: string }
+            token_set: { type: boolean, description: "a git token is stored; the token itself is never returned" }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+            last_run: { $ref: "#/components/schemas/ProjectLastRun" }
+    ProjectInput:
+      type: object
+      description: The read-only Project fields are accepted and ignored, so a client can PUT back what it fetched.
+      required: [name, repo_url]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+        repo_url: { type: string, description: "the https clone URL, without credentials" }
+        provider: { type: string, enum: [gitlab, github, ""], description: "empty: github for github.com, gitlab for any other host" }
+        default_branch: { type: string, default: main }
+        sandbox_network: { type: boolean, default: false }
+        description: { type: string, maxLength: 1024 }
+        token: { type: string, description: "write-only: required on create; on update, absent or empty keeps the stored token" }
+        id: {}
+        token_set: {}
+        created_at: {}
+        updated_at: {}
+        last_run: {}
+    ProjectCheck:
+      type: object
+      required: [ok, message, checked_at]
+      properties:
+        ok: { type: boolean, description: the token was accepted and the repository found }
+        message: { type: string, description: one sentence for the operator }
+        default_branch: { type: string, description: the repository's default branch as the provider reports it }
+        branch_exists: { type: boolean, description: the project's default branch exists on the repository }
+        can_push: { type: boolean, description: the token can push to the project's default branch }
+        checked_at: { type: string, format: date-time }
     ExecPolicy:
       type: object
       description: OpenClaw exec approvals policy for elevated (host) exec; sandboxed exec needs no approval.
@@ -828,7 +943,7 @@ components:
         model: { type: string, description: "OpenClaw model ref override for this run, e.g. scripted/scripted-1 (evals and tests)" }
         script_id: { type: string, description: "Script registered via /api/evals/scripts that the scripted provider replays for this run" }
         trigger: { type: string, enum: [manual, eval], default: manual, description: "Who starts the run: an operator, or the eval runner (eval runs can be filtered out of the run list); schedules and channels start their own runs" }
-        project: { type: boolean, default: false, description: "Quick runs only: work on the project repository when one is configured (PROJECT_REPO_URL); the engine clones it into the agent's run directory first. A workflow opts in through its definition's `project` field." }
+        project_id: { type: string, description: "The project the run works on (DESIGN 5.17 rule 4): required for a workflow whose definition has `project: true`, refused for one without it, optional for a quick run, whose one-node workflow then opts in. The engine clones the project into the first agent's run directory before its turn." }
     ScriptStep:
       type: object
       description: One scripted model response; exactly one of text or tool.
@@ -890,6 +1005,10 @@ components:
         updated_at: { type: string, format: date-time }
         reported_at: { type: string, format: date-time, description: "when a channel run's outcome was sent back into its conversation; absent otherwise" }
         toolchain: { type: string, enum: [go, node, python, default], description: "what the project checkout's manifest said when the engine cloned it (go.mod, package.json with a lockfile, uv.lock, requirements*.txt, pyproject.toml); absent for a run without a checkout" }
+        project_id: { type: string, description: "the project the run works on; absent for a run without one" }
+        project:
+          allOf: [ { $ref: "#/components/schemas/ProjectSettings" } ]
+          description: "the run's snapshot of its project's settings, taken when it was queued; never the token"
     RunNode:
       type: object
       required: [id, run_id, node_id, visit, iteration, status]
@@ -1020,6 +1139,7 @@ components:
         - type: object
           properties:
             tool_call: { $ref: "#/components/schemas/ToolCall" }
+            run_status: { type: string, enum: [queued, running, waiting_approval, succeeded, failed, cancelled, timed_out], description: "the status of the approval's run, so a tool approval on a run that has already ended can say that approving still executes the call; absent for an approval raised in a conversation" }
     ApprovalDecision:
       type: object
       additionalProperties: false

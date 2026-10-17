@@ -40,6 +40,12 @@ func (e *Engine) triggerWorkflow(ctx context.Context, req TriggerRequest) (*stor
 		return nil, err
 	}
 	msgs = append(msgs, agentMsgs...)
+	// A workflow that opts in names its project on every request (DESIGN 5.17 rule 4).
+	proj, projMsgs, err := e.projectForRequest(ctx, req.ProjectID, def.Project)
+	if err != nil {
+		return nil, err
+	}
+	msgs = append(msgs, projMsgs...)
 
 	input := req.Input
 	if t := bytes.TrimSpace(input); len(t) == 0 || string(t) == "null" {
@@ -65,7 +71,7 @@ func (e *Engine) triggerWorkflow(ctx context.Context, req TriggerRequest) (*stor
 		return nil, err
 	}
 	def.Limits = guardrails.EffectiveLimits(limits, agents, e.deps.Cfg.MaxCostUSD)
-	return e.queueRun(ctx, wf, def, input, req, agents)
+	return e.queueRun(ctx, wf, def, input, req, agents, proj)
 }
 
 // checkAgentNodes requires every agent node to name an existing agent by id (a

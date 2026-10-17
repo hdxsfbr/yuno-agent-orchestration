@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -410,5 +411,118 @@ func TestFinishResultRedacted(t *testing.T) {
 			!strings.Contains(got, "my chat token is [redacted]") {
 			t.Errorf("%s = %s", what, got)
 		}
+	}
+}
+
+// mrEffects is a SideEffectExecutor whose approved call opened a merge request.
+type mrEffects struct{ countingEffects }
+
+func (m *mrEffects) ExecuteApproved(ctx context.Context, toolCallID string) (json.RawMessage, bool, error) {
+	_, _, _ = m.countingEffects.ExecuteApproved(ctx, toolCallID)
+	return json.RawMessage(`{"number":7,"url":"https://gitlab.test/g/p/-/merge_requests/7","branch":"yuno/x","provider":"gitlab"}`), false, nil
+}
+
+// T5.17.7, DESIGN 5.17 rule 10: a run that opened a merge request before it ended
+// reports its URL.
+func TestReportBackCarriesMergeRequest(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	conv := env.chiefConversation(chiefConvKey)
+	a := env.agent(nil)
+	env.finishing(`{"summary":"proposed"}`)
+	run, err := env.e.Trigger(ctx, TriggerRequest{AgentID: a.ID, Task: "propose", Trigger: store.TriggerChannel,
+		TriggerRef: store.ConversationRef(conv.ID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the MCP gate records once the Deployer's call executed, as a row of the run.
+	now := time.Now().UTC()
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(store.InsertToolCall(ctx, env.pool, &store.ToolCall{RunID: run.ID, ToolUseID: "mcp-1", ToolName: "open_merge_request",
+		Input: json.RawMessage(`{"title":"Add it"}`), Output: json.RawMessage(`{"number":5,"url":"https://gitlab.test/g/p/-/merge_requests/5","provider":"gitlab"}`),
+		Status: store.ToolExecuted, StartedAt: &now, FinishedAt: &now}))
+	must(store.InsertToolCall(ctx, env.pool, &store.ToolCall{RunID: run.ID, ToolUseID: "mcp-0", ToolName: "open_merge_request",
+		Input: json.RawMessage(`{"title":"Failed first"}`), Output: json.RawMessage(`{"text":"propose the changes: git push: refused"}`),
+		Status: store.ToolFailed, IsError: true, StartedAt: &now, FinishedAt: &now}))
+	if r := env.resume(env.e, run.ID); r.Status != store.RunSucceeded {
+		t.Fatalf("run = %s %v", r.Status, r.FailureReason)
+	}
+	env.e.reports.Wait()
+	sends := env.reportSends()
+	if len(sends) != 1 || !strings.HasSuffix(sends[0].Message, "/runs/"+run.ID+" Merge request: https://gitlab.test/g/p/-/merge_requests/5") {
+		t.Fatalf("reports = %+v", sends)
+	}
+}
+
+// T5.17.7, DESIGN 5.17 rule 10: a merge request opened by a late grant after the run
+// was reported gets one follow-up into the conversation, under its own key.
+func TestLateMergeRequestFollowUp(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	conv := env.chiefConversation(chiefConvKey)
+	eff := &mrEffects{}
+	env.e.deps.Effects = eff
+	a := env.agent(nil)
+	var mu sync.Mutex
+	var g *gate
+	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
+		if strings.HasPrefix(p.IdempotencyKey, reportKeyPrefix) {
+			return startedTurn(p)
+		}
+		go func() {
+			wctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+			got := env.gatedCall(p, wctx)
+			cancel()
+			<-got.waitErr
+			mu.Lock()
+			g = got
+			mu.Unlock()
+			finishThenFinal(t, env, p, `{"summary":"merge request pending approval"}`)
+		}()
+		return startedTurn(p)
+	}
+	run, done := env.start(TriggerRequest{AgentID: a.ID, Task: "propose", Trigger: store.TriggerChannel,
+		TriggerRef: store.ConversationRef(conv.ID)})
+	if r := env.wait(done, run.ID); r.Status != store.RunSucceeded {
+		t.Fatalf("run = %s %v", r.Status, r.FailureReason)
+	}
+	env.e.reports.Wait()
+	// The approval notice and the end report went out; neither carries a request.
+	effects := func() []openclaw.ChatSendParams {
+		var out []openclaw.ChatSendParams
+		for _, p := range env.reportSends() {
+			if strings.Contains(p.IdempotencyKey, "-effect-") {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	if sends := env.reportSends(); len(sends) != 2 || len(effects()) != 0 || strings.Contains(sends[1].Message, "merge_requests") {
+		t.Fatalf("reports before the grant = %+v", sends)
+	}
+	mu.Lock()
+	gated := g
+	mu.Unlock()
+	// The gate recorded a deploy_release row; the Deployer's call was open_merge_request.
+	if _, err := env.pool.Exec(ctx, `UPDATE tool_calls SET tool_name='open_merge_request' WHERE id=$1`, gated.call.ID); err != nil {
+		t.Fatal(err)
+	}
+	appr := recv(t, gated.approval, "approval")
+	if _, err := env.e.DecideApproval(ctx, appr.ID, DecisionApprove, "andre", ""); err != nil {
+		t.Fatal(err)
+	}
+	env.e.bg.Wait()
+	sends := effects()
+	if len(sends) != 1 {
+		t.Fatalf("follow-ups after the grant = %+v", sends)
+	}
+	follow := sends[0]
+	if follow.IdempotencyKey != "report-"+run.ID+"-effect-"+gated.call.ID || !follow.Deliver || follow.SessionKey != chiefConvKey ||
+		follow.Message != "[platform] Run "+run.ID+": merge request opened after the run ended: https://gitlab.test/g/p/-/merge_requests/7" {
+		t.Fatalf("follow-up = %+v", follow)
 	}
 }

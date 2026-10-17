@@ -32,6 +32,8 @@ ensure() { # name
 
 ensure OPENCLAW_GATEWAY_TOKEN
 ensure YUNO_MCP_TOKEN
+# Encrypts the git tokens of the projects created in the UI (DESIGN 5.17 rule 2).
+ensure PROJECT_TOKEN_KEY
 
 # The gateway container runs as uid 1000 and must be able to open the host Docker
 # socket to create sandboxes; compose adds this group id to the container.

@@ -19,7 +19,7 @@ var ErrDuplicateTrigger = errors.New("a run for this trigger already exists")
 const runColumns = `id, workflow_id, workflow_version, workflow_snapshot, trigger, trigger_ref, status, input, state,
 	limits, current_node, resume_node_visit_id, step_count, tool_call_count, attempt, cancel_requested, cancel_by,
 	failure_reason, cost_usd_micros, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, paused_at,
-	paused_total_ms, created_at, started_at, finished_at, updated_at, reported_at, toolchain`
+	paused_total_ms, created_at, started_at, finished_at, updated_at, reported_at, toolchain, project_id, project_snapshot`
 
 // SetRunToolchain records the toolchain of the run's project checkout (DESIGN 5.16
 // rule 3).
@@ -47,10 +47,10 @@ func CreateRun(ctx context.Context, q Querier, r *Run) error {
 	now := time.Now().UTC()
 	r.CreatedAt, r.UpdatedAt = now, now
 	_, err := q.Exec(ctx, `INSERT INTO runs (id, workflow_id, workflow_version, workflow_snapshot, trigger, trigger_ref,
-		status, input, state, limits, attempt, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		status, input, state, limits, attempt, created_at, updated_at, project_id, project_snapshot)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		r.ID, r.WorkflowID, r.WorkflowVersion, r.WorkflowSnapshot, r.Trigger, r.TriggerRef,
-		r.Status, r.Input, r.State, r.Limits, r.Attempt, r.CreatedAt, r.UpdatedAt)
+		r.Status, r.Input, r.State, r.Limits, r.Attempt, r.CreatedAt, r.UpdatedAt, r.ProjectID, r.Project)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "runs_schedule_occurrence_idx" {
 		return ErrDuplicateTrigger

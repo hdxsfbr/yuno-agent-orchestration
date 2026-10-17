@@ -1,11 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router";
 import { getOpenClawStatus, getStatus } from "@/lib/api";
 import { useToken } from "@/lib/auth";
 import { formatDateTime, formatDuration } from "@/lib/format";
+import { providerLabel, repoDisplay } from "@/lib/project";
 import { useChannels } from "@/lib/useChannels";
+import { useProjects } from "@/lib/useProjects";
 import { useSchedules } from "@/lib/useSchedules";
 import { Badge } from "@/components/Badge";
-import { Card, PageHeader, Stat } from "@/components/Card";
+import { Card, PageHeader, Stat, cardClass } from "@/components/Card";
 import { Loading, QueryError } from "@/components/QueryState";
 
 function PlatformCards() {
@@ -39,42 +42,66 @@ function PlatformCards() {
 
 const MODE_LABEL: Record<string, string> = { polling: "polling", webhook: "webhook" };
 
-/** The project repository runs with `project: true` work on (DESIGN 5.16). */
-function ProjectPanel() {
-  const q = useQuery({ queryKey: ["status"], queryFn: getStatus, refetchInterval: 5000 });
-  const p = q.data?.project;
-  if (!q.data) return null;
+/** The projects runs can work on, with a way to the page that manages them. */
+function ProjectsPanel() {
+  const q = useProjects();
   return (
-    <section aria-labelledby="project-heading">
-      <h2 id="project-heading" className="mb-3 text-base font-semibold">
-        Project repository
-      </h2>
-      <Card>
-        {p?.configured ? (
-          <dl className="grid gap-x-6 gap-y-4 text-sm sm:grid-cols-3">
-            <div className="sm:col-span-3">
-              <dt className="text-xs uppercase tracking-wide text-zinc-500">Repository</dt>
-              <dd className="mt-1 break-all font-mono text-xs">{p.repo_url}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase tracking-wide text-zinc-500">Default branch</dt>
-              <dd className="mt-1 font-mono text-xs">{p.default_branch}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase tracking-wide text-zinc-500">Provider</dt>
-              <dd className="mt-1 font-medium">{p.provider === "github" ? "GitHub" : "GitLab"}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase tracking-wide text-zinc-500">Sandbox network</dt>
-              <dd className="mt-1">
-                <Badge tone={p.sandbox_network ? "amber" : "zinc"}>{p.sandbox_network ? "On: agents can install dependencies" : "Off"}</Badge>
-              </dd>
-            </div>
-          </dl>
-        ) : (
-          <p className="text-sm text-zinc-500">None configured. Runs with the project flag work in their run directory instead.</p>
-        )}
-      </Card>
+    <section aria-labelledby="projects-heading">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 id="projects-heading" className="text-base font-semibold">
+          Projects
+        </h2>
+        {q.data && q.data.length > 0 ? (
+          <Link to="/projects" className="text-sm underline">
+            Manage projects
+          </Link>
+        ) : null}
+      </div>
+      {q.isLoading ? <Loading /> : null}
+      {q.error ? <QueryError what="the projects" error={q.error} onRetry={() => void q.refetch()} /> : null}
+      {q.data && q.data.length === 0 ? (
+        <Card>
+          <p className="text-sm text-zinc-500">
+            None yet. Create one on the{" "}
+            <Link to="/projects" className="text-zinc-900 underline dark:text-zinc-100">
+              Projects page
+            </Link>
+            .
+          </p>
+        </Card>
+      ) : null}
+      {q.data && q.data.length > 0 ? (
+        <div className={`${cardClass} overflow-x-auto`}>
+          <table className="w-full min-w-[40rem] text-left text-sm">
+            <thead className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-800">
+              <tr>
+                <th className="px-4 py-2.5 font-medium">Name</th>
+                <th className="px-4 py-2.5 font-medium">Repository</th>
+                <th className="px-4 py-2.5 font-medium">Provider</th>
+                <th className="px-4 py-2.5 font-medium">Branch</th>
+                <th className="px-4 py-2.5 font-medium">Sandbox network</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+              {q.data.map((p) => (
+                <tr key={p.id}>
+                  <td className="px-4 py-2.5 font-medium">{p.name}</td>
+                  <td className="break-all px-4 py-2.5 font-mono text-xs" title={p.repo_url}>
+                    {repoDisplay(p.repo_url)}
+                  </td>
+                  <td className="px-4 py-2.5">{providerLabel(p.provider)}</td>
+                  <td className="px-4 py-2.5 font-mono text-xs">{p.default_branch}</td>
+                  <td className="px-4 py-2.5">
+                    <Badge tone={p.sandbox_network ? "amber" : "zinc"} title={p.sandbox_network ? "Agents can install dependencies in the sandbox" : "The sandbox has no network access"}>
+                      {p.sandbox_network ? "Network on" : "Network off"}
+                    </Badge>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -190,7 +217,7 @@ export default function StatusPage() {
       </PageHeader>
       <PlatformCards />
       <OpenClawPanel />
-      <ProjectPanel />
+      <ProjectsPanel />
       <SchedulerPanel />
     </div>
   );

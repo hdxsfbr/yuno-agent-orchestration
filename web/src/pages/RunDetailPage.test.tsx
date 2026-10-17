@@ -304,6 +304,27 @@ describe("RunDetailPage project runs", () => {
     expect(h.queryByRole("link", { name: /request/ })).toBeNull();
   });
 
+  it("names the project the run works on, linking to its page", async () => {
+    trace = {
+      ...trace,
+      run: run({
+        project_id: "p1",
+        project: { name: "yuno-playground", repo_url: "https://gitlab.com/g/p.git", provider: "gitlab", default_branch: "main", sandbox_network: false },
+      }),
+    };
+    renderPage();
+    const h = await header();
+    const item = h.getByText("Project").nextElementSibling as HTMLElement;
+    expect(within(item).getByRole("link", { name: "yuno-playground" }).getAttribute("href")).toBe("/projects/p1");
+  });
+
+  it("has no Project item for a run without a project", async () => {
+    renderPage();
+    const h = await header();
+    expect(h.getByText("Trigger")).not.toBeNull();
+    expect(h.queryByText("Project")).toBeNull();
+  });
+
   it("picks up the link when the tool call arrives on the stream", async () => {
     trace = { ...trace, run: run({ toolchain: "python" }) };
     renderPage();

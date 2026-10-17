@@ -27,6 +27,10 @@ type fakeGitLab struct {
 	// branchesFn, when set, answers branch lookups from a repository the test pushes
 	// to with git (open_merge_request) instead of the map.
 	branchesFn func() []string
+	// refuse answers every request 401 (a wrong token); noPush reports the branches as
+	// not pushable (the project check, DESIGN 5.17 rule 5).
+	refuse bool
+	noPush bool
 }
 
 func (g *fakeGitLab) hasBranch(name string) bool {
@@ -44,6 +48,10 @@ func newFakeGitLab(t *testing.T) (*fakeGitLab, *httptest.Server) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		g.token = r.Header.Get("PRIVATE-TOKEN")
+		if g.refuse {
+			writeJSONTest(w, 401, map[string]string{"message": "401 Unauthorized"})
+			return
+		}
 		p := r.URL.EscapedPath()
 		if !strings.HasPrefix(p, project) {
 			http.NotFound(w, r)
@@ -52,14 +60,21 @@ func newFakeGitLab(t *testing.T) (*fakeGitLab, *httptest.Server) {
 		p = strings.TrimPrefix(p, project)
 		switch {
 		case r.Method == http.MethodGet && p == "":
-			writeJSONTest(w, 200, map[string]any{"id": 7, "default_branch": "main"})
+			// A project access token reports its role under project_access (Developer
+			// is 30); noPush makes it a Reporter.
+			level := 30
+			if g.noPush {
+				level = 20
+			}
+			writeJSONTest(w, 200, map[string]any{"id": 7, "default_branch": "main", "path_with_namespace": "group/demo",
+				"permissions": map[string]any{"project_access": map[string]any{"access_level": level}, "group_access": nil}})
 		case r.Method == http.MethodGet && strings.HasPrefix(p, "/repository/branches/"):
 			name := unescape(strings.TrimPrefix(p, "/repository/branches/"))
 			if !g.hasBranch(name) {
 				writeJSONTest(w, 404, map[string]string{"message": "404 Branch Not Found"})
 				return
 			}
-			writeJSONTest(w, 200, map[string]any{"name": name})
+			writeJSONTest(w, 200, map[string]any{"name": name, "can_push": !g.noPush, "protected": g.noPush})
 		case r.Method == http.MethodHead && strings.HasPrefix(p, "/repository/files/"):
 			if !g.files[unescape(strings.TrimPrefix(p, "/repository/files/"))] || r.URL.Query().Get("ref") != "main" {
 				w.WriteHeader(404)

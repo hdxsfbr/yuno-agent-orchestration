@@ -36,6 +36,9 @@ func TestParse(t *testing.T) {
 		{name: "token required", url: "https://gitlab.com/g/p.git", wantErr: "PROJECT_GIT_TOKEN is required"},
 		{name: "unknown provider", url: "https://gitlab.com/g/p.git", token: "t", provider: "bitbucket", wantErr: "must be gitlab or github"},
 		{name: "bad branch", url: "https://gitlab.com/g/p.git", token: "t", branch: "-x", wantErr: "is not a branch name"},
+		{name: "query refused", url: "https://gitlab.com/g/p.git?private_token=glpat-in-the-query", token: "t", wantErr: "must not carry a query or a fragment"},
+		{name: "fragment refused", url: "https://gitlab.com/g/p.git#glpat-in-the-fragment", token: "t", wantErr: "must not carry a query or a fragment"},
+		{name: "unparsable url not echoed", url: "https://oauth2:glpat-in-a-bad-url@git lab/x", token: "t", wantErr: "is not a valid URL"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -43,6 +46,9 @@ func TestParse(t *testing.T) {
 			if c.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
 					t.Fatalf("err = %v, want %q", err, c.wantErr)
+				}
+				if strings.Contains(err.Error(), "glpat-") {
+					t.Fatalf("the error carries the URL's secret: %v", err)
 				}
 				if cfg.Enabled() {
 					t.Fatal("a refused setting must not enable the project")

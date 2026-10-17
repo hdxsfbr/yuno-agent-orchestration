@@ -215,6 +215,17 @@ describe("ApprovalsPage", () => {
     expect(await screen.findByText("Open the merge request?")).not.toBeNull();
   });
 
+  it("adds the ended-run note when the event stream says the approval's run ended", async () => {
+    server = [{ ...toolApproval, run_status: "running" }];
+    renderPage();
+    const tool = await card("ap-tool");
+    await waitFor(() => expect(api.hasStream("/api/events")).toBe(true));
+    expect(tool.queryByText(/This run has already ended/)).toBeNull();
+    server = [{ ...toolApproval, run_status: "succeeded" }];
+    api.send("/api/events", "run.status", { run: { id: toolApproval.run_id, status: "succeeded" } });
+    expect(await tool.findByText(/This run has already ended/)).not.toBeNull();
+  });
+
   it("filters by status and shows who decided and why", async () => {
     server = [
       { ...nodeApproval, status: "approved", decided_at: "2026-10-15T10:30:00Z", decided_by: "api", reason: "ship it" },
@@ -247,5 +258,54 @@ describe("ApprovalsPage", () => {
     server = [];
     renderPage();
     expect(await screen.findByText("Nothing is waiting for approval.")).not.toBeNull();
+  });
+});
+
+describe("approvals of runs that have ended", () => {
+  const NOTE = "This run has already ended. Approving still executes the call; rejecting discards it.";
+
+  it.each(["succeeded", "failed", "cancelled", "timed_out"] as const)("tells a pending tool approval whose run is %s that approving still executes the call", async (run_status) => {
+    server = [{ ...toolApproval, run_status }];
+    renderPage();
+    const tool = await card("ap-tool");
+    expect(tool.getByRole("note").textContent).toBe(NOTE);
+    expect(tool.getByRole("button", { name: "Approve" })).not.toBeNull();
+    expect(tool.getByRole("button", { name: "Reject" })).not.toBeNull();
+  });
+
+  it("says nothing while the run is still going, or when the inbox does not know its status", async () => {
+    server = [
+      { ...toolApproval, id: "ap-tool-running", run_status: "running" },
+      { ...toolApproval, id: "ap-tool-waiting", run_status: "waiting_approval" },
+      { ...toolApproval, id: "ap-tool-unknown", run_status: undefined },
+    ];
+    renderPage();
+    for (const id of ["ap-tool-running", "ap-tool-waiting", "ap-tool-unknown"]) expect((await card(id)).queryByRole("note")).toBeNull();
+  });
+
+  it("says nothing for a workflow step or a command, whatever happened to the run", async () => {
+    server = [
+      { ...nodeApproval, run_status: "failed" },
+      { ...execApproval, run_status: "failed" },
+    ];
+    renderPage();
+    expect((await card("ap-node")).queryByRole("note")).toBeNull();
+    expect((await card("ap-exec")).queryByRole("note")).toBeNull();
+  });
+
+  it("says nothing about a tool approval that is no longer pending", async () => {
+    server = [{ ...toolApproval, run_status: "succeeded", status: "approved", decided_at: "2026-10-15T11:00:00Z", decided_by: "api" }];
+    renderPage("/approvals?status=all");
+    expect((await card("ap-tool")).queryByRole("note")).toBeNull();
+  });
+
+  it("takes the note away when the approval turns out to have been decided already", async () => {
+    server = [{ ...toolApproval, run_status: "succeeded" }];
+    renderPage();
+    const tool = await card("ap-tool");
+    server[0].status = "approved";
+    fireEvent.click(tool.getByRole("button", { name: "Approve" }));
+    expect(await tool.findByText("This approval was already decided.")).not.toBeNull();
+    expect(tool.queryByRole("note")).toBeNull();
   });
 });

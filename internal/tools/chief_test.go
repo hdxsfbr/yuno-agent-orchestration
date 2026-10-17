@@ -359,3 +359,167 @@ func TestChatToolsAreMarked(t *testing.T) {
 		t.Fatal("IsChatTool")
 	}
 }
+
+// testProject creates a live project with a unique name; the token blob is opaque to
+// these tests (the tools never read it).
+func testProject(t *testing.T, pool *pgxpool.Pool, name string, mut func(p *store.Project)) *store.Project {
+	t.Helper()
+	p := &store.Project{Name: name, RepoURL: "https://gitlab.example/g/" + strings.ToLower(name) + ".git", Provider: "gitlab", DefaultBranch: "main"}
+	if mut != nil {
+		mut(p)
+	}
+	must(t, store.CreateProject(context.Background(), pool, p, []byte("sealed-elsewhere")))
+	return p
+}
+
+// DESIGN 5.17 rule 8: list_projects shows every live project with its repository,
+// provider, branch, network flag and last run; a deleted one is gone.
+func TestListProjects(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	sfx := uniq()
+	ran := testProject(t, pool, "Playground-"+sfx, func(p *store.Project) { p.SandboxNetwork = true; p.Provider = "github"; p.DefaultBranch = "develop" })
+	idle := testProject(t, pool, "Idle-"+sfx, nil)
+	gone := testProject(t, pool, "Gone-"+sfx, nil)
+	must(t, store.DeleteProject(ctx, pool, gone.ID))
+	wf := &store.Workflow{Name: "wf-" + sfx, Definition: json.RawMessage(`{"nodes":[],"edges":[]}`)}
+	must(t, store.CreateWorkflow(ctx, pool, wf))
+	settings := ran.Settings()
+	old := &store.Run{WorkflowID: wf.ID, WorkflowVersion: 1, WorkflowSnapshot: wf.Definition, Trigger: store.TriggerManual, ProjectID: &ran.ID, Project: &settings}
+	must(t, store.CreateRun(ctx, pool, old))
+	tc := "python"
+	newer := &store.Run{WorkflowID: wf.ID, WorkflowVersion: 1, WorkflowSnapshot: wf.Definition, Trigger: store.TriggerManual, ProjectID: &ran.ID, Project: &settings}
+	must(t, store.CreateRun(ctx, pool, newer))
+	must(t, store.SetRunToolchain(ctx, pool, newer.ID, tc))
+	_, err := pool.Exec(ctx, `UPDATE runs SET status='succeeded', finished_at='2026-10-17T10:00:00Z' WHERE id=$1`, newer.ID)
+	must(t, err)
+
+	res := invoke(t, NewListProjects(pool), Call{AgentID: "x", Chat: true, Input: json.RawMessage(`{"chat_token":"x"}`)})
+	if res.IsError {
+		t.Fatalf("list_projects: %+v", res)
+	}
+	var out struct {
+		Projects []struct {
+			Name           string `json:"name"`
+			Repository     string `json:"repository"`
+			Provider       string `json:"provider"`
+			DefaultBranch  string `json:"default_branch"`
+			SandboxNetwork bool   `json:"sandbox_network"`
+			LastRun        *struct {
+				RunID      string  `json:"run_id"`
+				Status     string  `json:"status"`
+				Toolchain  *string `json:"toolchain"`
+				FinishedAt *string `json:"finished_at"`
+			} `json:"last_run"`
+		} `json:"projects"`
+	}
+	must(t, json.Unmarshal(res.Output, &out))
+	seen := map[string]bool{}
+	for _, p := range out.Projects {
+		seen[p.Name] = true
+		switch p.Name {
+		case ran.Name:
+			if p.Repository != ran.RepoURL || p.Provider != "github" || p.DefaultBranch != "develop" || !p.SandboxNetwork || p.LastRun == nil ||
+				p.LastRun.RunID != newer.ID || p.LastRun.Status != "succeeded" || p.LastRun.Toolchain == nil || *p.LastRun.Toolchain != "python" ||
+				p.LastRun.FinishedAt == nil || *p.LastRun.FinishedAt != "2026-10-17T10:00:00Z" {
+				t.Fatalf("ran = %+v %+v", p, p.LastRun)
+			}
+		case idle.Name:
+			if p.LastRun != nil || p.SandboxNetwork || p.Provider != "gitlab" {
+				t.Fatalf("idle = %+v", p)
+			}
+		}
+	}
+	if !seen[ran.Name] || !seen[idle.Name] || seen[gone.Name] {
+		t.Fatalf("listed: %v", seen)
+	}
+	if strings.Contains(string(res.Output), "sealed-elsewhere") {
+		t.Fatal("the token blob is listed")
+	}
+}
+
+// DESIGN 5.17 rule 8, T5.17.6: delegate_task's project branches.
+func TestDelegateTaskProject(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	sfx := uniq()
+	chief := chiefAgent(t, pool, "Chief-"+sfx, "delegate_task")
+	coder := chiefAgent(t, pool, "Coder-"+sfx)
+	needs := &store.Workflow{Name: "Dev-" + sfx, Definition: json.RawMessage(`{"project":true,"nodes":[],"edges":[]}`)}
+	must(t, store.CreateWorkflow(ctx, pool, needs))
+	plain := &store.Workflow{Name: "Research-" + sfx, Definition: json.RawMessage(`{"nodes":[],"edges":[]}`)}
+	must(t, store.CreateWorkflow(ctx, pool, plain))
+	play := testProject(t, pool, "Playground-"+sfx, nil)
+	d := &fakeDelegator{pool: pool}
+	tool := NewDelegateTask(ChiefDeps{Pool: pool, Delegator: d})
+	chat := func(input string) Result {
+		return invoke(t, tool, Call{AgentID: chief.ID, Chat: true, Input: json.RawMessage(input)})
+	}
+
+	res := chat(`{"workflow_name":"Dev-` + sfx + `","input":{"task":"x"}}`)
+	if !res.IsError || !strings.HasPrefix(res.Text, "workflow Dev-"+sfx+" needs a project; choose one of: ") || !strings.Contains(res.Text, play.Name) {
+		t.Fatalf("needs a project: %+v", res)
+	}
+	res = chat(`{"workflow_name":"Dev-` + sfx + `","input":{"task":"x"},"project":"Nowhere-` + sfx + `"}`)
+	if !res.IsError || !strings.HasPrefix(res.Text, "no project named Nowhere-"+sfx+"; choose one of: ") || !strings.Contains(res.Text, play.Name) {
+		t.Fatalf("unknown project: %+v", res)
+	}
+	res = chat(`{"workflow_name":"Research-` + sfx + `","input":{"task":"x"},"project":"` + play.Name + `"}`)
+	if !res.IsError || res.Text != "workflow Research-"+sfx+" does not use a project" {
+		t.Fatalf("plain workflow with a project: %+v", res)
+	}
+	if len(d.got) != 0 {
+		t.Fatalf("refused calls delegated: %+v", d.got)
+	}
+	res = chat(`{"workflow_name":"dev-` + sfx + `","input":{"task":"x"},"project":"  playground-` + sfx + ` "}`)
+	if res.IsError || len(d.got) != 1 || d.got[0].WorkflowID != needs.ID || d.got[0].ProjectID != play.ID {
+		t.Fatalf("project workflow: %+v %+v", res, d.got)
+	}
+	res = chat(`{"workflow_name":"Research-` + sfx + `","input":{"task":"x"}}`)
+	if res.IsError || len(d.got) != 2 || d.got[1].ProjectID != "" {
+		t.Fatalf("plain workflow: %+v %+v", res, d.got)
+	}
+	res = chat(`{"agent_name":"Coder-` + sfx + `","task":"add a test","project":"` + play.Name + `"}`)
+	if res.IsError || len(d.got) != 3 || d.got[2].AgentID != coder.ID || d.got[2].ProjectID != play.ID {
+		t.Fatalf("agent with a project: %+v %+v", res, d.got)
+	}
+	res = chat(`{"agent_name":"Coder-` + sfx + `","task":"add a test","project":""}`)
+	if res.IsError || len(d.got) != 4 || d.got[3].ProjectID != "" {
+		t.Fatalf("agent with an empty project: %+v %+v", res, d.got)
+	}
+	// The approval sentence names the project (DESIGN 5.17 rule 8).
+	if msg := tool.Message(json.RawMessage(`{"workflow_name":"Dev","input":{},"project":"Playground"}`)); msg != "Run the workflow Dev on project Playground" {
+		t.Fatalf("message = %q", msg)
+	}
+	if msg := tool.Message(json.RawMessage(`{"agent_name":"Coder","task":"t","project":"Playground"}`)); msg != "Delegate to Coder on project Playground: t" {
+		t.Fatalf("message = %q", msg)
+	}
+}
+
+// DESIGN 5.17 rule 8: run_status carries the run's project and the merge request it
+// opened.
+func TestRunStatusProjectAndMergeRequest(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	f := newFixture(t, pool, nil)
+	play := testProject(t, pool, "Playground-"+uniq(), nil)
+	settings := play.Settings()
+	_, err := pool.Exec(ctx, `UPDATE runs SET project_id=$2, project_snapshot=$3 WHERE id=$1`, f.run.ID, play.ID, settings)
+	must(t, err)
+	tool := NewRunStatus(pool, "")
+	res := invoke(t, tool, Call{Input: json.RawMessage(`{"run_id":"` + f.run.ID + `"}`)})
+	var out map[string]any
+	must(t, json.Unmarshal(res.Output, &out))
+	if out["project"] != play.Name || out["merge_request_url"] != nil {
+		t.Fatalf("before the request: %s", res.Output)
+	}
+	now := time.Now().UTC()
+	must(t, store.InsertToolCall(ctx, pool, &store.ToolCall{RunID: f.run.ID, RunNodeID: f.visit.ID, ToolUseID: "mcp-" + uniq(),
+		ToolName: OpenMergeRequestName, Input: json.RawMessage(`{}`), Status: store.ToolExecuted, StartedAt: &now, FinishedAt: &now,
+		Output: json.RawMessage(`{"number":3,"url":"https://gitlab.test/g/p/-/merge_requests/3","provider":"gitlab"}`)}))
+	res = invoke(t, tool, Call{Input: json.RawMessage(`{"run_id":"` + f.run.ID + `"}`)})
+	must(t, json.Unmarshal(res.Output, &out))
+	if out["merge_request_url"] != "https://gitlab.test/g/p/-/merge_requests/3" {
+		t.Fatalf("after the request: %s", res.Output)
+	}
+}

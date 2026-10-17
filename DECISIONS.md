@@ -6,6 +6,31 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-17
 
+**D-038 Projects are records created in the UI; a run names its project; tokens are
+encrypted at rest; `PROJECT_*` only bootstraps.** (Andre, 2026-10-17) The single
+environment-configured project of D-037 becomes a `projects` table an operator fills in
+on a Projects tab: name, https URL, provider (inferred from the host when left empty),
+default branch, sandbox network opt-in, description, and a git token stored AES-GCM
+encrypted under `PROJECT_TOKEN_KEY` (generated into `.env` like the other platform
+tokens) and never returned by the API (`token_set` says one is stored). A run request,
+the Run dialog, the quick-run dialog and the Chief of Staff's `delegate_task` name the
+project; a workflow that opts in (`project: true`) requires one and one that does not
+refuses one; the run keeps a snapshot of the settings and reads the token from the row
+at clone and push time, so a deleted project finishes its runs and a replaced token
+applies to runs in flight. `open_merge_request` is registered always and takes the
+project from the run. A Check action lists the repository through the provider's API
+and reports the default branch and whether the token can push, without a clone. At
+start the api turns a configured `PROJECT_*` into a project once, named after the
+repository path, so the current deployment keeps working; after that the page is the
+truth. Why: the operator wants several repositories and wants to say "on the playground
+project" to the Chief, and a token in `.env` cannot be rotated or added without a
+redeploy; records with a write-only, encrypted token keep the credential on the api
+side (D-037's rule) while making projects a product object. Cost: one more secret in
+`.env` (`PROJECT_TOKEN_KEY`), whose loss makes every stored token unreadable (the check
+says so and the operator enters the tokens again); schedules do not name a project yet,
+so a scheduled run of a project workflow fails its validation until they do. Design:
+`docs/DESIGN.md` 5.17.
+
 **D-037 Projects are git repositories configured by environment variables; toolchains
 come from the repository and run in prebuilt generic images; sandbox network is a
 per-project opt-in; no agent clones or pushes.** (Andre, 2026-10-17) One project per

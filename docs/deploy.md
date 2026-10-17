@@ -61,17 +61,13 @@ TELEGRAM_MODE=webhook            # Telegram posts to https://DOMAIN/telegram-web
 API_TOKEN=<a long random value>  # the UI and every API call need it
 ```
 
-To let runs work on a git repository (README "Projects"), add the project settings to
-the same file. The token is held by the api only and never shown to an agent; network for
-the sandbox is an opt-in for a repository you trust:
-
-```
-PROJECT_REPO_URL=https://gitlab.com/group/project.git
-PROJECT_GIT_TOKEN=<a token with api and write_repository on that project>
-PROJECT_DEFAULT_BRANCH=main
-PROJECT_PROVIDER=gitlab            # or github
-PROJECT_SANDBOX_NETWORK=true       # agents install the project's dependencies themselves
-```
+Projects (the git repositories runs work on, README "Projects") are created on the
+Projects tab once the stack is up; their tokens are stored encrypted under
+`PROJECT_TOKEN_KEY`, which `make run-public` generates into the host's `.env` on its
+first run when the file has none. Back that key up with the `.env`: a lost key makes
+every stored token unreadable (the Check button says so) and each has to be entered
+again on the page. The `PROJECT_*` settings may still be put in the file as a bootstrap:
+at the api's start they become the first project, once, and are not read again.
 
 `.env.prod` is git-ignored like every `.env.*`. Deploy:
 
@@ -99,7 +95,8 @@ per-toolchain sandbox images (`yuno-sandbox-python`, `-node`, `-go`) are built o
 by the same `make run` the deploy runs, so a project run never pulls an image at run
 time; `make smoke` checks that all four sandbox images exist. An install that predates
 projects keeps its seeded agents and workflows; run `make seed-reset` once on the host
-so the Deployer gets `open_merge_request` and the Dev pipeline opts into the project.
+so the Deployer gets `open_merge_request`, the Chief of Staff gets `list_projects` and
+its new prompt, and the Dev pipeline opts into projects.
 
 ## Deploying from GitLab CI
 

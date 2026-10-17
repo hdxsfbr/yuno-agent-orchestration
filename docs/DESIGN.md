@@ -1057,8 +1057,8 @@ The full design with inputs, edge cases, failure handling and tests is
    by the API, redacted); an unknown token answers `invalid chat token`; both tokens
    answer `one of run_token or chat_token`.
 2. Only chat-capable tools accept a chat token: `list_agents`, `list_workflows`,
-   `delegate_task`, `run_status`, `memory_save`, `memory_recall`; others answer
-   `<tool> is not available in a conversation`.
+   `delegate_task`, `run_status`, `memory_save`, `memory_recall` and, since 5.17,
+   `list_projects`; others answer `<tool> is not available in a conversation`.
 3. A chat tool call is a `tool_calls` row with `run_id` null and `conversation_id` the
    agent's most recent conversation (null when none), redacted and capped like run calls.
 4. `list_agents` returns every agent but the caller (name, role, model, allowlist, bound
@@ -1087,8 +1087,8 @@ The full design with inputs, edge cases, failure handling and tests is
     approval: <kind>, <message>. Decide it at <url>` per approval
     (`approvals.reported_at`); approvals are decided in the UI.
 11. Those messages are mirrored like inbound messages with `run_id` set.
-12. The seeded `Chief of Staff` (Coordinator, `claude-opus-5-5`, the six chat tools, no
-    exec) carries the coordinator prompt from the brief.
+12. The seeded `Chief of Staff` (Coordinator, `claude-opus-5-5`, the chat tools, no
+    exec) carries the coordinator prompt from the brief, extended by 5.17 rule 8.
 13. Seeding instantiates both templates when no workflow carries their template key.
 14. Seeding binds the Chief of Staff when Telegram is enabled and nothing is bound; it
     never changes an existing binding.
@@ -1109,7 +1109,9 @@ definition or a run request; the run's idempotency keys.
 
 Rules:
 
-1. **Configuration from the environment.** `PROJECT_REPO_URL` is the https clone URL
+1. **Configuration from the environment** (since 5.17: a project is a record and
+   `PROJECT_*` only bootstraps the first one; the validation here still applies to
+   every record). `PROJECT_REPO_URL` is the https clone URL
    without user information; `PROJECT_GIT_TOKEN` is write-only (never returned by the
    API, redacted by `internal/obs` wherever it could appear); `PROJECT_DEFAULT_BRANCH`
    defaults to `main`; `PROJECT_PROVIDER` is `gitlab` or `github`, defaulting to `github`
@@ -1119,12 +1121,12 @@ Rules:
    is logged once at start and the api runs without a project. `GITLAB_*` keep their
    meaning for `gitlab_create_mr`, the loose-files tool.
 2. **Opt-in per workflow or run.** A workflow definition carries `project: true`; a
-   quick run carries `project: true` on the run request, which sets it on the one-node
-   definition. The flag means "use the project repository when one is configured": on an
-   install without a configured project the run proceeds as before, with one log line
-   (`project: no repository configured; running without a checkout`), so the seeded Dev
-   pipeline, which opts in, keeps working everywhere. The flag travels in the run's
-   workflow snapshot.
+   quick run opts in by naming a project on the run request (`project_id`, 5.17 rule
+   4), which sets the flag on the one-node definition. Since 5.17 the flag means "a
+   run of this workflow names a project" and the request must name one; a run whose
+   snapshot opts in but names no project (queued before 5.17) proceeds without a
+   checkout, with one log line (`project: no repository configured; running without a
+   checkout`). The flag travels in the run's workflow snapshot.
 3. **Clone before the first visit.** In the run's first agent visit, after the agent is
    materialised and its run directory prepared (5.6 rule 13) and before its turn, the
    engine clones the default branch at depth 1 (`--single-branch`) into
@@ -1218,7 +1220,7 @@ Rules:
 10. **`open_merge_request`**, a platform tool (5.7): input `{run_token, title,
     description}`; risk `side_effecting`, hits `external`, approval-gated by default
     (5.3), timeout 120 s, idempotency key as 5.4, branch `yuno/<first 12 hex of the key>`
-    like `gitlab_create_mr`. Steps, in the calling agent's workspace: (a) the checkout is
+    like `gitlab_create_mr`; the project is the run's (5.17 rule 6). Steps, in the calling agent's workspace: (a) the checkout is
     `runs/<run id>/repo/` reached through an `os.Root` with links refused, and must hold a
     `.git` directory, else the model-facing error `this run has no project checkout at
     runs/<run id>/repo/`; (b) if the provider reports the branch, the commit and push are
@@ -1235,8 +1237,8 @@ Rules:
     removes the private directory; (c) an open merge request from that branch is
     returned with `replayed: true`; otherwise one is opened against the default branch
     with the title and description. Output: `{number, url, branch, provider,
-    replayed?}`. Registered only when the project is configured (`GET /api/tools` lists
-    it then); `gitlab_create_mr` stays for runs without a project. Commits an agent made
+    replayed?}`. Registered always since 5.17 (a run without a project is told `this
+    run has no project`); `gitlab_create_mr` stays for runs without a project. Commits an agent made
     inside the sandbox are flattened: their working tree is what the one commit holds.
 11. **Providers behind one interface** (`branchExists`, `findOpen`, `create`): GitLab
     through `<scheme>://<host>/api/v4/projects/<url-encoded path>` (`PRIVATE-TOKEN`;
@@ -1316,9 +1318,225 @@ badge and the merge request link from the tool output; the list shows the badge;
 without an executed call. T5.16.8 `GET /api/tools` lists `open_merge_request` only when
 the project is configured; `RunCreate.project` reaches the snapshot.
 
-Out of scope: more than one project per platform, per-agent projects, branches other
+Out of scope (more than one project per platform is 5.17): per-agent projects, branches other
 than the default as the base, rebases or conflict resolution, reviewing an existing
 merge request, GitHub Apps (a token is the only credential), submodules.
+
+### 5.17 Projects as records: several repositories, one named per run
+
+Purpose: the one project of 5.16, configured by environment variables, becomes records
+an operator creates and edits in the UI, so a platform works on several repositories
+and every run, delegation or quick run names the one it works on. Decision D-038. The
+mechanics of 5.16 (clone, toolchain, images, sandbox selection, the task protocol
+lines, `open_merge_request`, the two providers) are unchanged; this section says where
+their settings come from and how a run is tied to them.
+
+Inputs: the `projects` table; `PROJECT_TOKEN_KEY`; the `PROJECT_*` settings, now a
+bootstrap only; `project_id` on a run request; `project` on `delegate_task`.
+
+Rules:
+
+1. **A project is a record.** `projects` (migration 0010): `id`, `name` (1 to 64
+   characters, trimmed, unique among live projects ignoring case), `repo_url` (https,
+   no user information, a repository path; validated as 5.16 rule 1), `provider`
+   (`gitlab` | `github`; a request may leave it empty, in which case the host decides
+   as in 5.16 rule 1 and the resolved value is stored), `default_branch` (default
+   `main`, validated as 5.16 rule 1), `sandbox_network` (default false), `description`
+   (at most 1024 characters), `token_enc`, `created_at`, `updated_at`, `deleted_at`
+   (soft delete). A project with no token cannot exist: a create needs one.
+2. **The token is encrypted at rest and write-only.** `token_enc` is AES-256-GCM over
+   the token, a random 96-bit nonce prefixed to the ciphertext, the project id as
+   additional data (a blob cannot be moved onto another row), under the key
+   SHA-256(`PROJECT_TOKEN_KEY`); `scripts/ensure-env.sh` generates the variable (32
+   random bytes, hex) like the other platform tokens, and `.env.example` and compose
+   carry it. The API never returns the token: every representation carries `token_set`
+   instead; an update whose `token` is absent or empty keeps the stored one, unless
+   it changes the repository's host or the provider, which needs the token again
+   (422 `token`: the stored one is for the host it was entered for, and a re-pointed
+   project could otherwise aim it at another server through the check or a clone);
+   the redactor knows the token shapes (5.16 rule 4). The api's provider clients never
+   follow a redirect, so a token header never travels to another host. Without `PROJECT_TOKEN_KEY` the api
+   refuses to store a token (503 `project_tokens_unavailable`) and skips the bootstrap
+   of rule 9 with a warning. A token that no longer decrypts (the key changed) is
+   reported by the check of rule 5 and fails a run's clone with the reason
+   `project: the stored token cannot be read; enter it again on the Projects page`.
+3. **API.** `GET /api/projects` (live projects by name), `POST /api/projects`,
+   `GET`/`PUT`/`DELETE /api/projects/{id}`, `POST /api/projects/{id}/check`. The
+   representation is `{id, name, repo_url, provider, default_branch, sandbox_network,
+   description, token_set, created_at, updated_at, last_run?}`, `last_run` being
+   `{id, status, toolchain?, created_at, finished_at?}` of the newest run that names
+   the project. Validation answers 422 with `details: [{path, message}]` on the paths
+   `name`, `repo_url`, `provider`, `default_branch`, `token` and `description`; a name
+   another live project holds is `name: a project named "X" already exists` (the
+   unique index settles a race). `DELETE` is a soft delete (204): the project leaves
+   the lists and the selectors, runs that name it keep their snapshot (rule 4), and the
+   row keeps its token so a run in flight still clones and pushes.
+4. **A run names a project.** `runs.project_id` (nullable, references `projects`) and
+   `runs.project_snapshot` (`{name, repo_url, provider, default_branch,
+   sandbox_network}`, never the token) are written when the run is queued. A run
+   request carries `project_id` (this replaces 5.16 rule 2's `RunCreate.project`
+   boolean): for a workflow whose definition has `project: true` it is required (422
+   `project_id: required; the workflow works on a project repository`), for a
+   workflow without the flag it is refused (422 `project_id: the workflow does not
+   use a project`), and a quick run takes it optionally, its one-node definition
+   getting `project: true` when it does. An unknown or deleted id is 422
+   `project_id: no project with id X`. A schedule carries no project (out of scope),
+   so a scheduled run of a workflow that opts in fails validation when it fires and
+   the schedule's `last_error` says so.
+5. **Check.** `POST /api/projects/{id}/check` verifies the stored token against the
+   provider without a clone: GitLab `GET <api base>` (the project: its
+   `default_branch`, and the token's access level under `permissions.project_access`
+   or `group_access`, Developer or above meaning it can push a branch; the platform
+   pushes its own branch, never the protected default one) and `GET <api
+   base>/repository/branches/<default branch>` (existence; its `can_push` stands in
+   when no access level is reported); GitHub `GET <api base>` (`default_branch`,
+   `permissions.push`) and `GET <api base>/branches/<default branch>`. It answers 200
+   with `{ok, message, default_branch?, branch_exists?, can_push?, checked_at}`: `ok`
+   means the token was accepted and the repository found; the message is one sentence
+   for the operator (`Token accepted: default branch main, push allowed.`, `The token
+   was refused (401).`, `Repository not found (404): check the URL and the token's
+   scope.`, `Token accepted, but it cannot push to the repository; it needs write
+   access.`, `Token accepted, but branch develop does not exist; the repository's
+   default branch is main.`). Provider errors, a redirect (never followed) and the
+   10 s timeout are results, not HTTP errors; the token never appears in them.
+6. **The engine takes the project from the run.** When the snapshot's definition has
+   `project: true` and the run names a project, the visit's project configuration is
+   the run's snapshot plus the token read from the project's row (deleted or not) and
+   decrypted when the clone starts and again when `open_merge_request` runs, so a
+   token replaced on the Projects page applies to runs in flight. A run whose
+   definition opts in but names no project (one queued before this section) runs
+   without a checkout with the log line of 5.16 rule 2. The clone, the toolchain
+   detection, the sandbox selection, the task protocol lines and `open_merge_request`
+   use that configuration and nothing reads `PROJECT_*` at run time.
+   `open_merge_request` is registered always (supersedes 5.16 rule 10's "only when
+   configured") and answers the model `this run has no project` for a run without one.
+7. **A run's representation** carries `project_id` and `project` (the snapshot). The
+   runs list and the run header show the project's name linking to
+   `/projects/<id>`; the Projects page shows for each project the toolchain of its
+   last run; the Status page lists the projects (name, repository, provider, branch,
+   network) instead of the single project, and `GET /api/status` loses its `project`
+   member.
+8. **Chief of Staff.** `list_projects` is a seventh chat-capable tool (5.15 rule 2):
+   `{projects: [{name, repository, provider, default_branch, sandbox_network,
+   last_run}]}` with `last_run` `{run_id, status, toolchain?, finished_at?}` or null.
+   `delegate_task` takes an optional `project` (a name, matched case-insensitively and
+   trimmed like agents and workflows): required when the target workflow's definition
+   has `project: true` (`workflow X needs a project; choose one of: A, B`, or
+   `workflow X needs a project and none exists yet; the operator creates one on the
+   Projects page`), refused when it has not (`workflow X does not use a project`),
+   optional with `agent_name` (the quick run then works on the project); an unknown
+   name answers `no project named X; choose one of: A, B`. The delegation's approval
+   sentence names the project. `run_status` adds `project` (the snapshot's name) and
+   `merge_request_url` (the newest executed `open_merge_request` call's URL) when the
+   run has them. The seeded Chief's prompt says to find the project the person's words
+   name with `list_projects`, to pass its name when delegating, and to ask which
+   project when the words name none and the workflow needs one.
+9. **Bootstrap from `PROJECT_*`.** At api start, after the migrations, when
+   `PROJECT_REPO_URL` and `PROJECT_GIT_TOKEN` parse (5.16 rule 1) and no project, live
+   or deleted, has that URL, the api creates the project once (a deleted one stays
+   deleted: the operator's decision on the page wins over the environment): named after the repository path's
+   last segment (`.git` stripped: `yuno-playground`), or the whole path
+   (`andrebatista/yuno-playground`) when a live project already has that name, with
+   the environment's branch, provider and network flag and the token encrypted, and
+   logs `project bootstrapped from PROJECT_*`. Nothing is updated afterwards:
+   `PROJECT_*` is the bootstrap for the first start of an install that predates this
+   section, the Projects page is the truth after it, and a rotated token goes into the
+   page, not the environment. The api runs without a bootstrap when the key is
+   missing or the setting is incomplete (a warning, as before).
+10. **Report-back.** The run report of 5.15 rule 9 ends with ` Merge request: <url>`
+    (`Pull request:` for GitHub) when the run has an executed `open_merge_request`
+    call when the report is composed. A request opened by a late grant (5.3 rule 5)
+    after the run was reported gets one follow-up, `[platform] Run <id>: merge request
+    opened after the run ended: <url>`, sent once into the same conversation
+    (idempotency key `report-<run id>-effect-<tool call id>`, one attempt, no claim).
+11. **Merge request title.** `open_merge_request`'s `title` is at most 72 characters
+    (the schema caps it) and the tool's description says it is a short summary of the
+    change, like a commit subject, never the task text; the detail goes into the
+    description. (The first live run used the whole task text as the title.)
+12. **Two cards in a row.** A gate node followed by a gated tool call raises two
+    approval cards within seconds of each other (the node's, then the tool's once the
+    Deployer calls the tool); that follows from 5.3 and nothing merges them. The
+    approval card of a tool call whose run has already ended (5.3 rule 5's late grant,
+    D-020) says that approving still executes the call and rejecting discards it: the
+    inbox's `ApprovalItem` carries `run_status` for that, the run page has the run.
+13. **UI.** A Projects tab (`/projects`, between Workflows and Runs): a table of name,
+    repository (host and path), provider, default branch, the toolchain of the last
+    run, a network badge; New project and Edit open one form (name, repository URL,
+    provider with "Detect from the URL", default branch, the token as a password field
+    that is empty on edit with the hint "A token is set. Enter a new one to replace
+    it.", sandbox network, description); Check on a row shows the result sentence
+    under the row with a green or red tone; Delete asks for confirmation ("Runs that
+    used this project keep their history."). `/projects/<id>` opens the page with that
+    project's form. The workflow Run dialog shows a required project selector when the
+    workflow opts in (and a sentence with a link to the Projects tab when no project
+    exists, the Start button disabled); the quick-run dialog offers an optional
+    selector when projects exist. The builder's switch says a run of the workflow
+    names a project. No developer commentary in product copy.
+14. **Seed and reset.** The seeded Chief of Staff lists the seven chat tools and
+    carries the prompt of rule 8; `make seed-reset` (5.16 rule 14) brings an existing
+    Chief up to date.
+
+Edge cases: two live projects with one URL (allowed: different branches or tokens; the
+bootstrap matches by URL and creates nothing then). A project renamed while a run is
+queued: the run keeps the snapshot's name. A project deleted while a run is queued or
+running: the run clones and pushes from the snapshot with the row's token. The key
+changed: every stored token fails to decrypt; the check says so, runs fail at the clone
+with rule 2's reason, the operator enters the tokens again. A delegation naming a
+project for a quick run on an agent without `exec`: the checkout is still made (5.16
+edge case). Two projects whose names differ only in case cannot both be live, so the
+name match is exact ignoring case. The hidden quick-run workflow (5.1) carries no flag:
+the flag lives in the run's snapshot. A deleted project's id on a run request is
+refused like an unknown one.
+
+Failure handling: a provider error during the check is a result; a decrypt error at
+the clone fails the run before any turn, with a redacted reason; a create or update
+that cannot encrypt (no key) is 503; the bootstrap logs and continues; the follow-up
+report of rule 10 is sent once and never retried (the UI holds the truth, 5.15 rule 9).
+A late grant that executes in the milliseconds between the end report's claim and its
+text can put the URL in both messages; nothing is lost and the window is not closed.
+
+Outputs: `projects` rows; `runs.project_id` and `runs.project_snapshot`; `tool_calls`
+rows for `list_projects`; the Projects tab, the selectors, the project link on runs,
+the Status list; the follow-up report.
+
+Tests: T5.17.1 cipher and store: round trip; a blob sealed for one id does not open
+for another; a wrong key fails; an empty key is refused; create, unique name ignoring
+case, update keeps the token when none is sent, soft delete hides the row from the
+list and the name lookup while the token still reads. T5.17.2 API: 422 details for a
+missing name, an http URL, a URL with credentials, an unknown provider, a bad branch,
+a missing token on create, a duplicate name; the representation never carries the
+token (`token_set` only), including after a PUT with a new token; `DELETE` then `GET`
+is 404; the conformance test covers every path. T5.17.3 check against the GitLab fake
+(accepted and can push; branch missing; refused token) and the GitHub fake
+(`permissions.push` true and false; repository not found). T5.17.4 engine, with the
+local bare repository as the remote: a project workflow run queued with `project_id`
+clones from its snapshot with the token read from the row, carries the checkout, and
+`open_merge_request` in the second agent's workspace pushes and opens the request on
+the fake provider for the same project; the project deleted after queueing still
+clones; a definition with `project: true` and no project id runs without a checkout; a
+quick run with `project_id` gets the checkout; a token that does not decrypt fails the
+run with rule 2's reason; the trigger refuses a project workflow without `project_id`
+and a plain workflow with one. T5.17.5 bootstrap: creates the project once (a second
+call creates nothing), names it from the path, uses the whole path when the name is
+taken, does nothing without a key or with an incomplete setting. T5.17.6
+`delegate_task`: a project workflow without `project` answers the needs-a-project
+message with the names; an unknown name answers `no project named`; a name puts the
+id on the delegation; a plain workflow with `project` is refused; `agent_name` with
+`project` delegates a quick run on it. `list_projects` lists name, repository,
+provider, branch, network and last run; `run_status` carries `project` and
+`merge_request_url`. T5.17.7 report: the run report carries the URL when the call
+executed before the report; a late grant sends the follow-up once. T5.17.8 UI: the
+Projects page lists, creates (the token field is write-only: the edit form shows the
+hint and sends no token when left empty), shows a check result, confirms a delete;
+the Run dialog's selector is required for a project workflow and absent otherwise;
+the quick-run selector; the runs list and the header show the project link; the Status
+page lists projects; the approval card's ended-run note. T5.17.9 `GET /api/tools` lists
+`open_merge_request` always (supersedes T5.16.8); `TestEnvExampleAndComposeCoverConfig`
+covers `PROJECT_TOKEN_KEY`.
+
+Out of scope: a schedule naming a project; per-agent projects; a project's own default
+limits; more than one token per project; GitHub Apps; validating a changed repository
+URL against the runs that used the project.
 
 ## 6. HTTP API summary
 
@@ -1334,7 +1552,9 @@ As revision 1 plus: `GET/POST /skills`, `GET/PUT/DELETE /skills/{id}`;
 `GET /conversations`, `GET /conversations/{id}/messages`, `GET /conversations/{id}/tool-calls`; `GET/POST /schedules`,
 `GET/PUT/DELETE /schedules/{id}`; `GET/POST /skills`, `GET/PUT/DELETE /skills/{id}`;
 `GET /agents/{id}/memory`, `DELETE /agents/{id}/memory/{factId}`; `POST /mcp` (MCP, bearer); `/model-proxy/*` (bearer or
-loopback only); `GET /openclaw/status` (gateway connection, scopes, version).
+loopback only); `GET /openclaw/status` (gateway connection, scopes, version);
+`GET/POST /projects`, `GET/PUT/DELETE /projects/{id}`, `POST /projects/{id}/check` (5.17;
+the token is write-only, `token_set` says one is stored).
 
 ## 7. Frontend
 
@@ -1358,6 +1578,11 @@ or delay form with the browser zone as default, input from the workflow's schema
 Skills (list, editor, read-only name on edit), the agent page's saved facts, guardrail
 pattern errors and Telegram line, and Status panels for OpenClaw and the scheduler.
 Binding lives on Channels, not on the agent form.
+
+Wave 7 as built (5.17): the Projects tab (list, one form for create and edit with a
+write-only token field, Check, Delete), the project selector in the workflow Run dialog
+and the quick-run dialog, the project link on the runs list and the run header, the
+projects list on Status, and the ended-run note on tool approval cards.
 
 ## 8. Docker and Makefile
 

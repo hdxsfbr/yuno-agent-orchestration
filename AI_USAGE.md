@@ -309,3 +309,24 @@ instance to it, and ran one Dev pipeline on it; Andre approved the gate and, aft
 tool approval had timed out and the run had ended, the merge-request card, which the
 engine executed as a late grant. The first real merge request opened by the platform is
 `yuno-playground!1`.
+
+**Projects as records (2026-10-17).** Andre asked for projects created and configured in
+the UI and for the Chief of Staff to delegate "on the playground project" by name. A
+coordinator session started by the wave-6 session wrote DESIGN 5.17 (fourteen rules,
+edge cases, failure handling, a test list) and D-038 first, then the contract in
+`api/openapi.yaml`, the store layer, the migration and the `project` package's cipher,
+validation helpers, resolver and bootstrap as the shared seams, and briefed two agents
+from `docs/briefs/wave7/` with disjoint file scopes: the API (Opus 5.5: the projects
+CRUD with the write-only encrypted token, the provider check against the existing
+httptest fakes, the bootstrap at start, `run_status` on approval items) and the UI
+(Sonnet 5.5: the Projects tab and form, the selectors in both run dialogs, the project
+link on runs, the Status list, the ended-run note on approval cards, with a mutation
+check of its own tests). The coordinator did the engine (the resolver in place of the
+environment project, validation of `project_id` at trigger time, the follow-up report for
+a merge request opened by a late grant), the Chief's `list_projects` and the project on
+`delegate_task` and `run_status`, the seed, and their tests, and ran the full suite, lint
+and the review itself. Two nits from the first live run were folded in: the merge
+request title is capped at 72 characters and described as a commit subject, and a tool
+approval on a run that has already ended says that approving still executes the call.
+The design was not approved by a human before coding: the session ran autonomously on
+the brief, so the design text is what a reviewer should read first.

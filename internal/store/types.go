@@ -219,6 +219,10 @@ type Run struct {
 	// Toolchain is what the project checkout's manifest said (DESIGN 5.16 rule 5): go,
 	// node, python or default; nil for a run without a checkout.
 	Toolchain *string `db:"toolchain" json:"toolchain,omitempty"`
+	// ProjectID and Project are the project the run works on and the snapshot of its
+	// settings taken when the run was queued (DESIGN 5.17 rule 4); nil without one.
+	ProjectID *string          `db:"project_id" json:"project_id,omitempty"`
+	Project   *ProjectSettings `db:"project_snapshot" json:"project,omitempty"`
 	// AgentNames and Models are not columns; FillRunParticipants sets them for list views.
 	AgentNames []string `db:"-" json:"agent_names,omitempty"`
 	Models     []string `db:"-" json:"models,omitempty"`

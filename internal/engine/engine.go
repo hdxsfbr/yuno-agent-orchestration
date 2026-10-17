@@ -33,10 +33,11 @@ type Engine struct {
 	waitMu  sync.Mutex
 	waiters map[string]*approvalWaiter // tool approval id → the MCP call waiting for it
 
-	// project is the configured repository (DESIGN 5.16 rule 1), nil when none; sbxHolds
-	// counts the project visits in progress per OpenClaw agent id, whose sandbox block
-	// is cleared when the last one ends (rule 7).
-	project  *project.Config
+	// projects resolves a run's project configuration from its snapshot and the row's
+	// sealed token (DESIGN 5.17 rule 6); sbxHolds counts the project visits in progress
+	// per OpenClaw agent id, whose sandbox block is cleared when the last one ends
+	// (5.16 rule 7).
+	projects *project.Resolver
 	sbxMu    sync.Mutex
 	sbxHolds map[string]int
 	bg      sync.WaitGroup             // side effects executed after a late approval
@@ -85,18 +86,16 @@ func New(d Deps) *Engine {
 		agentSync:     30 * time.Second,
 	}
 	e.execute = e.runRun
-	if pc, err := project.FromConfig(d.Cfg); err == nil {
-		e.project = &pc
-		e.log.Info("project repository configured", "repo", pc.RepoURL, "branch", pc.DefaultBranch,
-			"provider", pc.Provider, "sandbox_network", pc.SandboxNetwork)
-	} else if !errors.Is(err, project.ErrNotConfigured) {
-		e.log.Warn("project repository ignored", "error", err)
+	cipher, err := project.NewCipher(d.Cfg.ProjectTokenKey)
+	if err != nil && !errors.Is(err, project.ErrNoKey) {
+		e.log.Warn("project token key unusable; no project token can be read", "error", err)
+	}
+	e.projects = &project.Resolver{Cipher: cipher}
+	if d.Pool != nil {
+		e.projects.DB = d.Pool
 	}
 	return e
 }
-
-// Project is the configured project repository, nil when none.
-func (e *Engine) Project() *project.Config { return e.project }
 
 // holdSandbox sets the agent's sandbox block for a project visit (DESIGN 5.16 rule 7)
 // and counts the hold; the later of two concurrent holds on one agent wins.
@@ -376,6 +375,12 @@ func (e *Engine) Trigger(ctx context.Context, req TriggerRequest) (*store.Run, e
 	if strings.TrimSpace(req.Task) == "" {
 		msgs = append(msgs, "task: required")
 	}
+	// A quick run opts in by naming a project (DESIGN 5.17 rule 4).
+	proj, projMsgs, err := e.projectForRequest(ctx, req.ProjectID, req.ProjectID != "")
+	if err != nil {
+		return nil, err
+	}
+	msgs = append(msgs, projMsgs...)
 	if len(msgs) > 0 {
 		return nil, &ValidationError{Messages: msgs}
 	}
@@ -390,20 +395,43 @@ func (e *Engine) Trigger(ctx context.Context, req TriggerRequest) (*store.Run, e
 	agents := []*store.Agent{a}
 	limits = guardrails.EffectiveLimits(limits, agents, e.deps.Cfg.MaxCostUSD)
 	def := workflow.SingleAgent(a.ID, "{{.input.task}}", nil, limits)
-	def.Project = req.Project
+	def.Project = proj != nil
 	wf, err := e.quickRunWorkflow(ctx, a, def)
 	if err != nil {
 		return nil, err
 	}
 	input, _ := json.Marshal(map[string]string{"task": req.Task})
-	return e.queueRun(ctx, wf, def, input, req, agents, "agent_id", a.ID)
+	return e.queueRun(ctx, wf, def, input, req, agents, proj, "agent_id", a.ID)
+}
+
+// projectForRequest resolves a run request's project (DESIGN 5.17 rule 4): required
+// when the definition opts in, refused when it does not, and a live project when one is
+// named. The messages are path-qualified validation failures.
+func (e *Engine) projectForRequest(ctx context.Context, id string, optsIn bool) (*store.Project, []string, error) {
+	id = strings.TrimSpace(id)
+	switch {
+	case id == "" && optsIn:
+		return nil, []string{"project_id: required; the workflow works on a project repository"}, nil
+	case id == "":
+		return nil, nil, nil
+	case !optsIn:
+		return nil, []string{"project_id: the workflow does not use a project"}, nil
+	}
+	p, err := store.GetProject(ctx, e.deps.Pool, id)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, []string{"project_id: no project with id " + id}, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("project %s: %w", id, err)
+	}
+	return p, nil, nil
 }
 
 // queueRun stores a run with its snapshot (the definition as run, limits resolved, plus
 // the run overrides) and publishes it. The participating agents' hourly rate limits are
 // checked in the transaction that inserts the run (DESIGN 5.11 rule 2); a refusal is a
 // *guardrails.RateLimitError.
-func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow.Definition, input json.RawMessage, req TriggerRequest, agents []*store.Agent, logAttrs ...any) (*store.Run, error) {
+func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow.Definition, input json.RawMessage, req TriggerRequest, agents []*store.Agent, proj *store.Project, logAttrs ...any) (*store.Run, error) {
 	snap := runSnapshot{Definition: *def}
 	if req.Model != "" || req.ScriptID != "" {
 		snap.RunOverrides = &runOverrides{Model: req.Model, ScriptID: req.ScriptID}
@@ -428,6 +456,13 @@ func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow
 	if req.TriggerRef != "" {
 		ref := req.TriggerRef
 		run.TriggerRef = &ref
+	}
+	if proj != nil {
+		// The project's settings travel with the run (DESIGN 5.17 rule 4); the token
+		// stays on the project's row and is read when it is needed.
+		pid, settings := proj.ID, proj.Settings()
+		run.ProjectID, run.Project = &pid, &settings
+		logAttrs = append(logAttrs, "project_id", pid)
 	}
 	err = pgx.BeginFunc(ctx, e.deps.Pool, func(tx pgx.Tx) error {
 		// An occurrence fired again must not count its own first run against the rate
@@ -474,7 +509,11 @@ func (e *Engine) quickRunWorkflow(ctx context.Context, a *store.Agent, def *work
 	if !errors.Is(err, store.ErrNotFound) {
 		return nil, fmt.Errorf("quick-run workflow: %w", err)
 	}
-	defJSON, err := json.Marshal(def)
+	// The hidden workflow carries no project flag (DESIGN 5.17 edge case): the flag
+	// lives in each run's snapshot, so the workflow stays runnable without a project.
+	stored := *def
+	stored.Project = false
+	defJSON, err := json.Marshal(stored)
 	if err != nil {
 		return nil, err
 	}

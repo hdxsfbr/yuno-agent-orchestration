@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import type { Agent } from "@/lib/api";
 import { installFakeApi } from "@/test/fakeApi";
+import { project } from "@/test/fixtures";
 import AgentsPage from "./AgentsPage";
 
 const agent = (over: Partial<Agent>): Agent => ({
@@ -148,5 +149,25 @@ describe("live state", () => {
     await waitFor(() => expect(listCalls()).toBe(2));
     await sleep(800);
     expect(listCalls()).toBe(2);
+  });
+});
+
+describe("quick run", () => {
+  it("offers the projects to work on once there are some", async () => {
+    api.on("GET", "/api/projects", () => [project({}), project({ id: "p2", name: "docs-site" })]);
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Run Coder" }));
+    const select = (await dialog.findByLabelText("Project")) as HTMLSelectElement;
+    expect(Array.from(select.options).map((o) => o.textContent)).toEqual(["None", "yuno-playground", "docs-site"]);
+  });
+
+  it("shows no project choice while there are no projects", async () => {
+    api.on("GET", "/api/projects", () => []);
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Run Coder" }));
+    await waitFor(() => expect(api.made("GET", "/api/projects")).toHaveLength(1));
+    expect(dialog.queryByLabelText("Project")).toBeNull();
   });
 });

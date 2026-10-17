@@ -179,16 +179,6 @@ export type Status = {
   runs: Record<string, number>;
   /** Present once the scheduler runs. */
   scheduler?: { tick_seconds?: number; next_due_at?: string | null };
-  /** The project repository runs with `project: true` work on; never carries the token. */
-  project?: ProjectStatus;
-};
-
-export type ProjectStatus = {
-  configured: boolean;
-  repo_url?: string;
-  default_branch?: string;
-  provider?: "gitlab" | "github";
-  sandbox_network: boolean;
 };
 
 export type OpenClawStatus = {
@@ -355,6 +345,10 @@ export type Run = {
   reported_at?: string | null;
   /** What the project checkout's manifest said when it was cloned; absent without a checkout. */
   toolchain?: Toolchain;
+  /** The project the run works on; absent for a run without one. */
+  project_id?: string;
+  /** The project's settings as they were when the run was queued; never the token. */
+  project?: ProjectSettings;
   created_at: string;
   started_at?: string;
   finished_at?: string;
@@ -369,8 +363,65 @@ export type RunCreate = {
   agent_id?: string;
   task?: string;
   limits?: Limits;
-  /** Quick runs only: work on the project repository when one is configured. */
-  project?: boolean;
+  /** The project the run works on: required for a workflow that opts in, refused for one that does not, optional for a quick run. */
+  project_id?: string;
+};
+
+// ---------------------------------------------------------------------------------------
+// Projects (DESIGN 5.17): the git repositories runs work on. The token is write-only: the
+// API says whether one is stored (`token_set`) and never returns it.
+// ---------------------------------------------------------------------------------------
+
+export type ProjectProvider = "gitlab" | "github";
+
+/** A project's settings without its token; also a run's snapshot of the project it works on. */
+export type ProjectSettings = {
+  name: string;
+  repo_url: string;
+  provider: ProjectProvider;
+  default_branch: string;
+  sandbox_network: boolean;
+};
+
+/** The newest run that names the project. */
+export type ProjectLastRun = {
+  id: string;
+  status: RunStatus;
+  toolchain?: Toolchain;
+  created_at: string;
+  finished_at?: string;
+};
+
+export type Project = ProjectSettings & {
+  id: string;
+  description: string;
+  /** A git token is stored; the token itself is never returned. */
+  token_set: boolean;
+  created_at: string;
+  updated_at: string;
+  last_run?: ProjectLastRun;
+};
+
+export type ProjectInput = {
+  name: string;
+  repo_url: string;
+  /** Empty: github for github.com, gitlab for any other host. */
+  provider?: ProjectProvider | "";
+  default_branch?: string;
+  sandbox_network?: boolean;
+  description?: string;
+  /** Required on create; on update, absent or empty keeps the stored token. */
+  token?: string;
+};
+
+/** What a check of the stored token found; provider refusals come back as `ok: false`, not as errors. */
+export type ProjectCheck = {
+  ok: boolean;
+  message: string;
+  default_branch?: string;
+  branch_exists?: boolean;
+  can_push?: boolean;
+  checked_at: string;
 };
 
 /** The merge or pull request an executed open_merge_request call opened or found. */
@@ -557,7 +608,7 @@ export type WorkflowDefinition = {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   limits?: Limits;
-  /** Runs work on the project repository when one is configured (DESIGN 5.16 rule 2). */
+  /** Each run of the workflow names a project, which is cloned into the first agent's run directory (DESIGN 5.17). */
   project?: boolean;
   /** Where the builder drew each node; the backend keeps it with the definition. */
   ui?: { positions?: Record<string, Position> };
@@ -580,8 +631,8 @@ export type WorkflowTemplate = { key: string; name: string; description: string;
 /** One entry of a 422 `details` list. */
 export type ValidationDetail = { path: string; message: string };
 
-/** An approval as the inbox lists it: the tool call is joined for tool approvals. */
-export type ApprovalItem = Approval & { tool_call?: ToolCall };
+/** An approval as the inbox lists it: the tool call is joined for tool approvals, and the status of its run says whether that run has ended. */
+export type ApprovalItem = Approval & { tool_call?: ToolCall; run_status?: RunStatus };
 
 export type ApprovalDecision = { reason?: string; always?: boolean };
 
@@ -790,3 +841,10 @@ export const deleteSkill = (id: string) => api<void>(`/api/skills/${seg(id)}`, w
 export const listAgentMemory = async (agentId: string) => (await api<MemoryFact[] | null>(`/api/agents/${seg(agentId)}/memory`)) ?? [];
 export const deleteAgentMemory = (agentId: string, factId: string) =>
   api<void>(`/api/agents/${seg(agentId)}/memory/${seg(factId)}`, withBody("DELETE"));
+
+export const listProjects = async () => (await api<Project[] | null>("/api/projects")) ?? [];
+export const getProject = (id: string) => api<Project>(`/api/projects/${seg(id)}`);
+export const createProject = (input: ProjectInput) => api<Project>("/api/projects", withBody("POST", input));
+export const updateProject = (id: string, input: ProjectInput) => api<Project>(`/api/projects/${seg(id)}`, withBody("PUT", input));
+export const deleteProject = (id: string) => api<void>(`/api/projects/${seg(id)}`, withBody("DELETE"));
+export const checkProject = (id: string) => api<ProjectCheck>(`/api/projects/${seg(id)}/check`, withBody("POST"));

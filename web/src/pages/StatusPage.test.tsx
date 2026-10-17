@@ -3,10 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
-import type { ChannelsInfo, Schedule, Status } from "@/lib/api";
+import type { ChannelsInfo, Project, Schedule, Status } from "@/lib/api";
 import { clearToken } from "@/lib/auth";
 import { formatDateTime } from "@/lib/format";
 import { apiError, installFakeApi } from "@/test/fakeApi";
+import { project } from "@/test/fixtures";
 import StatusPage from "./StatusPage";
 
 const baseStatus: Status = { version: "0.3.0", uptime_s: 3600, db_ok: true, workers: 4, sse_clients: 1, runs: {} };
@@ -27,6 +28,7 @@ const schedule = (id: string, over: Partial<Schedule>): Schedule => ({
 let status: Status;
 let channels: ChannelsInfo;
 let schedules: Schedule[];
+let projects: Project[];
 let api: ReturnType<typeof installFakeApi>;
 
 beforeEach(() => {
@@ -37,8 +39,10 @@ beforeEach(() => {
     schedule("s2", { next_run_at: "2026-10-16T09:00:00Z" }),
     schedule("s3", { enabled: false, next_run_at: "2026-10-15T20:00:00Z" }),
   ];
+  projects = [];
   api = installFakeApi();
   api.on("GET", "/api/status", () => status);
+  api.on("GET", "/api/projects", () => projects);
   api.on("GET", "/api/openclaw/status", () => ({ connected: true, version: "2026.10.3", scopes: ["operator.read"], agents: 3 }));
   api.on("GET", "/api/channels", () => channels);
   api.on("GET", "/api/schedules", () => schedules);
@@ -147,20 +151,45 @@ describe("API token", () => {
   });
 });
 
-describe("project repository panel", () => {
-  it("says none is configured", async () => {
-    status = { ...baseStatus, project: { configured: false, sandbox_network: false } };
+describe("Projects panel", () => {
+  it("lists the projects with their repository, provider, branch and network, and links to the Projects page", async () => {
+    projects = [
+      project({}),
+      project({ id: "p2", name: "docs-site", repo_url: "https://github.com/acme/docs", provider: "github", default_branch: "develop", sandbox_network: true }),
+    ];
     renderPage();
-    expect(await screen.findByText(/None configured/)).not.toBeNull();
+    const p = await panel("Projects");
+    const first = within((await p.findByText("yuno-playground")).closest("tr") as HTMLElement).getAllByRole("cell");
+    expect(first.map((c) => c.textContent)).toEqual(["yuno-playground", "gitlab.com/andrebatista/yuno-playground.git", "GitLab", "main", "Network off"]);
+    const second = within(p.getByText("docs-site").closest("tr") as HTMLElement).getAllByRole("cell");
+    expect(second.map((c) => c.textContent)).toEqual(["docs-site", "github.com/acme/docs", "GitHub", "develop", "Network on"]);
+    expect(p.getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Name", "Repository", "Provider", "Branch", "Sandbox network"]);
+    expect(p.getByRole("link", { name: "Manage projects" }).getAttribute("href")).toBe("/projects");
+    expect(p.queryByText(/None yet/)).toBeNull();
   });
 
-  it("shows the repository, branch, provider and the network opt-in, never a token", async () => {
-    status = { ...baseStatus, project: { configured: true, repo_url: "https://gitlab.com/g/p.git", default_branch: "main", provider: "gitlab", sandbox_network: true } };
+  it("says there are none yet, with a way to the Projects page", async () => {
     renderPage();
-    const panel = within(await screen.findByRole("region", { name: "Project repository" }));
-    expect(panel.getByText("https://gitlab.com/g/p.git")).not.toBeNull();
-    expect(panel.getByText("main")).not.toBeNull();
-    expect(panel.getByText("GitLab")).not.toBeNull();
-    expect(panel.getByText(/On: agents can install dependencies/)).not.toBeNull();
+    const p = await panel("Projects");
+    const note = await p.findByText(/None yet/);
+    expect(note.textContent).toBe("None yet. Create one on the Projects page.");
+    expect(within(note).getByRole("link", { name: "Projects page" }).getAttribute("href")).toBe("/projects");
+    expect(p.queryByRole("table")).toBeNull();
+  });
+
+  it("replaces the single project repository panel and no longer reads the project from the status", async () => {
+    status = { ...baseStatus, project: { configured: true, repo_url: "https://gitlab.com/g/p.git" } } as Status;
+    renderPage();
+    await panel("Projects");
+    expect(screen.queryByRole("heading", { name: "Project repository" })).toBeNull();
+    expect(screen.queryByText("https://gitlab.com/g/p.git")).toBeNull();
+  });
+
+  it("says when the projects cannot be loaded, without touching the other panels", async () => {
+    api.on("GET", "/api/projects", () => apiError(500, "internal", "boom"));
+    renderPage();
+    const p = await panel("Projects");
+    expect((await p.findByRole("alert")).textContent).toContain("Could not load the projects: boom");
+    expect(await (await panel("OpenClaw")).findByText("Connected")).not.toBeNull();
   });
 });

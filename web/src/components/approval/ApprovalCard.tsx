@@ -21,6 +21,8 @@ type Props = {
   toolCall?: ToolCall;
   /** Show the run as a link (the inbox) rather than leaving it implied (the run page). */
   showRun?: boolean;
+  /** The approval's run has already ended: a tool call still open then answers a late grant. */
+  runEnded?: boolean;
   /** Called with the approval the API returned after a decision. */
   onDecided?: (approval: Approval) => void;
   /** Called after a decision attempt that changed nothing here, such as a 409. */
@@ -28,7 +30,7 @@ type Props = {
 };
 
 /** One request for a decision: what it is about, who it concerns, and the buttons to answer it. */
-export default function ApprovalCard({ approval, toolCall, showRun = false, onDecided, onStale }: Props) {
+export default function ApprovalCard({ approval, toolCall, showRun = false, runEnded = false, onDecided, onStale }: Props) {
   const [reason, setReason] = useState("");
   const [alreadyDecided, setAlreadyDecided] = useState(false);
 
@@ -118,6 +120,12 @@ export default function ApprovalCard({ approval, toolCall, showRun = false, onDe
         <div className="mt-3">
           <InlineError>Could not record the decision: {errorText(decide.error)}</InlineError>
         </div>
+      ) : null}
+
+      {pending && runEnded && approval.kind === "tool" ? (
+        <p role="note" className="mt-3 text-sm text-amber-700 dark:text-amber-400">
+          This run has already ended. Approving still executes the call; rejecting discards it.
+        </p>
       ) : null}
 
       {pending ? (

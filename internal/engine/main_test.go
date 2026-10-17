@@ -69,7 +69,7 @@ func needDB(t *testing.T) *pgxpool.Pool {
 	}
 	_, err := testPool.Exec(context.Background(), `TRUNCATE agents, skills, workflows, runs, run_nodes, model_calls,
 		tool_calls, side_effects, approvals, agent_messages, spans, run_events, channel_bindings, conversations,
-		conversation_messages CASCADE`)
+		conversation_messages, projects CASCADE`)
 	if err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
@@ -88,6 +88,7 @@ func testConfig() config.Config {
 		MaxCostUSD:            20,
 		MaxToolCalls:          300,
 		ApprovalTimeoutMaxSec: 604800,
+		ProjectTokenKey:       "engine-test-project-token-key",
 	}
 }
 

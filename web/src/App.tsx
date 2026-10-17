@@ -11,6 +11,7 @@ import AgentsPage from "./pages/AgentsPage";
 import ApprovalsPage from "./pages/ApprovalsPage";
 import ChannelsPage from "./pages/ChannelsPage";
 import NotFoundPage from "./pages/NotFoundPage";
+import ProjectsPage from "./pages/ProjectsPage";
 import RunDetailPage from "./pages/RunDetailPage";
 import RunsPage from "./pages/RunsPage";
 import SchedulesPage from "./pages/SchedulesPage";
@@ -29,6 +30,7 @@ const builder = (
 const nav = [
   { to: "/agents", label: "Agents" },
   { to: "/workflows", label: "Workflows" },
+  { to: "/projects", label: "Projects" },
   { to: "/runs", label: "Runs" },
   { to: "/approvals", label: "Approvals" },
   { to: "/channels", label: "Channels" },
@@ -102,6 +104,8 @@ export default function App() {
           <Route path="/workflows" element={<WorkflowsPage />} />
           <Route path="/workflows/new" element={builder} />
           <Route path="/workflows/:id" element={builder} />
+          <Route path="/projects" element={<ProjectsPage />} />
+          <Route path="/projects/:id" element={<ProjectsPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:id" element={<RunDetailPage />} />
           <Route path="/approvals" element={<ApprovalsPage />} />

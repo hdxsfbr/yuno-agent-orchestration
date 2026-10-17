@@ -38,8 +38,10 @@ type runCreate struct {
 	Model      string          `json:"model"`
 	ScriptID   string          `json:"script_id"`
 	Trigger    string          `json:"trigger"`
-	// Project opts a quick run into the project repository (DESIGN 5.16 rule 2).
-	Project bool `json:"project"`
+	// ProjectID names the project the run works on (DESIGN 5.17 rule 4): required for
+	// a workflow that opts in, refused for one that does not, optional for a quick run.
+	// The engine checks that against the workflow.
+	ProjectID string `json:"project_id"`
 }
 
 // apiTriggers are the triggers a client may name; schedules and channels start their
@@ -64,9 +66,6 @@ func (in *runCreate) validate() fieldErrors {
 	}
 	if in.Trigger != "" && !slices.Contains(apiTriggers, in.Trigger) {
 		fe.add("trigger", "must be one of %s", strings.Join(apiTriggers, ", "))
-	}
-	if in.Project && in.WorkflowID != "" {
-		fe.add("project", "applies to quick runs; a workflow opts in through its definition")
 	}
 	return fe
 }
@@ -135,7 +134,7 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		Trigger:    trigger,
 		Model:      in.Model,
 		ScriptID:   in.ScriptID,
-		Project:    in.Project,
+		ProjectID:  strings.TrimSpace(in.ProjectID),
 	})
 	if err != nil {
 		s.engineError(w, r, err)
