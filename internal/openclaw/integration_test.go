@@ -133,7 +133,7 @@ func TestIntegrationGateway(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry := configEntries(cfg.Config)[id]
+	entry := ConfigEntries(cfg.Config)[id]
 	if len(entry) == 0 {
 		t.Fatalf("config.get has no entry for %s", id)
 	}
