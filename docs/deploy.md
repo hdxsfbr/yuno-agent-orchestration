@@ -136,12 +136,12 @@ droplet or a workstation with the same installer and tag `yuno-ci` works.
 |---|---|
 | Host | `yuno-prod`, `s-4vcpu-8gb` in `sfo2` (sfo3 did not offer that size), tag `yuno` |
 | URL | <https://143.110.128.97.sslip.io> (Let's Encrypt certificate through Caddy) |
-| Deployed | wave 5 (`12e6478`, the Chief of Staff) on 2026-10-16 by pipeline 57708 (deploy retried once: a stray untracked file on the host blocked the checkout; both deploy paths now `git clean -fd` first); every push to `main` since deploys itself after a green test. First deploy: `make deploy HOST=143.110.128.97` at `4488049` |
+| Deployed | wave 7 (`f08aac5`, projects as records) on 2026-10-17 by the pipeline on `main`, verified the same hour (docs/test-results.md); before it wave 5 (`12e6478`) by pipeline 57708 and wave 6 (`b953f2b`). First deploy: `make deploy HOST=143.110.128.97` at `4488049` |
 | CI | runner 310 (`yuno-prod`) on the public droplet deploys; runner 311 (`yuno-ci`) on `yuno-ci` (`s-4vcpu-8gb`, `sfo2`, 157.245.188.91) runs the test job; project variables `YUNO_CI`, `YUNO_CI_TEST`, `DOMAIN`. Every push to `main` runs the tests and, with `DEPLOY_AUTO=true` (set), deploys itself when they pass; unset it to get a manual button instead |
 | Sign-in | the `API_TOKEN` in the operator's `.env.prod` (never in the repository) |
 | Telegram | webhook registered at `https://143.110.128.97.sslip.io/telegram-webhook`. Bound to the Chief of Staff since wave 5 (rebound from Coder through the API on 2026-10-16). Verified live on 2026-10-17: the Chief listed the roster, delegated a task to Coder (run succeeded in 25 s, $0.06), relayed the platform's report one second after the run ended, and answered a follow-up with `run_status`. The bot has one webhook, so this instance owns the bot while it runs; an unbound channel drops messages |
 | Memory | about 1.7 GB used of 8 GB idle, the gateway 1 GB of its 4 GB cap |
-| Project | `PROJECT_*` set to `andrebatista/yuno-playground` (private, GitLab, a project access token named `yuno-deployer` with `api` and `write_repository`, Developer role, expires 2026-11-16), sandbox network off; first merge request opened by the Dev pipeline on 2026-10-17 (docs/test-results.md) |
+| Projects | `yuno-playground` (private, GitLab, a project access token named `yuno-deployer` with `api` and `write_repository`, Developer role, expires 2026-11-16), network off: bootstrapped from the `PROJECT_*` values of `.env.prod` at the first start of wave 7 and now a record on the Projects tab, where the token is replaced when it expires. `PROJECT_TOKEN_KEY` was generated into the host's `.env` by that deploy: back it up with the file. Merge requests !1 (wave 6) and !2 (wave 7) were opened by the Dev pipeline |
 
 Four things bit on the first runs and are now in the scripts: a fresh droplet holds the apt
 lock for cloud-init's first pass (the bootstrap waits for it), `make` was missing (installed),

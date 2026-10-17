@@ -1,3 +1,33 @@
+# Test results, 2026-10-17 (projects as records, DESIGN 5.17)
+
+Run on the development machine on the `projects-as-records` branch before its merge
+as `f08aac5`, everything inside containers; CI ran the same commands on `main` and
+deployed the commit.
+
+| Command | Result |
+|---|---|
+| `make test-go` (`go test ./... -count=1` against the `yuno_test` database) | 19 packages ok, 0 failures (new: cipher and store round trip, projects API and the write-only token, the check against the GitLab and GitHub fakes and a redirect, engine clone from a project snapshot with the local bare remote, bootstrap idempotency, `delegate_task`'s project branches, `list_projects`, the merge request in the report and the late follow-up) |
+| `make test-web` (vitest) | 32 files, 451 tests passed (new: Projects page and form, the selectors in both run dialogs, the project link on runs, the Status list, the ended-run note) |
+| `make lint` (`go vet`, staticcheck 2026.2.2, eslint, `tsc --noEmit`) | clean |
+| review | codex out of quota; two Claude reviewer agents (Opus on the engine, tools and UI; Sonnet on the API and the check) found no token leak and nothing above medium; the medium findings (provider clients following redirects, a PUT re-pointing a project's host without a new token, the bootstrap recreating a deleted project) and the low ones worth it were fixed before the commit |
+
+Live verification on the public instance, 2026-10-17 19:24 to 19:28 UTC, from the
+coordinator session over ssh (the API token stayed on the host; nothing printed):
+
+| Step | Result |
+|---|---|
+| deploy | pipeline on `f08aac5`: migration `0010_projects.sql` applied, `PROJECT_TOKEN_KEY` generated into the host's `.env` by `make run-public`, `/api/status` without its `project` member |
+| bootstrap | `project bootstrapped from PROJECT_*`: `yuno-playground` (GitLab, `main`, network off, `token_set` true, no token in any response) |
+| `make seed-reset` | the Chief of Staff reset (the new prompt and `list_projects`), both template workflows reset |
+| Check on the bootstrapped project | `Token accepted: default branch main, push allowed.` (`branch_exists` and `can_push` true) |
+| a second project | created through the API with the same repository and a token: `token_set` true and no token in the body; Check green; deleted (204); the list back to one project |
+| a Dev pipeline run naming the project | `project_clone` span: `main` at depth 1 in 619 ms, toolchain `python`; Coder added `power(base, exponent)` with tests; Reviewer approved; the gate and the merge request card were approved from the API within the tool's wait (no late grant this time); the Deployer's title was `Add power(base, exponent) function with tests` (46 characters); run succeeded in 62 s at $0.17 with 11 steps and 8 tool calls |
+| the merge request | `yuno-playground!2` from branch `yuno/e8dfa53268bd` against `main` |
+
+Not verified here: a Telegram message to the Chief of Staff naming the playground
+project (only the operator can send one); the Chief's `list_projects` and the project
+on `delegate_task` are covered by the unit tests and the seeded prompt.
+
 # Test results, 2026-10-17 (project repository, DESIGN 5.16)
 
 Run by hand on the development machine before the merge of the `project-repository`
