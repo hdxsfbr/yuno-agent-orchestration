@@ -47,6 +47,9 @@ main() {
   local dir="$1" smoke="$2"
   cd "$dir"
   [ -f .env ] || { echo "no .env in $dir; pass --env-file once (docs/deploy.md)" >&2; exit 1; }
+  # A deploy checkout holds nothing untracked but ignored files (.env, data/); anything
+  # else is a stray copy and would block a checkout that now tracks the same path.
+  git clean -q -fd
   git checkout -q -B deploy refs/heads/deploy
   git reset -q --hard refs/heads/deploy
   echo "deploying $(git rev-parse --short HEAD) on $(hostname)"

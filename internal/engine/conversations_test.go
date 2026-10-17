@@ -155,6 +155,33 @@ func TestConversationMirror(t *testing.T) {
 	}
 }
 
+// An assistant turn can be announced first with only its tool calls and later, under the
+// same message id, with its text (seen live on 2026-10-17 after two parallel tool calls);
+// the text must still be stored once.
+func TestConversationMirrorTextAfterToolCallsSameID(t *testing.T) {
+	c := newConvEnv(t, true)
+	c.fc.push(openclaw.EventSessionsChanged, changed(convKey, "agconv"))
+	eventually(t, "subscribed to the conversation", func() bool { return len(c.fc.callsFor("sessions.messages.subscribe")) == 1 })
+	conv := c.conversation()
+	t0 := time.Now().Add(-time.Minute).UnixMilli()
+	c.fc.push("session.message", map[string]any{"sessionKey": convKey, "agentId": "agconv", "messageId": "m7",
+		"message": assistantEntry("m7", t0, map[string]any{"type": "toolCall", "id": "tc1", "name": "yuno__list_agents", "arguments": map[string]any{}},
+			map[string]any{"type": "toolCall", "id": "tc2", "name": "yuno__list_workflows", "arguments": map[string]any{}})})
+	c.fc.push("session.message", map[string]any{"sessionKey": convKey, "agentId": "agconv", "messageId": "m7",
+		"message": assistantEntry("m7", t0+3000, map[string]any{"type": "text", "text": "Here is the team."})})
+	c.fc.push("session.message", map[string]any{"sessionKey": convKey, "agentId": "agconv", "messageId": "m7",
+		"message": assistantEntry("m7", t0+3000, map[string]any{"type": "text", "text": "Here is the team."})})
+	eventually(t, "the text is stored", func() bool { return len(c.messages(conv.ID)) == 1 })
+	ms := c.messages(conv.ID)
+	if ms[0].Direction != store.DirectionOut || ms[0].Text != "Here is the team." || ms[0].ExternalMessageID != "m7" {
+		t.Fatalf("out message = %+v", ms[0])
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := len(c.messages(conv.ID)); n != 1 {
+		t.Fatalf("messages = %d, want 1 (the repeat must not duplicate)", n)
+	}
+}
+
 // Messages sent while the api was away arrive through the roster at start and the
 // session's history; a reconnect re-subscribes without duplicating anything.
 func TestConversationMirrorCatchUp(t *testing.T) {

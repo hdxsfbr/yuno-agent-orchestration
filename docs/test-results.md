@@ -53,3 +53,27 @@ did not know that compose reads `COMPOSE_PROFILES` from `.env` itself (test fixe
 fresh checkout has no `web/node_modules`, which the development machine always had
 (`make test-web` and `make lint` now install them first). Pipeline 57515 and 57524 hold
 the failing traces.
+
+## Wave 5 (the Chief of Staff), 2026-10-16
+
+Pipeline 57708 on commit `12e6478`, test job on the `yuno-ci` runner, 5 min 1 s:
+
+| Step | Result |
+|---|---|
+| `make run` | stack built and ready; seed created the six demo agents, the Chief of Staff and both template workflows |
+| `make test-go` | 18 packages ok, 0 failures (new: chat-token gate, chat tools, report-back, seed, migration 0008 upgrade test) |
+| `make test-web` | 27 files, 362 tests passed |
+| `make lint` | clean |
+| `make smoke` | 10 checks passed, Telegram checks skipped (mode off) |
+| deploy job | retried once (an untracked copy of the new probe on the host blocked the checkout), then `make run-public` and `make smoke` 12 of 12 |
+
+Live verification on the public instance, 2026-10-17 00:35 to 00:47 UTC, from the
+operator's phone: the Chief of Staff answered a roster question with `list_agents` and
+`list_workflows`, delegated "invert a binary tree, with tests" to Coder (`delegate_task`,
+run `01a1474b`, trigger `channel`, succeeded in 25 s at $0.06), the platform's report
+was mirrored with the run link six milliseconds after the run ended and relayed by the
+Chief one second later, and a follow-up question was answered with `run_status`. One
+defect found and fixed afterwards: the conversation mirror dropped an assistant reply that
+followed two parallel tool calls (the gateway announces such a turn first with only its
+tool calls, then with its text under the same message id; the mirror marked the id seen
+too early). The review is `docs/reviews/wave5-review.md`.

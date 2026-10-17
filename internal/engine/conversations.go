@@ -305,11 +305,13 @@ func (m *convMirror) mirror(ctx context.Context, s *convSession, raw json.RawMes
 	if s.seen[id] {
 		return
 	}
-	s.seen[id] = true
+	// An assistant turn can arrive first with only tool calls and later, under the same
+	// message id, with its text; the id is marked seen only once there is text to store.
 	text := strings.TrimSpace(h.Text())
 	if text == "" {
 		return
 	}
+	s.seen[id] = true
 	msg := &store.ConversationMessage{ConversationID: s.conv.ID, Direction: dir, ExternalMessageID: id,
 		Text: obs.Redact(text), CreatedAt: m.e.clock.Now()}
 	if h.Timestamp > 0 {

@@ -276,3 +276,6 @@ different from each author reviewed instead; the coordinator filtered their 20 f
 (docs/reviews/wave5-review.md), one fix pass per part followed, and the backend agent
 correctly declined one fix whose premise was wrong. The coordinator ran the suite, lint
 and the image builds itself before the single wave commit; CI tested and deployed it.
+Verified live by Andre from his phone the same night (roster, a delegation to Coder, the
+report relayed in a second, a follow-up through `run_status`); the one defect that showed,
+a mirrored reply lost after parallel tool calls, was fixed with a test the next hour.
