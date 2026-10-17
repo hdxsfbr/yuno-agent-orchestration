@@ -122,7 +122,10 @@ export default function RunsPage() {
                   <td className="px-4 py-2.5">{r.agent_names?.length ? r.agent_names.join(", ") : "—"}</td>
                   <td className="px-4 py-2.5 font-mono text-xs">{r.models?.length ? r.models.join(", ") : "—"}</td>
                   <td className="px-4 py-2.5">
-                    <RunStatusBadge status={r.status} />
+                    <span className="inline-flex flex-wrap items-center gap-1.5">
+                      <RunStatusBadge status={r.status} />
+                      {r.toolchain ? <Badge title="Toolchain of the project checkout">{r.toolchain}</Badge> : null}
+                    </span>
                   </td>
                   <td className="px-4 py-2.5">
                     <TriggerCell run={r} />

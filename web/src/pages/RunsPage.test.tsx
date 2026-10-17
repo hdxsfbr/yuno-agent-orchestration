@@ -33,7 +33,7 @@ const base = (over: Partial<Run>): Run => ({
 });
 
 const runs: Run[] = [
-  base({ agent_names: ["Coder"], models: ["claude-sonnet-5-5"] }),
+  base({ agent_names: ["Coder"], models: ["claude-sonnet-5-5"], toolchain: "go" }),
   base({ id: QUEUED, status: "queued", step_count: 0, tool_call_count: 0, cost_usd_micros: 0, started_at: undefined, finished_at: undefined }),
   base({ id: DELEGATED, trigger: "channel", trigger_ref: "conversation:c1", agent_names: ["Reviewer"] }),
   base({ id: DELEGATED_BARE, trigger: "channel", trigger_ref: "" }),
@@ -113,6 +113,14 @@ describe("RunsPage", () => {
     const queued = within(screen.getByTitle(QUEUED).closest("tr")!).getAllByRole("cell");
     expect(queued[1].textContent).toBe("—");
     expect(queued[2].textContent).toBe("—");
+  });
+
+  it("shows the toolchain of a project run next to its status, and nothing for the others", async () => {
+    renderPage();
+    const row = (await screen.findByTitle(DONE)).closest("tr")!;
+    expect(within(row).getByText("go").getAttribute("title")).toContain("Toolchain");
+    const queued = screen.getByTitle(QUEUED).closest("tr")!;
+    expect(within(queued).queryByTitle(/Toolchain/)).toBeNull();
   });
 
   it("opens the run when any cell of its row is clicked", async () => {

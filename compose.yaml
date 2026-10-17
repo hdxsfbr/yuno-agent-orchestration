@@ -34,6 +34,11 @@ x-api-env: &api-env
   GITLAB_BASE_URL: ${GITLAB_BASE_URL:-}
   GITLAB_PROJECT_ID: ${GITLAB_PROJECT_ID:-}
   GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+  PROJECT_REPO_URL: ${PROJECT_REPO_URL:-}
+  PROJECT_GIT_TOKEN: ${PROJECT_GIT_TOKEN:-}
+  PROJECT_DEFAULT_BRANCH: ${PROJECT_DEFAULT_BRANCH:-main}
+  PROJECT_PROVIDER: ${PROJECT_PROVIDER:-}
+  PROJECT_SANDBOX_NETWORK: ${PROJECT_SANDBOX_NETWORK:-false}
   API_TOKEN: ${API_TOKEN:-}
   ENGINE_WORKERS: ${ENGINE_WORKERS:-4}
   HTTP_FETCH_ALLOWLIST: ${HTTP_FETCH_ALLOWLIST:-docs.python.org,pypi.org,raw.githubusercontent.com}
@@ -225,11 +230,39 @@ services:
     entrypoint: ["true"]
     profiles: ["build"]
 
+  # Build-only: the per-toolchain sandbox images a project run selects by the
+  # repository's manifest (DESIGN 5.16 rule 6). Never run.
+  sandbox-image-python:
+    build:
+      context: .
+      dockerfile: docker/sandbox-python.Dockerfile
+    image: yuno-sandbox-python:latest
+    entrypoint: ["true"]
+    profiles: ["build"]
+  sandbox-image-node:
+    build:
+      context: .
+      dockerfile: docker/sandbox-node.Dockerfile
+    image: yuno-sandbox-node:latest
+    entrypoint: ["true"]
+    profiles: ["build"]
+  sandbox-image-go:
+    build:
+      context: .
+      dockerfile: docker/sandbox-go.Dockerfile
+    image: yuno-sandbox-go:latest
+    entrypoint: ["true"]
+    profiles: ["build"]
+
   # ---- tooling (profiles) ------------------------------------------------
 
   go:
     profiles: ["tools"]
-    image: golang:1.26-alpine
+    # golang:1.26-alpine plus git (docker/go.Dockerfile); compose builds it on first use.
+    build:
+      context: .
+      dockerfile: docker/go.Dockerfile
+    image: yuno-go-tools:1.26
     working_dir: /src
     # Shares the gateway namespace so integration tests reach it over loopback.
     network_mode: "service:openclaw"

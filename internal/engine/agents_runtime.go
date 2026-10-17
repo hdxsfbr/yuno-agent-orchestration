@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -99,6 +100,7 @@ type AgentSync struct {
 	KeptBusy          int // deleted agents kept while a visit of theirs is in flight
 	Materialized      int // platform agents pushed because they were missing or out of date
 	MaterializeFailed int
+	SandboxesCleared  int // per-visit sandbox blocks a dead process left behind (DESIGN 5.16 rule 7)
 }
 
 // SyncAgents brings the gateway's agents in line with the platform's. Every agent the
@@ -172,7 +174,42 @@ func (e *Engine) SyncAgents(ctx context.Context) (AgentSync, error) {
 			e.syncAgent(ctx, rows[i].ID, listed, &res)
 		}
 	}
+	res.SandboxesCleared = e.clearStaleSandboxes(ctx, listed)
 	return res, nil
+}
+
+// clearStaleSandboxes removes the per-visit sandbox block (DESIGN 5.16 rule 7) from
+// every listed agent that no project visit of this process holds: what a process that
+// died mid-visit left behind. It returns how many it cleared; failures are logged.
+func (e *Engine) clearStaleSandboxes(ctx context.Context, listed map[string]bool) int {
+	cfg, err := openclaw.ConfigGet(ctx, e.deps.Gateway)
+	if err != nil {
+		e.log.Warn("stale sandbox blocks not checked", "error", err)
+		return 0
+	}
+	holds := e.sandboxHolds()
+	n := 0
+	for id, raw := range openclaw.ConfigEntries(cfg.Config) {
+		if !listed[id] || holds[id] > 0 || id == openclaw.MainAgentID {
+			continue
+		}
+		var entry struct {
+			Sandbox json.RawMessage `json:"sandbox"`
+		}
+		if json.Unmarshal(raw, &entry) != nil || len(entry.Sandbox) == 0 || string(entry.Sandbox) == "null" {
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, e.setupTimeout)
+		err := openclaw.ClearAgentSandbox(cctx, e.deps.Gateway, id)
+		cancel()
+		if err != nil {
+			e.log.Warn("stale sandbox block not cleared", "openclaw_agent_id", id, "error", err)
+			continue
+		}
+		e.log.Info("stale sandbox block cleared", "openclaw_agent_id", id)
+		n++
+	}
+	return n
 }
 
 // MaterializeAgents is SyncAgents without the removals: every live agent the gateway

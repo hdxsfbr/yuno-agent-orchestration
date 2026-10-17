@@ -61,6 +61,9 @@ type Definition struct {
 	Nodes       []Node          `json:"nodes"`
 	Edges       []Edge          `json:"edges"`
 	Limits      store.Limits    `json:"limits"`
+	// Project opts the workflow's runs into the project repository (DESIGN 5.16 rule
+	// 2): the engine clones it for the first agent when one is configured.
+	Project bool `json:"project,omitempty"`
 }
 
 // Parse decodes a definition and runs the structural checks that need no database.

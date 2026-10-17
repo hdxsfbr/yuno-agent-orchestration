@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +22,7 @@ import (
 	ymodel "yuno/internal/model"
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
+	"yuno/internal/project"
 	"yuno/internal/runtoken"
 	"yuno/internal/store"
 	"yuno/internal/workflow"
@@ -71,6 +75,12 @@ type visit struct {
 	// carryFrom are the workspaces (OpenClaw agent ids) whose runs/<run_id>/ is copied
 	// into this agent's before the turn, oldest first (DESIGN 5.6 rule 13).
 	carryFrom []string
+	// project is the repository this visit works on (DESIGN 5.16): nil unless the run
+	// opted in and one is configured. toolchain is read from the checkout before the
+	// turn; sandboxHeld says the agent's sandbox block is this visit's to release.
+	project     *project.Config
+	toolchain   project.Toolchain
+	sandboxHeld bool
 
 	events <-chan openclaw.Event
 	unsub  func()
@@ -216,6 +226,11 @@ func (v *visit) execute(ctx context.Context) outcome {
 	if err := v.prepareRunDir(); err != nil {
 		return failed(store.RunFailed, "run directory: "+err.Error())
 	}
+	if v.project != nil {
+		if res := v.prepareProject(ctx); res != nil {
+			return *res
+		}
+	}
 	v.renderMemory(ctx)
 
 	v.events, v.unsub = gw.Subscribe(4096)
@@ -353,8 +368,104 @@ func (v *visit) prepareRunDir() error {
 	return nil
 }
 
+// prepareProject clones the project repository into this agent's run directory when
+// the run has none yet (DESIGN 5.16 rule 3), reads the toolchain from the checkout and
+// selects the agent's sandbox for the visit (rule 7). A failure ends the visit, and the
+// run, before any turn starts.
+func (v *visit) prepareProject(ctx context.Context) *outcome {
+	e := v.e
+	if e.deps.StateDir == "" {
+		return nil
+	}
+	ws := openclaw.WorkspaceDir(e.deps.StateDir, v.ocID)
+	repo := filepath.Join(ws, project.RepoRel(v.run.ID))
+	if v.run.Toolchain == nil {
+		cctx, done := v.boundedContext(ctx, project.GitTimeout)
+		start := e.clock.Now()
+		err := cloneInto(cctx, *v.project, ws, v.run.ID)
+		done()
+		if err != nil {
+			if ctx.Err() != nil {
+				return &outcome{interrupted: true}
+			}
+			if res := v.preflight(ctx); res != nil {
+				return res
+			}
+			o := failed(store.RunFailed, "project clone: "+err.Error())
+			return &o
+		}
+		tc := project.Detect(repo)
+		end := e.clock.Now()
+		e.startSpan(ctx, v.run.ID, &v.nodeSpan, "project", "project_clone", start, &end,
+			map[string]any{"repo": v.project.RepoURL, "branch": v.project.DefaultBranch, "toolchain": tc.Name, "duration_ms": end.Sub(start).Milliseconds()})
+		if err := store.SetRunToolchain(context.WithoutCancel(ctx), e.deps.Pool, v.run.ID, tc.Name); err != nil {
+			o := failed(store.RunFailed, "record toolchain: "+err.Error())
+			return &o
+		}
+		name := tc.Name
+		v.run.Toolchain = &name
+		v.refreshRun(ctx)
+		e.emit(ctx, v.run.ID, "run.status", map[string]any{"run": v.run})
+		e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("project repository cloned: %s (%s), toolchain %s", v.project.RepoURL, v.project.DefaultBranch, tc.Name))
+	}
+	v.toolchain = project.Detect(repo)
+	if v.toolchain.Name != *v.run.Toolchain {
+		// The manifest changed since the clone (an agent edited it): the run's record
+		// wins for the image, the fresh commands go into the task.
+		v.toolchain.Name = *v.run.Toolchain
+	}
+	spec := openclaw.SandboxSpec{Image: project.SandboxImage(e.deps.Cfg.OpenClawSandboxImage, v.toolchain.Name), Network: v.project.SandboxNetwork}
+	sctx, done := v.setupContext(ctx)
+	err := e.holdSandbox(sctx, v.ocID, spec)
+	done()
+	if err != nil {
+		o := v.setupFailed(ctx, "sandbox selection failed: "+err.Error())
+		return &o
+	}
+	v.sandboxHeld = true
+	return nil
+}
+
+// boundedContext bounds a setup step by d and the run's remaining time, ending it when
+// the run is cancelled, like setupContext with its own duration.
+func (v *visit) boundedContext(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	d = min(d, v.remaining())
+	c, cancel := context.WithTimeout(ctx, max(d, 0))
+	stop := context.AfterFunc(v.cancelCtx, cancel)
+	return c, func() {
+		stop()
+		cancel()
+	}
+}
+
+// cloneInto clones the project into runs/<run id>/repo of a workspace. The run
+// directory is checked through an os.Root of the workspace (a link planted at runs or
+// runs/<run id> is refused, as the copy-forward does), and a repo entry left by an
+// earlier attempt is removed first.
+func cloneInto(ctx context.Context, pc project.Config, ws, runID string) error {
+	root, err := os.OpenRoot(ws)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	runRel := filepath.Join("runs", runID)
+	for _, rel := range []string{"runs", runRel} {
+		info, err := root.Lstat(rel)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s: run directory is not a plain directory", rel)
+		}
+	}
+	if err := root.RemoveAll(filepath.Join(runRel, project.RepoDir)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return pc.Clone(ctx, filepath.Join(ws, runRel, project.RepoDir))
+}
+
 // taskMessage is the rendered node task plus the fixed protocol block (DESIGN 5.6
-// rule 5).
+// rule 5), with the project lines of DESIGN 5.16 rule 9 for a project visit.
 func (v *visit) taskMessage() string {
 	schema := v.node.OutputSchema
 	var buf bytes.Buffer
@@ -373,6 +484,9 @@ func (v *visit) taskMessage() string {
 		sb.WriteString("script_id: " + v.over.ScriptID + "\n")
 	}
 	sb.WriteString("Work inside the directory runs/" + v.run.ID + "/ of your workspace.\n")
+	if v.project != nil && v.toolchain.Name != "" {
+		sb.WriteString(project.Instructions(*v.project, v.run.ID, v.toolchain))
+	}
 	sb.WriteString(`When finished, call the tool yuno__finish with {"run_token": "` + v.token +
 		`", "result": <object matching this JSON schema>}:` + "\n")
 	sb.Write(schema)
@@ -1627,6 +1741,10 @@ func (v *visit) finish(ctx context.Context, res outcome) {
 	e := v.e
 	v.closing = true
 	v.release()
+	if v.sandboxHeld {
+		v.sandboxHeld = false
+		e.releaseSandbox(ctx, v.ocID)
+	}
 	if e.deps.Gateway != nil && v.sessionCreated {
 		if _, up := e.deps.Gateway.Info(); up {
 			v.reconcile(ctx)

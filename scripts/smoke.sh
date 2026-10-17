@@ -65,6 +65,16 @@ if docker image inspect yuno-sandbox:latest >/dev/null 2>&1; then
 else
   fail "sandbox image present" "yuno-sandbox:latest missing (make run builds it)"
 fi
+# The per-toolchain images a project run selects (DESIGN 5.16 rule 6).
+missing=""
+for tc in python node go; do
+  docker image inspect "yuno-sandbox-$tc:latest" >/dev/null 2>&1 || missing="$missing yuno-sandbox-$tc:latest"
+done
+if [ -z "$missing" ]; then
+  pass "toolchain sandbox images present"
+else
+  fail "toolchain sandbox images present" "missing:$missing (make run builds them)"
+fi
 
 # Baseline config written by openclaw-init (hash sidecar marks platform ownership).
 if [ -f data/openclaw/openclaw.json ] && [ -s data/openclaw/yuno-baseline.hash ] && grep -q '"mcp"' data/openclaw/openclaw.json; then

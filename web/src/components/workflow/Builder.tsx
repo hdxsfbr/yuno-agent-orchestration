@@ -35,7 +35,7 @@ import { formatDateTime } from "@/lib/format";
 import { Badge } from "../Badge";
 import Button from "../Button";
 import { Card } from "../Card";
-import { TextField } from "../fields";
+import { CheckboxField, TextField } from "../fields";
 import { ConfirmDialog } from "../Modal";
 import { InlineError, errorText } from "../QueryState";
 import Canvas from "./Canvas";
@@ -56,6 +56,13 @@ const toInput = (d: Draft): WorkflowInput => ({ name: d.name.trim(), description
 function prepare(w?: Workflow): Draft {
   const definition = w ? w.definition : newDefinition();
   return { name: w?.name ?? "", description: w?.description ?? "", definition: setPositions(definition, withPositions(definition)) };
+}
+
+/** The definition without its project flag (the key is left out, not set to false). */
+function omitProject(d: WorkflowDefinition): WorkflowDefinition {
+  const rest = { ...d };
+  delete rest.project;
+  return rest;
 }
 
 function Section({ title, children, aside }: { title: string; children: ReactNode; aside?: ReactNode }) {
@@ -397,6 +404,15 @@ export default function Builder({ workflow }: { workflow?: Workflow }) {
           <Card className="xl:sticky xl:top-4">{panel}</Card>
         </aside>
       </div>
+
+      <Section title="Project repository">
+        <CheckboxField
+          checked={!!def.project}
+          onChange={(v) => edit((d) => (v ? { ...d, project: true } : omitProject(d)), { type: "other", prefix: "project" })}
+          label="Runs work on the project repository"
+          hint="When the platform has a project repository configured, each run starts from a fresh checkout of its default branch in the first agent's run directory; later agents receive the checkout and the Deployer can open a merge request. Without one, runs work in their run directory as usual."
+        />
+      </Section>
 
       <Section title="Limits">
         <p className="mb-3 text-sm text-zinc-500">A run stops, and is marked accordingly, as soon as it reaches one of these. Empty fields use the platform default.</p>

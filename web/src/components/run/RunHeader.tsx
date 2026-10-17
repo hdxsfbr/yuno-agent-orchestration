@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, type Run } from "@/lib/api";
+import { cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, mergeRequestOf, type Run, type ToolCall } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, shortId } from "@/lib/format";
 import type { Connection } from "@/lib/useEventStream";
 import Button from "../Button";
@@ -43,15 +43,21 @@ type Props = {
   run: Run;
   connection: Connection;
   now: number;
+  /** The run's tool calls so far: the merge request link comes from them. */
+  toolCalls?: readonly ToolCall[];
   /** Called with the run the API returns after a cancel request. */
   onRunChange: (run: Run) => void;
 };
 
-export default function RunHeader({ run, connection, now, onRunChange }: Props) {
+const TOOLCHAIN_LABEL: Record<string, string> = { go: "Go", node: "Node", python: "Python", default: "default image" };
+
+export default function RunHeader({ run, connection, now, toolCalls = [], onRunChange }: Props) {
   const cancel = useMutation({ mutationFn: () => cancelRun(run.id), onSuccess: onRunChange });
   const terminal = isTerminalStatus(run.status);
   const requested = cancel.isSuccess || !!run.cancel_requested;
   const duration = elapsedMs(run.started_at, run.finished_at, now);
+  const mergeRequest = mergeRequestOf(toolCalls);
+  const requestLabel = mergeRequest?.provider === "github" ? "Pull request" : "Merge request";
 
   return (
     <section aria-label="Run summary">
@@ -64,6 +70,17 @@ export default function RunHeader({ run, connection, now, onRunChange }: Props) 
               </h1>
               <RunStatusBadge status={run.status} />
               {isDelegatedRun(run) ? <Badge tone="blue">Delegated</Badge> : null}
+              {run.toolchain ? (
+                <Badge tone="zinc" title="The toolchain read from the project checkout; the sandbox image follows it">
+                  Toolchain: {TOOLCHAIN_LABEL[run.toolchain] ?? run.toolchain}
+                </Badge>
+              ) : null}
+              {mergeRequest ? (
+                <a href={mergeRequest.url} target="_blank" rel="noreferrer" className="text-sm font-medium underline">
+                  {requestLabel}
+                  {mergeRequest.number !== undefined ? ` ${mergeRequest.provider === "github" ? "#" : "!"}${mergeRequest.number}` : ""}
+                </a>
+              ) : null}
             </div>
             <p className="mt-1 break-all font-mono text-xs text-zinc-500">{run.id}</p>
           </div>

@@ -54,6 +54,15 @@ type Config struct {
 	GitLabProjectID string
 	GitLabToken     string
 
+	// Project repository (DESIGN 5.16 rule 1): the git repository runs opted in with
+	// `project: true` work on. The token is write-only: never returned by the API,
+	// redacted wherever it could appear.
+	ProjectRepoURL        string
+	ProjectGitToken       string
+	ProjectDefaultBranch  string
+	ProjectProvider       string // gitlab | github; "" means by host (github.com → github)
+	ProjectSandboxNetwork bool
+
 	// API and engine.
 	APIToken           string
 	EngineWorkers      int
@@ -115,6 +124,12 @@ func FromEnv() Config {
 		GitLabProjectID: env("GITLAB_PROJECT_ID", ""),
 		GitLabToken:     env("GITLAB_TOKEN", ""),
 
+		ProjectRepoURL:        env("PROJECT_REPO_URL", ""),
+		ProjectGitToken:       env("PROJECT_GIT_TOKEN", ""),
+		ProjectDefaultBranch:  env("PROJECT_DEFAULT_BRANCH", "main"),
+		ProjectProvider:       strings.ToLower(env("PROJECT_PROVIDER", "")),
+		ProjectSandboxNetwork: envBool("PROJECT_SANDBOX_NETWORK", false),
+
 		APIToken:           env("API_TOKEN", ""),
 		EngineWorkers:      envInt("ENGINE_WORKERS", 4),
 		EngineStaleAfter:   envDuration("ENGINE_STALE_AFTER", 300*time.Second),
@@ -153,6 +168,13 @@ func env(key, def string) string {
 
 func envInt(key string, def int) int {
 	if v, err := strconv.Atoi(env(key, "")); err == nil {
+		return v
+	}
+	return def
+}
+
+func envBool(key string, def bool) bool {
+	if v, err := strconv.ParseBool(env(key, "")); err == nil {
 		return v
 	}
 	return def

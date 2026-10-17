@@ -32,6 +32,7 @@ workflow:
           release_id: { type: string }
           version: { type: string }
           status: { type: string }
+          merge_request_url: { type: string }
         required: [status]
   nodes:
     - { id: start, kind: start }
@@ -94,6 +95,7 @@ workflow:
           release_id: { type: string }
           version: { type: string }
           status: { type: string }
+          merge_request_url: { type: string }
         required: [status]
         additionalProperties: true
       input_from: [coder, reviewer]

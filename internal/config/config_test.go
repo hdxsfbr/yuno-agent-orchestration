@@ -15,7 +15,7 @@ import (
 )
 
 // envRead matches every setting FromEnv reads and the helper that parses it.
-var envRead = regexp.MustCompile(`\benv(Int|Float|Duration|List|Int64List)?\("([A-Z][A-Z0-9_]*)"`)
+var envRead = regexp.MustCompile(`\benv(Int|Float|Duration|List|Int64List|Bool)?\("([A-Z][A-Z0-9_]*)"`)
 
 // readNames returns the names config.go reads, each with its parser ("" is a string).
 func readNames(t *testing.T) map[string]string {
@@ -99,6 +99,8 @@ func parses(kind, v string) bool {
 		_, err = strconv.ParseFloat(v, 64)
 	case "Duration":
 		_, err = time.ParseDuration(v)
+	case "Bool":
+		_, err = strconv.ParseBool(v)
 	}
 	return err == nil
 }

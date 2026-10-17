@@ -19,7 +19,7 @@ const finishTool = "finish"
 
 // sideEffectingTools are the platform tools of risk side_effecting (DESIGN 5.7). A row
 // with an idempotency key is also treated as one, whatever its name.
-var sideEffectingTools = map[string]bool{"deploy_release": true, "gitlab_create_mr": true}
+var sideEffectingTools = map[string]bool{"deploy_release": true, "gitlab_create_mr": true, "open_merge_request": true}
 
 // toolBase strips the platform prefix: "yuno__finish" is "finish".
 func toolBase(name string) string { return strings.TrimPrefix(name, platformPrefix) }

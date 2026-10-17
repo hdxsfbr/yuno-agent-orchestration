@@ -28,6 +28,8 @@ type walk struct {
 	rootSpan string
 	stale    []store.RunNode // a lost worker's unfinished visits, for the next agent visit
 	sessions []string        // node sessions to delete when the worker lets the run go
+	// noProjectLogged keeps the "no repository configured" line to one per walk.
+	noProjectLogged bool
 
 	// The definition's state_schema, compiled at the first agent node output.
 	stateSchema         *jsonschema.Schema
@@ -174,6 +176,15 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 			v.early = &o
 		}
 		v.carryFrom = from
+	}
+	if v.early == nil && w.def.Project {
+		// DESIGN 5.16 rule 2: the flag means "when one is configured".
+		if e.project != nil {
+			v.project = e.project
+		} else if w.run.Toolchain == nil && !w.noProjectLogged {
+			w.noProjectLogged = true
+			e.logEvent(ctx, w.run.ID, "info", "project: no repository configured; running without a checkout")
+		}
 	}
 	e.mu.Lock()
 	e.active[w.run.ID] = v

@@ -230,7 +230,7 @@ func TestDevPipelineEndToEnd(t *testing.T) {
 	}
 	gate := pendingApproval(t, env, r.ID)
 	if gate.Kind != store.ApprovalKindNode || gate.NodeID != "gate" ||
-		gate.Message != "Deploy release 1.0.0? Coder: zero handled Reviewer: Looks good." {
+		gate.Message != "Ship this change (release 1.0.0 or a merge request)? Coder: zero handled Reviewer: Looks good." {
 		t.Fatalf("gate approval = %+v", gate)
 	}
 	if !gate.ExpiresAt.Equal(gate.RequestedAt.Add(86400 * time.Second)) {

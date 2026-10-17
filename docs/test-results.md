@@ -1,3 +1,16 @@
+# Test results, 2026-10-17 (project repository, DESIGN 5.16)
+
+Run by hand on the development machine before the merge of the `project-repository`
+branch, everything inside containers; CI runs the same commands on `main`.
+
+| Command | Result |
+|---|---|
+| `make test-go` (`go test ./... -count=1` against the `yuno_test` database) | 19 packages ok, 0 failures (new: `internal/project`, engine clone/carry/propose, tool against GitLab and GitHub fakes, materialiser sandbox patch, seed reset) |
+| `make test-web` (vitest) | 27 files, 370 tests passed (new: toolchain badge, merge request link, builder opt-in, status panel) |
+| `make lint` (`go vet`, staticcheck 2026.2.2, eslint, `tsc --noEmit`) | clean |
+| `make probe-sandbox` with `yuno-sandbox-node:latest` and `yuno-sandbox-go:latest` (per-agent image and network override, hot reload, restore) | all checks passed, twice |
+| image builds (`docker/sandbox-{python,node,go}.Dockerfile`, `docker/go.Dockerfile`) | built; each image answers with its toolchain as uid 1000 |
+
 # Test results, 2026-10-16
 
 Real run on the submission commit's parent (`0c3afdd` plus the smoke fix), on the

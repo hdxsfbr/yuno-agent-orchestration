@@ -279,3 +279,26 @@ and the image builds itself before the single wave commit; CI tested and deploye
 Verified live by Andre from his phone the same night (roster, a delegation to Coder, the
 report relayed in a second, a follow-up through `run_status`); the one defect that showed,
 a mirrored reply lost after parallel tool calls, was fixed with a test the next hour.
+
+**Projects: a repository, its toolchain, a merge request (2026-10-17).** Andre decided
+that projects are git repositories configured by environment variables, that toolchains
+are read from the repository and served by prebuilt generic images, that sandbox
+network is a per-project opt-in, and that no agent ever clones or pushes (D-037). A
+coordinator session wrote the design first (DESIGN 5.16: sixteen rules, edge cases,
+failure handling, a test list), then probed the gateway for the facts the design
+depends on with a new `scripts/openclaw-probe-sandbox.mjs` (`make probe-sandbox`): a
+per-agent `sandbox` block set through `config.patch` reloads hot, picks the image and
+network of the agent's next session while the defaults stay untouched, and a `null` in
+`replacePaths` restores them; the same probe found that the gateway sets `HOME` and its
+own `PATH` for every exec, which moved the Go toolchain onto `/usr/local/bin` in its
+image. The implementation followed the design: `internal/project` (configuration,
+detection table, git with the token in the environment only), the engine's clone step
+and per-visit sandbox holds, `open_merge_request` with GitLab and GitHub providers
+behind one interface, the seed's reset switch for installs that predate the feature,
+the toolchain badge and request link in the UI, and the docs. One security choice came
+from writing the tool: the api never runs git inside the agent-writable checkout (a
+planted hook or config entry would run on the api side), so the merge request is built
+from a fresh private clone that receives the working tree as files; a test plants such
+a hook and checks it never ran. Tests run against local bare repositories with the real
+git (no network), httptest fakes for both providers, and the fake gateway; `make
+test-go`, `make test-web` and `make lint` were green before the merge.

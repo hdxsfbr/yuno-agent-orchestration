@@ -593,7 +593,7 @@ components:
             details: {}
     Status:
       type: object
-      required: [version, uptime_s, db_ok, workers, runs, sse_clients, scheduler]
+      required: [version, uptime_s, db_ok, workers, runs, sse_clients, scheduler, project]
       properties:
         version: { type: string }
         uptime_s: { type: integer }
@@ -607,6 +607,16 @@ components:
           properties:
             tick_seconds: { type: number, description: how often the scheduler looks for due schedules }
             next_due_at: { type: [string, "null"], format: date-time, description: "earliest next_run_at of the enabled schedules; null when none is enabled" }
+        project:
+          type: object
+          required: [configured, sandbox_network]
+          description: "the project repository runs with `project: true` work on (PROJECT_* settings); the token is never returned"
+          properties:
+            configured: { type: boolean }
+            repo_url: { type: string, description: "the https clone URL, without credentials" }
+            default_branch: { type: string }
+            provider: { type: string, enum: [gitlab, github] }
+            sandbox_network: { type: boolean, description: "runs on the project get a sandbox with network access (PROJECT_SANDBOX_NETWORK)" }
     OpenClawStatus:
       type: object
       required: [connected, scopes]
@@ -818,6 +828,7 @@ components:
         model: { type: string, description: "OpenClaw model ref override for this run, e.g. scripted/scripted-1 (evals and tests)" }
         script_id: { type: string, description: "Script registered via /api/evals/scripts that the scripted provider replays for this run" }
         trigger: { type: string, enum: [manual, eval], default: manual, description: "Who starts the run: an operator, or the eval runner (eval runs can be filtered out of the run list); schedules and channels start their own runs" }
+        project: { type: boolean, default: false, description: "Quick runs only: work on the project repository when one is configured (PROJECT_REPO_URL); the engine clones it into the agent's run directory first. A workflow opts in through its definition's `project` field." }
     ScriptStep:
       type: object
       description: One scripted model response; exactly one of text or tool.
@@ -878,6 +889,7 @@ components:
         finished_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         reported_at: { type: string, format: date-time, description: "when a channel run's outcome was sent back into its conversation; absent otherwise" }
+        toolchain: { type: string, enum: [go, node, python, default], description: "what the project checkout's manifest said when the engine cloned it (go.mod, package.json with a lockfile, uv.lock, requirements*.txt, pyproject.toml); absent for a run without a checkout" }
     RunNode:
       type: object
       required: [id, run_id, node_id, visit, iteration, status]
@@ -1049,6 +1061,7 @@ components:
         nodes: { type: array, items: { $ref: "#/components/schemas/WorkflowNode" } }
         edges: { type: array, items: { $ref: "#/components/schemas/WorkflowEdge" } }
         limits: { $ref: "#/components/schemas/Limits" }
+        project: { type: boolean, description: "runs of this workflow work on the project repository when one is configured: the engine clones it into the first agent's run directory, later agents receive the checkout, and open_merge_request can propose it" }
     WorkflowInput:
       type: object
       required: [name, definition]

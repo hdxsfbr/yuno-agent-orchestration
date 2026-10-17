@@ -146,3 +146,21 @@ describe("API token", () => {
     expect(screen.queryByText("API token in use")).toBeNull();
   });
 });
+
+describe("project repository panel", () => {
+  it("says none is configured", async () => {
+    status = { ...baseStatus, project: { configured: false, sandbox_network: false } };
+    renderPage();
+    expect(await screen.findByText(/None configured/)).not.toBeNull();
+  });
+
+  it("shows the repository, branch, provider and the network opt-in, never a token", async () => {
+    status = { ...baseStatus, project: { configured: true, repo_url: "https://gitlab.com/g/p.git", default_branch: "main", provider: "gitlab", sandbox_network: true } };
+    renderPage();
+    const panel = within(await screen.findByRole("region", { name: "Project repository" }));
+    expect(panel.getByText("https://gitlab.com/g/p.git")).not.toBeNull();
+    expect(panel.getByText("main")).not.toBeNull();
+    expect(panel.getByText("GitLab")).not.toBeNull();
+    expect(panel.getByText(/On: agents can install dependencies/)).not.toBeNull();
+  });
+});

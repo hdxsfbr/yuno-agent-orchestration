@@ -34,6 +34,9 @@ type TriggerRequest struct {
 	// ScriptID, when set, is written into the task message as "script_id: <id>" so the
 	// scripted provider can find the registered script for this run.
 	ScriptID string
+	// Project opts a quick run into the project repository (DESIGN 5.16 rule 2); a
+	// workflow run takes the flag from its definition instead.
+	Project bool
 }
 
 // RunContext is what a run token resolves to (DESIGN 5.7 rule 3).

@@ -179,6 +179,16 @@ export type Status = {
   runs: Record<string, number>;
   /** Present once the scheduler runs. */
   scheduler?: { tick_seconds?: number; next_due_at?: string | null };
+  /** The project repository runs with `project: true` work on; never carries the token. */
+  project?: ProjectStatus;
+};
+
+export type ProjectStatus = {
+  configured: boolean;
+  repo_url?: string;
+  default_branch?: string;
+  provider?: "gitlab" | "github";
+  sandbox_network: boolean;
 };
 
 export type OpenClawStatus = {
@@ -343,11 +353,15 @@ export type Run = {
   paused_total_ms?: number;
   /** When the outcome of a delegated run was reported into its conversation. */
   reported_at?: string | null;
+  /** What the project checkout's manifest said when it was cloned; absent without a checkout. */
+  toolchain?: Toolchain;
   created_at: string;
   started_at?: string;
   finished_at?: string;
   updated_at?: string;
 };
+
+export type Toolchain = "go" | "node" | "python" | "default";
 
 export type RunCreate = {
   workflow_id?: string;
@@ -355,7 +369,33 @@ export type RunCreate = {
   agent_id?: string;
   task?: string;
   limits?: Limits;
+  /** Quick runs only: work on the project repository when one is configured. */
+  project?: boolean;
 };
+
+/** The merge or pull request an executed open_merge_request call opened or found. */
+export type MergeRequestRef = { url: string; number?: number; provider?: "gitlab" | "github"; replayed?: boolean };
+
+const isRecordValue = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/**
+ * The merge request of a run, from the newest executed open_merge_request call whose
+ * output carries a URL; undefined when none did (DESIGN 5.16 rule 12).
+ */
+export function mergeRequestOf(toolCalls: readonly ToolCall[]): MergeRequestRef | undefined {
+  for (let i = toolCalls.length - 1; i >= 0; i--) {
+    const call = toolCalls[i];
+    if (call.tool_name.replace(/^yuno__/, "") !== "open_merge_request" || call.status !== "executed" || call.is_error) continue;
+    const out = call.output;
+    if (!isRecordValue(out) || typeof out.url !== "string" || out.url === "") continue;
+    const ref: MergeRequestRef = { url: out.url };
+    if (typeof out.number === "number") ref.number = out.number;
+    if (out.provider === "gitlab" || out.provider === "github") ref.provider = out.provider;
+    if (out.replayed === true) ref.replayed = true;
+    return ref;
+  }
+  return undefined;
+}
 
 export type NodeStatus = "pending" | "running" | "waiting_approval" | "succeeded" | "failed" | "skipped";
 
@@ -423,7 +463,7 @@ export type Span = {
   id: string;
   run_id: string;
   parent_id?: string;
-  kind: "run" | "node" | "model_call" | "tool_call" | "approval_wait";
+  kind: "run" | "node" | "model_call" | "tool_call" | "approval_wait" | "project";
   name: string;
   started_at: string;
   ended_at?: string;
@@ -517,6 +557,8 @@ export type WorkflowDefinition = {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   limits?: Limits;
+  /** Runs work on the project repository when one is configured (DESIGN 5.16 rule 2). */
+  project?: boolean;
   /** Where the builder drew each node; the backend keeps it with the definition. */
   ui?: { positions?: Record<string, Position> };
 };

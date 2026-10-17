@@ -1095,6 +1095,231 @@ The full design with inputs, edge cases, failure handling and tests is
 15. The materialiser writes a `## Chatting` section into `AGENTS.md` only for agents whose
     allowlist holds a chat-capable tool.
 
+### 5.16 Project repository: clone, toolchain, sandbox image and network, merge request
+
+Purpose: a run can work on an existing git repository, with that repository's toolchain
+in the sandbox, and end in a merge request; GitLab first, GitHub as a second provider
+behind the same interface. Decision D-037. Everything about the repository is
+configuration of the platform, not of an agent: no agent clones or pushes, and no model
+ever sees the token.
+
+Inputs: `PROJECT_REPO_URL`, `PROJECT_GIT_TOKEN`, `PROJECT_DEFAULT_BRANCH`,
+`PROJECT_PROVIDER`, `PROJECT_SANDBOX_NETWORK`; the `project` flag of a workflow
+definition or a run request; the run's idempotency keys.
+
+Rules:
+
+1. **Configuration from the environment.** `PROJECT_REPO_URL` is the https clone URL
+   without user information; `PROJECT_GIT_TOKEN` is write-only (never returned by the
+   API, redacted by `internal/obs` wherever it could appear); `PROJECT_DEFAULT_BRANCH`
+   defaults to `main`; `PROJECT_PROVIDER` is `gitlab` or `github`, defaulting to `github`
+   when the URL's host is `github.com` and to `gitlab` otherwise;
+   `PROJECT_SANDBOX_NETWORK` defaults to `false`. The project is configured when the URL
+   and the token are set and the URL is well-formed; an incomplete or malformed setting
+   is logged once at start and the api runs without a project. `GITLAB_*` keep their
+   meaning for `gitlab_create_mr`, the loose-files tool.
+2. **Opt-in per workflow or run.** A workflow definition carries `project: true`; a
+   quick run carries `project: true` on the run request, which sets it on the one-node
+   definition. The flag means "use the project repository when one is configured": on an
+   install without a configured project the run proceeds as before, with one log line
+   (`project: no repository configured; running without a checkout`), so the seeded Dev
+   pipeline, which opts in, keeps working everywhere. The flag travels in the run's
+   workflow snapshot.
+3. **Clone before the first visit.** In the run's first agent visit, after the agent is
+   materialised and its run directory prepared (5.6 rule 13) and before its turn, the
+   engine clones the default branch at depth 1 (`--single-branch`) into
+   `runs/<run id>/repo/` of that agent's workspace. The destination is reached through an
+   `os.Root` of the workspace: `runs/<run id>` must be a plain directory, and a `repo`
+   entry left by an earlier attempt is removed first. The engine then writes
+   `.git/info/exclude` entries for dependency and cache directories (`node_modules/`,
+   `.venv/`, `__pycache__/`, `.pytest_cache/`, `.cache/`, `.home/`), detects the toolchain
+   (rule 5), stores it as `runs.toolchain`, records a span of kind `project` named
+   `project_clone` (attributes: repository URL, branch, toolchain, duration) and a log line
+   `project repository cloned: <url> (<branch>), toolchain <x>`. A clone failure fails the
+   run cleanly before any turn starts, with reason `project clone: <redacted git error>`.
+   The run's first visit is the one whose run has no `toolchain` yet; later visits, and a
+   re-queued attempt of a run already cloned, clone nothing and rely on the copy-forward
+   of 5.6 rule 13, which carries the checkout (its `.git` included) to each later agent.
+4. **The token never leaves the api.** The api's own git processes receive it as an
+   `http.extraheader` configuration entry passed through `GIT_CONFIG_COUNT`/`KEY`/`VALUE`
+   environment variables (`Authorization: Basic base64(<user>:<token>)`, user `oauth2`
+   for GitLab and `x-access-token` for GitHub), so the checkout's `.git/config` holds the
+   bare URL and nothing on disk, in the task, in a transcript or in a trace carries the
+   token. Git runs with `GIT_TERMINAL_PROMPT=0` and a timeout. `internal/obs` redacts
+   GitLab (`glpat-`), GitHub (`ghp_`, `github_pat_`) tokens and `Authorization: Basic`
+   values besides what it knew.
+5. **Toolchain detection**, at clone time, from the repository root, first match wins:
+
+   | Manifest | Toolchain | Install (network on) | Tests |
+   |---|---|---|---|
+   | `go.mod` | `go` | `go mod download` | `go test ./...` |
+   | `package.json` + `pnpm-lock.yaml` | `node` | `pnpm install --frozen-lockfile` | `pnpm test` |
+   | `package.json` + `yarn.lock` | `node` | `yarn install --frozen-lockfile` | `yarn test` |
+   | `package.json` + `package-lock.json` (or no lockfile) | `node` | `npm ci` (`npm install` without a lockfile) | `npm test` |
+   | `uv.lock` | `python` | `uv sync` | `uv run pytest` |
+   | `requirements*.txt` | `python` | `python -m venv .venv && .venv/bin/pip install -r <file>` (every match, `requirements.txt` first) | `.venv/bin/pytest` |
+   | `pyproject.toml` | `python` | `python -m venv .venv && .venv/bin/pip install -e .` | `.venv/bin/pytest` |
+   | none of the above | `default` | none | none |
+
+   The value is one of `go`, `node`, `python`, `default`; the UI shows it as a badge on
+   the run header and in the runs list.
+6. **Per-toolchain images**, shipped with the platform and built by `make run` and
+   `make build` like the default image: `docker/sandbox-python.Dockerfile`
+   (`yuno-sandbox-python:latest`: python 3.12, pip, uv, pytest, git),
+   `docker/sandbox-node.Dockerfile` (`yuno-sandbox-node:latest`: node 24, npm, pnpm,
+   yarn, git) and `docker/sandbox-go.Dockerfile` (`yuno-sandbox-go:latest`: Go 1.26,
+   git). Nothing project-specific is baked in. The gateway runs every exec with
+   `HOME=/workspace` (the agent's workspace, mounted read-write) and its own `PATH` of the
+   usual system directories, while the image's other variables survive **[probed]**, so
+   each image keeps its tools under `/usr/local/bin` and sets every cache (`npm`, `pip`,
+   `uv`, `GOPATH`, `GOMODCACHE`, `GOCACHE`) to hidden directories of the workspace
+   (`/workspace/.cache/...`), which the platform never lists, copies forward or packages
+   and which persist across the agent's sessions; the root filesystem stays read-only.
+   The image for a toolchain is derived from `OPENCLAW_SANDBOX_IMAGE`
+   (`yuno-sandbox:latest` becomes `yuno-sandbox-<toolchain>:latest`); `default` keeps the
+   default image.
+7. **Sandbox selection through the materialiser, per visit.** Before the turn of every
+   visit of a project run whose toolchain is known, the engine sets
+   `agents.entries.<id>.sandbox` to `{scope: "session", docker: {image: <rule 6 image>,
+   network: <rule 8>}}` with `config.patch` **[probed: `agents.entries.*.sandbox.docker.*`
+   overrides `agents.defaults.sandbox.docker.*` for that agent; the next session of the
+   agent runs in that image with that network, and `agents.defaults.sandbox` is
+   untouched]**, and deletes the block (`null`, listed in `replacePaths`) once the visit
+   ends **[probed: the following session is back on the defaults]**. `scope: "session"`
+   is deliberate: the gateway keeps a hot agent-scoped container running when its
+   configuration changes (it only replaces stopped or expired ones) **[docs]**, so an
+   agent-scoped container created by an earlier run would keep the old image; a
+   per-session scope gives every node visit a fresh container built from the current
+   settings, pruned by the gateway's idle rules. The engine counts holds per agent: two
+   project visits of one agent at the same time (two runs) share its entry, the later
+   one wins, and the block is removed when the last of them ends. The sandbox paths
+   reload hot **[probed: `config.schema.lookup` reports the reload kind]**; a visit whose
+   sandbox patch fails ends with reason `sandbox selection failed: <error>`.
+8. **Network.** `network: "none"` unless `PROJECT_SANDBOX_NETWORK=true`, in which case the
+   sandboxes of visits of project runs get `network: "bridge"` and the task protocol
+   block tells the agent to install dependencies from the lockfile first and to run the
+   project's tests (rule 9). With network off the run still clones; the block says that
+   dependencies cannot be installed. The api does not get the Docker socket in either
+   case. `docs/threat-model.md` records the trade-off of rule 13.
+9. **Agents are told through the task protocol block** (5.6 rule 5, per visit), after
+   the run id lines:
+
+   ```
+   Project repository: runs/<run id>/repo/ in your workspace is a git checkout of <url>
+   (branch <default branch>, toolchain <x>). Work inside it. Do not clone, commit or push:
+   the platform commits the working tree when a merge request is opened.
+   Sandbox network: on. Install the dependencies from the lockfile first (<install>),
+   then run the project's tests (<tests>).
+   ```
+   or, with network off, `Sandbox network: off. Dependencies cannot be installed: use
+   what the image provides and say which tests you could not run.` A visit of a project
+   run without a configured project gets no such lines. `AGENTS.md` states the standing
+   rules (never clone or push; the checkout is the platform's).
+10. **`open_merge_request`**, a platform tool (5.7): input `{run_token, title,
+    description}`; risk `side_effecting`, hits `external`, approval-gated by default
+    (5.3), timeout 120 s, idempotency key as 5.4, branch `yuno/<first 12 hex of the key>`
+    like `gitlab_create_mr`. Steps, in the calling agent's workspace: (a) the checkout is
+    `runs/<run id>/repo/` reached through an `os.Root` with links refused, and must hold a
+    `.git` directory, else the model-facing error `this run has no project checkout at
+    runs/<run id>/repo/`; (b) if the provider reports the branch, the commit and push are
+    skipped (a retry after a partial failure); otherwise the api **never runs git inside
+    the checkout** (a hook or a configuration entry an agent wrote there, such as a
+    `pre-commit` hook or a `url.insteadOf` rewrite, would run on the api side or redirect
+    the push with its credentials): it clones the default branch again into a private
+    directory of its own, empties that working tree, copies the checkout's working tree
+    over it (regular files only, links skipped, `.git` and the excluded directories of
+    rule 3 left out), stages everything, and ends the call with the model-facing error
+    `the checkout has no changes to propose` when `git status` is clean; otherwise it
+    commits as `Yuno <yuno@localhost>` with the title as message (`--no-verify`, no
+    signing) and pushes `HEAD` to the branch from the api with the token (rule 4), then
+    removes the private directory; (c) an open merge request from that branch is
+    returned with `replayed: true`; otherwise one is opened against the default branch
+    with the title and description. Output: `{number, url, branch, provider,
+    replayed?}`. Registered only when the project is configured (`GET /api/tools` lists
+    it then); `gitlab_create_mr` stays for runs without a project. Commits an agent made
+    inside the sandbox are flattened: their working tree is what the one commit holds.
+11. **Providers behind one interface** (`branchExists`, `findOpen`, `create`): GitLab
+    through `<scheme>://<host>/api/v4/projects/<url-encoded path>` (`PRIVATE-TOKEN`;
+    `repository/branches/<branch>`, `merge_requests?source_branch=&state=opened`,
+    `POST merge_requests` with `remove_source_branch`), GitHub through
+    `https://api.github.com/repos/<owner>/<repo>` (or `https://<host>/api/v3/repos/...`
+    for another host; `Authorization: Bearer`; `branches/<branch>`,
+    `pulls?head=<owner>:<branch>&state=open`, `POST pulls`). The project path comes from
+    the clone URL (`.git` stripped). Non-2xx answers follow 5.5 rule 4: 5xx transient,
+    the rest permanent, the first line of the body in the error.
+12. **UI.** The run header shows a `Toolchain: <x>` badge when the run has one, and a
+    `Merge request` (GitLab) or `Pull request` (GitHub) link with the number, taken from
+    the newest executed `open_merge_request` call's output in the trace; the runs list
+    shows the toolchain badge.
+13. **Trust.** With network on, anything injected into the repository (a README, a test,
+    a dependency's install script) can reach the internet from the sandbox and can touch
+    the host's published ports; side effects inside the sandbox are not gated. The opt-in
+    is therefore for trusted repositories only, documented in the threat model. The token
+    is held by the api alone; the sandbox has the bare URL and no credential; the api
+    has no Docker socket.
+14. **Shipped agents and templates.** The seeded Deployer gets `open_merge_request`
+    besides `deploy_release`; the Coder's prompt says to work in the checkout, install
+    from the lockfile when the network is on and run the project's tests; the Reviewer's
+    prompt says to review `git status` and `git diff <default branch>` in the checkout;
+    the Dev pipeline opts in and its deployer node opens a merge request when the task
+    describes a project checkout and deploys a release otherwise, with
+    `merge_request_url` in its output. The seed never overwrites an existing agent or
+    workflow (5.15 rule 13); `yuno seed --reset-shipped` (`make seed-reset`) restores the
+    shipped agents' role, prompt and allowlist and the instantiated templates'
+    definitions to the current shipped versions, keeping ids, bindings, memory and every
+    other setting, for an install that predates this section.
+
+Edge cases: a quick run with `project: true` on an agent without `exec` still gets the
+checkout (file tools work in it). The clone's `runs/<run id>` is a link planted by the
+agent in an earlier run: refused like the copy-forward (`run directory is not a plain
+directory`). The default branch does not exist: git fails, the run fails with that
+message. The working tree holds `node_modules/` because the project does not ignore it:
+left out of the copy and excluded by rule 3's local exclude file, never committed. The
+agent commits in the sandbox: the working tree is what counts, flattened into the
+platform's one commit (rule 10). The provider refuses the merge request (a branch
+protection, a duplicate title): the branch stays pushed and the error reaches the model;
+a retry under the same key skips the commit and push (rule 10b). Two project runs on
+one agent at once: rule 7's holds. A run cancelled during the clone: the git process is
+killed with the visit's context and the run ends `cancelled`.
+
+Failure handling: git errors are redacted (rule 4) before they reach the run's failure
+reason, a tool result or a log line; a provider's transient failure is retried by the
+executor (5.5) under the same key; the materialiser's sandbox patch retries a stale
+`baseHash` three times like every other patch.
+
+Outputs: `runs.toolchain`; the `project` span; `tool_calls` rows for
+`open_merge_request` with `{number, url, branch, provider}`; the `Toolchain` badge and
+the merge request link.
+
+Tests: T5.16.1 config: every `PROJECT_*` name in `.env.example` and compose
+(`TestEnvExampleAndComposeCoverConfig`), provider default by host, configured only with
+URL and token, a URL with user information refused. T5.16.2 the detection table, one case
+per row plus precedence (`uv.lock` beats `requirements.txt`, `go.mod` beats
+`package.json`). T5.16.3 engine, against a local bare repository as the remote (no
+network): a two-node project workflow clones into the first agent's workspace before its
+turn (the file from the remote is there, `.git/config` holds no token), records
+`runs.toolchain` and the span, the checkout reaches the second agent, and
+`open_merge_request` in the second agent's workspace commits the edit, pushes the key's
+branch to the bare repository and opens the request on the fake provider; a clone of a
+missing branch fails the run with `project clone:` before any turn; an opted-in run
+without a configured project runs without a checkout; a quick run opts in through the
+request; a `pre-commit` hook planted in the checkout never runs on the api side. T5.16.4 the materialiser against the
+fake gateway: the sandbox patch for `go` with network on carries the derived image and
+`bridge`, with network off `none`; the clear patch sends `null` with the path in
+`replacePaths`; holds of two visits clear once. T5.16.5 the tool against the httptest
+GitLab fake: branch and merge request created, a second call replays, a retry after a
+failed request skips the commit; the GitHub fake: pull request created with `head`
+`<owner>:<branch>`, replay found through `pulls?head=`. T5.16.6 redaction of GitLab and
+GitHub token shapes and basic auth headers in logs, spans and tool rows; the tool's
+stored input and output carry no token. T5.16.7 UI: the run header shows the toolchain
+badge and the merge request link from the tool output; the list shows the badge; no link
+without an executed call. T5.16.8 `GET /api/tools` lists `open_merge_request` only when
+the project is configured; `RunCreate.project` reaches the snapshot.
+
+Out of scope: more than one project per platform, per-agent projects, branches other
+than the default as the base, rebases or conflict resolution, reviewing an existing
+merge request, GitHub Apps (a token is the only credential), submodules.
+
 ## 6. HTTP API summary
 
 Errors: `{error: {code, message, details?}}`; validation failures are 422 with
@@ -1141,15 +1366,20 @@ Services: `postgres`, `openclaw-init` (writes the baseline config, exits), `open
 `/home/node/.openclaw`), `api` (shares the gateway network namespace, mounts the same
 bind at the same path, so `web` proxies to `openclaw:8080`), `web` (also proxies
 `/telegram-webhook` to `openclaw:18789`), `deploytarget`, `sandbox-image` (build-only
-service that tags `yuno-sandbox:latest`); profiles `eval`, `tunnel`, `tools`. The gateway
+service that tags `yuno-sandbox:latest`) and `sandbox-image-{python,node,go}` (build-only,
+the per-toolchain images of 5.16 rule 6); profiles `eval`, `tunnel`, `tools`, `build`.
+The `go` tool service is `golang:1.26-alpine` plus git (`docker/go.Dockerfile`); the
+api image carries git too (5.16 rules 3 and 10). The gateway
 image is pinned to `2026.10.3`. Volumes: `pgdata`, `releases`, caches; everything OpenClaw
 touches is a host bind mount under `./data/` (git-ignored). `.env.example` adds
 `OPENCLAW_GATEWAY_TOKEN`, `YUNO_MCP_TOKEN`, `MODEL_PROXY_RATE_PER_MINUTE`,
 `MCP_TOOL_WAIT_SECONDS`, `DOCKER_SOCKET`. Make targets unchanged plus `make openclaw-shell`
-(CLI inside the gateway container), `make openclaw-logs`, and `make probe-openclaw`
+(CLI inside the gateway container), `make openclaw-logs`, `make probe-openclaw`
 (`scripts/openclaw-probe.mjs`: connects over loopback, patches a mock provider, runs a
 turn with a sandboxed `exec`, and prints the event summary; the integration contract's
-canary).
+canary), `make probe-sandbox` (`scripts/openclaw-probe-sandbox.mjs`: the per-agent
+sandbox override of 5.16 rule 7, against the running gateway) and `make seed-reset`
+(5.16 rule 14).
 
 ## 9. Build order (tracer bullet, then widen)
 

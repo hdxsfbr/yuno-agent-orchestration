@@ -48,7 +48,7 @@ export default function RunDetailPage() {
   return (
     <div className="max-w-5xl space-y-5">
       {back}
-      <RunHeader run={view.run} connection={connection} now={now} onRunChange={applyRun} />
+      <RunHeader run={view.run} connection={connection} now={now} toolCalls={view.tool_calls} onRunChange={applyRun} />
 
       {view.approvals.length > 0 || view.run.status === "waiting_approval" ? (
         <Section title="Approvals" count={view.approvals.length}>

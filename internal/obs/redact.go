@@ -15,8 +15,14 @@ var secretValuePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{10,}`),            // Anthropic API keys
 	regexp.MustCompile(`sk-or-v1-[A-Za-z0-9]{10,}`),            // OpenRouter API keys
 	regexp.MustCompile(`\b\d{6,}:[A-Za-z0-9_-]{30,}`),          // Telegram bot tokens
-	regexp.MustCompile(`glpat-[A-Za-z0-9_-]{15,}`),             // GitLab personal access tokens
-	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]{16,}`), // Authorization headers
+	regexp.MustCompile(`gl(?:pat|dt|oas|rt)-[A-Za-z0-9_-]{15,}`), // GitLab personal, deploy and access tokens
+	regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`),              // GitHub tokens (classic)
+	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`),            // GitHub fine-grained tokens
+	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]{16,}`),   // Authorization headers
+	// Basic credentials (DESIGN 5.16 rule 4 sends the project token this way to git):
+	// "Basic" and a base64 value with at least one digit or symbol, so prose such as
+	// "Basic responsibilities" stays.
+	regexp.MustCompile(`Basic\s+[A-Za-z0-9+/]*[0-9+/][A-Za-z0-9+/]{8,}={0,2}`),
 	// Run tokens (DESIGN 5.14 rule 7) bind platform tool calls to a node visit; logs and
 	// stored transcripts never keep one. Minted lowercase, matched in either case.
 	regexp.MustCompile(`(?i)\br_[a-z2-7]{24}\b`),

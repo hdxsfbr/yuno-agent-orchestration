@@ -32,7 +32,7 @@ const PlatformToolPrefix = "yuno__"
 // entry with one of these names is materialised with PlatformToolPrefix; every other
 // name is an OpenClaw built-in and keeps its name.
 var PlatformTools = []string{"finish", "http_fetch", "memory_save", "memory_recall", "deploy_release", "gitlab_create_mr",
-	"list_agents", "list_workflows", "delegate_task", "run_status"}
+	"open_merge_request", "list_agents", "list_workflows", "delegate_task", "run_status"}
 
 // FinishTool is the platform tool every managed agent must be able to call.
 const FinishTool = PlatformToolPrefix + "finish"
@@ -48,7 +48,13 @@ const AgentsMD = "You run on the Yuno platform. Work only inside the directory r
 	"runtime refuses heredocs and inline interpreter scripts in exec commands, so use exec only " +
 	"to run programs. Tool calls made in the same turn run at the same time; when a call needs " +
 	"another's result, such as running a file you just wrote, make it in the next turn. " +
-	ChatRule + "\n"
+	ProjectRule + " " + ChatRule + "\n"
+
+// ProjectRule is the AGENTS.md sentence about project checkouts (DESIGN 5.16 rule 9):
+// the platform clones and pushes; agents only edit.
+const ProjectRule = "When your task describes a project repository, its checkout at runs/<run_id>/repo/ is the " +
+	"platform's: work inside it, never clone, commit or push, and never change its .git directory; " +
+	"the platform commits your working tree when a merge request is opened."
 
 // ChatRule is the AGENTS.md sentence for an agent bound to a channel: a person's message
 // has no task, run token or run directory, and the rules above are about runs.
@@ -371,8 +377,8 @@ func Materialize(ctx context.Context, c Client, stateDir string, a *store.Agent,
 	return h, nil
 }
 
-// configEntries extracts agents.entries from a config.get payload.
-func configEntries(cfg json.RawMessage) map[string]json.RawMessage {
+// ConfigEntries extracts agents.entries from a config.get payload.
+func ConfigEntries(cfg json.RawMessage) map[string]json.RawMessage {
 	var c struct {
 		Agents struct {
 			Entries map[string]json.RawMessage `json:"entries"`
@@ -408,7 +414,7 @@ func patchEntry(ctx context.Context, c Client, d desired) error {
 			return fmt.Errorf("config.get: %w", err)
 		}
 		live := map[string]any{}
-		if raw, ok := configEntries(cfg.Config)[d.ID]; ok {
+		if raw, ok := ConfigEntries(cfg.Config)[d.ID]; ok {
 			_ = json.Unmarshal(raw, &live)
 		}
 		entry := make(map[string]any, len(d.Entry)+1)
@@ -638,7 +644,7 @@ func Runtime(ctx context.Context, c Client, stateDir string, a *store.Agent) (*V
 	if err != nil {
 		return nil, fmt.Errorf("runtime %s: config.get: %w", id, err)
 	}
-	if raw, ok := configEntries(cfg.Config)[id]; ok {
+	if raw, ok := ConfigEntries(cfg.Config)[id]; ok {
 		v.ConfigEntry = raw
 	}
 	ea, err := ExecApprovalsGet(ctx, c)

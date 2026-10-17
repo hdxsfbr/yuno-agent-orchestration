@@ -30,6 +30,7 @@ func TestCreateRunValidation(t *testing.T) {
 		{name: "script id the provider cannot read back", body: `{"agent_id":"a","task":"t","script_id":"case-"}`, wantPaths: []string{"script_id"}},
 		{name: "a trigger only the platform starts", body: `{"agent_id":"a","task":"t","trigger":"schedule"}`, wantPaths: []string{"trigger"}},
 		{name: "unknown trigger", body: `{"agent_id":"a","task":"t","trigger":"cron"}`, wantPaths: []string{"trigger"}},
+		{name: "project on a workflow run", body: `{"workflow_id":"w","project":true}`, wantPaths: []string{"project"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -51,12 +52,15 @@ func TestCreateRunMapsToTrigger(t *testing.T) {
 	fe := &fakeEngine{}
 	_, ts := newTestServer(t, nil, fe, nil)
 	code, body := do(t, ts, http.MethodPost, "/api/runs", `{"agent_id":"ag-1","task":"write fizzbuzz","model":"scripted/scripted-1",
-		"script_id":"fizz.1","limits":{"max_steps":5,"max_cost_usd":0.5}}`)
+		"script_id":"fizz.1","limits":{"max_steps":5,"max_cost_usd":0.5},"project":true}`)
 	if code != http.StatusCreated {
 		t.Fatalf("status %d: %s", code, body)
 	}
 	if len(fe.triggers) != 1 {
 		t.Fatalf("triggers = %d", len(fe.triggers))
+	}
+	if !fe.triggers[0].Project {
+		t.Fatal("project did not reach the trigger request (T5.16.8)")
 	}
 	got := fe.triggers[0]
 	if got.AgentID != "ag-1" || got.Task != "write fizzbuzz" || got.Model != "scripted/scripted-1" || got.ScriptID != "fizz.1" ||

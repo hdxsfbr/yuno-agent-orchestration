@@ -24,6 +24,7 @@ import (
 	"yuno/internal/memory"
 	"yuno/internal/model"
 	"yuno/internal/openclaw"
+	"yuno/internal/project"
 	"yuno/internal/sched"
 	"yuno/internal/store"
 	"yuno/internal/tools"
@@ -396,6 +397,17 @@ type statusResponse struct {
 	Runs      map[string]int64 `json:"runs"`
 	SSEClient int              `json:"sse_clients"`
 	Scheduler schedulerStatus  `json:"scheduler"`
+	Project   projectStatus    `json:"project"`
+}
+
+// projectStatus is the configured project repository (DESIGN 5.16 rule 1), without
+// its token, which the API never returns.
+type projectStatus struct {
+	Configured     bool   `json:"configured"`
+	RepoURL        string `json:"repo_url,omitempty"`
+	DefaultBranch  string `json:"default_branch,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	SandboxNetwork bool   `json:"sandbox_network"`
 }
 
 // schedulerStatus is how often the scheduler checks and when the next enabled schedule
@@ -420,6 +432,10 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		Runs:      map[string]int64{"queued": 0, "running": 0, "waiting_approval": 0},
 		SSEClient: s.hub.Subscribers(),
 		Scheduler: schedulerStatus{TickSeconds: tick.Seconds()},
+	}
+	if pc, err := project.FromConfig(s.cfg); err == nil {
+		resp.Project = projectStatus{Configured: true, RepoURL: pc.RepoURL, DefaultBranch: pc.DefaultBranch,
+			Provider: string(pc.Provider), SandboxNetwork: pc.SandboxNetwork}
 	}
 	if s.pool != nil {
 		if next, err := store.NextScheduleDue(ctx, s.pool); err == nil && next != nil {
@@ -501,6 +517,11 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 			BaseURL: cfg.GitLabBaseURL, ProjectID: cfg.GitLabProjectID, Token: cfg.GitLabToken,
 			MaxBytes: int64(cfg.DeployTargetMaxMB) << 20,
 		}
+	}
+	// open_merge_request exists only with a configured project (DESIGN 5.16 rule 10);
+	// the engine logs what is wrong with an incomplete setting.
+	if pc, err := project.FromConfig(cfg); err == nil {
+		pd.MergeRequest = &tools.MergeRequestConfig{Project: pc}
 	}
 	return pd
 }

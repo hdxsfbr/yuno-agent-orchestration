@@ -75,6 +75,63 @@ func TestOpenClawStatus(t *testing.T) {
 	}
 }
 
+// T5.16.8: open_merge_request is listed only with a configured project, and the
+// status endpoint describes the project without its token.
+func TestListToolsAndStatusWithProject(t *testing.T) {
+	cfg := testConfig()
+	cfg.ProjectRepoURL, cfg.ProjectGitToken, cfg.ProjectSandboxNetwork = "https://gitlab.com/group/demo.git", "glpat-not-a-real-token-00", true
+	_, ts := newTestServerDeps(t, Deps{Cfg: cfg}, nil)
+	code, body := do(t, ts, http.MethodGet, "/api/tools", "")
+	if code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	var got []toolView
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, tv := range got {
+		if tv.Name == "open_merge_request" {
+			found = true
+			if tv.Risk != "side_effecting" || tv.Hits != "external" || tv.TimeoutSeconds != 120 || tv.Chat || tv.Source != "platform" {
+				t.Fatalf("open_merge_request = %+v", tv)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("open_merge_request not listed with a project configured")
+	}
+	if strings.Contains(string(body), cfg.ProjectGitToken) {
+		t.Fatal("the token is in the tool listing")
+	}
+	code, body = do(t, ts, http.MethodGet, "/api/status", "")
+	if code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	var st statusResponse
+	if err := json.Unmarshal(body, &st); err != nil {
+		t.Fatal(err)
+	}
+	if !st.Project.Configured || st.Project.RepoURL != cfg.ProjectRepoURL || st.Project.DefaultBranch != "main" || st.Project.Provider != "gitlab" || !st.Project.SandboxNetwork {
+		t.Fatalf("status project = %+v", st.Project)
+	}
+	if strings.Contains(string(body), cfg.ProjectGitToken) {
+		t.Fatal("the token is in the status")
+	}
+
+	// A misconfigured project (no token) registers nothing and reports unconfigured.
+	cfg.ProjectGitToken = ""
+	_, ts2 := newTestServerDeps(t, Deps{Cfg: cfg}, nil)
+	_, body = do(t, ts2, http.MethodGet, "/api/tools", "")
+	if strings.Contains(string(body), "open_merge_request") {
+		t.Fatal("open_merge_request listed without a token")
+	}
+	_, body = do(t, ts2, http.MethodGet, "/api/status", "")
+	if err := json.Unmarshal(body, &st); err != nil || st.Project.Configured {
+		t.Fatalf("status project = %+v %v", st.Project, err)
+	}
+}
+
 // GET /api/tools lists every platform tool with its risk class (DESIGN 5.7 table),
 // then the OpenClaw built-ins.
 func TestListTools(t *testing.T) {

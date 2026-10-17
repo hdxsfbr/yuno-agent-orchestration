@@ -15,6 +15,7 @@ import (
 	"yuno/internal/guardrails"
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
+	"yuno/internal/project"
 	"yuno/internal/store"
 	"yuno/internal/workflow"
 )
@@ -31,6 +32,13 @@ type Engine struct {
 
 	waitMu  sync.Mutex
 	waiters map[string]*approvalWaiter // tool approval id → the MCP call waiting for it
+
+	// project is the configured repository (DESIGN 5.16 rule 1), nil when none; sbxHolds
+	// counts the project visits in progress per OpenClaw agent id, whose sandbox block
+	// is cleared when the last one ends (rule 7).
+	project  *project.Config
+	sbxMu    sync.Mutex
+	sbxHolds map[string]int
 	bg      sync.WaitGroup             // side effects executed after a late approval
 	reports sync.WaitGroup             // report-back sends in flight (report.go)
 
@@ -64,6 +72,7 @@ func New(d Deps) *Engine {
 		tokens:        newTokenRegistry(d.Clock),
 		active:        map[string]*visit{},
 		waiters:       map[string]*approvalWaiter{},
+		sbxHolds:      map[string]int{},
 		pollInterval:  500 * time.Millisecond,
 		sweepInterval: 60 * time.Second,
 		approvalSweep: 30 * time.Second,
@@ -76,7 +85,61 @@ func New(d Deps) *Engine {
 		agentSync:     30 * time.Second,
 	}
 	e.execute = e.runRun
+	if pc, err := project.FromConfig(d.Cfg); err == nil {
+		e.project = &pc
+		e.log.Info("project repository configured", "repo", pc.RepoURL, "branch", pc.DefaultBranch,
+			"provider", pc.Provider, "sandbox_network", pc.SandboxNetwork)
+	} else if !errors.Is(err, project.ErrNotConfigured) {
+		e.log.Warn("project repository ignored", "error", err)
+	}
 	return e
+}
+
+// Project is the configured project repository, nil when none.
+func (e *Engine) Project() *project.Config { return e.project }
+
+// holdSandbox sets the agent's sandbox block for a project visit (DESIGN 5.16 rule 7)
+// and counts the hold; the later of two concurrent holds on one agent wins.
+func (e *Engine) holdSandbox(ctx context.Context, ocID string, spec openclaw.SandboxSpec) error {
+	e.sbxMu.Lock()
+	e.sbxHolds[ocID]++
+	e.sbxMu.Unlock()
+	if err := openclaw.SetAgentSandbox(ctx, e.deps.Gateway, ocID, spec); err != nil {
+		e.releaseSandbox(ctx, ocID)
+		return err
+	}
+	return nil
+}
+
+// releaseSandbox drops one hold and clears the agent's sandbox block when it was the
+// last; a failed clear is logged, and the next api start clears it (ClearSandboxes).
+func (e *Engine) releaseSandbox(ctx context.Context, ocID string) {
+	e.sbxMu.Lock()
+	e.sbxHolds[ocID]--
+	last := e.sbxHolds[ocID] <= 0
+	if last {
+		delete(e.sbxHolds, ocID)
+	}
+	e.sbxMu.Unlock()
+	if !last || e.deps.Gateway == nil {
+		return
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.setupTimeout)
+	defer cancel()
+	if err := openclaw.ClearAgentSandbox(cctx, e.deps.Gateway, ocID); err != nil {
+		e.log.Warn("clear agent sandbox failed", "openclaw_agent_id", ocID, "error", err)
+	}
+}
+
+// sandboxHolds reports the live holds (tests).
+func (e *Engine) sandboxHolds() map[string]int {
+	e.sbxMu.Lock()
+	defer e.sbxMu.Unlock()
+	out := make(map[string]int, len(e.sbxHolds))
+	for k, v := range e.sbxHolds {
+		out[k] = v
+	}
+	return out
 }
 
 var _ Service = (*Engine)(nil)
@@ -327,6 +390,7 @@ func (e *Engine) Trigger(ctx context.Context, req TriggerRequest) (*store.Run, e
 	agents := []*store.Agent{a}
 	limits = guardrails.EffectiveLimits(limits, agents, e.deps.Cfg.MaxCostUSD)
 	def := workflow.SingleAgent(a.ID, "{{.input.task}}", nil, limits)
+	def.Project = req.Project
 	wf, err := e.quickRunWorkflow(ctx, a, def)
 	if err != nil {
 		return nil, err

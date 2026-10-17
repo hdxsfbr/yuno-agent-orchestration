@@ -3,7 +3,9 @@
 //	yuno api            HTTP API, run engine, scheduler, OpenClaw client, MCP server, model proxy
 //	yuno migrate        apply database migrations and exit
 //	yuno seed           create the demo agents and the Chief of Staff, instantiate the
-//	                    shipped templates once, bind the chief to Telegram when unbound (idempotent)
+//	                    shipped templates once, bind the chief to Telegram when unbound (idempotent);
+//	                    --reset-shipped also restores the shipped agents' prompts and allowlists
+//	                    and the instantiated templates to the current shipped versions
 //	yuno openclaw-init  write the baseline openclaw.json into the state directory and exit
 //	yuno deploytarget   local release store the deploy tool publishes to
 //	yuno eval           run the evaluation suite and write a report
@@ -64,7 +66,17 @@ func main() {
 	case "deploytarget":
 		err = deploytarget.Run(ctx, cfg, log)
 	case "seed":
-		err = seed.Run(ctx, cfg, log)
+		var opts seed.Options
+		for _, arg := range os.Args[2:] {
+			switch arg {
+			case "--reset-shipped":
+				opts.ResetShipped = true
+			default:
+				fmt.Fprintln(os.Stderr, "usage: yuno seed [--reset-shipped]")
+				os.Exit(2)
+			}
+		}
+		err = seed.Run(ctx, cfg, log, opts)
 	case "eval":
 		err = evals.Run(ctx, cfg, log)
 	case "version":

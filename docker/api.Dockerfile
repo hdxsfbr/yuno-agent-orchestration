@@ -17,7 +17,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -ldflags="-s -w -X yuno/internal/config.Version=${VERSION}" -o /out/yuno ./cmd/yuno
 
 FROM alpine:3.21 AS runtime
-RUN apk add --no-cache ca-certificates tzdata wget && adduser -D -u 1000 app \
+# git: the api clones the project repository for a run and pushes a merge request's
+# branch itself, on the platform side (DESIGN 5.16 rules 3 and 10).
+RUN apk add --no-cache ca-certificates tzdata wget git && adduser -D -u 1000 app \
     && mkdir -p /data && chown app:app /data
 WORKDIR /src
 COPY --from=build /out/yuno /usr/local/bin/yuno

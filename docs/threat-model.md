@@ -7,11 +7,11 @@ Rules referenced as 5.x are in `docs/DESIGN.md`; decisions as D-nnn in `DECISION
 ## Assets
 
 - The operator's credentials: the model provider key, the Telegram bot token, the
-  platform tokens (`API_TOKEN`, `YUNO_MCP_TOKEN`, `OPENCLAW_GATEWAY_TOKEN`), optional
-  GitLab token.
+  platform tokens (`API_TOKEN`, `YUNO_MCP_TOKEN`, `OPENCLAW_GATEWAY_TOKEN`), the optional
+  GitLab token, and the project repository token (`PROJECT_GIT_TOKEN`).
 - The host: Docker socket, the state directory with every agent's workspace, Postgres.
-- The side effects: releases on the deploy target, merge requests on GitLab, outbound
-  Telegram messages.
+- The side effects: releases on the deploy target, merge requests on GitLab, branches
+  and merge or pull requests on the project repository, outbound Telegram messages.
 - The record: runs, traces, approvals, conversations, which must stay truthful.
 
 ## Trust boundaries
@@ -20,7 +20,8 @@ Rules referenced as 5.x are in `docs/DESIGN.md`; decisions as D-nnn in `DECISION
 |---|---|---|---|
 | Model output | the engine | everything the model says or calls | tool schemas, allowlists, interaction rules, approval gate, limits |
 | Tool output | the engine | files, command output, fetched pages | untrusted-content wrapper (5.7 rule 5), `AGENTS.md` rules, no instruction-following in tool results |
-| Sandbox | gateway container | agent commands | per-agent Docker sandbox: no network, read-only root, dropped capabilities, pids and memory limits, only the agent's workspace mounted (5.14 rule 12) |
+| Sandbox | gateway container | agent commands | per-agent Docker sandbox: no network (unless a project opts in, 5.16 rule 8), read-only root, dropped capabilities, pids and memory limits, only the agent's workspace mounted (5.14 rule 12) |
+| Project checkout | api | the repository's content and the agent's edits to it | the api never runs git inside the checkout; the token stays in the api's git environment; the checkout holds the bare URL (5.16 rules 4, 10) |
 | Channel | gateway | Telegram users | `dmPolicy: allowlist` of numeric user ids; closed until an agent is bound (D-025, D-026); webhook secret header in webhook mode, bot-token-authenticated polling otherwise |
 | Browser | api | the operator's browser | optional `API_TOKEN` bearer; no accounts (single operator) |
 | MCP | api | the gateway's MCP client | `YUNO_MCP_TOKEN` bearer, loopback only |
@@ -61,6 +62,28 @@ is the only one with the Docker socket. Residual risk (known limitation): mounti
 Docker socket into the gateway container is root-equivalent on the host; the gateway is
 trusted code from a pinned image, but a gateway compromise is a host compromise.
 Exec guardrail patterns do not reach the sandbox (D-028).
+
+**Project repository with sandbox network on (DESIGN 5.16, D-037).** With
+`PROJECT_SANDBOX_NETWORK=true` the sandboxes of project runs get a bridge network so
+agents can install the project's dependencies. That is a deliberate widening of the
+sandbox boundary: anything injected into the repository (a README, a test, a
+dependency's install script, a package the lockfile names) runs in a container that
+can reach the internet, so it can exfiltrate whatever the sandbox holds (the checkout,
+the agent's workspace, the task text) and can call any service, and side effects
+inside the sandbox are not gated by the approval gate (D-028 applies). The container
+can also reach the host's published ports, which is why `API_TOKEN` matters on any host
+with the opt-in. Mitigation: off by default; the opt-in is per platform, for one
+repository the operator trusts; the token never enters the sandbox (the checkout's
+`.git/config` has the bare URL, the api's git gets the token through its environment
+only); the api never executes anything from the checkout (no hooks, no config: the
+merge request is built from a fresh private clone that receives the working tree as
+files, 5.16 rule 10); the api has no Docker socket; the merge request itself stays an
+approval-gated side effect; the redactor knows GitLab and GitHub token shapes and basic
+credentials. Residual risk: with network on, the sandbox is a general-purpose network
+client in the hands of whatever the model reads; use it only with repositories whose
+contents you would run on your own machine. With network off the clone still happens
+and the only widening is the checkout's content in the agent's workspace, which the
+untrusted-content rules already cover.
 
 **Secrets in logs, traces, fixtures or the repository.** Mitigation: the log handler
 redacts keys, tokens and anything shaped like a provider key or a Telegram token (5.12
@@ -107,3 +130,8 @@ derived gateway image adds only the static Docker CLI.
   workspace read yields them. Rotating one means re-materialising the agent.
 - `require_approval` on a chat-capable tool disables it in conversations rather than
   gating it, since a conversation has no run to pause; approvals stay in the UI.
+- One project per platform, cloned at depth 1 from its default branch; the merge
+  request flattens the agent's changes into one commit by Yuno. A project run with
+  sandbox network on is a trusted-repository mode (above). An agent that edits its
+  checkout's `.git` directory only breaks its own `git diff`; the platform does not read
+  that directory.

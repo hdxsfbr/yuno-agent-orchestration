@@ -216,6 +216,9 @@ type Run struct {
 	// ReportedAt is when a channel-triggered run's outcome was sent back into its
 	// conversation (DESIGN 5.15 rule 9); nil when it was not.
 	ReportedAt *time.Time `db:"reported_at" json:"reported_at,omitempty"`
+	// Toolchain is what the project checkout's manifest said (DESIGN 5.16 rule 5): go,
+	// node, python or default; nil for a run without a checkout.
+	Toolchain *string `db:"toolchain" json:"toolchain,omitempty"`
 	// AgentNames and Models are not columns; FillRunParticipants sets them for list views.
 	AgentNames []string `db:"-" json:"agent_names,omitempty"`
 	Models     []string `db:"-" json:"models,omitempty"`

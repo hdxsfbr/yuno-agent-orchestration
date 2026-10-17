@@ -2,6 +2,7 @@ package seed
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -312,4 +313,73 @@ func mustWorkflowNamed(t *testing.T, pool *pgxpool.Pool, name string) string {
 	}
 	t.Fatalf("no workflow named %s", name)
 	return ""
+}
+
+// DESIGN 5.16 rule 14: the reset restores the shipped agents' role, prompt and
+// allowlist and the template workflows' definitions, keeps everything else, and leaves
+// agents and workflows that are not shipped alone.
+func TestResetShipped(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.DiscardHandler)
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	srv, err := httpapi.New(httpapi.Deps{Cfg: config.Config{AnthropicBaseURL: "http://127.0.0.1:1"}, Pool: pool, Log: log,
+		TemplatesDir: "../../templates"})
+	must(t, err)
+	must(t, srv.LoadTemplates(ctx))
+	sh := httpapi.NewShared(httpapi.Deps{Pool: pool, Log: log})
+	_, err = Templates(ctx, pool, sh, log)
+	must(t, err)
+
+	// An operator edited the Deployer (an older prompt, no open_merge_request, a model
+	// of their own) and the Dev pipeline (no project flag), and made an agent of their own.
+	deployer, err := findAgent(ctx, pool, "Deployer")
+	must(t, err)
+	deployer.SystemPrompt, deployer.ToolAllowlist, deployer.Model = "old prompt", []string{"read", "ls", "deploy_release", "finish"}, "claude-haiku-5-5"
+	deployer.Limits.MaxCostUSD = 0.25
+	must(t, store.UpdateAgent(ctx, pool, deployer))
+	own := &store.Agent{Name: "Own agent", Role: "mine", SystemPrompt: "mine", Model: "claude-sonnet-5-5", ToolAllowlist: []string{"read", "finish"}}
+	must(t, store.CreateAgent(ctx, pool, own))
+	devID := mustWorkflowNamed(t, pool, "Dev pipeline")
+	dev, err := store.GetWorkflow(ctx, pool, devID)
+	must(t, err)
+	var def map[string]any
+	must(t, json.Unmarshal(dev.Definition, &def))
+	delete(def, "project")
+	dev.Definition, _ = json.Marshal(def)
+	dev.Name = "Dev pipeline (ours)"
+	must(t, store.UpdateWorkflow(ctx, pool, dev))
+
+	agents, workflows, err := ResetShipped(ctx, pool, sh)
+	must(t, err)
+	if !slices.Equal(agents, []string{"Deployer"}) || !slices.Equal(workflows, []string{"Dev pipeline (ours)", "Research pipeline"}) {
+		t.Fatalf("reset %v %v", agents, workflows)
+	}
+	deployer, err = findAgent(ctx, pool, "Deployer")
+	must(t, err)
+	if deployer.SystemPrompt != Agents[2].SystemPrompt || !slices.Contains(deployer.ToolAllowlist, tools.OpenMergeRequestName) {
+		t.Fatalf("deployer not reset: %q %v", deployer.SystemPrompt, deployer.ToolAllowlist)
+	}
+	if deployer.Model != "claude-haiku-5-5" || deployer.Limits.MaxCostUSD != 0.25 || deployer.MaterializedHash != "" {
+		t.Fatalf("deployer's own settings changed: model %s limits %+v hash %q", deployer.Model, deployer.Limits, deployer.MaterializedHash)
+	}
+	got, err := store.GetAgent(ctx, pool, own.ID)
+	must(t, err)
+	if got.SystemPrompt != "mine" {
+		t.Fatal("an agent that is not shipped was changed")
+	}
+	dev, err = store.GetWorkflow(ctx, pool, devID)
+	must(t, err)
+	must(t, json.Unmarshal(dev.Definition, &def))
+	if def["project"] != true || dev.Name != "Dev pipeline (ours)" || dev.Version != 3 || strings.Contains(string(dev.Definition), "agent_name") {
+		t.Fatalf("dev pipeline after the reset: name %q version %d project %v", dev.Name, dev.Version, def["project"])
+	}
+	// A second reset changes nothing on the agents and rewrites the workflows (a new
+	// version each), which is what a deploy does on purpose.
+	agents, workflows, err = ResetShipped(ctx, pool, sh)
+	must(t, err)
+	if len(agents) != 0 || len(workflows) != 2 {
+		t.Fatalf("second reset %v %v", agents, workflows)
+	}
 }

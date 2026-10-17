@@ -282,6 +282,21 @@ describe("editing and saving", () => {
     expect(saved().definition.limits).toEqual({ max_cost_usd: 1.5, max_loop_visits: 5 });
   });
 
+  it("opts the workflow into the project repository and out again, leaving the key out when off", async () => {
+    renderBuilder();
+    await outline();
+    const box = screen.getByLabelText(/Runs work on the project repository/) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    fireEvent.click(box);
+    save();
+    await waitFor(() => expect(api.made("PUT", "/api/workflows/wf1")).toHaveLength(1));
+    expect(saved().definition.project).toBe(true);
+    fireEvent.click(box);
+    save();
+    await waitFor(() => expect(api.made("PUT", "/api/workflows/wf1")).toHaveLength(2));
+    expect("project" in (api.made("PUT", "/api/workflows/wf1")[1].body as { definition: Record<string, unknown> }).definition).toBe(false);
+  });
+
   it("holds back save while a limit is not a number", async () => {
     renderBuilder();
     await outline();

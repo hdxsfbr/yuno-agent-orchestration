@@ -51,6 +51,10 @@ type fakeClient struct {
 	createErr map[string]error
 	// defaultID, when set, is the gateway's default agent besides main.
 	defaultID string
+	// entries is what config.get reports under agents.entries; a test seeds it and
+	// config.patch merges into it (null deletes a key) so a sandbox block set and
+	// cleared through the fake behaves like the gateway's.
+	entries map[string]map[string]any
 }
 
 type fakeCall struct {
@@ -125,8 +129,39 @@ func (f *fakeClient) handle(method string, p json.RawMessage) (any, error) {
 		f.agents = slices.Delete(f.agents, i, i+1)
 		return map[string]any{"ok": true}, nil
 	case "config.get":
-		return map[string]any{"hash": "h1", "config": map[string]any{"agents": map[string]any{"entries": map[string]any{}}}}, nil
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		entries := map[string]any{}
+		for id, e := range f.entries {
+			entries[id] = e
+		}
+		return map[string]any{"hash": "h1", "config": map[string]any{"agents": map[string]any{"entries": entries}}}, nil
 	case "config.patch":
+		var in openclaw.ConfigPatchParams
+		_ = json.Unmarshal(p, &in)
+		var raw struct {
+			Agents struct {
+				Entries map[string]map[string]any `json:"entries"`
+			} `json:"agents"`
+		}
+		_ = json.Unmarshal([]byte(in.Raw), &raw)
+		f.mu.Lock()
+		if f.entries == nil {
+			f.entries = map[string]map[string]any{}
+		}
+		for id, patch := range raw.Agents.Entries {
+			if f.entries[id] == nil {
+				f.entries[id] = map[string]any{}
+			}
+			for k, v := range patch {
+				if v == nil {
+					delete(f.entries[id], k)
+				} else {
+					f.entries[id][k] = v
+				}
+			}
+		}
+		f.mu.Unlock()
 		return map[string]any{"ok": true, "hash": "h2"}, nil
 	case "exec.approvals.get":
 		return map[string]any{"exists": true, "hash": "e1", "file": map[string]any{"version": 1, "agents": map[string]any{}}}, nil

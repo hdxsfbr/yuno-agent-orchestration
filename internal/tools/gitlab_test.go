@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +24,16 @@ type fakeGitLab struct {
 	commits  []map[string]any
 	token    string
 	failMR   int // answer the next MR creations with 500
+	// branchesFn, when set, answers branch lookups from a repository the test pushes
+	// to with git (open_merge_request) instead of the map.
+	branchesFn func() []string
+}
+
+func (g *fakeGitLab) hasBranch(name string) bool {
+	if g.branchesFn != nil {
+		return slices.Contains(g.branchesFn(), name)
+	}
+	return g.branches[name]
 }
 
 func newFakeGitLab(t *testing.T) (*fakeGitLab, *httptest.Server) {
@@ -44,7 +55,7 @@ func newFakeGitLab(t *testing.T) (*fakeGitLab, *httptest.Server) {
 			writeJSONTest(w, 200, map[string]any{"id": 7, "default_branch": "main"})
 		case r.Method == http.MethodGet && strings.HasPrefix(p, "/repository/branches/"):
 			name := unescape(strings.TrimPrefix(p, "/repository/branches/"))
-			if !g.branches[name] {
+			if !g.hasBranch(name) {
 				writeJSONTest(w, 404, map[string]string{"message": "404 Branch Not Found"})
 				return
 			}

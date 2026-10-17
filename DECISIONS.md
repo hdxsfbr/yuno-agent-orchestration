@@ -4,6 +4,35 @@ Newest first. Each entry says what was decided, by whom, and why. Design rules t
 refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR under
 `docs/adr/`.
 
+## 2026-10-17
+
+**D-037 Projects are git repositories configured by environment variables; toolchains
+come from the repository and run in prebuilt generic images; sandbox network is a
+per-project opt-in; no agent clones or pushes.** (Andre, 2026-10-17) One project per
+platform, set by `PROJECT_REPO_URL`, `PROJECT_GIT_TOKEN`, `PROJECT_DEFAULT_BRANCH`,
+`PROJECT_PROVIDER` and `PROJECT_SANDBOX_NETWORK`; a workflow or quick run opts in with
+`project: true` (the seeded Dev pipeline does). The engine clones the default branch at
+depth 1 into the first agent's run directory before its turn and the copy-forward hands
+the checkout on; the toolchain is read from the manifest (go.mod, package.json plus a
+lockfile, pyproject.toml, requirements*.txt, uv.lock) and selects one of three shipped
+images (`yuno-sandbox-{python,node,go}`) with nothing project-specific inside; the
+materialiser sets `agents.entries.<id>.sandbox` for the visit's duration with scope
+`session`, because the gateway keeps a hot agent-scoped container on its old image.
+Sandbox network stays off unless `PROJECT_SANDBOX_NETWORK=true`, which exists so agents
+can install the project's dependencies themselves; the no-network rule of D-012 was a
+design choice, not a brief requirement, and it is now a per-project choice recorded in
+the threat model. The token stays on the api side: git receives it as an
+`http.extraheader` through the environment, the checkout's config holds the bare URL,
+and the Deployer opens the merge request through the platform tool `open_merge_request`
+(GitLab, then GitHub behind the same interface), which commits and pushes from the api.
+Why: a demo that writes loose files into a run directory shows the mechanism, not the
+job; a run that starts from a real repository with its own toolchain and ends in a merge
+request is what the pipeline is for, and keeping every credential and every push on the
+platform side keeps the model out of the trust boundary. Cost: one more container per
+node visit of a project run (session scope), three more images to build, and with
+network on the sandbox can exfiltrate, so the opt-in is for trusted repositories only.
+Design: `docs/DESIGN.md` 5.16.
+
 ## 2026-10-16
 
 **D-036 One coordinator agent on Telegram; chat-time tools identified by a chat token.**

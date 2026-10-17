@@ -61,6 +61,18 @@ TELEGRAM_MODE=webhook            # Telegram posts to https://DOMAIN/telegram-web
 API_TOKEN=<a long random value>  # the UI and every API call need it
 ```
 
+To let runs work on a git repository (README "Projects"), add the project settings to
+the same file. The token is held by the api only and never shown to an agent; network for
+the sandbox is an opt-in for a repository you trust:
+
+```
+PROJECT_REPO_URL=https://gitlab.com/group/project.git
+PROJECT_GIT_TOKEN=<a token with api and write_repository on that project>
+PROJECT_DEFAULT_BRANCH=main
+PROJECT_PROVIDER=gitlab            # or github
+PROJECT_SANDBOX_NETWORK=true       # agents install the project's dependencies themselves
+```
+
 `.env.prod` is git-ignored like every `.env.*`. Deploy:
 
 ```bash
@@ -82,7 +94,12 @@ make deploy HOST=$IP REF=<sha>  # any local commit or branch; also how to roll b
 
 A deploy ships what your checkout has, so pull first. It rebuilds the images on the host (a few minutes on 4 vCPUs), recreates the
 containers whose configuration changed and keeps Postgres, the gateway state and the
-releases volume. `.env` on the host is only touched when `ENV_FILE` is passed.
+releases volume. `.env` on the host is only touched when `ENV_FILE` is passed. The
+per-toolchain sandbox images (`yuno-sandbox-python`, `-node`, `-go`) are built on the host
+by the same `make run` the deploy runs, so a project run never pulls an image at run
+time; `make smoke` checks that all four sandbox images exist. An install that predates
+projects keeps its seeded agents and workflows; run `make seed-reset` once on the host
+so the Deployer gets `open_merge_request` and the Dev pipeline opts into the project.
 
 ## Deploying from GitLab CI
 

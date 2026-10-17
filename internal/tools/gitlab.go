@@ -1,13 +1,11 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -69,10 +67,11 @@ func GitLabBranch(key string) string {
 // branch. A second call with the same key finds the branch (no second commit) and the
 // open merge request (no second MR) and reports replayed.
 func NewGitLabCreateMR(cfg GitLabConfig) *Tool {
-	g := &gitlab{cfg: cfg, client: cfg.Client}
-	if g.client == nil {
-		g.client = &http.Client{}
+	client := cfg.Client
+	if client == nil {
+		client = &http.Client{}
 	}
+	g := &gitlab{cfg: cfg, api: &apiClient{what: "gitlab", client: client, authorize: privateTokenAuth(cfg.Token)}}
 	base := strings.TrimRight(cfg.BaseURL, "/")
 	if !strings.HasSuffix(base, "/api/v4") {
 		base += "/api/v4"
@@ -99,14 +98,9 @@ func NewGitLabCreateMR(cfg GitLabConfig) *Tool {
 
 type gitlab struct {
 	cfg     GitLabConfig
-	client  *http.Client
+	api     *apiClient
 	project string
 }
-
-// errGitLabStatus carries a failed answer as a result.
-type errGitLabStatus struct{ res Result }
-
-func (e *errGitLabStatus) Error() string { return e.res.Text }
 
 func (g *gitlab) exec(ctx context.Context, call Call) (Result, error) {
 	var in gitlabInput
@@ -122,7 +116,7 @@ func (g *gitlab) exec(ctx context.Context, call Call) (Result, error) {
 	}
 	branch := GitLabBranch(call.IdempotencyKey)
 	res, err := g.run(ctx, in, files, branch)
-	var se *errGitLabStatus
+	var se *errAPIStatus
 	if errors.As(err, &se) {
 		return se.res, nil
 	}
@@ -133,13 +127,13 @@ func (g *gitlab) run(ctx context.Context, in gitlabInput, files []packagedFile, 
 	var project struct {
 		DefaultBranch string `json:"default_branch"`
 	}
-	if _, err := g.do(ctx, http.MethodGet, g.project, nil, &project); err != nil {
+	if _, err := g.api.do(ctx, http.MethodGet, g.project, nil, &project); err != nil {
 		return Result{}, err
 	}
 	if project.DefaultBranch == "" {
 		return Result{IsError: true, Text: "gitlab: the project has no default branch"}, nil
 	}
-	status, err := g.do(ctx, http.MethodGet, g.project+"/repository/branches/"+url.PathEscape(branch), nil, nil)
+	status, err := g.api.do(ctx, http.MethodGet, g.project+"/repository/branches/"+url.PathEscape(branch), nil, nil)
 	if err != nil && status != http.StatusNotFound {
 		return Result{}, err
 	}
@@ -153,7 +147,7 @@ func (g *gitlab) run(ctx context.Context, in gitlabInput, files []packagedFile, 
 		WebURL string `json:"web_url"`
 	}
 	q := url.Values{"source_branch": {branch}, "state": {"opened"}}
-	if _, err := g.do(ctx, http.MethodGet, g.project+"/merge_requests?"+q.Encode(), nil, &open); err != nil {
+	if _, err := g.api.do(ctx, http.MethodGet, g.project+"/merge_requests?"+q.Encode(), nil, &open); err != nil {
 		return Result{}, err
 	}
 	if len(open) > 0 {
@@ -165,7 +159,7 @@ func (g *gitlab) run(ctx context.Context, in gitlabInput, files []packagedFile, 
 	}
 	body := map[string]any{"source_branch": branch, "target_branch": project.DefaultBranch, "title": in.Title,
 		"description": in.Description, "remove_source_branch": true}
-	if _, err := g.do(ctx, http.MethodPost, g.project+"/merge_requests", body, &mr); err != nil {
+	if _, err := g.api.do(ctx, http.MethodPost, g.project+"/merge_requests", body, &mr); err != nil {
 		return Result{}, err
 	}
 	return JSONResult(gitlabOutput{IID: mr.IID, URL: mr.WebURL, Branch: branch}), nil
@@ -178,7 +172,7 @@ func (g *gitlab) commit(ctx context.Context, in gitlabInput, files []packagedFil
 	for i, f := range files {
 		action := "create"
 		u := g.project + "/repository/files/" + url.PathEscape(f.Path) + "?ref=" + url.QueryEscape(defaultBranch)
-		status, err := g.do(ctx, http.MethodHead, u, nil, nil)
+		status, err := g.api.do(ctx, http.MethodHead, u, nil, nil)
 		switch {
 		case err == nil:
 			action = "update"
@@ -189,45 +183,6 @@ func (g *gitlab) commit(ctx context.Context, in gitlabInput, files []packagedFil
 			"content": base64.StdEncoding.EncodeToString(f.Content)}
 	}
 	body := map[string]any{"branch": branch, "start_branch": defaultBranch, "commit_message": in.Title, "actions": actions}
-	_, err := g.do(ctx, http.MethodPost, g.project+"/repository/commits", body, nil)
+	_, err := g.api.do(ctx, http.MethodPost, g.project+"/repository/commits", body, nil)
 	return err
-}
-
-// do sends one API request. A non-2xx answer is an *errGitLabStatus with the status
-// returned alongside, so callers can treat 404 as "absent".
-func (g *gitlab) do(ctx context.Context, method, u string, body, out any) (int, error) {
-	var rd io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return 0, err
-		}
-		rd = bytes.NewReader(b)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, u, rd)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("PRIVATE-TOKEN", g.cfg.Token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return 0, &errGitLabStatus{res: transportFailure("gitlab", err)}
-	}
-	defer resp.Body.Close()
-	raw, err := readBody(resp, 4<<20)
-	if err != nil {
-		return resp.StatusCode, &errGitLabStatus{res: transportFailure("gitlab", err)}
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return resp.StatusCode, &errGitLabStatus{res: statusFailure("gitlab", resp, raw)}
-	}
-	if out != nil {
-		if r := decodeJSONBody("gitlab", raw, out); r != nil {
-			return resp.StatusCode, &errGitLabStatus{res: *r}
-		}
-	}
-	return resp.StatusCode, nil
 }

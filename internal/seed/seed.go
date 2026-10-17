@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -62,24 +63,31 @@ var Agents = []store.Agent{
 	{
 		Name: "Coder", Role: "Software engineer", Model: "claude-sonnet-5-5",
 		SystemPrompt: "You are a careful software engineer. You implement exactly what the task asks, in small, " +
-			"readable code with tests you run yourself. Work only inside the run directory named in your task. " +
-			"Create and change files with the file tools and use exec only to run commands. When a reviewer " +
-			"sends feedback, address every point. Report honestly whether the tests passed.",
+			"readable code with tests you run yourself. Work only inside the run directory named in your task; " +
+			"when the task describes a project repository, work inside that checkout, install its dependencies " +
+			"from the lockfile first when the sandbox has network (the task says how), and run the project's own " +
+			"tests. Never clone, commit or push: the platform does that. Create and change files with the file " +
+			"tools and use exec only to run commands. When a reviewer sends feedback, address every point. " +
+			"Report honestly whether the tests passed.",
 		ToolAllowlist: []string{"read", "write", "edit", "ls", "exec", "finish"},
 	},
 	{
 		Name: "Reviewer", Role: "Code reviewer", Model: "claude-opus-5-5",
 		SystemPrompt: "You are a demanding but fair code reviewer. Read the code, run the tests yourself, and judge " +
-			"whether the work does what the task asks. Approve only working, tested code. When you request " +
-			"changes, give specific, actionable feedback the author can act on without guessing.",
+			"whether the work does what the task asks. When the task describes a project repository, review the " +
+			"change in that checkout with git status and git diff <default branch>, and read new files, which the " +
+			"diff does not show. Approve only working, tested code. When you request changes, give specific, " +
+			"actionable feedback the author can act on without guessing.",
 		ToolAllowlist: []string{"read", "ls", "exec", "finish"},
 	},
 	{
 		Name: "Deployer", Role: "Release engineer", Model: "claude-sonnet-5-5",
-		SystemPrompt: "You publish reviewed work as releases with the deploy_release tool, exactly once per task, " +
-			"with the version and files you were given. Never change code. If the tool answers that the deploy " +
+		SystemPrompt: "You ship reviewed work, exactly once per task, and never change code. When the task describes " +
+			"a project repository, open a merge request with the open_merge_request tool, with a clear title and a " +
+			"description of what changed and how it was tested. Otherwise publish the work as a release with the " +
+			"deploy_release tool, with the version and files you were given. If the tool answers that the action " +
 			"was rejected or is pending approval, report that status and stop.",
-		ToolAllowlist: []string{"read", "ls", "deploy_release", "finish"},
+		ToolAllowlist: []string{"read", "ls", "deploy_release", "open_merge_request", "finish"},
 	},
 	{
 		Name: "Researcher", Role: "Research analyst", Model: "claude-sonnet-5-5",
@@ -103,11 +111,19 @@ var Agents = []store.Agent{
 	Chief,
 }
 
+// Options are the seed's switches.
+type Options struct {
+	// ResetShipped restores the shipped agents' role, prompt and allowlist and the
+	// instantiated templates' definitions to the current shipped versions (DESIGN 5.16
+	// rule 14), keeping ids, bindings, memory and every other setting.
+	ResetShipped bool
+}
+
 // Run creates every missing demo agent, instantiates the templates no workflow was made
 // from yet, binds the Chief of Staff when Telegram is on and unbound, and reports what
 // it did. A template or binding step that cannot be done is logged and skipped, so a
 // seed without the api or the gateway still creates the agents.
-func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
+func Run(ctx context.Context, cfg config.Config, log *slog.Logger, opts Options) error {
 	pool, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("seed: open database: %w", err)
@@ -120,8 +136,17 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	log.Info("seed: demo agents", "created", strings.Join(created, ","), "existing", strings.Join(existing, ","))
 
 	// Each failing template was logged by Templates; the ones that worked are reported.
-	made, _ := Templates(ctx, pool, httpapi.NewShared(httpapi.Deps{Cfg: cfg, Log: log, Pool: pool}), log)
+	sh := httpapi.NewShared(httpapi.Deps{Cfg: cfg, Log: log, Pool: pool})
+	made, _ := Templates(ctx, pool, sh, log)
 	log.Info("seed: workflows from templates", "created", strings.Join(made, ","))
+
+	if opts.ResetShipped {
+		agents, workflows, err := ResetShipped(ctx, pool, sh)
+		if err != nil {
+			return err
+		}
+		log.Info("seed: shipped agents and workflows reset", "agents", strings.Join(agents, ","), "workflows", strings.Join(workflows, ","))
+	}
 
 	if !telegramOn(cfg) {
 		return nil
@@ -145,8 +170,8 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		return nil
 	}
 	eng := engine.New(engine.Deps{Cfg: cfg, Log: log, Pool: pool, Gateway: gw, StateDir: cfg.OpenClawStateDir})
-	sh := httpapi.NewShared(httpapi.Deps{Cfg: cfg, Log: log, Pool: pool, Engine: eng, Gateway: gw})
-	bound, err := BindChief(ctx, pool, retryBinder{sh})
+	binder := httpapi.NewShared(httpapi.Deps{Cfg: cfg, Log: log, Pool: pool, Engine: eng, Gateway: gw})
+	bound, err := BindChief(ctx, pool, retryBinder{binder})
 	switch {
 	case err != nil:
 		log.Warn("seed: telegram not bound; bind on the Channels page or seed again", "error", err)
@@ -163,6 +188,53 @@ func telegramOn(cfg config.Config) bool {
 // Instantiator creates a workflow from a template (httpapi.Shared in production).
 type Instantiator interface {
 	InstantiateTemplate(ctx context.Context, key, name string) (*store.Workflow, error)
+}
+
+// Resetter rewrites an instantiated workflow's definition from its template
+// (httpapi.Shared in production).
+type Resetter interface {
+	Instantiator
+	ResetFromTemplate(ctx context.Context, workflowID string) error
+}
+
+// ResetShipped restores the shipped agents (by name) to their shipped role, prompt and
+// tool allowlist, and every workflow instantiated from a shipped template to the
+// template's current definition (DESIGN 5.16 rule 14). Everything else an operator set
+// on them (model, limits, guardrails, memory, skills, bindings) is kept, and agents or
+// workflows that are not shipped are untouched. It returns the names it reset.
+func ResetShipped(ctx context.Context, q store.Querier, r Resetter) (agents, workflows []string, err error) {
+	for _, tpl := range Agents {
+		a, err := findAgent(ctx, q, tpl.Name)
+		if err != nil {
+			return agents, workflows, err
+		}
+		if a == nil {
+			continue
+		}
+		if a.Role == tpl.Role && a.SystemPrompt == tpl.SystemPrompt && slices.Equal(a.ToolAllowlist, tpl.ToolAllowlist) {
+			continue
+		}
+		a.Role, a.SystemPrompt, a.ToolAllowlist = tpl.Role, tpl.SystemPrompt, slices.Clone(tpl.ToolAllowlist)
+		a.MaterializedHash = "" // the runtime copy is out of date until the api pushes it
+		if err := store.UpdateAgent(ctx, q, a); err != nil {
+			return agents, workflows, fmt.Errorf("seed: reset agent %s: %w", tpl.Name, err)
+		}
+		agents = append(agents, tpl.Name)
+	}
+	all, err := store.ListWorkflows(ctx, q)
+	if err != nil {
+		return agents, workflows, fmt.Errorf("seed: list workflows: %w", err)
+	}
+	for _, wf := range all {
+		if wf.FromTemplate == nil || !slices.Contains(TemplateKeys, *wf.FromTemplate) {
+			continue
+		}
+		if err := r.ResetFromTemplate(ctx, wf.ID); err != nil {
+			return agents, workflows, fmt.Errorf("seed: reset workflow %s: %w", wf.Name, err)
+		}
+		workflows = append(workflows, wf.Name)
+	}
+	return agents, workflows, nil
 }
 
 // Binder binds an agent to Telegram (httpapi.Shared in production).

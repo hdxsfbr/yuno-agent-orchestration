@@ -8,8 +8,8 @@ WEB_PORT     ?= 8080
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env run smoke probe-openclaw probe-deliver stop down clean logs ps test test-go test-web web-deps \
-        test-integration lint tidy install migrate seed eval eval-baseline eval-final \
+.PHONY: help env run smoke probe-openclaw probe-deliver probe-sandbox stop down clean logs ps test test-go test-web web-deps \
+        test-integration lint tidy install migrate seed seed-reset eval eval-baseline eval-final \
         tunnel build openclaw-shell openclaw-logs openclaw-validate prune-sandboxes
 
 help: ## Show this help
@@ -25,7 +25,7 @@ env: ## Create .env from the example and generate missing platform tokens
 run build: export VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 
 run: env ## Build and start everything, wait for ready, seed the demo agents, print the URL
-	$(COMPOSE) --profile build build sandbox-image
+	$(COMPOSE) --profile build build sandbox-image sandbox-image-python sandbox-image-node sandbox-image-go
 	$(COMPOSE) up --build -d postgres deploytarget openclaw api web
 	@echo "waiting for the stack..."
 	@for i in $$(seq 1 120); do \
@@ -45,6 +45,9 @@ probe-approval: ## Verify the gateway's plugin approval RPCs the side-effect gat
 
 probe-deliver: ## Verify chat.send {deliver: true} reaches Telegram (sends one message; needs a Telegram session)
 	$(COMPOSE) --profile tools run --rm --entrypoint node probe /scripts/openclaw-probe-deliver.mjs
+
+probe-sandbox: ## Verify a per-agent sandbox image and network override on the running gateway (DESIGN 5.16 rule 7)
+	$(COMPOSE) --profile tools run --rm --no-deps --entrypoint node probe /scripts/openclaw-probe-sandbox.mjs
 
 build: ## Build images without starting
 	$(COMPOSE) --profile build build
@@ -112,6 +115,9 @@ migrate: ## Apply database migrations
 
 seed: ## Create the demo agents, the Chief of Staff, both template workflows, and bind the Chief to Telegram when nothing is bound (idempotent)
 	$(COMPOSE) run --rm api seed
+
+seed-reset: ## seed, then restore the shipped agents' prompts and allowlists and the template workflows to the shipped versions (keeps everything else)
+	$(COMPOSE) run --rm api seed --reset-shipped
 
 eval: env ## Run the evaluation suite against the running stack (offline by default: EVAL_PROVIDER=scripted)
 	@curl -fsS -m 3 http://localhost:$(WEB_PORT)/readyz >/dev/null 2>&1 || { echo 'the stack is not running: run `make run` first'; exit 1; }

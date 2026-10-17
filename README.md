@@ -14,8 +14,10 @@ and API, materialised into OpenClaw (config entry, exec policy, workspace files)
 multi-agent workflows as graphs with conditions, feedback loops and typed state, built
 in the visual builder or loaded from the two shipped templates; agent turns executed by
 OpenClaw with `exec` in a Docker sandbox and the run directory handed forward from agent
-to agent; the platform tools over MCP (`finish`, `deploy_release`, `http_fetch`,
-`memory_save`, `memory_recall`, and `gitlab_create_mr` when configured) with
+to agent; a project repository the platform clones for a run, with the sandbox image
+chosen by the repository's toolchain and a merge request at the end (see Projects); the
+platform tools over MCP (`finish`, `deploy_release`, `http_fetch`,
+`memory_save`, `memory_recall`, `gitlab_create_mr` and `open_merge_request` when configured) with
 idempotency keys and a human approval gate in front of every side effect, answered from
 the approvals inbox or the run page; approval nodes in workflows; exec approvals from
 the gateway; retries; live traces over SSE with tokens, cost, agent messages and state;
@@ -89,7 +91,9 @@ ones that matter:
 | `make test-race` | The engine and event packages under the race detector (installs gcc in the throwaway tools container) |
 | `make probe-openclaw` | A real OpenClaw turn with a sandboxed `exec`, the integration canary |
 | `make probe-approval` | Verifies the gateway's plugin approval calls the side-effect gate relies on |
+| `make probe-sandbox` | Verifies a per-agent sandbox image and network override on the running gateway, the mechanism project runs use |
 | `make seed` | Creates the six demo agents the workflow templates name (Coder, Reviewer, Deployer, Researcher, Critic, Writer); idempotent |
+| `make seed-reset` | `make seed`, then restores the shipped agents' prompts and allowlists and the template workflows to the shipped versions, keeping everything else |
 | `make eval` | Run the evaluation suite offline with the scripted provider against the running stack; `make eval-baseline` / `make eval-final` store the report |
 | `make lint` | `go vet`, `staticcheck`, `eslint`, `tsc` |
 | `scripts/mutation-check.sh` | Breaks a line of code, runs a test command, restores the file, and says whether the test caught it |
@@ -120,7 +124,7 @@ under Channels with their transcript.
 Tool settings: `DEPLOYTARGET_URL` (the local release store `deploy_release` publishes
 to), `HTTP_FETCH_ALLOWLIST` (hosts `http_fetch` may reach; empty means none),
 `GITLAB_BASE_URL`, `GITLAB_PROJECT_ID` and `GITLAB_TOKEN` (all three register
-`gitlab_create_mr`), `MCP_TOOL_WAIT_SECONDS` (how long a gated tool call waits for the
+`gitlab_create_mr`), the `PROJECT_*` settings of the Projects section, `MCP_TOOL_WAIT_SECONDS` (how long a gated tool call waits for the
 human before the agent continues with `pending_approval`, default 540), `TOOL_OUTPUT_MAX_BYTES`. The memory
 tools need the agent's `memory_policy.enabled`.
 Secrets never go in the repository; the log handler redacts anything shaped like a
@@ -145,6 +149,7 @@ output. OpenClaw's built-ins run inside the agent's Docker sandbox.
 | `finish` | computational | postgres | 5 s | `{run_token, result}` validated against the node's output schema |
 | `deploy_release` | side-effecting, approval by default | deploy target | 30 s + approval wait | `{run_token, version, notes, paths[]}` from `runs/<run id>/` |
 | `gitlab_create_mr` | side-effecting, approval by default | GitLab (when configured) | 30 s + approval wait | `{run_token, title, description, paths[]}` |
+| `open_merge_request` | side-effecting, approval by default | the project's GitLab or GitHub (when a project is configured) | 120 s + approval wait | `{run_token, title, description}`; commits the run's checkout, pushes a branch and opens the request |
 | `http_fetch` | read-only | allowlisted https hosts | 15 s | `{run_token, url}`; output wrapped as untrusted content |
 | `memory_save` | computational | postgres | 5 s | `{run_token, key, value, ttl_days?}` |
 | `memory_recall` | read-only | postgres | 5 s | `{run_token, query}`; output wrapped as untrusted content |
@@ -191,6 +196,65 @@ Per-agent model settings: `thinking` is the reasoning control on OpenClaw (the a
 OpenClaw has no counterpart to `effort`; the API still accepts the field for
 compatibility, but it changes nothing and the agent form no longer offers it.
 
+## Projects: a repository, its toolchain, a merge request
+
+The platform can work on one git repository, configured by environment variables
+(DESIGN 5.16, D-037): `PROJECT_REPO_URL` (the https clone URL, no credentials in it),
+`PROJECT_GIT_TOKEN` (a token with write access: on GitLab a project or personal access
+token with `api` and `write_repository`; on GitHub a fine-grained token with contents
+and pull requests read and write), `PROJECT_DEFAULT_BRANCH` (default `main`),
+`PROJECT_PROVIDER` (`gitlab` or `github`; empty means `github` for github.com and
+`gitlab` for any other host) and `PROJECT_SANDBOX_NETWORK` (default `false`). The
+Status page shows what is configured, never the token, which the API never returns and
+the log redactor knows the shapes of.
+
+A workflow opts in with `project: true` on its definition (the builder has the switch;
+the shipped Dev pipeline opts in), a quick run with the same field on the request (a
+checkbox in the Run dialog once a project is configured). On an install without a
+project, those runs work in their run directory as before. With one, the engine clones
+the default branch at depth 1 into `runs/<run id>/repo/` of the first agent's workspace
+before its turn; later agents receive the checkout with the rest of the run directory.
+No agent clones, commits or pushes, and no model sees the token: the api's own git runs
+with the token in its environment, the checkout holds the bare URL, and the task
+protocol block tells each agent where the checkout is, which toolchain it has and
+whether the sandbox has network.
+
+The toolchain is read from the repository's manifest when it is cloned: `go.mod` is
+`go`; `package.json` with `pnpm-lock.yaml`, `yarn.lock` or `package-lock.json` is
+`node`; `uv.lock`, `requirements*.txt` or `pyproject.toml` is `python`; anything else is
+`default`. It is recorded on the run (a badge on the run page and in the list) and it
+selects the sandbox image for every visit of that run: `yuno-sandbox-go`,
+`yuno-sandbox-node` and `yuno-sandbox-python`, built by `make run` from
+`docker/sandbox-*.Dockerfile` with git and the toolchain's package manager and test
+runner and nothing project-specific, or the default image for `default`. The engine sets
+the image on the agent for the visit's duration (a per-session sandbox, so each visit
+starts a fresh container) and restores the defaults afterwards; `make probe-sandbox`
+verifies that mechanism on the running gateway.
+
+Sandbox network is off by default: the run still clones, and agents work with what the
+image provides. `PROJECT_SANDBOX_NETWORK=true` gives the sandboxes of project runs
+network access, and the task tells the Coder to install dependencies from the lockfile
+first (`npm ci`, `pnpm install --frozen-lockfile`, `go mod download`, `uv sync` or a
+`.venv` with pip) and to run the project's tests. Network on means anything injected
+into the repository can reach the internet from the sandbox and side effects inside the
+sandbox are not gated, so it is for trusted repositories only (`docs/threat-model.md`).
+
+At the end, the Deployer calls `open_merge_request` with a title and description. The
+tool is approval-gated like every side effect and idempotent by the run's key: it
+clones the default branch again into a private directory of the api (never running git
+inside the agent-writable checkout, where a planted hook would run on the api side),
+copies the checkout's working tree over it without `.git`, dependency and cache
+directories or links, commits as Yuno with the title, pushes `yuno/<key>` from the api
+and opens the merge request (GitLab) or pull request (GitHub) against the default
+branch. A repeat finds the branch and the open request and says `replayed`. The run
+page links the request from the tool's output. `gitlab_create_mr` stays for runs
+without a project.
+
+An install that predates projects keeps its seeded agents and workflows as they were;
+`make seed-reset` restores the shipped agents' prompts and allowlists (the Deployer gets
+`open_merge_request`) and the template workflows' definitions (the Dev pipeline's
+opt-in) while keeping ids, bindings, memory and every other setting.
+
 ## Talking to the platform: the Chief of Staff
 
 One agent is meant to be talked to: the seeded Chief of Staff, which `make run` binds to
@@ -227,7 +291,7 @@ internal/obs/       logging and redaction
 internal/pathcheck/ relative-path validation shared by tools and the deploy target
 api/openapi.yaml    the HTTP contract, served at /openapi.yaml and validated in tests
 web/                React + Vite + TypeScript UI
-docker/             Dockerfiles (api, web, the OpenClaw sandbox image) and nginx config
+docker/             Dockerfiles (api, web, the OpenClaw sandbox images: default and per toolchain) and nginx config
 scripts/            smoke.sh, the three gateway probes (turn, approval, telegram), ensure-env.sh, mutation-check.sh
 templates/          the two workflow templates, loaded at api start
 evals/              versioned eval cases (twelve public, two private) and reports
@@ -307,9 +371,10 @@ toolchain, and a type system that keeps a 30-table data model honest.
 and the residual risk, and the known limitations. The headline items: model output and
 every tool result are untrusted (schemas, allowlists, the approval gate and the
 untrusted-content wrapper stand between them and a side effect); agent commands run in a
-sandbox with no network; the provider key never reaches the runtime; secrets are redacted
-from logs and traces; the Docker socket mounted into the gateway container is the one
-root-equivalent surface, and exec guardrail patterns do not reach the sandbox.
+sandbox with no network unless a project opts in; the provider key and the project token
+never reach the runtime; secrets are redacted from logs and traces; the Docker socket
+mounted into the gateway container is the one root-equivalent surface, and exec
+guardrail patterns do not reach the sandbox.
 
 ## Evaluation
 

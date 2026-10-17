@@ -264,3 +264,53 @@ describe("RunDetailPage trigger", () => {
     expect(value.queryByText("Delegated")).toBeNull();
   });
 });
+
+describe("RunDetailPage project runs", () => {
+  const header = async () => within(await screen.findByRole("region", { name: "Run summary" }));
+  const mrCall = (over: Partial<ToolCall> = {}): ToolCall => ({
+    ...toolCall,
+    id: "t-mr",
+    tool_name: "yuno__open_merge_request",
+    input: { title: "Add src", description: "d" },
+    output: { number: 12, url: "https://gitlab.test/g/p/-/merge_requests/12", branch: "yuno/0123456789ab", provider: "gitlab" },
+    status: "executed",
+    is_error: false,
+    ...over,
+  });
+
+  it("shows the toolchain badge and the merge request link from the tool's output", async () => {
+    trace = { ...trace, run: run({ toolchain: "go" }), tool_calls: [mrCall()] };
+    renderPage();
+    const h = await header();
+    expect(h.getByText("Toolchain: Go")).not.toBeNull();
+    const link = h.getByRole("link", { name: "Merge request !12" });
+    expect(link.getAttribute("href")).toBe("https://gitlab.test/g/p/-/merge_requests/12");
+    expect(link.getAttribute("target")).toBe("_blank");
+  });
+
+  it("calls a GitHub request a pull request", async () => {
+    trace = { ...trace, run: run({ toolchain: "node" }), tool_calls: [mrCall({ output: { number: 3, url: "https://github.test/o/r/pull/3", provider: "github" } })] };
+    renderPage();
+    const h = await header();
+    expect(h.getByText("Toolchain: Node")).not.toBeNull();
+    expect(h.getByRole("link", { name: "Pull request #3" }).getAttribute("href")).toBe("https://github.test/o/r/pull/3");
+  });
+
+  it("shows neither without a checkout, and no link while the call waits or failed", async () => {
+    trace = { ...trace, tool_calls: [mrCall({ status: "awaiting_approval", output: undefined }), mrCall({ id: "t-mr2", status: "failed", is_error: true, output: { error: "boom" } })] };
+    renderPage();
+    const h = await header();
+    expect(h.queryByText(/Toolchain/)).toBeNull();
+    expect(h.queryByRole("link", { name: /request/ })).toBeNull();
+  });
+
+  it("picks up the link when the tool call arrives on the stream", async () => {
+    trace = { ...trace, run: run({ toolchain: "python" }) };
+    renderPage();
+    const h = await header();
+    expect(h.getByText("Toolchain: Python")).not.toBeNull();
+    expect(h.queryByRole("link", { name: /Merge request/ })).toBeNull();
+    send(7, "tool_call", { tool_call: mrCall() });
+    expect(await screen.findByRole("link", { name: "Merge request !12" })).not.toBeNull();
+  });
+});

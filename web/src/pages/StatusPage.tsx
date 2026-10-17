@@ -39,6 +39,46 @@ function PlatformCards() {
 
 const MODE_LABEL: Record<string, string> = { polling: "polling", webhook: "webhook" };
 
+/** The project repository runs with `project: true` work on (DESIGN 5.16). */
+function ProjectPanel() {
+  const q = useQuery({ queryKey: ["status"], queryFn: getStatus, refetchInterval: 5000 });
+  const p = q.data?.project;
+  if (!q.data) return null;
+  return (
+    <section aria-labelledby="project-heading">
+      <h2 id="project-heading" className="mb-3 text-base font-semibold">
+        Project repository
+      </h2>
+      <Card>
+        {p?.configured ? (
+          <dl className="grid gap-x-6 gap-y-4 text-sm sm:grid-cols-3">
+            <div className="sm:col-span-3">
+              <dt className="text-xs uppercase tracking-wide text-zinc-500">Repository</dt>
+              <dd className="mt-1 break-all font-mono text-xs">{p.repo_url}</dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase tracking-wide text-zinc-500">Default branch</dt>
+              <dd className="mt-1 font-mono text-xs">{p.default_branch}</dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase tracking-wide text-zinc-500">Provider</dt>
+              <dd className="mt-1 font-medium">{p.provider === "github" ? "GitHub" : "GitLab"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase tracking-wide text-zinc-500">Sandbox network</dt>
+              <dd className="mt-1">
+                <Badge tone={p.sandbox_network ? "amber" : "zinc"}>{p.sandbox_network ? "On: agents can install dependencies" : "Off"}</Badge>
+              </dd>
+            </div>
+          </dl>
+        ) : (
+          <p className="text-sm text-zinc-500">None configured. Runs with the project flag work in their run directory instead.</p>
+        )}
+      </Card>
+    </section>
+  );
+}
+
 function OpenClawPanel() {
   const q = useQuery({ queryKey: ["openclaw-status"], queryFn: getOpenClawStatus, refetchInterval: 5000 });
   const channels = useChannels();
@@ -150,6 +190,7 @@ export default function StatusPage() {
       </PageHeader>
       <PlatformCards />
       <OpenClawPanel />
+      <ProjectPanel />
       <SchedulerPanel />
     </div>
   );
