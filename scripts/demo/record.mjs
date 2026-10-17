@@ -6,6 +6,8 @@
 //   SCENES     e.g. 04,06 records only those (default: all)
 //   LIVE       1 lets scenes change state and spend model budget; otherwise they stop before that
 //   OUT_DIR    where videos, stills, cuts.json and state.json are written (default scripts/demo/out)
+//   PROJECT_REPO_URL, PROJECT_GIT_TOKEN  the repository scene 03 registers as a project when the workflow
+//              works on one; the token is typed into the page's password field only, never printed
 //
 // Runs inside the Playwright container (see the `demo` service in compose.yaml); entrypoint.sh
 // installs playwright-core there first. Slow waits are recorded in cuts.json, never skipped.
@@ -55,6 +57,12 @@ async function preflight() {
   if (missing.length) log("pre", `WARNING: seeded agents missing: ${missing.join(", ")} (make seed)`);
   const runs = await fetch(`${cfg.baseUrl}/api/runs?limit=1`, { headers: auth }).then((r) => (r.ok ? r.json() : [])).catch(() => []);
   if (runs?.length) log("pre", "note: the Runs list is not empty; scenes that show it will show those runs");
+  const projects = await fetch(`${cfg.baseUrl}/api/projects`, { headers: auth }).then((r) => (r.ok ? r.json() : [])).catch(() => []);
+  const projectNames = (projects ?? []).map((p) => p.name);
+  log("pre", `projects: ${projectNames.join(", ") || "none"}`);
+  if (cfg.projectName && !projectNames.includes(cfg.projectName)) {
+    log("pre", `note: no project named ${cfg.projectName} yet; scene 03 creates it from PROJECT_REPO_URL with LIVE=1`);
+  }
 }
 
 async function recordScene(browser, id, def, tools) {

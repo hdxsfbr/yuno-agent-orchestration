@@ -40,10 +40,15 @@ The recorder checks the first three and prints what it finds; the rest is yours.
 3. The six seeded agents exist (`make seed`).
 4. A **fresh editable copy of the research pipeline** exists (scene 8 schedules it; shipped templates cannot be scheduled).
 5. For scene 3 either let it create a fresh copy of the dev pipeline (`LIVE=1`, the default) or have exactly the copy you want and pass `DEMO_NEW_COPY=0`.
-6. The Runs list shows what you want a viewer to see on scenes 5 and 8 (the eval suite leaves its runs there).
-7. Telegram bound to Coder, the phone in hand, for scene 7 (`LIVE=1` waits up to 10 minutes for your message).
-8. For scene 6's terminal segment, capture a real `make eval` console first (see below).
-9. Record the time-free scenes first; scene 8 is time-bound (the schedule fires about two minutes after it is created).
+6. The dev pipeline works on a project, so scene 3 registers one on the Projects page before the run: `PROJECT_REPO_URL`
+   and `PROJECT_GIT_TOKEN` in `.env` (the api's bootstrap inputs) name the repository and a token that can push. `LIVE=1`
+   creates the project, named after the repository path (`DEMO_PROJECT_NAME` to choose), or shows the one that already
+   has that name, and clicks Check. The token is typed into a password field, so the footage shows dots, and nothing
+   prints it. A workflow that does not opt in (`DEMO_PIPELINE_WORKFLOW`) needs none of this.
+7. The Runs list shows what you want a viewer to see on scenes 5 and 8 (the eval suite leaves its runs there).
+8. Telegram bound to Coder, the phone in hand, for scene 7 (`LIVE=1` waits up to 10 minutes for your message).
+9. For scene 6's terminal segment, capture a real `make eval` console first (see below).
+10. Record the time-free scenes first; scene 8 is time-bound (the schedule fires about two minutes after it is created).
 
 ## Dry run
 
@@ -58,8 +63,8 @@ Without `LIVE=1` every scene stops before its state-changing click and nothing i
 | Scene | Dry run does | `LIVE=1` also does |
 |---|---|---|
 | 02 | tours Coder's form, read-only | same |
-| 03 | opens the template drawer, tours an existing editable copy, fills the run form, cancels | creates a copy from the template, clicks **Start run**, saves the run id to `out/state.json` |
-| 04 | tours the trace of `RUN_ID`, or of an existing finished run | follows the run scene 3 started; approves the gate and the `deploy_release` call |
+| 03 | fills the New project form and cancels (when the workflow works on a project), opens the template drawer, tours an existing editable copy, fills the run form with a project that exists, cancels | creates the project (or reuses the one with its name) and clicks Check, creates a copy from the template, picks the project, clicks **Start run**, saves the run id to `out/state.json` |
+| 04 | tours the trace of `RUN_ID`, or of an existing finished run | follows the run scene 3 started; approves the gate and the `open_merge_request` call (`deploy_release` for a run without a project) |
 | 05 | shows Coder's Max steps field, failed runs, rejected approvals | sets Max steps 2, runs Coder, restores the limit afterwards; runs Deployer and rejects its approval |
 | 06 | renders `evals/reports/baseline.md` (no stack needed) | same |
 | 07 | Channels page and the bound agent's conversation | waits for a message from the phone and for the reply |
@@ -73,7 +78,7 @@ Output goes to `scripts/demo/out/`: `NN.webm` per scene, `01.png`/`09.png` with 
 ## Recording live
 
 ```
-make demo-record SCENES=02,03 LIVE=1      # 03 starts the dev-pipeline run
+make demo-record SCENES=02,03 LIVE=1      # 03 registers the project and starts the dev-pipeline run
 make demo-record SCENES=04 LIVE=1         # follows that run (or: DEMO_RUN_ID=<id>)
 make demo-record SCENES=05,06 LIVE=1
 make demo-record SCENES=08 LIVE=1
@@ -84,6 +89,10 @@ make demo-stitch
 
 Scene 4 should start within a minute or two of scene 3's run (it follows the run from the page, so a
 finished run also works: the waits are then instant and nothing is cut).
+
+`LIVE=1` for scene 3 creates the project from `PROJECT_REPO_URL` and `PROJECT_GIT_TOKEN` when none has its name; a
+re-take finds it and shows its row instead (delete it on the Projects page first to record its creation again). The
+run then clones the repository, and the Deployer ends by opening a merge request on it, which scene 4 approves and shows.
 
 `LIVE=1` for scene 5 saves Coder's agent form with Max steps 2 and puts the previous value back in a
 non-recorded session when the scene ends, also when it fails.
@@ -132,12 +141,20 @@ One object per line, in footage time (ms from the start of the scene's video):
 wait. `keep_head_ms` / `keep_tail_ms` override the defaults for one entry (the page-load trim uses 0/0).
 Re-recording scenes replaces only their entries.
 
-## Knobs
+## Inputs and knobs
+
+Read from `.env` as they are: `API_TOKEN` (the api's bearer token, required when the api has one) and, for a workflow
+that works on a project (the dev pipeline), `PROJECT_REPO_URL`, `PROJECT_GIT_TOKEN` and `PROJECT_DEFAULT_BRANCH`: the
+repository scene 3 registers. The token is typed into the page's password field and is never printed or written
+anywhere by the recorder. Without the URL a dry run leaves the project form out and says so; `LIVE=1` refuses to start
+the scene unless `DEMO_PROJECT_NAME` names a project that already exists.
 
 Environment variables of `make demo-record` (all optional): `SCENES`, `LIVE`, `DEMO_PACE` (multiplies the
 deliberate pauses), `DEMO_RUN_ID`, `DEMO_NEW_COPY=0`, `DEMO_PIPELINE_TASK`, `DEMO_STEP_LIMIT_TASK`,
 `DEMO_REJECT_TASK`, `DEMO_SCHEDULE_TOPIC`, `DEMO_EVAL_CONSOLE`, `DEMO_RUN_TIMEOUT_MS`, `DEMO_PHONE_TIMEOUT_MS`,
-`DEMO_BASE_URL`, `DEMO_MASK_IDS=1` (blurs long numeric ids such as a Telegram user id), `DEMO_PIPELINE_TEMPLATE`, `DEMO_PIPELINE_WORKFLOW`, `DEMO_SCHEDULE_WORKFLOW`. Stitch: `OUT_DIR`, `FFMPEG_IMAGE`, `FPS`, `WIDTH`, `HEIGHT`, `CRF`, `CUT_HEAD_MS`,
+`DEMO_BASE_URL`, `DEMO_MASK_IDS=1` (blurs long numeric ids such as a Telegram user id), `DEMO_PIPELINE_TEMPLATE`, `DEMO_PIPELINE_WORKFLOW`, `DEMO_SCHEDULE_WORKFLOW`,
+`DEMO_PROJECT_NAME` (the project scene 3 registers or reuses; default: the last segment of the repository path),
+`DEMO_PROJECT_DESCRIPTION` (typed into the project form when set). Stitch: `OUT_DIR`, `FFMPEG_IMAGE`, `FPS`, `WIDTH`, `HEIGHT`, `CRF`, `CUT_HEAD_MS`,
 `CUT_TAIL_MS`, `MIN_CUT_MS`, `MAX_SPEEDUP`, `TAIL_SLACK`, `BREATH`.
 
 ## Known limits
