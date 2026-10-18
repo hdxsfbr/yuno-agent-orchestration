@@ -12,8 +12,17 @@ the stack runs); CI runs the same commands on `main` and deploys the commit.
 | `go vet ./...`, staticcheck 2026.2.2, `gofmt -l`, eslint, `tsc --noEmit` (what `make lint` runs) | clean (`internal/obs/redact.go` was unformatted before the wave and is untouched) |
 | review | two Sonnet 5.5 reviewer agents (backend; API, store and UI): one high (a second run for an issue whose label swap never worked), five mediums and the kept lows fixed in one pass by two Sonnet 5.5 fix agents, the rest recorded as limitations; `docs/reviews/wave9-review.md` |
 
-Live verification on the public instance: see the table below this header once the
-deploy of the merge commit is verified.
+Live verification on the public instance, 2026-10-18 18:37 to 18:43 UTC, from the
+coordinator session over ssh with `scripts/deploy/verify-wave9.sh` fed on stdin (the API
+token stays in the host's `.env`; nothing printed):
+
+| Step | Result |
+|---|---|
+| deploy | pipeline on `6db1207` (the fix-pass commit, `main` fast-forwarded from the worktree branch): migration `0013_wave9.sql` applied, `/api/status` at `6db1207` at 18:37:38 UTC |
+| `make seed-reset` | Coder, Reviewer, Deployer and Chief of Staff reset (the `read_merge_request` allowlist entries and the prompt lines of 5.22 rule 10 and rule 8), Dev pipeline and Research pipeline reset; the Telegram binding kept |
+| iterate on `!4` (5.22) | `POST /api/runs` with the Dev pipeline, the playground and `merge_request_id` of the record of `!4`: queued with `merge_request_id` set; a second request a second later refused `422 merge_request_id: merge request !4 is being updated by run <id>`; the run cloned `yuno/5084648102e2`, the Coder and the Reviewer called `read_merge_request` four times (0 unresolved threads, the request as one untrusted block), the gate and the tool approval were approved from the API, the Deployer's `open_merge_request` answered `replayed: true, updated: true` on `!4`, and the run succeeded in 20 steps at $0.32; `checkout_sha` moved to the pushed commit `a4c59df…`, and `POST /api/merge-requests/{id}/sync` then read `head_sha a4c59df…` back from GitLab (the request has the new commit on top of its branch) |
+| intake (5.23) | `PUT /api/projects/{id}` with `intake {enabled, label yuno, workflow Dev pipeline}` on the playground (caps $5 a day, $30 a month set since wave 8) answered the settings with `workflow_name`; `POST .../intake/poll` answered `{taken: 0, closed: 0}` with `polled_at` set and no `last_error` (the three derived labels were created on the repository). No issue carried the label yet: taking an issue, the label swap, the comments and `Closes #<n>` wait for Andre to label one; the two-minute tick then takes it and this table gains the row |
+| not verified live | the branch guard (a commit pushed by hand onto the branch during a run) and the Telegram phrasing "on !4" to the Chief (Andre sends); both are covered by the unit tests |
 
 
 # Test results, 2026-10-17 (wave 8: project instructions and notes, budgets, merge request records, retry; DESIGN 5.18 to 5.21)

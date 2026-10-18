@@ -427,6 +427,10 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
 5. Done 2026-10-18: Andre answered both open lines with the recommended answer (D-054:
    one merged report, to the opening run's conversation; D-055: a budget cap before
    intake is enabled) and approved the briefs, every agent on Sonnet 5.5.
-6. Next: the coordinator lands the prerequisites of `docs/briefs/wave9/00-plan.md`; the
-   wave runs through the loop; the demo, README, threat model and test results are
-   re-derived where the wave changed them; merge to main.
+6. Done 2026-10-18: wave 9 built by four Sonnet 5.5 agents, reviewed
+   (`docs/reviews/wave9-review.md`), fixed, merged to `main` as `6db1207` and deployed;
+   the iteration on `!4` verified live, the intake enabled on the playground and waiting
+   for a labelled issue (`docs/test-results.md`).
+7. Next: wave 10 (5.24 questions to the operator, 5.25 run artifacts): write the design
+   sections and briefs when the wave starts, as wave 9's were; the demo recording with
+   projects is still pending.
