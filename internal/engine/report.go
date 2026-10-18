@@ -11,6 +11,7 @@ import (
 
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
+	"yuno/internal/project"
 	"yuno/internal/store"
 	"yuno/internal/tools"
 )
@@ -395,16 +396,79 @@ func sentence(s string) string {
 	return s + "."
 }
 
+// questionKey is the chat.send idempotency key of a question's notice to the Telegram-bound
+// agent's conversation under DESIGN 5.24 rule 6 (b): report-<run id>-question-<approval id>,
+// the shape reportRunID reads the run from, so the mirrored message links the run.
+func questionKey(runID, approvalID string) string { return reportKey(runID, "question-"+approvalID) }
+
 // announceQuestion is the notice of DESIGN 5.24 rule 6, sent when AskOperator has recorded
-// a question: to the run's conversation, or else to the Telegram-bound agent's most
-// recent one. It only logs until the notice is written.
+// a question, in the background like every report.
+//
+// (a) A run that reports to a conversation announces it through afterApproval: the claim
+// on approvals.reported_at, the give-back of a deferred send and the sweep are the
+// approval notice's, and approvalReportText writes the question notice in place of the
+// waiting line, so the conversation hears it once.
+//
+// (b) Any other run sends the same notice to the most recent conversation of the agent
+// bound to Telegram, through the route of the budget alerts: SendPlatformMessage, one
+// attempt per call, under the key question-<approval id> (the gateway dedupes a repeat).
+// Without a binding or a conversation it is a log line, and the inbox and the run page are
+// the surfaces.
 func (e *Engine) announceQuestion(ctx context.Context, run *store.Run, a *store.Approval) {
-	e.log.Debug("question announced", "run_id", a.RunID, "approval_id", a.ID)
+	if run == nil || a == nil || a.Kind != store.ApprovalKindQuestion {
+		return
+	}
+	if reportsTo(run) {
+		e.afterApproval(ctx, run)
+		return
+	}
+	runID, approvalID, text := run.ID, a.ID, e.questionReportText(run, a)
+	e.reports.Add(1)
+	go func() {
+		defer e.reports.Done()
+		e.announceToBoundAgent(context.WithoutCancel(ctx), runID, approvalID, text)
+	}()
+}
+
+// announceToBoundAgent sends the notice of a run that has no conversation to the
+// conversation of the agent bound to Telegram (DESIGN 5.24 rule 6 (b)).
+func (e *Engine) announceToBoundAgent(ctx context.Context, runID, approvalID, text string) {
+	convID, ok, err := project.BoundAgentConversation(ctx, e.deps.Pool)
+	if err != nil {
+		e.reportLog(ctx, runID, "warn", "question "+approvalID+" could not be announced: "+err.Error())
+		return
+	}
+	if !ok {
+		e.reportLog(ctx, runID, "info", "question "+approvalID+" has nowhere to be announced: no conversation and no Telegram binding")
+		return
+	}
+	// A deferred send (the gateway unreachable) is not retried here: the next call for the
+	// same question sends it, and the gateway drops a repeat of a key it already took.
+	e.SendPlatformMessage(ctx, runID, convID, questionKey(runID, approvalID), text)
+}
+
+// questionReportText is DESIGN 5.24 rule 6's notice: "[platform] Run <id> asks:
+// <question> Options: <a> | <b>. Answer it at <url>, or tell me the answer and I will pass
+// it on (question <id>)." The Options sentence is only there when the question has options;
+// the question ends with a full stop unless it already ends a sentence.
+func (e *Engine) questionReportText(run *store.Run, a *store.Approval) string {
+	question := sentence(obs.Redact(strings.TrimSpace(a.Message)))
+	options := ""
+	var list []string
+	if len(a.Options) > 0 && json.Unmarshal(a.Options, &list) == nil && len(list) > 0 {
+		options = " Options: " + obs.Redact(strings.Join(list, " | ")) + "."
+	}
+	return fmt.Sprintf("[platform] Run %s asks: %s%s Answer it at %s, or tell me the answer and I will pass it on (question %s).",
+		run.ID, question, options, tools.RunURL(e.deps.Cfg.PublicBaseURL, run.ID), a.ID)
 }
 
 // approvalReportText is DESIGN 5.15 rule 10's message: "[platform] Run <id> is waiting for an
-// approval: <kind>, <message>. Decide it at <url>".
+// approval: <kind>, <message>. Decide it at <url>". A question has its own notice (DESIGN
+// 5.24 rule 6), which replaces this line.
 func (e *Engine) approvalReportText(run *store.Run, a *store.Approval) string {
+	if a.Kind == store.ApprovalKindQuestion {
+		return e.questionReportText(run, a)
+	}
 	msg := obs.Truncate(obs.Redact(strings.TrimSpace(a.Message)), reportApprovalMessageMax)
 	if msg == "" {
 		msg = "no description"

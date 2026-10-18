@@ -78,6 +78,8 @@ paths:
         tool_call, approval.requested, approval.decided, agent_message, log,
         run.retry (`{retries, from_node, by, limits, at}`: an operator retried the run from
         the step it stopped at),
+        run.artifacts (`{run_id, count}`: the files a step delivered were collected, DESIGN
+        5.25),
         schedule.fired (`{schedule, run}`, filed under the run it created),
         conversation.message (`{conversation, message}`: a Conversation and a
         ConversationMessage, platform-wide, no run), and conversation.tool_call
@@ -279,9 +281,8 @@ paths:
     get:
       tags: [runs]
       summary: The files the run delivered, by path
-      x-planned: wave 10
       description: |
-        Planned for wave 10 (DESIGN 5.25). Files an agent put under `runs/<run id>/out/`,
+        DESIGN 5.25. Files an agent put under `runs/<run id>/out/`,
         collected at the end of every step, one entry per path (the newest version), plus
         `diff.patch` for a project run whose checkout changed. Empty for a run that delivered
         nothing; artifacts are deleted `ARTIFACT_TTL_DAYS` after the run finished.
@@ -293,9 +294,8 @@ paths:
     get:
       tags: [runs]
       summary: Download one artifact
-      x-planned: wave 10
       description: |
-        Planned for wave 10 (DESIGN 5.25 rule 5). The file's bytes with its content type
+        DESIGN 5.25 rule 5. The file's bytes with its content type
         (`text/plain` for HTML and SVG), `Content-Disposition: attachment; filename="<base
         name>"`, `X-Content-Type-Options: nosniff` and `Cache-Control: private, no-store`;
         never rendered inline. 404 when the artifact is not this run's or its file is gone.
@@ -356,9 +356,8 @@ paths:
     post:
       tags: [approvals]
       summary: Answer a pending question
-      x-planned: wave 10
       description: |
-        Planned for wave 10 (DESIGN 5.24 rule 3). The approval must be of kind `question`
+        DESIGN 5.24 rule 3. The approval must be of kind `question`
         (422 `answer: only a question can be answered` otherwise) and pending (409
         `not_pending`). The row becomes `approved` with `answer`. An answer that arrives while
         the agent's tool call still waits is returned to the agent in the same turn; after
@@ -1292,7 +1291,7 @@ components:
         agent_id: { type: string }
         visit: { type: integer }
         iteration: { type: integer }
-        question_id: { type: string, x-planned: wave 10, description: "set on a continuation visit: the question (an approval of kind question) whose answer this visit of the step continues with (DESIGN 5.24 rule 5); such a visit does not count toward max_loop_visits" }
+        question_id: { type: string, description: "set on a continuation visit: the question (an approval of kind question) whose answer this visit of the step continues with (DESIGN 5.24 rule 5); such a visit does not count toward max_loop_visits" }
         status: { type: string, enum: [pending, running, waiting_approval, succeeded, failed, skipped] }
         messages: { type: array, items: { type: object }, description: "transcript entries mirrored from OpenClaw, never reasoning" }
         output: {}
@@ -1372,11 +1371,11 @@ components:
         run_id: { type: string }
         run_node_id: { type: string }
         tool_call_id: { type: string }
-        kind: { type: string, enum: [exec, tool, node, question], description: "question: a run asks the operator something and waits for the answer (DESIGN 5.24; planned for wave 10). It is answered through /answer, or declined through /reject; approved means answered." }
+        kind: { type: string, enum: [exec, tool, node, question], description: "question: a run asks the operator something and waits for the answer (DESIGN 5.24). It is answered through /answer, or declined through /reject; approved means answered." }
         node_id: { type: string }
         message: { type: string, description: "the gated command or call, the node's message, or the question's text" }
-        options: { type: array, items: { type: string }, x-planned: wave 10, description: "question only: the answers the agent suggested, 2 to 5; an answer need not be one of them" }
-        answer: { type: string, x-planned: wave 10, description: "question only: the operator's answer, set when the status is approved" }
+        options: { type: array, items: { type: string }, description: "question only: the answers the agent suggested, 2 to 5; an answer need not be one of them" }
+        answer: { type: string, description: "question only: the operator's answer, set when the status is approved" }
         status: { type: string, enum: [pending, approved, rejected, expired] }
         external_id: { type: string, description: OpenClaw approval id when the gateway raised it }
         requested_at: { type: string, format: date-time }
@@ -1429,14 +1428,12 @@ components:
         reason: { type: string, maxLength: 2000 }
     AnswerBody:
       type: object
-      x-planned: wave 10
       additionalProperties: false
       required: [answer]
       properties:
         answer: { type: string, minLength: 1, maxLength: 4096, description: "the operator's answer, 1 to 4096 bytes after trimming; need not be one of the question's options" }
     Artifact:
       type: object
-      x-planned: wave 10
       description: One file a run delivered (DESIGN 5.25), the newest version at its path.
       required: [id, run_id, node_id, visit, path, size, sha256, content_type, generated, created_at, updated_at]
       properties:

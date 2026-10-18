@@ -4,31 +4,15 @@ import (
 	"context"
 
 	"yuno/internal/openclaw"
-	"yuno/internal/store"
 	"yuno/internal/tools"
 )
 
-// Wave 10 (DESIGN 5.24, 5.25): the engine's door for questions to the operator, the
-// exported event helpers the artifact collector uses, and the call that hands a finished
-// visit's workspace to the collector.
+// Wave 10 (DESIGN 5.24, 5.25): the engine's questions to the operator are in questions.go;
+// this file holds the exported event helpers the artifact collector uses, and the call that
+// hands a finished visit's workspace to the collector.
 
 // The engine satisfies the tools' Asker, as the contract's Service says.
 var _ tools.Asker = (*Engine)(nil)
-
-// AskOperator, WaitQuestion and AnswerQuestion are the Asker methods (DESIGN 5.24 rules 2
-// and 3). They answer ErrNotImplemented until questions.go replaces them.
-
-func (e *Engine) AskOperator(ctx context.Context, token, question string, options []string) (*store.Approval, error) {
-	return nil, ErrNotImplemented
-}
-
-func (e *Engine) WaitQuestion(ctx context.Context, id string) (*store.Approval, error) {
-	return nil, ErrNotImplemented
-}
-
-func (e *Engine) AnswerQuestion(ctx context.Context, id, answer, by string) (*store.Approval, error) {
-	return nil, ErrNotImplemented
-}
 
 // Emit records an SSE event of a run durably and fans it out (emit, exported for the
 // artifact collector: run.artifacts, DESIGN 5.25 rule 2); failures are logged.

@@ -2853,8 +2853,10 @@ Rules:
    and that no later visit names (`store.ContinuationQuestion`); nil for a loop revisit
    or a retry. A continuation visit does not count toward `max_loop_visits`
    (`CountNodeLoopVisits` counts the step's visits with `question_id IS NULL`; 5.6's
-   entry check and 5.21 rule 2 use it); its steps count toward `max_steps` as any
-   visit's do, and `max_node_iterations` bounds each visit as today.
+   entry check and 5.21 rule 2 use it) and is not refused by that limit at its own
+   entry either (the parked visit may have been the last the limit allowed; the answer
+   still continues it); its steps count toward `max_steps` as any visit's do, and
+   `max_node_iterations` bounds each visit as today.
 6. **Where the question is announced.** (a) A run with a conversation (5.15 rule 10's
    route): one notice per question, `[platform] Run <id> asks: <question> Options: <a>
    | <b>. Answer it at <url>, or tell me the answer and I will pass it on (question
@@ -2864,7 +2866,8 @@ Rules:
    as that rule's mechanics do. (b) A run without a conversation: the same notice goes
    to the most recent conversation of the agent bound to Telegram through the budget
    alerts' route (5.19 rule 6: `SendPlatformMessage`, one attempt, idempotency key
-   `question-<id>`, mirrored with the run id); without a binding or a conversation it is
+   `report-<run id>-question-<id>`, the shape the mirror reads the run id from, so the
+   mirrored message links the run); without a binding or a conversation it is
    a log line, and the inbox and the run page are the surfaces. (b) is the recommended
    answer of the first open line below; until it is answered the rule stands as
    written.
@@ -2943,6 +2946,37 @@ Rules:
     each prompt gains `Ask the operator with ask_operator only when a missing fact
     decides the work; otherwise decide and state the assumption.` No developer
     commentary in product copy.
+
+As built (wave 10): everything `AskOperator` does, the insert included, runs inside the
+visit's loop (`v.do`), so the step's count is read under the lock and a visit that ended
+leaves no row behind. The park is decided after the reply-result extraction and the
+limit checks in `turnFinal` (a result in the reply, a limit or a cancel beats it, as rule
+5 lists), and `RequeueParkedRun` closes the parked visit's row `succeeded` in the same
+statement, so a worker claiming the run never finds it open. `ContinuationQuestion` takes
+only an answered or declined question, the last one of the visit that parked (an expired
+question is a retry, not a continuation, and a question answered within the wait never
+turns a loop revisit into a continuation); the paragraph of rule 7 is appended by the walk
+right after the task is rendered. `expireApproval` hands an expired question to its
+waiter; the parked case and `question unanswered` live in the question sweep, which also
+re-queues a parked run whose question was decided while the re-queue failed; a cancel
+while the turn is live expires the question `step finished`, a cancel while parked `run
+cancelled`. `approve` on a question is 422 before the pending check (as `always` on a
+non-exec approval), so approving a decided question is 422 and answering it 409. The
+decision delivery re-tries the re-queue once after a failed handoff and skips the
+unattended re-queue when a live visit was found. `ask_operator` matches the text
+`invalid run token` (the tools package cannot import the engine), `answer_question` reads
+the row itself before and after the engine call to produce the three texts, refuses a
+blank id with `question_id: must not be empty`, and tells a run call by `Call.Chat`
+and `RunID`; `options: null` counts as absent, `[]` is refused, and any control
+character (a newline included) refuses an option; the notice ends the question with a
+full stop unless it already ends a sentence, and its idempotency key for the bound
+agent's conversation is `report-<run id>-question-<id>` so the mirror links the run (D-058
+amended). `run_status.question` is the oldest pending question. The UI shows `Not
+answered in time` for every expired question with the reason beneath, uses the oldest
+pending question for the `Asks:` line, caps the answer box at 4096 characters (the
+server counts bytes), labels a continuation visit `continued after a question`, and keeps
+the status badge's `approved`/`rejected` words for an answered or declined question. The
+agent form refuses `interaction_rules.ask_operator: require_approval`.
 
 Edge cases: two `ask_operator` calls issued in one turn: the second is refused with
 `one question at a time` (the lock serializes them). The agent gets `pending`, keeps
@@ -3084,8 +3118,9 @@ Rules:
    untouched (the copy is discarded); a different one, updated in place (the same id,
    the new file replacing the old, `node_id` and `visit` the collecting visit). Skipped
    files are one log line per visit, `artifacts: <n> files not collected: <path>:
-   <reason>; ...` (the first three named), and the span `artifacts` on the visit carries
-   `files`, `bytes` and `skipped`. Collection is best effort: a failure (I/O, database,
+   <reason>; ...` (the first three named), and one structured api log line per
+   collection carries `files`, `bytes` and `skipped` (the engine's spans are not open to
+   the collector). Collection is best effort: a failure (I/O, database,
    the deadline) is a log line and never changes the visit's outcome; what was stored
    before it stays. SSE `run.artifacts {run_id, count}` follows a collection that
    changed anything.
@@ -3102,8 +3137,10 @@ Rules:
    `git diff --cached --binary --no-color --no-ext-diff`; the private directory is
    removed. A non-empty patch is stored as the artifact `diff.patch` (`generated =
    true`, content type `text/x-patch`, cut at 10 MiB with the last line `# cut at 10
-   MiB`); an empty one removes an earlier generated `diff.patch`; a file the agent
-   itself put at `out/diff.patch` wins and the generated one is skipped with a log
+   MiB`); an empty one leaves an earlier generated `diff.patch` in place (after the
+   Deployer pushes, `checkout_sha` moves to the pushed commit, 5.22 rule 2, and the
+   checkout matches it; the stored patch is still what the run changed); a file the
+   agent itself put at `out/diff.patch` wins and the generated one is skipped with a log
    line. A clone or fetch failure skips the diff with the log line `artifacts: diff
    skipped: <reason>` and nothing else changes. Cost: one shallow clone per agent visit
    of a project run, on the api side, inside the 60 s deadline.
@@ -3145,15 +3182,37 @@ Rules:
    Preview in a `<pre>` (never as HTML; SVG previews as text), for `image/png`,
    `image/jpeg`, `image/gif` and `image/webp` up to 256 KiB an `<img>` from a blob URL;
    larger files download only. Empty state: `No files delivered yet.` while the run is
-   live, `No files were delivered.` once it ended; the section is hidden when the
-   collector is disabled and the run has none. The section refreshes on SSE
-   `run.artifacts`. The Logs section shows the skipped-file lines. No developer
+   live, `No files were delivered.` once it ended (also when the collector is disabled:
+   the contract carries no signal for that, and the empty state says what is true). The
+   section refreshes on SSE `run.artifacts`. The Logs section shows the skipped-file lines. No developer
    commentary.
 8. **Shipped prompts.** The Writer's prompt gains `Put the finished report under
    runs/<run id>/out/ so the operator receives it.` and the research template's writer
    task says the same; the Coder, Reviewer and Deployer are unchanged (the merge request
    and the release are their deliverables; the diff is generated). `make seed-reset`
    applies it.
+
+As built (wave 10): a file is renamed into the store before its row is written or
+updated (the Consistency paragraph's order), so a crash leaves at most a file the sweep
+removes; names with invalid UTF-8 or control characters and files that cannot be read are
+skipped with a reason, and only store-side failures end a collection. A bad `out/` (a
+link or a file) skips the diff too; a missing `out/` collects nothing silently and the
+diff still runs. The diff is stored after the walk, so a run at 200 files gets no diff
+(the skip line names it); a smaller file later in the walk still fits after a larger one
+was skipped; the cut patch stays within 10 MiB with its marker; `base` must be a full
+40-hex commit, `.git` a real directory; the generated diff never overwrites an agent's own
+`diff.patch` row. Downloads strip backslashes from the file name too, compare the media
+type after parsing (`TEXT/HTML; Charset=UTF-8` is plain text), support `Range` and `HEAD`
+through `http.ServeContent`, and read the file through an `os.Root` (a link in the store
+is 404). The sweep also removes, in a run's directory, a file no row names that is older
+than an hour (a crash leftover or a `.tmp`); directories whose names are not run ids are
+never touched. The `run.artifacts` count is the run's total after the collection. `Emit`
+and `LogEvent` are fields set once the engine exists, and the collector is created
+before the engine (an unusable directory leaves `Deps.Artifacts` nil). The UI shows the
+empty state also when the store is disabled (rule 7 amended), names buttons with the full
+path, revokes the object URL after the click, previews 256 KiB inclusive, and refreshes
+on `run.artifacts` 300 ms after the first event of a burst. The research template's
+writer task names `runs/$RUN_ID/out/report.md` and the eval case 015 mirrors it.
 
 Edge cases: `out/` does not exist: nothing is collected, no log line. `out/` is a
 symlink, or `runs/<run id>` is: nothing is collected, the log line of rule 2. A link

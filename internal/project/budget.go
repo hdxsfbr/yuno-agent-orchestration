@@ -245,21 +245,33 @@ func (w *Watcher) checkWindow(ctx context.Context, p *store.Project, win Window,
 // resolveDestination finds the newest conversation of the agent bound to the Telegram
 // channel (rule 6); a destination with an empty id says there is none.
 func (w *Watcher) resolveDestination(ctx context.Context) (*destination, error) {
-	b, err := store.GetChannelBinding(ctx, w.Pool, store.ChannelTelegram)
+	id, _, err := BoundAgentConversation(ctx, w.Pool)
+	if err != nil {
+		return nil, err
+	}
+	return &destination{id: id}, nil
+}
+
+// BoundAgentConversation is where a message for the operator goes when its subject has no
+// conversation of its own: the conversation with the latest message of the agent bound to
+// the Telegram channel (DESIGN 5.19 rule 6, 5.24 rule 6). ok is false, with no error, when
+// no agent is bound or the bound agent has no conversation yet.
+func BoundAgentConversation(ctx context.Context, q store.Querier) (conversationID string, ok bool, err error) {
+	b, err := store.GetChannelBinding(ctx, q, store.ChannelTelegram)
 	if errors.Is(err, store.ErrNotFound) {
-		return &destination{}, nil
+		return "", false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("channel binding: %w", err)
+		return "", false, fmt.Errorf("channel binding: %w", err)
 	}
-	c, err := store.LatestConversationForAgent(ctx, w.Pool, b.AgentID)
+	c, err := store.LatestConversationForAgent(ctx, q, b.AgentID)
 	if errors.Is(err, store.ErrNotFound) {
-		return &destination{}, nil
+		return "", false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("conversation: %w", err)
+		return "", false, fmt.Errorf("conversation: %w", err)
 	}
-	return &destination{id: c.ID}, nil
+	return c.ID, true, nil
 }
 
 // AlertKey is the chat.send idempotency key of an alert (rule 6):

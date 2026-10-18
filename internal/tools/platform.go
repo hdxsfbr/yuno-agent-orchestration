@@ -77,6 +77,8 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 	r.Register(NewOpenMergeRequest(MergeRequestConfig{Projects: d.Projects, Client: d.ProviderClient}))
 	r.Register(NewReadMergeRequest(ReadMergeRequestConfig{Projects: d.Projects, Pool: d.Pool, Client: d.ProviderClient,
 		MaxOutputBytes: d.MaxOutputBytes}))
+	r.Register(NewAskOperator(d))
+	r.Register(NewAnswerQuestion(d))
 	return r
 }
 

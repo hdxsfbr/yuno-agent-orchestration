@@ -309,3 +309,74 @@ describe("approvals of runs that have ended", () => {
     expect(tool.queryByRole("note")).toBeNull();
   });
 });
+
+describe("questions in the inbox", () => {
+  const question = approval({
+    id: "ap-question",
+    kind: "question",
+    node_id: "coder",
+    message: "Which greeting language should I use?",
+    options: ["English", "Spanish"],
+    requested_at: "2026-10-15T10:20:00Z",
+  });
+  const decide = (r: { match: RegExpMatchArray; body: unknown }) => {
+    const a = server.find((x) => x.id === r.match[1])!;
+    if (a.status !== "pending") return apiError(409, "not_pending", "approval is already decided");
+    a.status = "approved";
+    a.answer = (r.body as { answer: string }).answer;
+    a.decided_at = "2026-10-15T11:00:00Z";
+    a.decided_by = "api";
+    return a;
+  };
+
+  beforeEach(() => {
+    server = [nodeApproval, question].map((a) => ({ ...a }));
+    api.on("POST", /^\/api\/approvals\/([^/]+)\/answer$/, decide);
+  });
+
+  it("lists a pending question with the other requests, as a Question card with its options", async () => {
+    renderPage();
+    const asked = await card("ap-question");
+    expect(asked.getByText("Question")).not.toBeNull();
+    expect(asked.getByText("Which greeting language should I use?")).not.toBeNull();
+    expect(asked.getByRole("link", { name: shortId(RUN) }).getAttribute("href")).toBe(`/runs/${RUN}`);
+    expect(asked.getByRole("button", { name: "English" })).not.toBeNull();
+    expect(asked.getByRole("button", { name: "Decline" })).not.toBeNull();
+    expect(asked.queryByRole("button", { name: "Approve" })).toBeNull();
+    // the workflow step next to it keeps Approve and Reject
+    const step = await card("ap-node");
+    expect(step.getByRole("button", { name: "Approve" })).not.toBeNull();
+    expect(step.getByRole("button", { name: "Reject" })).not.toBeNull();
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+  });
+
+  it("answers with an option and the card leaves the pending list", async () => {
+    renderPage();
+    fireEvent.click((await card("ap-question")).getByRole("button", { name: "Spanish" }));
+    await waitFor(() => expect(screen.queryByText("Which greeting language should I use?")).toBeNull());
+    expect(api.made("POST", "/api/approvals/ap-question/answer")[0].body).toEqual({ answer: "Spanish" });
+    expect(screen.getByText("Deploy release 1.0.0?")).not.toBeNull();
+  });
+
+  it("shows the answer on the card under the Approved filter", async () => {
+    server = [{ ...question, status: "approved", answer: "Spanish", decided_at: "2026-10-15T10:30:00Z", decided_by: "chat:Chief of Staff" }];
+    renderPage("/approvals?status=approved");
+    const done = await card("ap-question");
+    expect(done.getByText("Answered: Spanish")).not.toBeNull();
+    expect(done.getByText(/by chat:Chief of Staff/)).not.toBeNull();
+    expect(done.queryByRole("button")).toBeNull();
+  });
+
+  it("adds a question that is asked while the page is open, and drops it when it is answered elsewhere", async () => {
+    server = [nodeApproval];
+    renderPage();
+    await screen.findByText("Deploy release 1.0.0?");
+    await waitFor(() => expect(api.hasStream("/api/events")).toBe(true));
+    server = [nodeApproval, question];
+    api.send("/api/events", "approval.requested", { approval: question });
+    expect(await screen.findByText("Which greeting language should I use?")).not.toBeNull();
+    server = [nodeApproval];
+    api.send("/api/events", "approval.decided", { approval: { ...question, status: "approved", answer: "English" } });
+    await waitFor(() => expect(screen.queryByText("Which greeting language should I use?")).toBeNull());
+  });
+});

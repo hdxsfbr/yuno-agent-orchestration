@@ -85,6 +85,20 @@ func OpenRunDir(stateDir, openclawID, runID string) (*os.Root, error) {
 	return openRunDir(ws, runID)
 }
 
+// OpenRunDirAt is OpenRunDir for a workspace given as its directory (the path the engine
+// hands the artifact collector, DESIGN 5.25 rule 2) rather than as a state directory and
+// an agent id. The same refusals apply: a missing workspace or run directory is
+// fs.ErrNotExist, and a runs or runs/<run_id> entry that is a link or any other
+// non-directory is ErrRunDirLink. The caller closes the root.
+func OpenRunDirAt(workspace, runID string) (*os.Root, error) {
+	ws, err := os.OpenRoot(workspace)
+	if err != nil {
+		return nil, err
+	}
+	defer ws.Close()
+	return openRunDir(ws, runID)
+}
+
 // openRunDir opens runs/<run_id>/ inside a workspace root, refusing a symlink at either
 // level so the directory is the workspace's own.
 func openRunDir(ws *os.Root, runID string) (*os.Root, error) {

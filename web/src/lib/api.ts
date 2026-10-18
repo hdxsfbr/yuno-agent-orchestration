@@ -166,7 +166,7 @@ export function subscribe(
 }
 
 // ---------------------------------------------------------------------------------------
-// Types derived from api/openapi.yaml (version 0.5.0) and the endpoint functions that use
+// Types derived from api/openapi.yaml (version 0.7.0) and the endpoint functions that use
 // them. Optional fields are the ones the API may omit.
 // ---------------------------------------------------------------------------------------
 
@@ -568,6 +568,8 @@ export type RunNode = {
   failure_reason?: string;
   session_key?: string;
   openclaw_run_id?: string;
+  /** Set on a continuation visit: the question (an approval of kind `question`) whose answer this visit of the step continues with (DESIGN 5.24 rule 5). */
+  question_id?: string;
   started_at?: string;
   finished_at?: string;
 };
@@ -643,9 +645,15 @@ export type Approval = {
   run_id: string | null;
   run_node_id: string;
   tool_call_id?: string;
-  kind: "exec" | "tool" | "node";
+  /** `question` is a run asking the operator something (DESIGN 5.24): answered through `answerApproval`, declined through `rejectApproval`; approved means answered. */
+  kind: "exec" | "tool" | "node" | "question";
   node_id: string;
+  /** The gated command or call, the node's message, or the question's text. */
   message: string;
+  /** Question only: the answers the agent suggested, 2 to 5; an answer need not be one of them. */
+  options?: string[];
+  /** Question only: the operator's answer, set when the status is approved. */
+  answer?: string;
   status: ApprovalStatus;
   external_id?: string;
   requested_at: string;
@@ -741,6 +749,30 @@ export type ApprovalItem = Approval & { tool_call?: ToolCall; run_status?: RunSt
 
 export type ApprovalDecision = { reason?: string; always?: boolean };
 
+/** The body of `POST /api/approvals/{id}/answer`: 1 to 4096 bytes after trimming; it need not be one of the question's options. */
+export type AnswerBody = { answer: string };
+
+/** One file a run delivered (DESIGN 5.25): the newest version at its path under `runs/<run id>/out/`. */
+export type Artifact = {
+  id: string;
+  run_id: string;
+  /** The step whose visit last collected this version. */
+  node_id: string;
+  visit: number;
+  /** Relative to `runs/<run id>/out/`, at most 512 bytes. */
+  path: string;
+  /** Bytes. */
+  size: number;
+  sha256: string;
+  /** Sniffed, with the text kinds by extension (text/markdown, application/json, text/csv, text/x-patch, text/yaml). */
+  content_type: string;
+  /** True for the platform's own diff.patch of a project run. */
+  generated: boolean;
+  created_at: string;
+  /** When this version was collected. */
+  updated_at: string;
+};
+
 const withBody = (method: string, body?: unknown): RequestInit => ({
   method,
   body: body === undefined ? undefined : JSON.stringify(body),
@@ -815,6 +847,29 @@ export const cancelRun = (id: string) => api<Run>(`/api/runs/${seg(id)}/cancel`,
 export const retryRun = (id: string, limits?: Limits) => api<Run>(`/api/runs/${seg(id)}/retry`, withBody("POST", limits ? { limits } : undefined));
 export const getTrace = async (id: string) => normalizeTrace(await api<Trace>(`/api/runs/${seg(id)}/trace`));
 
+/** The files the run delivered, by path (DESIGN 5.25); empty for a run that delivered nothing. */
+export const listRunArtifacts = async (runId: string) => (await api<Artifact[] | null>(`/api/runs/${seg(runId)}/artifacts`)) ?? [];
+
+/**
+ * The bytes of one artifact. A link cannot carry the token, so the file is fetched with it and handed to the browser as a blob.
+ * Anything but a 200 is an ApiError (404 when the artifact is not the run's or its file is gone).
+ */
+export async function downloadArtifact(runId: string, artifactId: string): Promise<Blob> {
+  const sent = getToken();
+  const res = await fetch(`/api/runs/${seg(runId)}/artifacts/${seg(artifactId)}`, { headers: authHeaders(sent) });
+  if (res.status === 401) reportUnauthorized(sent);
+  if (res.status !== 200) {
+    let err: { code?: string; message?: string; details?: unknown } | undefined;
+    try {
+      err = ((await res.json()) as { error?: typeof err })?.error;
+    } catch {
+      /* not the API's error shape */
+    }
+    throw new ApiError(res.status, err?.code ?? "http_error", err?.message ?? res.statusText, err?.details);
+  }
+  return res.blob();
+}
+
 export const isTerminalStatus = (s: RunStatus) => s === "succeeded" || s === "failed" || s === "cancelled" || s === "timed_out";
 
 // Go encodes nil slices as null; the builder treats nodes and edges as always present.
@@ -851,6 +906,8 @@ export async function listApprovals(opts: { status?: ApprovalStatus; runId?: str
 export const approveApproval = (id: string, body: ApprovalDecision = {}) => api<Approval>(`/api/approvals/${seg(id)}/approve`, withBody("POST", body));
 export const rejectApproval = (id: string, body: Pick<ApprovalDecision, "reason"> = {}) =>
   api<Approval>(`/api/approvals/${seg(id)}/reject`, withBody("POST", body));
+/** Answers a pending question (DESIGN 5.24 rule 3). A 422 names the problem with the answer; a 409 means it was decided already. */
+export const answerApproval = (id: string, body: AnswerBody) => api<Approval>(`/api/approvals/${seg(id)}/answer`, withBody("POST", body));
 
 // ---------------------------------------------------------------------------------------
 // Channels and conversations (DESIGN 5.8), schedules (5.9), skills and agent memory (5.10).

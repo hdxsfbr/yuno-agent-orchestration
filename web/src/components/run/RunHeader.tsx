@@ -1,9 +1,10 @@
 import { useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { ApiError, cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, issueRef, retryRun, type Run, type ToolCall } from "@/lib/api";
+import { ApiError, cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, issueRef, retryRun, type Approval, type Run, type ToolCall } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, shortId } from "@/lib/format";
 import { requestNoun, requestRef } from "@/lib/mergeRequest";
+import { pendingQuestion, questionLine } from "@/lib/question";
 import { toolchainLabel } from "@/lib/project";
 import { canRetry, repeatsSideEffects } from "@/lib/runRetry";
 import type { Connection } from "@/lib/useEventStream";
@@ -71,11 +72,13 @@ type Props = {
   now: number;
   /** The run's tool calls so far: the retry dialog says when a retry would repeat what some of them did. */
   toolCalls?: readonly ToolCall[];
+  /** The run's approvals so far: while the run waits on a question, the header says what it asks. */
+  approvals?: readonly Approval[];
   /** Called with the run the API returns after a cancel or a retry. */
   onRunChange: (run: Run) => void;
 };
 
-export default function RunHeader({ run, connection, now, toolCalls = [], onRunChange }: Props) {
+export default function RunHeader({ run, connection, now, toolCalls = [], approvals = [], onRunChange }: Props) {
   const cancel = useMutation({ mutationFn: () => cancelRun(run.id), onSuccess: onRunChange });
   // A refusal for a run that used up a limit opens the dialog; any other refusal is told inline.
   const [limitsRefusal, setLimitsRefusal] = useState<ApiError | null>(null);
@@ -96,6 +99,7 @@ export default function RunHeader({ run, connection, now, toolCalls = [], onRunC
   const duration = elapsedMs(run.started_at, run.finished_at, now);
   const retries = run.retries ?? 0;
   const retryError = retry.error && !limitsRefusal ? retry.error : null;
+  const asking = run.status === "waiting_approval" ? pendingQuestion(approvals) : undefined;
 
   return (
     <section aria-label="Run summary">
@@ -146,6 +150,13 @@ export default function RunHeader({ run, connection, now, toolCalls = [], onRunC
           <div className="mt-3">
             <InlineError>Could not retry the run: {errorText(retryError)}</InlineError>
           </div>
+        ) : null}
+        {asking ? (
+          <p className="mt-3 text-sm">
+            <a href="#approvals" className="font-medium underline">
+              Asks: {questionLine(asking.message)}
+            </a>
+          </p>
         ) : null}
         {run.failure_reason ? (
           <p role="alert" className="mt-3 rounded-md border border-red-200 bg-red-50 p-2.5 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">

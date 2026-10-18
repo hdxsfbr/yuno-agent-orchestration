@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"yuno/api"
+	"yuno/internal/artifacts"
 	"yuno/internal/channels"
 	"yuno/internal/config"
 	"yuno/internal/deploytarget"
@@ -145,7 +146,10 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	eng := engine.New(engine.Deps{
+	// Run artifacts (DESIGN 5.25 rules 2 and 4): the collector runs after every agent visit
+	// and keeps the files under ARTIFACT_DIR; an unusable directory disables it and the
+	// visits run as before. Its event helpers are the engine's, set once it exists.
+	engineDeps := engine.Deps{
 		Cfg:      cfg,
 		Log:      log,
 		Pool:     pool,
@@ -154,7 +158,18 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		Recorder: rec,
 		StateDir: cfg.OpenClawStateDir,
 		Effects:  s.effects,
-	})
+	}
+	collector, err := artifacts.New(cfg.ArtifactDir, pool, log, nil, nil, cfg.ArtifactTTLDays)
+	if err != nil {
+		log.Warn("artifacts: " + cfg.ArtifactDir + ": " + err.Error() + "; artifacts are disabled")
+		collector = nil
+	} else {
+		engineDeps.Artifacts = collector
+	}
+	eng := engine.New(engineDeps)
+	if collector != nil {
+		collector.Emit, collector.LogEvent = eng.Emit, eng.LogEvent
+	}
 	s.engine = eng
 	engineDone := make(chan error, 1)
 	go func() { engineDone <- eng.Start(ctx) }()
@@ -169,11 +184,15 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 
 	// Scheduler and memory retention (DESIGN 5.9, 5.10 rule 6); both stop with ctx.
 	go (&sched.Scheduler{Pool: pool, Engine: eng, Tick: cfg.SchedulerTick, Log: log, Emit: s.emit}).Run(ctx)
-	go (&memory.Sweeper{Pool: pool, Log: log, Also: []memory.SweepFunc{
+	sweeps := []memory.SweepFunc{
 		func(ctx context.Context, now time.Time) (int64, error) {
 			return store.DeleteExpiredConversationMessages(ctx, pool, now)
 		},
-	}}).Run(ctx)
+	}
+	if collector != nil {
+		sweeps = append(sweeps, collector.Sweep) // DESIGN 5.25 rule 6
+	}
+	go (&memory.Sweeper{Pool: pool, Log: log, Also: sweeps}).Run(ctx)
 	// Project budget alerts (DESIGN 5.19 rule 5) and merge request records refreshed
 	// from their provider (DESIGN 5.20 rule 3), the backfill of rule 7 first so the
 	// first pass settles the records of runs that predate the table.

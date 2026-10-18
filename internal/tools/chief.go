@@ -31,10 +31,10 @@ const (
 )
 
 // ChatToolNames are the tools callable with a chat token (DESIGN 5.15 rule 2, 5.17 rule
-// 8, 5.22 rule 6), sorted. The registry marks the same tools Chat; a test keeps the two
-// in step.
-var ChatToolNames = []string{DelegateTaskName, ListAgentsName, ListProjectsName, ListWorkflowsName, MemoryRecallName, MemorySaveName,
-	ReadMergeRequestName, RunStatusName}
+// 8, 5.22 rule 6, 5.24 rule 9), sorted. The registry marks the same tools Chat; a test
+// keeps the two in step.
+var ChatToolNames = []string{AnswerQuestionName, DelegateTaskName, ListAgentsName, ListProjectsName, ListWorkflowsName, MemoryRecallName,
+	MemorySaveName, ReadMergeRequestName, RunStatusName}
 
 // IsChatTool reports whether name (with or without the platform prefix) is
 // chat-capable.
@@ -48,6 +48,9 @@ const (
 	DelegationWindow      = 10 * time.Minute
 	delegationLimitText   = "delegation limit reached; try later"
 	runStatusStateMaxSize = 4 << 10
+	// runStatusArtifactsMax is how many delivered files run_status names (DESIGN 5.25
+	// rule 5); artifact_count says how many there are.
+	runStatusArtifactsMax = 20
 )
 
 // tokenProperties are the identity fields of a chat-capable tool: exactly one of them is
@@ -660,8 +663,9 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
 	return &Tool{
 		Name: RunStatusName,
 		Description: "Check on a platform run: its status, timing, steps, tool calls, cost, its final state when it " +
-			"has ended, the failure reason if it failed, the approval it waits for, if any, the merge request it " +
-			"opened or updates, and the issue it came from.",
+			"has ended, the failure reason if it failed, the approval it waits for, if any, the question it asks " +
+			"the operator while it waits for an answer, the files it delivered, the merge request it opened or " +
+			"updates, and the issue it came from.",
 		InputSchema: runStatusSchema,
 		Risk:        RiskReadOnly,
 		Hits:        HitsPostgres,
@@ -732,10 +736,41 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
 				if len(pending) > 0 {
 					out["pending_approval"] = map[string]string{"kind": pending[0].Kind, "message": pending[0].Message}
 				}
+				// DESIGN 5.24 rule 11: the question the run waits on, next to the entry above.
+				for i := range pending {
+					if pending[i].Kind == store.ApprovalKindQuestion {
+						out["question"] = questionView(&pending[i])
+						break
+					}
+				}
+			}
+			// DESIGN 5.25 rule 5: the files the run delivered, the first 20 by path.
+			artifacts, err := store.ListRunArtifacts(ctx, pool, run.ID)
+			if err != nil {
+				return Result{}, err
+			}
+			if len(artifacts) > 0 {
+				shown := make([]map[string]any, 0, min(len(artifacts), runStatusArtifactsMax))
+				for _, a := range artifacts[:min(len(artifacts), runStatusArtifactsMax)] {
+					shown = append(shown, map[string]any{"path": a.Path, "size_bytes": a.Size})
+				}
+				out["artifacts"] = shown
+				out["artifact_count"] = len(artifacts)
 			}
 			return JSONResult(out), nil
 		},
 	}
+}
+
+// questionView is run_status's question (DESIGN 5.24 rule 11): its id, text, options when
+// it has any, and when it was asked.
+func questionView(a *store.Approval) map[string]any {
+	q := map[string]any{"id": a.ID, "text": a.Message, "asked_at": a.RequestedAt.UTC().Format(time.RFC3339)}
+	var options []string
+	if len(a.Options) > 0 && json.Unmarshal(a.Options, &options) == nil && len(options) > 0 {
+		q["options"] = options
+	}
+	return q
 }
 
 // runRequest is the merge request record run_status shows for a run (DESIGN 5.22 rule 8):

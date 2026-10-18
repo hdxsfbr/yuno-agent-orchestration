@@ -78,7 +78,7 @@ workflow:
 
         Use the approved notes at {{.state.researcher.notes_path}} and nothing the notes do not support. The critic's assessment: {{.state.critic.feedback}}
 
-        Write the report to runs/$RUN_ID/report.md with a one-paragraph summary, the findings, the trade-offs and a recommendation. Finish with the summary and the report path.
+        Write the report to runs/$RUN_ID/out/report.md with a one-paragraph summary, the findings, the trade-offs and a recommendation. Put the finished report under runs/$RUN_ID/out/ so the operator receives it. Finish with the summary and the report path.
       output_schema:
         type: object
         properties:

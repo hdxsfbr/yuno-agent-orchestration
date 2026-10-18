@@ -131,8 +131,10 @@ human before the agent continues with `pending_approval`, default 540), `TOOL_OU
 `BUDGET_TICK` (how often project spend is checked for budget alerts, default 60 s) and
 `MERGE_REQUEST_SYNC_INTERVAL` (how often open merge requests are refreshed from their
 provider, default 120 s) and `INTAKE_POLL_INTERVAL` (how often projects with issue intake
-enabled are polled for labelled issues, default 120 s). The memory tools need the agent's
-`memory_policy.enabled`.
+enabled are polled for labelled issues, default 120 s). `ARTIFACT_DIR` (where the api
+keeps the files runs deliver, the `artifacts` volume) and `ARTIFACT_TTL_DAYS` (how long
+after a run finished they are kept, default 30; 0 keeps them). The memory tools need the
+agent's `memory_policy.enabled`.
 Secrets never go in the repository; the log handler redacts anything shaped like a
 provider key (Anthropic or OpenRouter), a bot token, a run token or a bearer token, in
 logs and in stored transcripts (see `internal/obs/redact.go`). Postgres is published on
@@ -159,6 +161,7 @@ output. OpenClaw's built-ins run inside the agent's Docker sandbox.
 | `http_fetch` | read-only | allowlisted https hosts | 15 s | `{run_token, url}`; output wrapped as untrusted content |
 | `memory_save` | computational | postgres | 5 s | `{run_token, key, value, ttl_days?, scope?}`; `scope: "project"` saves a note shared by every agent of a run on the project |
 | `memory_recall` | read-only | postgres | 5 s | `{run_token, query, scope?}`; output wrapped as untrusted content |
+| `ask_operator` | computational | postgres | the approval wait + 30 s | `{run_token, question, options?}`; blocks for the operator's answer up to the wait, then the step parks until it arrives |
 | `read`, `write`, `edit`, `apply_patch`, `ls`, `exec`, `process` | OpenClaw built-ins | the sandbox | OpenClaw's | |
 
 Side effects are idempotent: the key is a hash of run, node visit, tool and canonical
@@ -190,12 +193,36 @@ file there with `key`, `name`, `description` and `definition`, naming agents by
 `agent_name`; it loads at the next api start, and "From template" resolves the names to
 your agents.
 
-Approvals come in three kinds and share one inbox: a side-effecting tool call (the MCP
+Approvals come in four kinds and share one inbox: a side-effecting tool call (the MCP
 call blocks up to `MCP_TOOL_WAIT_SECONDS`; approved runs it in the same turn, rejected tells the
 agent, and a late approval is executed by the platform with the same idempotency key), a
-workflow `approval` node (the run pauses and releases its worker), and an OpenClaw exec
-approval for a command outside the agent's policy. Every approval is also registered
-with the gateway so OpenClaw's own surfaces can answer it.
+workflow `approval` node (the run pauses and releases its worker), an OpenClaw exec
+approval for a command outside the agent's policy, and a question from an agent (below).
+Every approval but a question is also registered with the gateway so OpenClaw's own
+surfaces can answer it.
+
+An agent that is missing one fact can ask for it instead of guessing (DESIGN 5.24): the
+`ask_operator` tool (the shipped Coder and Researcher hold it) puts a question, with up to
+five suggested answers, into the inbox as an approval of kind Question and blocks the
+call for the same wait as a gated tool; an answer within the wait reaches the agent in the
+same turn. Past the wait the agent is told to save its progress and end its turn, the
+step parks (the run waits with no worker, the time limit paused), and the answer
+re-queues it: the step runs again as a continuation visit with every answer of the step
+in its task, which does not count toward `max_loop_visits`. The question is announced
+where the run reports (its conversation, or else the Telegram-bound agent's latest one),
+and the Chief of Staff relays the person's reply with `answer_question`; the operator may
+also decline, and the agent then proceeds and states what it assumed. A question nobody
+answers within `approval_timeout_seconds` fails the run with `question unanswered`,
+which Retry asks again. At most three questions per step and one pending at a time.
+
+A run can deliver files (DESIGN 5.25): whatever an agent puts under `runs/<run id>/out/`
+is collected when its step ends, one entry per path (a later step that changes a file
+replaces it), kept under `ARTIFACT_DIR` for `ARTIFACT_TTL_DAYS`, and listed on the run
+page's Artifacts section with Download and a preview for small text and images; a
+project run also gets `diff.patch`, the checkout against the commit it cloned, produced
+in a private clone on the api side (never with the checkout's own `.git`). Downloads
+are attachments with `nosniff`, never rendered inline, and `run_status` names the files
+with the run's link for the Chief.
 
 Per-agent model settings: `thinking` is the reasoning control on OpenClaw (the agent's
 `thinkingDefault`), and `max_tokens` reaches OpenClaw as the agent's `params.maxTokens`.
@@ -343,19 +370,21 @@ Coder's and the Reviewer's agent pages once so they can use those tools.
 
 One agent is meant to be talked to: the seeded Chief of Staff, which `make run` binds to
 Telegram when nothing else is bound. It never does the work itself. In a conversation it
-can call seven platform tools (DESIGN 5.15, 5.17): `list_agents`, `list_workflows` and
+can call the chat tools (DESIGN 5.15, 5.17, 5.22, 5.24): `list_agents`, `list_workflows` and
 `list_projects` to know the roster and the repositories, `delegate_task` to start a run
 for one agent with a task or for a workflow with input, naming the project when the
 words or the workflow call for one ("implement a trie in Python on the playground
 project" runs the Dev pipeline on that project), `run_status` to read a run (with its
-merge request, its state and pipeline, and how often it was retried), and the memory
+merge request, its state and pipeline, how often it was retried, the question it waits
+on and the files it delivered), `read_merge_request` for "what is !4 about?",
+`answer_question` to pass the person's answer to a run that asked, and the memory
 tools. Every delegated run is an ordinary
 run: traced, limited, its side effects gated by approvals in the UI. When such a run ends,
 or stops for an approval, the platform posts a one-line report into the Chief's chat
 session and the Chief relays it; the Channels page shows the report with a link to the
 run, and the Runs page marks delegated runs. Chat-time calls identify the agent with a
 per-agent chat token written into its instructions (the gateway sends no caller identity);
-only those six tools accept it, and it is redacted everywhere like run tokens.
+only those tools accept it, and it is redacted everywhere like run tokens.
 
 ## Layout
 

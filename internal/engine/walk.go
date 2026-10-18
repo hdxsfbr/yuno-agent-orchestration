@@ -136,8 +136,11 @@ func (w *walk) enter(ctx context.Context, node *workflow.Node) *outcome {
 		o := violated(viol)
 		return &o
 	}
-	if max := w.run.Limits.MaxLoopVisits; max > 0 {
-		n, err := store.CountNodeVisits(ctx, e.deps.Pool, w.run.ID, node.ID)
+	// A continuation visit (DESIGN 5.24 rule 5) is free of the loop limit: it is not counted
+	// by the visits after it, and the visit the answer would resume is not refused for the
+	// limit the step reached by asking.
+	if max := w.run.Limits.MaxLoopVisits; max > 0 && !w.continuesQuestion(ctx, node) {
+		n, err := store.CountNodeLoopVisits(ctx, e.deps.Pool, w.run.ID, node.ID)
 		if err != nil {
 			o := failed(store.RunFailed, "count node visits: "+err.Error())
 			return &o
@@ -151,6 +154,16 @@ func (w *walk) enter(ctx context.Context, node *workflow.Node) *outcome {
 	return nil
 }
 
+// continuesQuestion reports whether the next visit of an agent node is the continuation of
+// a parked question that was decided (DESIGN 5.24 rule 5).
+func (w *walk) continuesQuestion(ctx context.Context, node *workflow.Node) bool {
+	if node.Kind != workflow.KindAgent {
+		return false
+	}
+	_, err := store.ContinuationQuestion(ctx, w.e.deps.Pool, w.run.ID, node.ID)
+	return err == nil
+}
+
 // agentNode runs one visit of an agent node and returns the next node.
 func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *outcome) {
 	e := w.e
@@ -161,12 +174,27 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 	if v == nil {
 		return "", &early
 	}
+	stale := w.stale
 	w.stale = nil
+	// A question a lost worker's visit left pending is closed before this visit's task
+	// lists the step's questions (DESIGN 5.24 rule 7).
+	e.expireStepQuestions(ctx, w.run.ID, stale)
 	if v.early == nil {
 		task, err := w.renderTask(node)
 		if err != nil {
 			o := failed(store.RunFailed, "task template: "+err.Error())
 			v.early = &o
+		}
+		// The step's decided questions go after the rendered task, before the protocol
+		// block taskMessageWith adds, so a continuation, a retry and a loop revisit all
+		// carry them (DESIGN 5.24 rule 7). A visit never runs on a silently incomplete task.
+		if answers, aerr := e.stepAnswers(ctx, w.run.ID, node.ID); aerr != nil {
+			if v.early == nil {
+				o := failed(store.RunFailed, "read the step's answers: "+aerr.Error())
+				v.early = &o
+			}
+		} else if answers != "" {
+			task += "\n\n" + answers
 		}
 		v.task = task
 	}
@@ -223,6 +251,14 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 	e.collectArtifacts(wctx, v)
 	if v.sessionCreated {
 		w.sessions = append(w.sessions, v.key)
+	}
+	if res.paused {
+		// The visit parked on a question (DESIGN 5.24 rule 5): the worker lets the run go
+		// as it does at an approval node, and the answer re-queues it. A cancel that came
+		// in meanwhile is applied now, since nothing else would see it.
+		w.refresh(wctx)
+		o := w.applyPendingCancel(ctx, w.run)
+		return "", &o
 	}
 	if res.nodeStatus != store.NodeSucceeded {
 		return w.nodeFailed(ctx, node, res)

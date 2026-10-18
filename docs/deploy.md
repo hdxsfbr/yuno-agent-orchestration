@@ -105,7 +105,12 @@ have defaults and need no entry in `.env`. After the wave 9 deploy run `make see
 once more: the Coder and the Reviewer gain `read_merge_request` and the prompt lines
 about a merge request the run updates, the Deployer the update wording, the Chief the
 `merge_request` argument and the intake sentence, and the Dev pipeline's deployer task
-names both statuses.
+names both statuses. After the wave 10 deploy run it once more: the Coder and the
+Researcher gain `ask_operator` and the sentence about asking, the Writer the sentence
+about `out/`, the Chief the answering sentence, and the research template's writer task
+names `out/`. `ARTIFACT_DIR` and `ARTIFACT_TTL_DAYS` (wave 10) have defaults; the deploy
+creates the `artifacts` volume on the api, the first named volume it mounts (back it up
+with `pgdata` if the delivered files matter).
 
 ## Deploying from GitLab CI
 

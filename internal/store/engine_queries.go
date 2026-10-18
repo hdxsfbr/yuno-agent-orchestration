@@ -98,10 +98,18 @@ func ResumeRunAt(ctx context.Context, q Querier, id string, at time.Time) (*Run,
 
 // UpdateRunNodeProgress writes everything about a node visit except its output, which
 // only SetRunNodeOutput writes (the finish tool and the engine race otherwise).
+//
+// A parked visit (DESIGN 5.24 rule 5) that its decision already closed keeps its closed
+// state: the visit goroutine that parked it may still save what it holds (a late
+// transcript entry) after the decision re-queued the run, and must not reopen the row.
 func UpdateRunNodeProgress(ctx context.Context, q Querier, n *RunNode) error {
-	_, err := q.Exec(ctx, `UPDATE run_nodes SET iteration=$2, status=$3, messages=$4, failure_reason=$5, session_key=$6,
-		openclaw_run_id=$7, started_at=$8, finished_at=$9 WHERE id=$1`,
-		n.ID, n.Iteration, n.Status, n.Messages, n.FailureReason, n.SessionKey, n.OpenClawRunID, n.StartedAt, n.FinishedAt)
+	_, err := q.Exec(ctx, `UPDATE run_nodes SET iteration=$2, messages=$4, failure_reason=$5, session_key=$6,
+		openclaw_run_id=$7, started_at=$8,
+		status = CASE WHEN parked_at IS NOT NULL AND status = $10 THEN status ELSE $3 END,
+		finished_at = CASE WHEN parked_at IS NOT NULL AND status = $10 THEN finished_at ELSE $9 END
+		WHERE id=$1`,
+		n.ID, n.Iteration, n.Status, n.Messages, n.FailureReason, n.SessionKey, n.OpenClawRunID, n.StartedAt, n.FinishedAt,
+		NodeSucceeded)
 	return err
 }
 
@@ -153,6 +161,24 @@ func GetApprovalByExternalID(ctx context.Context, q Querier, externalID string) 
 func DecideApprovalAt(ctx context.Context, q Querier, id, status, by, reason string, at time.Time) (*Approval, error) {
 	rows, err := q.Query(ctx, `UPDATE approvals SET status=$2, decided_at=$5, decided_by=$3, reason=$4
 		WHERE id=$1 AND status='pending' RETURNING `+approvalSelect, id, status, by, reason, at.UTC())
+	if err != nil {
+		return nil, err
+	}
+	a, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Approval])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return a, err
+}
+
+// AnswerApprovalAt records the operator's answer to a pending question (DESIGN 5.24 rule
+// 3): the row becomes approved with answer, decided_at and decided_by. It returns
+// ErrNotFound when the approval is not a pending question, as DecideApprovalAt does for
+// one that is not pending.
+func AnswerApprovalAt(ctx context.Context, q Querier, id, answer, by string, at time.Time) (*Approval, error) {
+	rows, err := q.Query(ctx, `UPDATE approvals SET status=$2, answer=$3, decided_by=$4, decided_at=$5
+		WHERE id=$1 AND status='pending' AND kind=$6 RETURNING `+approvalSelect,
+		id, ApprovalApproved, answer, by, at.UTC(), ApprovalKindQuestion)
 	if err != nil {
 		return nil, err
 	}
@@ -256,6 +282,78 @@ func RequeuePausedRunAt(ctx context.Context, q Querier, id string, at time.Time)
 		paused_total_ms = paused_total_ms + GREATEST(0, COALESCE(EXTRACT(EPOCH FROM ($3::timestamptz - paused_at)) * 1000, 0))::bigint,
 		paused_at=NULL, updated_at=now() WHERE id=$1 AND status=$4 RETURNING `+runColumns,
 		id, RunQueued, at.UTC(), RunWaitingApproval))
+}
+
+// ParkVisit parks a visit on its pending question (DESIGN 5.24 rule 5) in one
+// transaction: the visit's row becomes waiting_approval with parked_at, and the run moves
+// to waiting_approval with resume_node_visit_id the visit and paused_at the park time (a
+// run that is already waiting keeps its paused_at). It is committed before the worker is
+// released. ErrNotFound means the visit or the run was not in a state that can park;
+// nothing is stored.
+func ParkVisit(ctx context.Context, db interface {
+	Begin(context.Context) (pgx.Tx, error)
+}, runID, runNodeID string, at time.Time) (*Run, error) {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // no-op after commit
+	tag, err := tx.Exec(ctx, `UPDATE run_nodes SET parked_at=$3, status=$4 WHERE id=$1 AND run_id=$2 AND status IN ($5, $4)`,
+		runNodeID, runID, at.UTC(), NodeWaitingApproval, NodeRunning)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrNotFound
+	}
+	run, err := collectRun(tx.Query(ctx, `UPDATE runs SET status=$2, paused_at=COALESCE(paused_at, $3), resume_node_visit_id=$4,
+		updated_at=now() WHERE id=$1 AND status IN ($5, $2) RETURNING `+runColumns,
+		runID, RunWaitingApproval, at.UTC(), runNodeID, RunRunning))
+	if err != nil {
+		return nil, err
+	}
+	return run, tx.Commit(ctx)
+}
+
+// IsParkedOn reports whether the run waits on a parked visit: the predicate of
+// RequeueParkedRun, read without changing anything (DESIGN 5.24 rule 8).
+func IsParkedOn(ctx context.Context, q Querier, runID, runNodeID string) (bool, error) {
+	var parked bool
+	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs r WHERE r.id=$1 AND r.status=$3 AND r.resume_node_visit_id=$2
+		AND EXISTS (SELECT 1 FROM run_nodes n WHERE n.id=$2 AND n.parked_at IS NOT NULL))`,
+		runID, runNodeID, RunWaitingApproval).Scan(&parked)
+	return parked, err
+}
+
+// RequeueParkedRun re-queues a run that waits on a parked visit (DESIGN 5.24 rule 5, the
+// Consistency paragraph): status waiting_approval, resume_node_visit_id the visit, and the
+// visit's parked_at set. The paused interval is added to paused_total_ms as
+// RequeuePausedRunAt does, and in the same statement the parked visit's row is closed
+// succeeded without output, so a worker that claims the run at once never finds it open.
+// It returns ErrNotFound when the predicate does not hold (nothing parked, or already
+// re-queued), which makes every call after the first idempotent.
+func RequeueParkedRun(ctx context.Context, q Querier, runID, runNodeID string, at time.Time) (*Run, error) {
+	return collectRun(q.Query(ctx, `WITH parked AS (
+			UPDATE run_nodes SET status=$5, finished_at=$3
+			WHERE id=$2 AND run_id=$1 AND parked_at IS NOT NULL AND status IN ($6, $7, $8)
+			  AND EXISTS (SELECT 1 FROM runs WHERE id=$1 AND status=$4 AND resume_node_visit_id=$2)
+			RETURNING id)
+		UPDATE runs SET status=$9,
+			paused_total_ms = paused_total_ms + GREATEST(0, COALESCE(EXTRACT(EPOCH FROM ($3::timestamptz - paused_at)) * 1000, 0))::bigint,
+			paused_at=NULL, updated_at=now()
+		WHERE id=$1 AND status=$4 AND resume_node_visit_id=$2
+		  AND EXISTS (SELECT 1 FROM run_nodes WHERE id=$2 AND parked_at IS NOT NULL)
+		RETURNING `+runColumns,
+		runID, runNodeID, at.UTC(), RunWaitingApproval, NodeSucceeded, NodePending, NodeRunning, NodeWaitingApproval, RunQueued))
+}
+
+// CountNodeLoopVisits returns the visits of a node in a run that count toward
+// max_loop_visits (DESIGN 5.24 rule 5): those that continue no question. CountNodeVisits
+// stays the visit number.
+func CountNodeLoopVisits(ctx context.Context, q Querier, runID, nodeID string) (int, error) {
+	var n int
+	err := q.QueryRow(ctx, `SELECT count(*) FROM run_nodes WHERE run_id=$1 AND node_id=$2 AND question_id IS NULL`, runID, nodeID).Scan(&n)
+	return n, err
 }
 
 // SetApprovalExternalID stores the gateway's id for an approval registered with it.

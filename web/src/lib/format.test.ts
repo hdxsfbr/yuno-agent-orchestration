@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { elapsedMs, formatAgo, formatCount, formatDuration, formatMicros, formatUsd, humanize, shortId } from "./format";
+import { elapsedMs, formatAgo, formatBytes, formatCount, formatDuration, formatMicros, formatUsd, humanize, shortId } from "./format";
 
 describe("formatMicros", () => {
   it("shows micro-dollars as dollars with four decimals", () => {
@@ -140,5 +140,38 @@ describe("formatAgo", () => {
     expect(formatAgo(undefined, now)).toBe("—");
     expect(formatAgo(null, now)).toBe("—");
     expect(formatAgo("soon", now)).toBe("—");
+  });
+});
+
+describe("formatBytes", () => {
+  it("counts small sizes in bytes", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(1)).toBe("1 B");
+    expect(formatBytes(850)).toBe("850 B");
+    expect(formatBytes(1023)).toBe("1023 B");
+  });
+
+  it("uses binary units, with one decimal below ten of a unit and none above", () => {
+    expect(formatBytes(1024)).toBe("1 KiB");
+    expect(formatBytes(1536)).toBe("1.5 KiB");
+    expect(formatBytes(10 * 1024)).toBe("10 KiB");
+    expect(formatBytes(262_144)).toBe("256 KiB");
+    expect(formatBytes(300 * 1024)).toBe("300 KiB");
+    expect(formatBytes(3.2 * 1024 * 1024)).toBe("3.2 MiB");
+    expect(formatBytes(20 * 1024 * 1024)).toBe("20 MiB");
+    expect(formatBytes(50 * 1024 ** 3)).toBe("50 GiB");
+  });
+
+  it("moves to the next unit when rounding reaches 1024", () => {
+    expect(formatBytes(1024 * 1024 - 1)).toBe("1 MiB");
+    expect(formatBytes(1024 * 1024)).toBe("1 MiB");
+    expect(formatBytes(9.97 * 1024)).toBe("10 KiB");
+  });
+
+  it("shows an em dash for a size it cannot read", () => {
+    expect(formatBytes(undefined)).toBe("—");
+    expect(formatBytes(null)).toBe("—");
+    expect(formatBytes(-1)).toBe("—");
+    expect(formatBytes(Number.NaN)).toBe("—");
   });
 });

@@ -59,6 +59,30 @@ closing tag escaped, the tool is read-only, and the push onto the request's bran
 refused when the branch moved since the run cloned it (D-050), so a commit someone else
 pushed is never replaced by the checkout's tree.
 
+**Answers from the operator (DESIGN 5.24).** `ask_operator` lets an agent put a question
+in the inbox and the answer reaches the model as the operator's own text, not wrapped as
+untrusted content; the question is also announced in the run's conversation or the
+Telegram-bound agent's latest one, and the Chief relays the person's reply with
+`answer_question`. Mitigation: only the API token holder and the allowed Telegram users
+(`TELEGRAM_ALLOWED_USER_IDS`) can answer; a question is never a gate (the tool cannot be
+set to `require_approval`), so an answer authorises nothing by itself and every side
+effect still needs its approval; three questions per step, one pending at a time, and
+the question text is redacted and capped. Residual risk: whoever may message the Chief
+steers a run through its questions as they could through a delegation; the answer is
+visible on the run page.
+
+**Files a run delivers (DESIGN 5.25).** Agents write arbitrary files under `out/` and the
+api serves them to the operator's browser. Mitigation: the api reads the workspace
+through `os.Root` (links never followed), caps the files (200, 50 MiB, 20 MiB each),
+serves every artifact as an attachment with `X-Content-Type-Options: nosniff` and HTML
+and SVG as plain text, and the UI previews text in a `<pre>` and images from a blob, so
+nothing an agent wrote runs in the operator's browser; `diff.patch` is produced in a
+private clone, never by running git inside the agent's checkout, where a hook or a
+config entry an agent wrote could run on the api side; the file paths `run_status`
+names are agent-chosen text and reach the Chief as tool output, which `AGENTS.md` tells
+it to treat as data. Residual risk: a delivered file is still untrusted content once
+downloaded and opened elsewhere.
+
 **Runaway agents.** Loops, unbounded tool use, cost blow-ups. Mitigation: per-run step,
 time, cost, tool-call, node-iteration and loop-visit limits enforced on every event and
 on a tick (5.2), cancellation from the UI, a run can only ever wait on a human for
@@ -197,6 +221,12 @@ derived gateway image adds only the static Docker CLI.
 - Issue intake polls the provider every two minutes and drives the issue's labels; the
   comments it posts are best effort (a crash between the label swap and the comment can
   repeat the comment once), and an issue's text is the run's task (above).
+- A step parked on a question (DESIGN 5.24) continues as a new visit with the answer in
+  its task and the files it saved, not in its old OpenClaw session, so the agent loses
+  its conversational context unless the answer arrives while the turn is still open.
+- Artifacts (DESIGN 5.25) are the newest version per path, kept on one named volume
+  with no backup of their own; the project diff costs one shallow clone per step of a
+  project run and is skipped when the provider refuses to serve the cloned commit.
 - The scheduler is a single process; two api instances would both be safe (row locks)
   but only one is run.
 - No OpenTelemetry export; spans live in Postgres and the UI.

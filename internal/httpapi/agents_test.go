@@ -255,3 +255,36 @@ func TestListAgentsChannelsAndActivity(t *testing.T) {
 		t.Fatalf("listed %d of the two agents", seen)
 	}
 }
+
+// DESIGN 5.24 rule 1: ask_operator is auto or blocked; a gated question would wait twice
+// and outlive OpenClaw's request timeout, so the form refuses require_approval on it.
+func TestAgentRefusesRequireApprovalOnAskOperator(t *testing.T) {
+	pool := needDB(t)
+	_, ts := newTestServer(t, pool, &fakeEngine{pool: pool}, nil)
+	for _, key := range []string{"ask_operator", "yuno__ask_operator"} {
+		body := `{"name":"Asker","model":"claude-opus-5-5","tool_allowlist":["ask_operator","finish"],"interaction_rules":{"` + key + `":"require_approval"}}`
+		code, resp := do(t, ts, http.MethodPost, "/api/agents", body)
+		if code != http.StatusUnprocessableEntity || !slices.Equal(detailPaths(t, resp), []string{"interaction_rules." + key}) ||
+			!strings.Contains(string(resp), "must be auto or blocked") {
+			t.Fatalf("%s: %d %s", key, code, resp)
+		}
+	}
+	for _, mode := range []string{"auto", "blocked"} {
+		body := `{"name":"Asker ` + mode + `","model":"claude-opus-5-5","tool_allowlist":["ask_operator","finish"],"interaction_rules":{"ask_operator":"` + mode + `","finish":"auto"}}`
+		code, resp := do(t, ts, http.MethodPost, "/api/agents", body)
+		var a store.Agent
+		if code != http.StatusCreated || json.Unmarshal(resp, &a) != nil || a.InteractionRules["ask_operator"] != mode {
+			t.Fatalf("%s: %d %s", mode, code, resp)
+		}
+	}
+	// The same refusal on an update, and a bad value still reads as a bad value.
+	id := testAgent(t, "asker-update")
+	code, resp := do(t, ts, http.MethodPut, "/api/agents/"+id, `{"name":"asker-update","model":"claude-opus-5-5","interaction_rules":{"ask_operator":"require_approval"}}`)
+	if code != http.StatusUnprocessableEntity || !strings.Contains(string(resp), "must be auto or blocked") {
+		t.Fatalf("update: %d %s", code, resp)
+	}
+	code, resp = do(t, ts, http.MethodPost, "/api/agents", `{"name":"Asker","model":"claude-opus-5-5","interaction_rules":{"ask_operator":"maybe"}}`)
+	if code != http.StatusUnprocessableEntity || !strings.Contains(string(resp), "must be one of") {
+		t.Fatalf("bad value: %d %s", code, resp)
+	}
+}

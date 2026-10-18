@@ -101,3 +101,23 @@ export function formatAgo(iso: string | null | undefined, now: number = Date.now
   if (hours < 24) return `${hours} h ago`;
   return `${Math.floor(hours / 24)} d ago`;
 }
+
+/**
+ * A size in bytes the way a file manager says it, in binary units: "0 B", "850 B", "1.5 KiB",
+ * "12 KiB", "3.2 MiB". One decimal below ten of a unit, none above; a missing or negative
+ * size is an em dash.
+ */
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  const round = (v: number) => (v < 10 ? Math.round(v * 10) / 10 : Math.round(v));
+  let value = bytes / 1024;
+  let unit = 0;
+  // 1023.9 KiB rounds to 1024: that is "1 MiB", not "1024 KiB".
+  while (round(value) >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${round(value)} ${units[unit]}`;
+}

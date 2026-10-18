@@ -276,6 +276,13 @@ func (e *Engine) DecideApproval(ctx context.Context, approvalID, decision, by, r
 		return e.decideTool(ctx, a, status, by, reason, true)
 	case store.ApprovalKindNode:
 		return e.decideNode(ctx, a, status, by, reason)
+	case store.ApprovalKindQuestion:
+		// A question is answered (AnswerQuestion) or declined; approving it says nothing
+		// (DESIGN 5.24 rule 3).
+		if status == store.ApprovalApproved {
+			return nil, &ValidationError{Messages: []string{"answer: a question needs an answer"}}
+		}
+		return e.decideQuestion(ctx, a, by, reason)
 	}
 	return nil, fmt.Errorf("approval %s: unknown kind %q", approvalID, a.Kind)
 }
@@ -426,8 +433,20 @@ func (e *Engine) announceDecision(ctx context.Context, a *store.Approval) {
 		e.log.Warn("end approval span failed", "approval_id", a.ID, "error", err)
 	}
 	e.emit(ctx, a.RunID, "approval.decided", map[string]any{"approval": a})
-	e.logEvent(ctx, a.RunID, "info", fmt.Sprintf("%s approval %s by %s", a.Kind, a.Status, strValue(a.DecidedBy)),
-		"node_id", a.NodeID, "approval_id", a.ID)
+	e.logEvent(ctx, a.RunID, "info", decisionLine(a), "node_id", a.NodeID, "approval_id", a.ID)
+}
+
+// decisionLine is the run log line of a decision: "<kind> approval <status> by <who>", and
+// for a question (DESIGN 5.24) "question answered|declined|expired by <who>".
+func decisionLine(a *store.Approval) string {
+	if a.Kind != store.ApprovalKindQuestion {
+		return fmt.Sprintf("%s approval %s by %s", a.Kind, a.Status, strValue(a.DecidedBy))
+	}
+	what := map[string]string{store.ApprovalApproved: "answered", store.ApprovalRejected: "declined", store.ApprovalExpired: "expired"}[a.Status]
+	if what == "" {
+		what = a.Status
+	}
+	return fmt.Sprintf("question %s by %s", what, strValue(a.DecidedBy))
 }
 
 // resolvePlugin settles the gateway's copy of a tool approval. "Already resolved" and
@@ -544,9 +563,15 @@ func (e *Engine) requeueIfUnattended(ctx context.Context, runID string) {
 // expireApproval marks a pending approval expired, denies it on the gateway, hands it
 // to a waiting MCP call (which answers the model "rejected") or records the outcome.
 func (e *Engine) expireApproval(ctx context.Context, a *store.Approval, reason string) (*store.Approval, bool) {
+	decided, _, ok := e.expire(ctx, a, reason)
+	return decided, ok
+}
+
+// expire is expireApproval that also says whether a waiting MCP call took the expiry.
+func (e *Engine) expire(ctx context.Context, a *store.Approval, reason string) (decided *store.Approval, delivered, ok bool) {
 	decided, err := e.recordDecision(ctx, a, store.ApprovalExpired, "platform", reason)
 	if err != nil {
-		return nil, false
+		return nil, false, false
 	}
 	switch a.Kind {
 	case store.ApprovalKindExec:
@@ -559,16 +584,21 @@ func (e *Engine) expireApproval(ctx context.Context, a *store.Approval, reason s
 		}
 	case store.ApprovalKindTool:
 		e.resolvePlugin(ctx, decided, "deny")
-		if !e.deliver(decided) {
+		if delivered = e.deliver(decided); !delivered {
 			e.settleUnwaited(ctx, decided)
 		}
+	case store.ApprovalKindQuestion:
+		// A call that waits answers the model `unanswered` (DESIGN 5.24 rules 4 and 8); a
+		// live visit or a parked run is the sweeper's to tell (sweepQuestion), and the ends
+		// of a visit, a cancel and a failed run need nothing more.
+		delivered = e.deliver(decided)
 	case store.ApprovalKindNode:
 		r := reason
 		if rn, err := store.FinishRunNode(ctx, e.deps.Pool, a.RunNodeID, store.NodeFailed, &r, e.clock.Now()); err == nil {
 			e.emit(ctx, a.RunID, "node.status", map[string]any{"node": rn})
 		}
 	}
-	return decided, true
+	return decided, delivered, true
 }
 
 // expireRunApprovals expires every approval a finished run left pending.
@@ -584,7 +614,8 @@ func (e *Engine) expireRunApprovals(ctx context.Context, runID, reason string) {
 }
 
 // sweepApprovals expires approvals past their expires_at and fails their runs with
-// reason "approval expired" (DESIGN 5.2 rule 10).
+// reason "approval expired" (DESIGN 5.2 rule 10); a question is treated by sweepQuestion
+// (5.24 rule 8). It then repeats the re-queues a decision could not finish.
 func (e *Engine) sweepApprovals(ctx context.Context) {
 	due, err := store.ListExpiredApprovals(ctx, e.deps.Pool, e.clock.Now())
 	if err != nil {
@@ -593,11 +624,18 @@ func (e *Engine) sweepApprovals(ctx context.Context) {
 	}
 	for i := range due {
 		a := &due[i]
+		if a.Kind == store.ApprovalKindQuestion && a.RunID != "" {
+			// A question's expiry does not fail the run unless the run waits on it
+			// (DESIGN 5.24 rule 8), and then with its own reason.
+			e.sweepQuestion(ctx, a)
+			continue
+		}
 		// A conversation's approval has no run to fail.
 		if _, ok := e.expireApproval(ctx, a, "approval expired"); ok && a.RunID != "" {
 			e.failRun(ctx, a.RunID, "approval expired")
 		}
 	}
+	e.requeueParkedDecided(ctx)
 }
 
 // failRun ends a run that is not terminal with reason: a live visit aborts its turn,

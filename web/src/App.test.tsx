@@ -95,6 +95,24 @@ describe("navigation", () => {
     await waitFor(() => expect(within(link).getByLabelText("3 pending")).not.toBeNull());
   });
 
+  it("counts a pending question like any other request", async () => {
+    const asked = { ...pending("q1"), kind: "question" as const, node_id: "coder", message: "Which greeting language should I use?", options: ["English", "Spanish"] };
+    waiting = [pending("a1"), asked];
+    renderApp();
+    const link = screen.getByRole("link", { name: /^Approvals/ });
+    expect((await within(link).findByLabelText("2 pending")).textContent).toBe("2");
+
+    await waitFor(() => expect(api.hasStream("/api/events")).toBe(true));
+    // a second question is asked, then the first is answered from another surface
+    const second = { ...asked, id: "q2" };
+    waiting = [pending("a1"), asked, second];
+    api.send("/api/events", "approval.requested", { approval: second });
+    await waitFor(() => expect(within(link).getByLabelText("3 pending")).not.toBeNull());
+    waiting = [pending("a1"), second];
+    api.send("/api/events", "approval.decided", { approval: { ...asked, status: "approved", answer: "Spanish" } });
+    await waitFor(() => expect(within(link).getByLabelText("2 pending")).not.toBeNull());
+  });
+
   it("shows no badge when nothing is waiting", async () => {
     waiting = [];
     renderApp();

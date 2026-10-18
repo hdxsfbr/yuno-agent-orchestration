@@ -19,7 +19,7 @@ that cancels the run). Design: DESIGN 5.24 rules 4 and 7.
 most recent conversation, like a budget alert.** (Andre, 2026-10-18, the recommended
 answer of DESIGN 5.24's first open line) A run started from the UI, a schedule or the
 intake has no conversation to report to; its question is announced through the route of
-5.19 rule 6 (`SendPlatformMessage`, idempotency key `question-<id>`) so the operator
+5.19 rule 6 (`SendPlatformMessage`, idempotency key `report-<run id>-question-<id>`) so the operator
 hears it where they are; without a binding or a conversation the inbox and the run page
 are the surfaces. Why: a question is time-critical and the route exists; the Chief
 relays the answer with `answer_question`. Alternative: the inbox only. Design: DESIGN

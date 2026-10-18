@@ -7,6 +7,7 @@ import { useRunTrace } from "@/lib/useRunTrace";
 import { Card } from "@/components/Card";
 import { Loading, QueryError } from "@/components/QueryState";
 import ApprovalsSection from "@/components/run/ApprovalsSection";
+import ArtifactsSection from "@/components/run/ArtifactsSection";
 import LogSection from "@/components/run/LogSection";
 import MergeRequestCard from "@/components/run/MergeRequestCard";
 import MessagesSection from "@/components/run/MessagesSection";
@@ -14,9 +15,9 @@ import RunHeader from "@/components/run/RunHeader";
 import StateSection from "@/components/run/StateSection";
 import Timeline from "@/components/run/Timeline";
 
-function Section({ title, count, children }: { title: string; count?: number; children: ReactNode }) {
+function Section({ title, count, id, children }: { title: string; count?: number; id?: string; children: ReactNode }) {
   return (
-    <section>
+    <section id={id}>
       <h2 className="mb-2 text-base font-semibold">
         {title}
         {count !== undefined ? <span className="ml-2 text-sm font-normal text-zinc-500">{count}</span> : null}
@@ -51,11 +52,13 @@ export default function RunDetailPage() {
   return (
     <div className="max-w-5xl space-y-5">
       {back}
-      <RunHeader run={view.run} connection={connection} now={now} toolCalls={view.tool_calls} onRunChange={applyRun} />
+      <RunHeader run={view.run} connection={connection} now={now} toolCalls={view.tool_calls} approvals={view.approvals} onRunChange={applyRun} />
       {view.run.merge_request ? <MergeRequestCard key={view.run.merge_request.id} mr={view.run.merge_request} run={view.run} onChange={applyMergeRequest} /> : null}
 
+      <ArtifactsSection key={view.run.id} runId={view.run.id} status={view.run.status} />
+
       {view.approvals.length > 0 || view.run.status === "waiting_approval" ? (
-        <Section title="Approvals" count={view.approvals.length}>
+        <Section id="approvals" title="Approvals" count={view.approvals.length}>
           <ApprovalsSection approvals={view.approvals} toolCalls={view.tool_calls} runStatus={view.run.status} onDecided={applyApproval} />
         </Section>
       ) : null}

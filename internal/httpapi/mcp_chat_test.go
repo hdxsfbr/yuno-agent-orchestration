@@ -133,14 +133,14 @@ func TestMCPChatTokenRefusals(t *testing.T) {
 	}
 	// A run tool with a valid chat token: refused before validation (its schema would
 	// ask for run_token), recorded as blocked.
-	for _, tool := range []string{"finish", "deploy_release", "http_fetch"} {
+	for _, tool := range []string{"finish", "deploy_release", "http_fetch", "ask_operator"} {
 		text, isErr := f.call(t, tool, map[string]any{"chat_token": f.token})
 		if !isErr || text != tool+" is not available in a conversation" {
 			t.Errorf("%s: %v %q", tool, isErr, text)
 		}
 	}
 	rows := f.rows(t)
-	if len(rows) != 3 {
+	if len(rows) != 4 {
 		t.Fatalf("rows = %+v", rows)
 	}
 	for _, r := range rows {

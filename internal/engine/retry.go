@@ -90,10 +90,11 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 			applied, under = &resolved, resolved
 		}
 		// The visits of the node the walk resumes at count against max_loop_visits as its
-		// entry check counts them (walk.enter, >=), or the run would fail again at once.
+		// entry check counts them (walk.enter, >=), or the run would fail again at once; a
+		// continuation visit does not count (DESIGN 5.24 rule 5).
 		visits := 0
 		if under.MaxLoopVisits > 0 {
-			if visits, err = store.CountNodeVisits(ctx, tx, runID, *run.CurrentNode); err != nil {
+			if visits, err = store.CountNodeLoopVisits(ctx, tx, runID, *run.CurrentNode); err != nil {
 				return fmt.Errorf("run %s: count visits of %s: %w", runID, *run.CurrentNode, err)
 			}
 		}

@@ -140,12 +140,17 @@ func (in *agentInput) apply(a *store.Agent) {
 // checkInteractionRule validates one interaction rule (DESIGN 5.3 rules 6 and 7):
 // the key names a known tool, the value is auto, require_approval or blocked (a
 // side-effecting tool may be auto, D-009), require_approval only gates platform tools
-// (built-ins follow the exec policy), and finish, the run protocol itself, stays auto.
+// (built-ins follow the exec policy), finish, the run protocol itself, stays auto, and
+// ask_operator is auto or blocked (DESIGN 5.24 rule 1).
 func checkInteractionRule(fe *fieldErrors, registry *tools.Registry, key, value string) {
 	path := "interaction_rules." + key
 	name := tools.PlainName(key)
 	_, platform := registry.Get(name)
 	switch {
+	case name == tools.AskOperatorName && value == tools.PolicyRequireApproval:
+		// A gated question would wait twice and outlive OpenClaw's request timeout
+		// (DESIGN 5.24 rule 1).
+		fe.add(path, "must be auto or blocked")
 	case !platform && !tools.IsOpenClawBuiltin(name):
 		fe.add(path, "unknown tool %q", key)
 	case !slices.Contains(interactionModes, value):

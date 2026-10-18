@@ -140,6 +140,13 @@ type visit struct {
 	result         *outcome
 	lastTouch      time.Time
 	lastEventAt    time.Time
+
+	// Questions to the operator (DESIGN 5.24), owned by the visit goroutine: the visit's
+	// pending question (one at a time), the one its wait ended on with no decision (rule
+	// 4: parked-on), and a decision that reached the live visit for its turn's end (rule 5 (b)).
+	pendingQuestion string
+	parkedOn        string
+	answered        *store.Approval
 }
 
 // SessionKey is the node-scoped OpenClaw session of a visit (DESIGN 5.14 rule 5). It
@@ -171,6 +178,14 @@ func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.No
 	}
 	agentID := node.AgentID
 	v.rn = &store.RunNode{RunID: run.ID, NodeID: node.ID, AgentID: &agentID, Visit: prior + 1, Status: store.NodeRunning, StartedAt: &now}
+	// A visit created because a parked question was decided names it (DESIGN 5.24 rule 5);
+	// a loop revisit or a retry continues nothing.
+	switch q, err := store.ContinuationQuestion(ctx, e.deps.Pool, run.ID, node.ID); {
+	case err == nil:
+		v.rn.QuestionID = &q.ID
+	case !errors.Is(err, store.ErrNotFound):
+		return nil, failed(store.RunFailed, "continuation question: "+err.Error())
+	}
 	a, skills, err := e.loadAgentForRun(ctx, node.AgentID)
 	if err != nil {
 		o := failed(store.RunFailed, err.Error())
@@ -1336,6 +1351,13 @@ func (v *visit) approvalDecided(ctx context.Context, a *store.Approval) {
 	}
 	if a.Status != store.ApprovalPending {
 		delete(v.toolBlocking, a.ID)
+		if a.ID == v.pendingQuestion {
+			// The waiting call took the decision itself (DESIGN 5.24 rule 5 (a)).
+			v.pendingQuestion = ""
+		}
+		if a.ID == v.parkedOn {
+			v.parkedOn = ""
+		}
 	}
 	v.resumeIfClear(ctx)
 }
@@ -1398,7 +1420,9 @@ func (v *visit) onChat(ctx context.Context, ce openclaw.ChatEvent) {
 
 // end fixes the visit's outcome and closes finish acceptance (a result arriving later is
 // refused). A success yields to a cancellation or the time limit in effect at this
-// moment, re-read from the run row, so a result never outruns a cancel (DESIGN 5.2).
+// moment, re-read from the run row, so a result never outruns a cancel (DESIGN 5.2). A
+// paused outcome (the visit parked on a question, DESIGN 5.24 rule 5) is stored as it is:
+// it is not a success, so the limit check does not apply.
 func (v *visit) end(ctx context.Context, o outcome) {
 	if v.result != nil {
 		return
@@ -1477,6 +1501,14 @@ func (v *visit) turnFinal(ctx context.Context, ce openclaw.ChatEvent) {
 		}
 		v.e.logEvent(ctx, v.run.ID, "info", "result taken from the final reply (finish was not called)")
 		v.end(ctx, succeeded(out))
+		return
+	}
+	// The turn ended without a finish and without a result in its reply. A question of
+	// this visit decides what that means (DESIGN 5.24 rule 5): a decision becomes the next
+	// turn, a pending question parks the visit. Every other end of the visit (a finish, a
+	// result taken from the reply, an error, an abort, a limit, a cancel) parks nothing
+	// and closes the question as the visit finishes.
+	if v.questionTurnEnd(ctx) {
 		return
 	}
 	v.end(ctx, failed(store.RunFailed, "agent did not call finish"))
@@ -1835,7 +1867,9 @@ func (v *visit) release() {
 }
 
 // finish is the visit's terminal housekeeping: revoke the token, reconcile the
-// transcript, close open tool calls and approvals, write the node row and span.
+// transcript, close open tool calls and approvals, write the node row and span. A visit
+// that parked on a question (res.paused, DESIGN 5.24 rule 5) is not finished: its row and
+// the run keep the waiting_approval the park wrote, and the decision closes the row.
 func (v *visit) finish(ctx context.Context, res outcome) {
 	e := v.e
 	v.closing = true
@@ -1873,6 +1907,20 @@ func (v *visit) finish(ctx context.Context, res outcome) {
 		if decided, ok := e.expireApproval(ctx, a, reason); ok {
 			v.approvals[extID] = decided
 		}
+	}
+	// A visit that ends with its question pending closes it, after the result is fixed, so
+	// a decision made a moment earlier is the decider's and one made later is a 409
+	// (DESIGN 5.24 rule 5). A visit that parked leaves it for the decision.
+	if id := v.pendingQuestion; id != "" && !res.paused {
+		v.pendingQuestion, v.parkedOn = "", ""
+		if q, err := store.GetApproval(ctx, e.deps.Pool, id); err == nil && q.Status == store.ApprovalPending {
+			e.expireApproval(ctx, q, stepFinishedReason)
+		}
+	}
+	if res.paused {
+		clear(v.toolBlocking)
+		e.endSpan(ctx, v.nodeSpan, now, map[string]any{"status": store.NodeWaitingApproval, "parked": true, "steps": v.steps, "turns": v.turn})
+		return
 	}
 	// A turn that ended while an MCP call still waited for its approval leaves the run
 	// paused; the walk continues with it running. The approval stays pending. After a

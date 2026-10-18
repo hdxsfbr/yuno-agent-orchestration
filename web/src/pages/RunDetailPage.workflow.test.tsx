@@ -72,6 +72,7 @@ beforeEach(() => {
   trace = { run: run(), nodes: [], model_calls: [], tool_calls: [], spans: [], agent_messages: [], approvals: [] };
   api = installFakeApi();
   api.on("GET", `/api/runs/${RUN}/trace`, () => trace);
+  api.on("GET", `/api/runs/${RUN}/artifacts`, () => []);
 });
 
 afterEach(() => {
@@ -329,5 +330,97 @@ describe("several nodes and repeat visits", () => {
     const gate = within(timeline.getByRole("region", { name: "Node gate" }));
     expect(gate.getByText("waiting approval")).not.toBeNull();
     expect(gate.getByText("Waiting for an approval.")).not.toBeNull();
+  });
+});
+
+describe("a run that asks the operator a question", () => {
+  const question = (over: Partial<Approval> = {}): Approval =>
+    approval({
+      id: "q1",
+      run_node_id: "rn-coder",
+      kind: "question",
+      node_id: "coder",
+      message: "Which greeting language should I use?",
+      options: ["English", "Spanish"],
+      requested_at: "2026-10-15T10:05:00Z",
+      ...over,
+    });
+
+  beforeEach(() => {
+    trace.run = run({ status: "waiting_approval", current_node: "coder" });
+    trace.nodes = [node("rn-coder", "coder", 1, { status: "waiting_approval" })];
+    trace.approvals = [question()];
+  });
+
+  it("puts the question to the operator on the Approvals section, with the header line pointing to it", async () => {
+    renderPage();
+    const approvals = await section("Approvals");
+    const card = within(approvals.getByRole("article"));
+    expect(card.getByText("Question")).not.toBeNull();
+    expect(card.getByText("Which greeting language should I use?")).not.toBeNull();
+    expect(card.getByRole("button", { name: "English" })).not.toBeNull();
+    expect(card.getByRole("button", { name: "Spanish" })).not.toBeNull();
+    expect(card.getByLabelText("Your answer")).not.toBeNull();
+    expect(card.getByRole("button", { name: "Decline" })).not.toBeNull();
+    expect(card.queryByRole("button", { name: "Approve" })).toBeNull();
+
+    const link = within(screen.getByRole("region", { name: "Run summary" })).getByRole("link", { name: /^Asks:/ });
+    expect(link.textContent).toBe("Asks: Which greeting language should I use?");
+    expect(link.getAttribute("href")).toBe("#approvals");
+    // the fragment names the section the question is in
+    const target = document.getElementById("approvals")!;
+    expect(target.tagName).toBe("SECTION");
+    expect(target.contains(card.getByText("Which greeting language should I use?"))).toBe(true);
+  });
+
+  it("answers with an option: the card shows the answer, and the header line goes", async () => {
+    api.on("POST", "/api/approvals/q1/answer", () => question({ status: "approved", answer: "Spanish", decided_at: "2026-10-15T10:06:00Z", decided_by: "api" }));
+    renderPage();
+    const approvals = await section("Approvals");
+    fireEvent.click(approvals.getByRole("button", { name: "Spanish" }));
+    expect(await approvals.findByText("Answered: Spanish")).not.toBeNull();
+    expect(api.made("POST", "/api/approvals/q1/answer")[0].body).toEqual({ answer: "Spanish" });
+    expect(approvals.queryByRole("button", { name: "Spanish" })).toBeNull();
+    expect(screen.queryByRole("link", { name: /^Asks:/ })).toBeNull();
+  });
+
+  it("follows the stream: an answer from Telegram shows on the card, and the header line goes when the run resumes", async () => {
+    renderPage();
+    const approvals = await section("Approvals");
+    await screen.findByText("Live");
+    api.send(EVENTS, "approval.decided", { approval: question({ status: "approved", answer: "English", decided_at: "2026-10-15T10:06:00Z", decided_by: "chat:Chief of Staff" }) });
+    expect(await approvals.findByText("Answered: English")).not.toBeNull();
+    expect(approvals.getByText(/by chat:Chief of Staff/)).not.toBeNull();
+    api.send(EVENTS, "run.status", { run: run({ status: "running", current_node: "coder" }) });
+    await waitFor(() => expect(screen.queryByRole("link", { name: /^Asks:/ })).toBeNull());
+  });
+
+  it("shows a question asked while the page is open", async () => {
+    trace.run = run({ status: "running", current_node: "coder" });
+    trace.approvals = [];
+    renderPage();
+    await screen.findByRole("heading", { name: "Timeline" });
+    await screen.findByText("Live");
+    expect(screen.queryByRole("link", { name: /^Asks:/ })).toBeNull();
+    api.send(EVENTS, "run.status", { run: run({ status: "waiting_approval", current_node: "coder" }) });
+    api.send(EVENTS, "approval.requested", { approval: question() });
+    expect(await screen.findByRole("link", { name: "Asks: Which greeting language should I use?" })).not.toBeNull();
+    expect((await section("Approvals")).getByRole("button", { name: "English" })).not.toBeNull();
+  });
+
+  it("shows the question and its answer in the timeline, and says why the step has a second visit", async () => {
+    trace.run = run({ status: "running", current_node: "coder" });
+    trace.nodes = [
+      node("rn-coder", "coder", 1, { started_at: "2026-10-15T10:01:00Z" }),
+      node("rn-coder2", "coder", 2, { status: "running", started_at: "2026-10-15T10:07:00Z", question_id: "q1" }),
+    ];
+    trace.approvals = [question({ status: "approved", answer: "Spanish", decided_at: "2026-10-15T10:06:00Z", decided_by: "api" })];
+    renderPage();
+    const timeline = await section("Timeline");
+    const first = within(timeline.getByRole("region", { name: "Node coder, visit 1" }));
+    expect(first.getByText("Question")).not.toBeNull();
+    expect(first.getByText("Answered: Spanish")).not.toBeNull();
+    const second = within(timeline.getByRole("region", { name: "Node coder, visit 2" }));
+    expect(second.getByText("visit 2, continued after a question")).not.toBeNull();
   });
 });

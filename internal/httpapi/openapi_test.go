@@ -134,6 +134,8 @@ func TestOpenAPIConformance(t *testing.T) {
 	steps = append(steps, retryConformanceSteps(t, fe)...)
 	steps = append(steps, iterationConformanceSteps(t)...)
 	steps = append(steps, intakeConformanceSteps(t)...)
+	steps = append(steps, artifactConformanceSteps(t)...)
+	steps = append(steps, questionConformanceSteps(t)...)
 	var agentID string
 	for _, st := range steps {
 		code, body := checkConformance(t, router, ts.URL, st.method, st.path, st.body, st.want < 300)
@@ -218,7 +220,7 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 		return out
 	}
 	for schema, props := range map[string][]string{
-		"Approval":            {"conversation_id", "reported_at"},
+		"Approval":            {"conversation_id", "reported_at", "options", "answer"},
 		"Status":              {"scheduler"},
 		"Conversation":        {"session_key", "message_count", "last_message_at"},
 		"ConversationMessage": {"direction", "text", "usage", "run_id"},
@@ -250,6 +252,10 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 		"ProjectIntakeInput": {"enabled", "label", "workflow_id"},
 		"ProjectIntake":      {"enabled", "label", "workflow_id", "workflow_name", "polled_at", "last_error"},
 		"IntakePollResult":   {"taken", "closed", "error"},
+		// DESIGN 5.24 and 5.25 (wave 10).
+		"RunNode":    {"question_id"},
+		"AnswerBody": {"answer"},
+		"Artifact":   {"id", "run_id", "node_id", "visit", "path", "size", "sha256", "content_type", "generated", "created_at", "updated_at"},
 	} {
 		ref := doc.Components.Schemas[schema]
 		if ref == nil || ref.Value == nil {
@@ -277,6 +283,9 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 	}
 	if events == nil || events.Get == nil || !strings.Contains(events.Get.Description, "run.retry") {
 		t.Error("GET /api/events does not document run.retry")
+	}
+	if events == nil || events.Get == nil || !strings.Contains(events.Get.Description, "run.artifacts") {
+		t.Error("GET /api/events does not document run.artifacts")
 	}
 	if p := doc.Paths.Find("/api/conversations/{id}/tool-calls"); p == nil || p.Get == nil {
 		t.Error("GET /api/conversations/{id}/tool-calls is not documented")

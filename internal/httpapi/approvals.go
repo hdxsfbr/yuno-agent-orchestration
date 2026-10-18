@@ -90,10 +90,75 @@ func (s *Server) rejectApproval(w http.ResponseWriter, r *http.Request) {
 	s.decide(w, r, engine.DecisionReject, in.Reason, false)
 }
 
-// answerApproval is POST /api/approvals/{id}/answer (DESIGN 5.24 rule 3): the route is in
-// the contract ahead of the engine path that serves it, and answers 501 until then.
+// answerBody is AnswerBody.
+type answerBody struct {
+	Answer string `json:"answer"`
+}
+
+// maxAnswerBytes is AnswerBody's cap: 1 to 4096 bytes after trimming (DESIGN 5.24 rule 3).
+const maxAnswerBytes = 4096
+
+// answerApproval is POST /api/approvals/{id}/answer (DESIGN 5.24 rule 3): the answer to a
+// pending question. 404 for an unknown approval, 422 for one that is not a question or an
+// answer outside 1 to 4096 bytes, 409 when it is no longer pending.
 func (s *Server) answerApproval(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not_implemented", "planned for wave 10", nil)
+	var in answerBody
+	if !decodeBody(w, r, &in, maxDecisionBody) {
+		return
+	}
+	id := r.PathValue("id")
+	answer := strings.TrimSpace(in.Answer)
+	var fe fieldErrors
+	if n := len(answer); n < 1 || n > maxAnswerBytes {
+		fe.add("answer", "1 to %d characters", maxAnswerBytes)
+	}
+	a, err := store.GetApproval(r.Context(), s.pool, id)
+	if err != nil {
+		s.storeError(w, r, "approval", err)
+		return
+	}
+	if a.Kind != store.ApprovalKindQuestion {
+		fe = append(fe, fieldError{Path: "answer", Message: "only a question can be answered"})
+	}
+	if len(fe) > 0 {
+		writeValidation(w, "invalid answer", fe)
+		return
+	}
+	if a.Status != store.ApprovalPending {
+		writeNotPending(w, a.Status)
+		return
+	}
+	if s.engine == nil {
+		writeError(w, http.StatusServiceUnavailable, "engine_unavailable", errEngineUnavailable.Error(), nil)
+		return
+	}
+	answered, err := s.engine.AnswerQuestion(r.Context(), id, answer, decidedBy)
+	var verr *engine.ValidationError
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, answered)
+	case errors.Is(err, engine.ErrNotPending):
+		status := "decided"
+		if cur, gerr := store.GetApproval(r.Context(), s.pool, id); gerr == nil {
+			status = cur.Status
+		}
+		writeNotPending(w, status)
+	case errors.Is(err, engine.ErrNotQuestion):
+		writeValidation(w, "invalid answer", fieldErrors{{Path: "answer", Message: "only a question can be answered"}})
+	case errors.As(err, &verr):
+		details := make(fieldErrors, 0, len(verr.Messages))
+		for _, m := range verr.Messages {
+			path, msg, _ := strings.Cut(m, ": ")
+			details = append(details, fieldError{Path: path, Message: msg})
+		}
+		writeValidation(w, "invalid answer", details)
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "approval not found", nil)
+	case errors.Is(err, engine.ErrNotImplemented):
+		writeError(w, http.StatusServiceUnavailable, "engine_unavailable", "the run engine cannot answer questions", nil)
+	default:
+		s.internalError(w, r, "answer question", err)
+	}
 }
 
 // decide applies a decision through the engine (DESIGN 5.3 rules 3, 5, 8): 404 for an
@@ -112,6 +177,10 @@ func (s *Server) decide(w http.ResponseWriter, r *http.Request, decision, reason
 	}
 	if always && a.Kind != store.ApprovalKindExec {
 		fe.add("always", "only exec approvals can be approved always")
+	}
+	if decision != engine.DecisionReject && a.Kind == store.ApprovalKindQuestion {
+		// A question is answered, or declined with reject (DESIGN 5.24 rule 3).
+		fe.add("answer", "a question needs an answer")
 	}
 	if len(fe) > 0 {
 		writeValidation(w, "invalid decision", fe)

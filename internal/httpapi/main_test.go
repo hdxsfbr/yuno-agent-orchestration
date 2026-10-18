@@ -70,6 +70,7 @@ func testConfig() config.Config {
 		AnthropicBaseURL:        "http://127.0.0.1:1",
 		ModelProxyRatePerMinute: 60,
 		ProjectTokenKey:         testProjectTokenKey,
+		ArtifactDir:             artifactStoreDir(),
 	}
 }
 
@@ -320,8 +321,20 @@ func (f *fakeEngine) WaitQuestion(context.Context, string) (*store.Approval, err
 	return nil, engine.ErrNotImplemented
 }
 
-func (f *fakeEngine) AnswerQuestion(context.Context, string, string, string) (*store.Approval, error) {
-	return nil, engine.ErrNotImplemented
+// AnswerQuestion answers a pending question in the store the way the engine does (DESIGN
+// 5.24 rule 3), without the delivery of rule 5: enough for the conformance steps.
+func (f *fakeEngine) AnswerQuestion(ctx context.Context, id, answer, by string) (*store.Approval, error) {
+	a, err := store.GetApproval(ctx, f.pool, id)
+	if err != nil {
+		return nil, err
+	}
+	if a.Kind != store.ApprovalKindQuestion {
+		return nil, engine.ErrNotQuestion
+	}
+	if a.Status != store.ApprovalPending {
+		return nil, engine.ErrNotPending
+	}
+	return store.AnswerApprovalAt(ctx, f.pool, id, answer, by, time.Now())
 }
 
 var _ engine.Service = (*fakeEngine)(nil)

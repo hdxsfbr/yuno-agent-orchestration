@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { Approval, ModelCall, RunNode, ToolCall } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros } from "@/lib/format";
+import { isQuestion, questionOutcome } from "@/lib/question";
 import { buildTimelineEntries, type RetryMark, type RunView, type TimelineItem } from "@/lib/trace";
 import { Badge, StatusBadge } from "../Badge";
 import { EmptyState } from "../QueryState";
@@ -59,7 +60,10 @@ function NodeCard({ node, items, now, repeated }: { node: RunNode; items: Timeli
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-zinc-200 px-4 py-2.5 dark:border-zinc-800">
         <h3 className="font-mono text-sm font-semibold">{node.node_id}</h3>
         <StatusBadge kind="node" status={node.status} />
-        {repeated || node.visit > 1 ? <span className="text-xs text-zinc-500">visit {node.visit}</span> : null}
+        {repeated || node.visit > 1 || node.question_id ? (
+          // A visit that continues after a question is a second visit of the step because the operator answered.
+          <span className="text-xs text-zinc-500">{node.question_id ? `visit ${node.visit}, continued after a question` : `visit ${node.visit}`}</span>
+        ) : null}
         {node.iteration > 0 ? (
           <span className="text-xs text-zinc-500">
             {formatCount(node.iteration)} {node.iteration === 1 ? "turn" : "turns"}
@@ -198,24 +202,28 @@ function ToolCallRow({ call }: { call: ToolCall }) {
 }
 
 function ApprovalRow({ approval }: { approval: Approval }) {
+  const outcome = questionOutcome(approval);
+  // A declined question carries its reason in the outcome line.
+  const reason = isQuestion(approval) && approval.status === "rejected" ? undefined : approval.reason;
   return (
     <Row
       accent="border-l-amber-400 dark:border-l-amber-600"
       title={
         <>
           <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">Approval</span>
-          <Badge>{approval.kind}</Badge>
+          <Badge>{isQuestion(approval) ? "Question" : approval.kind}</Badge>
           <StatusBadge kind="approval" status={approval.status} />
         </>
       }
       right={`Requested ${formatDateTime(approval.requested_at)}${approval.decided_at ? ` · Decided ${formatDateTime(approval.decided_at)}` : ""}`}
     >
       <p className="mt-2 whitespace-pre-wrap break-words text-sm">{approval.message}</p>
-      {approval.decided_at && (approval.decided_by || approval.reason) ? (
+      {outcome ? <p className="mt-1 whitespace-pre-wrap break-words text-sm font-medium">{outcome}</p> : null}
+      {approval.decided_at && (approval.decided_by || reason) ? (
         <p className="mt-1 text-xs text-zinc-500">
           {approval.decided_by ? `By ${approval.decided_by}` : ""}
-          {approval.decided_by && approval.reason ? " · " : ""}
-          {approval.reason ?? ""}
+          {approval.decided_by && reason ? " · " : ""}
+          {reason ?? ""}
         </p>
       ) : null}
       {approval.status === "pending" ? <p className="mt-1 text-xs text-zinc-500">Expires {formatDateTime(approval.expires_at)}</p> : null}

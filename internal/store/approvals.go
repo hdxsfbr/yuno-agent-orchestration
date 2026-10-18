@@ -1,6 +1,11 @@
 package store
 
-import "context"
+import (
+	"context"
+	"errors"
+
+	"github.com/jackc/pgx/v5"
+)
 
 // ApprovalItem is an approval as the inbox lists it: with the gated tool call joined
 // when there is one, so the operator sees the tool's name and full input (DESIGN 5.3),
@@ -69,4 +74,79 @@ func runStatuses(ctx context.Context, q Querier, ids []string) (map[string]strin
 		out[id] = status
 	}
 	return out, rows.Err()
+}
+
+// ---- questions to the operator (DESIGN 5.24) ------------------------------------------
+
+// CountStepQuestions counts the questions a step has asked in a run: the rows of kind
+// question with the run and node id, whatever their status (rule 2: the fourth is
+// refused). The partial index approvals_question_step_idx serves it.
+func CountStepQuestions(ctx context.Context, q Querier, runID, nodeID string) (int, error) {
+	var n int
+	err := q.QueryRow(ctx, `SELECT count(*) FROM approvals WHERE kind=$1 AND run_id=$2 AND node_id=$3`,
+		ApprovalKindQuestion, runID, nodeID).Scan(&n)
+	return n, err
+}
+
+// ListStepQuestions lists the step's decided questions, oldest first: the rows of kind
+// question with the run and node id that are no longer pending, whichever visit asked
+// them (rule 7's answer paragraph has one block for each).
+func ListStepQuestions(ctx context.Context, q Querier, runID, nodeID string) ([]Approval, error) {
+	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals
+		WHERE kind=$1 AND run_id=$2 AND node_id=$3 AND status <> $4 ORDER BY requested_at, id`,
+		ApprovalKindQuestion, runID, nodeID, ApprovalPending)
+	if err != nil {
+		return nil, err
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByName[Approval])
+	if out == nil {
+		out = []Approval{}
+	}
+	return out, err
+}
+
+// ContinuationQuestion is the question a new visit of the step continues (DESIGN 5.24
+// rule 5): the newest question of the step that was answered or declined, that the visit
+// which asked it parked on (the last question of a visit whose parked_at is set), and
+// that no visit names yet. ErrNotFound for a loop revisit or a retry, which continue
+// nothing: an expired question is not one (a retry after rule 8 is not a continuation),
+// and a question the visit went on past (answered within the wait) is not the one it
+// parked on.
+func ContinuationQuestion(ctx context.Context, q Querier, runID, nodeID string) (*Approval, error) {
+	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals
+		WHERE kind=$1 AND run_id=$2 AND node_id=$3 AND status IN ($4, $5)
+		  AND EXISTS (SELECT 1 FROM run_nodes p WHERE p.id = approvals.run_node_id AND p.parked_at IS NOT NULL)
+		  AND NOT EXISTS (SELECT 1 FROM run_nodes n WHERE n.question_id = approvals.id)
+		  AND NOT EXISTS (SELECT 1 FROM approvals later WHERE later.kind = $1 AND later.run_node_id = approvals.run_node_id
+		                  AND (later.requested_at, later.id) > (approvals.requested_at, approvals.id))
+		ORDER BY requested_at DESC, id DESC LIMIT 1`,
+		ApprovalKindQuestion, runID, nodeID, ApprovalApproved, ApprovalRejected)
+	if err != nil {
+		return nil, err
+	}
+	a, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Approval])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return a, err
+}
+
+// ListParkedQuestions returns, for every run that waits on a parked visit, that visit's
+// newest question when it is no longer pending: the decisions whose re-queue (or, for an
+// expiry, whose failure) the sweep repeats (DESIGN 5.24 Failure handling).
+func ListParkedQuestions(ctx context.Context, q Querier) ([]Approval, error) {
+	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals WHERE status <> $1 AND id IN (
+		SELECT (SELECT a.id FROM approvals a WHERE a.run_node_id = r.resume_node_visit_id AND a.kind = $2
+		        ORDER BY a.requested_at DESC, a.id DESC LIMIT 1)
+		FROM runs r JOIN run_nodes n ON n.id = r.resume_node_visit_id
+		WHERE r.status = $3 AND n.parked_at IS NOT NULL)
+		ORDER BY decided_at`, ApprovalPending, ApprovalKindQuestion, RunWaitingApproval)
+	if err != nil {
+		return nil, err
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByName[Approval])
+	if out == nil {
+		out = []Approval{}
+	}
+	return out, err
 }

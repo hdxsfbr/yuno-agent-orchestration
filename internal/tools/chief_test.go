@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -780,5 +781,135 @@ func TestListProjectsIntake(t *testing.T) {
 	}
 	if got[plain.Name] != `{"enabled":false,"label":"yuno"}` || got[watched.Name] != `{"enabled":true,"label":"triage"}` {
 		t.Fatalf("intake = %v", got)
+	}
+}
+
+// T5.24.13 (DESIGN 5.24 rule 11): while the run waits on a question, run_status names it
+// (id, text, options, when it was asked) next to the pending approval it already reports;
+// a run that waits on anything else, or on nothing, has no question.
+func TestRunStatusQuestion(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	tool := NewRunStatus(pool, "")
+	f := newFixture(t, pool, nil)
+	asked := time.Date(2026, 10, 18, 9, 30, 15, 0, time.UTC)
+
+	status := func() map[string]any {
+		t.Helper()
+		res := invoke(t, tool, Call{Input: json.RawMessage(`{"chat_token":"x","run_id":"` + f.run.ID + `"}`)})
+		if res.IsError {
+			t.Fatalf("run_status: %+v", res)
+		}
+		var out map[string]any
+		must(t, json.Unmarshal(res.Output, &out))
+		return out
+	}
+	if out := status(); out["question"] != nil || out["pending_approval"] != nil {
+		t.Fatalf("a running run has a question: %v", out)
+	}
+
+	q := &store.Approval{RunID: f.run.ID, RunNodeID: f.visit.ID, Kind: store.ApprovalKindQuestion, NodeID: "coder",
+		Message: "Which greeting language?", Options: json.RawMessage(`["Python","Go"]`), Status: store.ApprovalPending,
+		RequestedAt: asked, ExpiresAt: asked.Add(24 * time.Hour)}
+	_, err := store.InsertApprovalAndPause(ctx, pool, q, asked)
+	must(t, err)
+	out := status()
+	question, _ := out["question"].(map[string]any)
+	if out["status"] != store.RunWaitingApproval || question["id"] != q.ID || question["text"] != "Which greeting language?" ||
+		question["asked_at"] != "2026-10-18T09:30:15Z" || len(question) != 4 {
+		t.Fatalf("waiting on a question = %v", out)
+	}
+	if opts, _ := question["options"].([]any); len(opts) != 2 || opts[0] != "Python" || opts[1] != "Go" {
+		t.Fatalf("options = %v", question["options"])
+	}
+	// The pending-approval entry it already had stays.
+	if pa, _ := out["pending_approval"].(map[string]any); pa["kind"] != "question" || pa["message"] != "Which greeting language?" {
+		t.Fatalf("pending_approval = %v", out["pending_approval"])
+	}
+
+	// A question without options has no options key.
+	_, err = pool.Exec(ctx, `UPDATE approvals SET options = NULL WHERE id = $1`, q.ID)
+	must(t, err)
+	if question, _ = status()["question"].(map[string]any); question["id"] != q.ID || question["options"] != nil || len(question) != 3 {
+		t.Fatalf("question without options = %v", question)
+	}
+
+	// A decided question is no longer the one the run waits on.
+	_, err = pool.Exec(ctx, `UPDATE approvals SET status = 'approved', answer = 'Go', decided_by = 'andre', decided_at = now() WHERE id = $1`, q.ID)
+	must(t, err)
+	if out := status(); out["question"] != nil {
+		t.Fatalf("a decided question is reported: %v", out)
+	}
+
+	// A run waiting on a tool approval has none.
+	g := newFixture(t, pool, nil)
+	_, err = store.InsertApprovalAndPause(ctx, pool, &store.Approval{RunID: g.run.ID, RunNodeID: g.visit.ID, Kind: store.ApprovalKindTool,
+		NodeID: "deployer", Message: "Deploy release 1.0.0", Status: store.ApprovalPending, ExpiresAt: asked.Add(time.Hour)}, asked)
+	must(t, err)
+	res := invoke(t, tool, Call{Input: json.RawMessage(`{"run_id":"` + g.run.ID + `"}`)})
+	var tooled map[string]any
+	must(t, json.Unmarshal(res.Output, &tooled))
+	if tooled["question"] != nil || tooled["pending_approval"] == nil {
+		t.Fatalf("waiting on a tool approval = %s", res.Output)
+	}
+}
+
+// T5.25.8 (DESIGN 5.25 rule 5): run_status names the files the run delivered, the first 20
+// by path, and how many there are; a run with none has neither field.
+func TestRunStatusArtifacts(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	tool := NewRunStatus(pool, "")
+	f := newFixture(t, pool, nil)
+	status := func() (map[string]any, string) {
+		t.Helper()
+		res := invoke(t, tool, Call{Input: json.RawMessage(`{"chat_token":"x","run_id":"` + f.run.ID + `"}`)})
+		if res.IsError {
+			t.Fatalf("run_status: %+v", res)
+		}
+		var out map[string]any
+		must(t, json.Unmarshal(res.Output, &out))
+		return out, string(res.Output)
+	}
+	add := func(path string, size int64) {
+		t.Helper()
+		_, err := pool.Exec(ctx, `INSERT INTO run_artifacts (id, run_id, node_id, visit, path, size, sha256, content_type, created_at, updated_at)
+			VALUES ($1, $2, 'writer', 1, $3, $4, $5, 'text/markdown', now(), now())`, store.NewID(), f.run.ID, path, size, strings.Repeat("a", 64))
+		must(t, err)
+	}
+
+	if out, raw := status(); out["artifacts"] != nil || out["artifact_count"] != nil || strings.Contains(raw, "artifact") {
+		t.Fatalf("a run with no files: %s", raw)
+	}
+
+	add("report.md", 2048)
+	add("data/results.csv", 120)
+	out, _ := status()
+	files, _ := out["artifacts"].([]any)
+	if out["artifact_count"] != float64(2) || len(files) != 2 {
+		t.Fatalf("two files: %v", out)
+	}
+	first, _ := files[0].(map[string]any)
+	second, _ := files[1].(map[string]any)
+	if first["path"] != "data/results.csv" || first["size_bytes"] != float64(120) || second["path"] != "report.md" || second["size_bytes"] != float64(2048) ||
+		len(first) != 2 || len(second) != 2 {
+		t.Fatalf("files = %v", files)
+	}
+
+	// 25 files: the first 20 by path are named, the count says 25.
+	for i := 0; i < 23; i++ {
+		add(fmt.Sprintf("part-%02d.txt", i), int64(i))
+	}
+	out, _ = status()
+	files, _ = out["artifacts"].([]any)
+	if out["artifact_count"] != float64(25) || len(files) != 20 {
+		t.Fatalf("25 files: count %v, named %d", out["artifact_count"], len(files))
+	}
+	var paths []string
+	for _, f := range files {
+		paths = append(paths, f.(map[string]any)["path"].(string))
+	}
+	if !slices.IsSorted(paths) || paths[0] != "data/results.csv" || paths[19] != "part-18.txt" {
+		t.Fatalf("named paths = %v", paths)
 	}
 }

@@ -372,3 +372,22 @@ provider issue client, the poll and closer loop, the API), and the UI for both. 
 coordinator did the integration, the full suite and lint, the review filtering and the
 derived docs; the "As built" paragraphs of 5.22 and 5.23 record the agents'
 interpretations.
+
+**Designing and building wave 10 (2026-10-18).** The same side session wrote DESIGN 5.24
+(questions to the operator) and 5.25 (run artifacts) with the design-first template after
+reading the approval, retry, walk, run-directory and report code they build on, amended
+the older rules with "since 5.24/5.25" notes, recorded the decisions it settled (D-056,
+D-057) and the two Andre answered with the recommended answer (D-058, D-059), extended
+`api/openapi.yaml` to 0.7.0 marked `x-planned`, and wrote the plan, a prerequisites brief
+and four agent briefs under `docs/briefs/wave10/`. A Sonnet 5.5 agent landed the
+prerequisites (migration 0014, the question and artifact types, the config and the
+`artifacts` volume, the engine and tool interfaces, the protocol block texts, the route
+stubs), which the coordinator re-verified in a throwaway container; four Sonnet 5.5
+agents then built on disjoint files with one test database each: the engine side of
+questions (the row and the pause, the decision delivery order, the park and the
+continuation visit, the answer endpoint), the tools side (`ask_operator`,
+`answer_question`, the notice, `run_status`, prompts and `AGENTS.md`), the artifacts (the
+collector over `os.Root`, the diff from a private clone, the store, the endpoints, the
+sweep) and the UI (the Question card, the Artifacts section). The coordinator did the
+integration, the suite and lint, the review filtering, the fix pass and the derived docs;
+the "As built" paragraphs of 5.24 and 5.25 record the agents' interpretations.

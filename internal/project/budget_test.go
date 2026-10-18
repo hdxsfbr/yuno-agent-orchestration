@@ -667,3 +667,44 @@ func TestWatcherRunStopsWithItsContext(t *testing.T) {
 		t.Fatalf("messages = %q", e.reporter.texts())
 	}
 }
+
+// DESIGN 5.19 rule 6 and 5.24 rule 6 (b): BoundAgentConversation is the newest
+// conversation of the agent bound to Telegram, never another agent's, and nothing, with no
+// error, when nothing is bound, the bound agent has no conversation, or its agent is gone.
+func TestBoundAgentConversation(t *testing.T) {
+	e := newAlertEnv(t)
+	ctx := context.Background()
+	if id, ok, err := BoundAgentConversation(ctx, e.pool); id != "" || ok || err != nil {
+		t.Fatalf("no binding: %q %v %v", id, ok, err)
+	}
+
+	a := &store.Agent{Name: "Chief " + store.NewID(), Model: "claude-opus-5-5"}
+	if err := store.CreateAgent(ctx, e.pool, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.BindChannel(ctx, e.pool, store.ChannelTelegram, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok, err := BoundAgentConversation(ctx, e.pool); id != "" || ok || err != nil {
+		t.Fatalf("bound, no conversation: %q %v %v", id, ok, err)
+	}
+
+	older := e.conversation(a.ID, "1", "2026-10-17T09:00:00Z")
+	newest := e.conversation(a.ID, "2", "2026-10-17T11:00:00Z")
+	other := &store.Agent{Name: "Other " + store.NewID(), Model: "claude-opus-5-5"}
+	if err := store.CreateAgent(ctx, e.pool, other); err != nil {
+		t.Fatal(err)
+	}
+	e.conversation(other.ID, "3", "2026-10-17T11:59:00Z")
+	if id, ok, err := BoundAgentConversation(ctx, e.pool); id != newest || !ok || err != nil || id == older {
+		t.Fatalf("bound with conversations: %q %v %v, want %s", id, ok, err, newest)
+	}
+
+	// The bound agent is deleted: the binding counts as none.
+	if _, err := e.pool.Exec(ctx, `UPDATE agents SET deleted_at = now() WHERE id = $1`, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok, err := BoundAgentConversation(ctx, e.pool); id != "" || ok || err != nil {
+		t.Fatalf("bound agent deleted: %q %v %v", id, ok, err)
+	}
+}

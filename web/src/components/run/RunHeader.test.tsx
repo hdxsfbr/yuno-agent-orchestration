@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
-import type { Run, RunStatus, ToolCall } from "@/lib/api";
+import type { Approval, Run, RunStatus, ToolCall } from "@/lib/api";
 import { apiError, installFakeApi } from "@/test/fakeApi";
 import { mergeRequest, projectSettings, run } from "@/test/fixtures";
 import RunHeader from "./RunHeader";
@@ -22,12 +22,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderHeader(r: Run = run(), toolCalls: ToolCall[] = []) {
+function renderHeader(r: Run = run(), toolCalls: ToolCall[] = [], approvals: Approval[] = []) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
       <MemoryRouter>
-        <RunHeader run={r} connection="open" now={Date.parse("2026-10-15T10:06:00Z")} toolCalls={toolCalls} onRunChange={onRunChange} />
+        <RunHeader run={r} connection="open" now={Date.parse("2026-10-15T10:06:00Z")} toolCalls={toolCalls} approvals={approvals} onRunChange={onRunChange} />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -340,5 +340,71 @@ describe("an issue run", () => {
   it("is not marked as delegated", () => {
     renderHeader(issue());
     expect(header().queryByText("Delegated")).toBeNull();
+  });
+});
+
+describe("the line for a run that asks a question", () => {
+  const question = (over: Partial<Approval> = {}): Approval => ({
+    id: "q1",
+    run_id: "r1",
+    run_node_id: "rn1",
+    kind: "question",
+    node_id: "coder",
+    message: "Which greeting language should I use?",
+    status: "pending",
+    requested_at: "2026-10-18T10:00:00Z",
+    expires_at: "2026-10-19T10:00:00Z",
+    ...over,
+  });
+  const waiting = () => run({ status: "waiting_approval" });
+  const asks = () => screen.queryByRole("link", { name: /^Asks:/ });
+
+  it("says what the run asks, linking to the approvals on the page", () => {
+    renderHeader(waiting(), [], [question()]);
+    const link = asks()!;
+    expect(link.textContent).toBe("Asks: Which greeting language should I use?");
+    expect(link.getAttribute("href")).toBe("#approvals");
+    expect(header().getByRole("link", { name: /^Asks:/ })).toBe(link);
+  });
+
+  it("gives the first 120 characters of a long question and marks the cut", () => {
+    const long = `${"Q".repeat(119)}XYZ and more words after the cut`;
+    renderHeader(waiting(), [], [question({ message: long })]);
+    expect(asks()!.textContent).toBe(`Asks: ${"Q".repeat(119)}X…`);
+  });
+
+  it("puts a question that spans lines on one", () => {
+    renderHeader(waiting(), [], [question({ message: "Which language?\n\nEnglish or Spanish?" })]);
+    expect(asks()!.textContent).toBe("Asks: Which language? English or Spanish?");
+  });
+
+  it("names the question that has waited longest when several are open", () => {
+    renderHeader(waiting(), [], [question({ id: "q2", message: "Second?", requested_at: "2026-10-18T10:05:00Z" }), question({ id: "q1", message: "First?" })]);
+    expect(asks()!.textContent).toBe("Asks: First?");
+    expect(screen.getAllByRole("link", { name: /^Asks:/ })).toHaveLength(1);
+  });
+
+  it("is not there once the question is answered, declined or expired", () => {
+    for (const q of [question({ status: "approved", answer: "Spanish" }), question({ status: "rejected" }), question({ status: "expired" })]) {
+      renderHeader(waiting(), [], [q]);
+      expect(asks()).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("is not there while the run is not waiting, however the question stands", () => {
+    for (const status of ["queued", "running", "succeeded", "failed", "cancelled", "timed_out"] as const) {
+      renderHeader(run({ status, current_node: "coder" }), [], [question()]);
+      expect(asks()).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("is not there for a run that waits on another kind of approval, or when the header is not told the approvals", () => {
+    renderHeader(waiting(), [], [question({ kind: "node", message: "Deploy?" }), question({ id: "t1", kind: "tool", message: "Open the merge request" })]);
+    expect(asks()).toBeNull();
+    cleanup();
+    renderHeader(waiting());
+    expect(asks()).toBeNull();
   });
 });

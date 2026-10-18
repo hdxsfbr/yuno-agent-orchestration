@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -649,5 +650,357 @@ func TestReportBackSendsTheUpdatedMergeRequest(t *testing.T) {
 	if len(sends) != 1 || !strings.HasSuffix(sends[0].Message, "/runs/"+run.ID+" Updated merge request: "+url) ||
 		sends[0].IdempotencyKey != "report-"+run.ID+"-end" {
 		t.Fatalf("reports = %+v", sends)
+	}
+}
+
+// ---- questions to the operator (DESIGN 5.24 rule 6, T5.24.10) ------------------------
+
+// lockedBuffer is a log destination the notice goroutines may write concurrently.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// captureLog sends the engine's log lines to a buffer.
+func (env *testEnv) captureLog() *lockedBuffer {
+	buf := &lockedBuffer{}
+	env.e.log = slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return buf
+}
+
+// questionRun stores a run with a pending question of kind question, as AskOperator
+// leaves them (the run waiting_approval is not needed by the notice).
+func (env *testEnv) questionRun(trigger, ref, question string, options []string) (*store.Run, *store.Approval) {
+	env.t.Helper()
+	ctx := context.Background()
+	wf := &store.Workflow{Name: "asks", Definition: json.RawMessage(`{"nodes":[],"edges":[]}`)}
+	if err := store.CreateWorkflow(ctx, env.pool, wf); err != nil {
+		env.t.Fatal(err)
+	}
+	run := &store.Run{WorkflowID: wf.ID, WorkflowVersion: 1, WorkflowSnapshot: wf.Definition, Trigger: trigger, Status: store.RunWaitingApproval}
+	if ref != "" {
+		run.TriggerRef = &ref
+	}
+	if err := store.CreateRun(ctx, env.pool, run); err != nil {
+		env.t.Fatal(err)
+	}
+	a := &store.Approval{RunID: run.ID, Kind: store.ApprovalKindQuestion, NodeID: "coder", Message: question, Status: store.ApprovalPending,
+		RequestedAt: env.clock.Now(), ExpiresAt: env.clock.Now().Add(time.Hour)}
+	if options != nil {
+		a.Options, _ = json.Marshal(options)
+	}
+	if err := store.InsertApproval(ctx, env.pool, a); err != nil {
+		env.t.Fatal(err)
+	}
+	return run, a
+}
+
+// boundConversation binds an agent to Telegram and stores one of its conversations.
+func (env *testEnv) boundConversation(key string) *store.Conversation {
+	env.t.Helper()
+	ctx := context.Background()
+	a := env.agent(func(a *store.Agent) { a.Name = "Chief of Staff" })
+	if _, err := store.BindChannel(ctx, env.pool, store.ChannelTelegram, a.ID); err != nil {
+		env.t.Fatal(err)
+	}
+	return env.agentConversation(a, key)
+}
+
+func (env *testEnv) agentConversation(a *store.Agent, key string) *store.Conversation {
+	env.t.Helper()
+	k, _ := openclaw.ParseChannelSessionKey(key)
+	conv, err := store.UpsertConversation(context.Background(), env.pool, &store.Conversation{Channel: store.ChannelTelegram,
+		ExternalChatID: k.PeerID, SessionKey: key, AgentID: a.ID})
+	if err != nil {
+		env.t.Fatal(err)
+	}
+	return conv
+}
+
+// sendsWithPrefix are the chat.send calls whose idempotency key starts with prefix.
+func (env *testEnv) sendsWithPrefix(prefix string) []openclaw.ChatSendParams {
+	var out []openclaw.ChatSendParams
+	for _, p := range env.fc.sendParams() {
+		if strings.HasPrefix(p.IdempotencyKey, prefix) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// acceptingSends makes every chat.send start a turn, which is all a notice needs.
+func (env *testEnv) acceptingSends() {
+	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) { return startedTurn(p) }
+}
+
+const operatorConvKey = "agent:agboss:telegram:direct:100000003"
+
+// The texts of rule 6, with and without options.
+func TestQuestionNoticeText(t *testing.T) {
+	env := newEnv(t)
+	env.e.deps.Cfg.PublicBaseURL = "https://yuno.example/"
+	run, a := env.questionRun(store.TriggerManual, "", "Which greeting language should I use?", []string{"Python", "Go"})
+	want := "[platform] Run " + run.ID + " asks: Which greeting language should I use? Options: Python | Go. Answer it at https://yuno.example/runs/" +
+		run.ID + ", or tell me the answer and I will pass it on (question " + a.ID + ")."
+	if got := env.e.questionReportText(run, a); got != want {
+		t.Fatalf("with options:\n got %q\nwant %q", got, want)
+	}
+	if got := env.e.approvalReportText(run, a); got != want {
+		t.Fatalf("approvalReportText of a question is not the question notice:\n got %q", got)
+	}
+
+	a.Options = nil
+	want = "[platform] Run " + run.ID + " asks: Which greeting language should I use? Answer it at https://yuno.example/runs/" +
+		run.ID + ", or tell me the answer and I will pass it on (question " + a.ID + ")."
+	if got := env.e.questionReportText(run, a); got != want {
+		t.Fatalf("without options:\n got %q\nwant %q", got, want)
+	}
+	a.Options = json.RawMessage(`null`)
+	if got := env.e.questionReportText(run, a); got != want {
+		t.Fatalf("options null:\n got %q", got)
+	}
+
+	// A question that does not end a sentence is ended with a full stop, as the approval
+	// notice's message is; one that does is left alone.
+	a.Message = "Which language"
+	a.Options = json.RawMessage(`["Python","Go"]`)
+	if got := env.e.questionReportText(run, a); !strings.Contains(got, "asks: Which language. Options: Python | Go. Answer it at ") {
+		t.Fatalf("unfinished question: %q", got)
+	}
+
+	// The waiting line of a tool approval is what it was.
+	tool := &store.Approval{ID: "ap1", Kind: store.ApprovalKindTool, Message: "Ship v2?"}
+	if got := env.e.approvalReportText(run, tool); got != "[platform] Run "+run.ID+" is waiting for an approval: tool, Ship v2? Decide it at https://yuno.example/runs/"+run.ID {
+		t.Fatalf("tool approval = %q", got)
+	}
+}
+
+// T5.24.10 (a): a run that reports to a conversation gets the question notice once, in
+// place of the waiting line, claimed through approvals.reported_at, and a send the gateway
+// never received gives the claim back for the next sweep.
+func TestQuestionNoticeToTheRunsConversation(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.e.deps.Cfg.PublicBaseURL = "https://yuno.example"
+	conv := env.chiefConversation(chiefConvKey)
+	env.acceptingSends()
+	run, a := env.questionRun(store.TriggerChannel, store.ConversationRef(conv.ID), "Which greeting language?", []string{"Python", "Go"})
+
+	env.e.announceQuestion(ctx, run, a)
+	env.e.reports.Wait()
+	sends := env.sendsWithPrefix("")
+	want := "[platform] Run " + run.ID + " asks: Which greeting language? Options: Python | Go. Answer it at https://yuno.example/runs/" + run.ID +
+		", or tell me the answer and I will pass it on (question " + a.ID + ")."
+	if len(sends) != 1 || sends[0].Message != want || sends[0].SessionKey != chiefConvKey || sends[0].AgentID != "agchief" || !sends[0].Deliver ||
+		sends[0].IdempotencyKey != "report-"+run.ID+"-approval-"+a.ID {
+		t.Fatalf("sends = %+v, want one notice %q", sends, want)
+	}
+	if strings.Contains(sends[0].Message, "waiting for an approval") {
+		t.Fatalf("the waiting line went out too: %q", sends[0].Message)
+	}
+	if env.reportedAt("approvals", a.ID) == nil {
+		t.Fatal("approvals.reported_at not set")
+	}
+
+	// Once: another call, the approval hook and the sweep find it claimed, and nothing
+	// goes to the Telegram-bound agent as well.
+	env.boundConversation(operatorConvKey)
+	env.e.announceQuestion(ctx, run, a)
+	env.e.afterApproval(ctx, run)
+	env.e.sweepReports(ctx)
+	env.e.reports.Wait()
+	if n := len(env.fc.sendParams()); n != 1 {
+		t.Fatalf("announced %d times: %+v", n, env.fc.sendParams())
+	}
+}
+
+// The same, when the gateway is unreachable: the claim is given back and the sweep sends
+// the notice once the gateway is back.
+func TestQuestionNoticeDeferredWhileDisconnected(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	conv := env.chiefConversation(chiefConvKey)
+	var down atomic.Bool
+	down.Store(true)
+	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
+		if down.Load() {
+			return nil, fmt.Errorf("fake: chat.send: %w", openclaw.ErrDisconnected)
+		}
+		return startedTurn(p)
+	}
+	run, a := env.questionRun(store.TriggerChannel, store.ConversationRef(conv.ID), "Which greeting language?", nil)
+
+	env.e.announceQuestion(ctx, run, a)
+	env.e.reports.Wait()
+	if env.reportedAt("approvals", a.ID) != nil {
+		t.Fatal("an undelivered notice kept its claim")
+	}
+	down.Store(false)
+	env.e.sweepReports(ctx)
+	env.e.sweepReports(ctx)
+	env.e.reports.Wait()
+	if env.reportedAt("approvals", a.ID) == nil {
+		t.Fatal("the sweep did not send the notice")
+	}
+	var accepted int
+	for _, p := range env.fc.sendParams() {
+		if strings.Contains(p.Message, "asks: Which greeting language? Answer it at") {
+			accepted++
+		}
+	}
+	if accepted != 2 { // the refused attempt and the one that went out
+		t.Fatalf("attempts = %d", accepted)
+	}
+}
+
+// T5.24.10 (b): a run without a conversation sends the same notice to the most recent
+// conversation of the agent bound to Telegram, under question-<id>, with deliver and one
+// attempt; the approval's reported_at, the channel runs' claim, is not used.
+func TestQuestionNoticeToTheBoundAgent(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.e.deps.Cfg.PublicBaseURL = "https://yuno.example"
+	env.acceptingSends()
+	// Two conversations of the bound agent: the newer one gets the notice. A conversation
+	// of another agent is never the destination.
+	older := "agent:agboss:telegram:direct:100000001"
+	boss := env.agent(func(a *store.Agent) { a.Name = "Chief of Staff" })
+	if _, err := store.BindChannel(ctx, env.pool, store.ChannelTelegram, boss.ID); err != nil {
+		t.Fatal(err)
+	}
+	env.agentConversation(boss, older)
+	env.agentConversation(boss, operatorConvKey)
+	other := env.agent(func(a *store.Agent) { a.Name = "Other" })
+	env.agentConversation(other, "agent:agother:telegram:direct:100000009")
+
+	for name, trigger := range map[string]string{"manual": store.TriggerManual, "a channel run with no conversation ref": store.TriggerChannel} {
+		t.Run(name, func(t *testing.T) {
+			before := len(env.fc.sendParams())
+			run, a := env.questionRun(trigger, "", "Which greeting language?", []string{"Python", "Go"})
+			env.e.announceQuestion(ctx, run, a)
+			env.e.reports.Wait()
+			sends := env.fc.sendParams()[before:]
+			want := "[platform] Run " + run.ID + " asks: Which greeting language? Options: Python | Go. Answer it at https://yuno.example/runs/" + run.ID +
+				", or tell me the answer and I will pass it on (question " + a.ID + ")."
+			if len(sends) != 1 || sends[0].Message != want || sends[0].SessionKey != operatorConvKey || sends[0].AgentID != "agboss" ||
+				!sends[0].Deliver || sends[0].IdempotencyKey != "report-"+run.ID+"-question-"+a.ID {
+				t.Fatalf("sends = %+v, want one notice %q", sends, want)
+			}
+			if env.reportedAt("approvals", a.ID) != nil {
+				t.Error("a run without a conversation claimed its approval notice")
+			}
+			// The sweep never announces it again: reported_at is the channel runs' claim.
+			env.e.sweepReports(ctx)
+			env.e.reports.Wait()
+			if n := len(env.fc.sendParams()) - before; n != 1 {
+				t.Fatalf("sent %d times", n)
+			}
+		})
+	}
+}
+
+// T5.24.10 (b), failure handling: without a binding, or with a binding and no
+// conversation, the notice is a log line, a run event, and nothing is sent.
+func TestQuestionNoticeHasNowhereToGo(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.acceptingSends()
+	logs := env.captureLog()
+	run, a := env.questionRun(store.TriggerManual, "", "Which greeting language?", nil)
+	line := "question " + a.ID + " has nowhere to be announced: no conversation and no Telegram binding"
+
+	env.e.announceQuestion(ctx, run, a)
+	env.e.reports.Wait()
+	if len(env.fc.sendParams()) != 0 || !strings.Contains(logs.String(), line) {
+		t.Fatalf("no binding: sends %+v, log %q", env.fc.sendParams(), logs.String())
+	}
+	events, err := store.RunEventsAfter(ctx, env.pool, run.ID, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, ev := range events {
+		found = found || (ev.Type == "log" && strings.Contains(string(ev.Data), line))
+	}
+	if !found {
+		t.Errorf("the run's events do not carry the line: %+v", events)
+	}
+
+	// Bound, but the bound agent has never chatted.
+	boss := env.agent(func(a *store.Agent) { a.Name = "Chief of Staff" })
+	if _, err := store.BindChannel(ctx, env.pool, store.ChannelTelegram, boss.ID); err != nil {
+		t.Fatal(err)
+	}
+	run2, a2 := env.questionRun(store.TriggerManual, "", "Which greeting language?", nil)
+	env.e.announceQuestion(ctx, run2, a2)
+	env.e.reports.Wait()
+	if len(env.fc.sendParams()) != 0 || !strings.Contains(logs.String(), "question "+a2.ID+" has nowhere to be announced") {
+		t.Fatalf("no conversation: sends %+v, log %q", env.fc.sendParams(), logs.String())
+	}
+}
+
+// T5.24.10 (b): one attempt per call. A send the gateway never received is not retried by
+// the engine; whoever announces the question again sends it, under the same key.
+func TestQuestionNoticeDeferredIsRetriedByTheNextCall(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	var down atomic.Bool
+	down.Store(true)
+	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
+		if down.Load() {
+			return nil, fmt.Errorf("fake: chat.send: %w", openclaw.ErrDisconnected)
+		}
+		return startedTurn(p)
+	}
+	env.boundConversation(operatorConvKey)
+	run, a := env.questionRun(store.TriggerManual, "", "Which greeting language?", nil)
+
+	env.e.announceQuestion(ctx, run, a)
+	env.e.reports.Wait()
+	sends := env.fc.sendParams()
+	if len(sends) != 1 || sends[0].IdempotencyKey != "report-"+run.ID+"-question-"+a.ID {
+		t.Fatalf("first call: %+v", sends)
+	}
+	env.e.sweepReports(ctx)
+	env.e.reports.Wait()
+	if n := len(env.fc.sendParams()); n != 1 {
+		t.Fatalf("the engine retried by itself: %d attempts", n)
+	}
+	down.Store(false)
+	env.e.announceQuestion(ctx, run, a)
+	env.e.reports.Wait()
+	sends = env.fc.sendParams()
+	if len(sends) != 2 || sends[1].IdempotencyKey != "report-"+run.ID+"-question-"+a.ID || sends[1].Message != sends[0].Message {
+		t.Fatalf("second call: %+v", sends)
+	}
+}
+
+// Only a question has this notice: announceQuestion ignores any other row, and the
+// waiting line of a tool approval still goes to a channel run's conversation.
+func TestQuestionNoticeOnlyForQuestions(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.acceptingSends()
+	env.boundConversation(operatorConvKey)
+	run, a := env.questionRun(store.TriggerManual, "", "x", nil)
+	a.Kind = store.ApprovalKindTool
+	env.e.announceQuestion(ctx, run, a)
+	env.e.announceQuestion(ctx, nil, a)
+	env.e.announceQuestion(ctx, run, nil)
+	env.e.reports.Wait()
+	if n := len(env.fc.sendParams()); n != 0 {
+		t.Fatalf("sends = %+v", env.fc.sendParams())
 	}
 }

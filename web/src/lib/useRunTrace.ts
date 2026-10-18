@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { getTrace, isTerminalStatus, subscribe, type Approval, type MergeRequest, type Run, type SSEEvent } from "./api";
 import type { Connection } from "./useEventStream";
 import { applyEvent, applyEvents, toRunView, type RunView } from "./trace";
+import { artifactsKey } from "./useRunArtifacts";
 
 /** How long to wait for the stream to open before loading the trace anyway. */
 const STREAM_WAIT_MS = 2000;
@@ -9,6 +11,8 @@ const STREAM_WAIT_MS = 2000;
 const MAX_BUFFERED_EVENTS = 2000;
 /** The server replays events after the given id; id 1 asks for the run's whole history. */
 const REPLAY_FROM_START = "1";
+/** Files collected in a burst (or replayed from the start of the stream) cost one refresh of the file list, this long after the first. */
+const ARTIFACTS_REFRESH_MS = 300;
 
 export type RunTraceState = {
   view: RunView | null;
@@ -32,9 +36,11 @@ export type RunTraceState = {
  * and applied on top of it. The trace is loaded again after every reconnect and when the
  * run reaches a final status, which re-baselines anything the stream missed. Log lines
  * exist only on the stream, so the stream is opened with a replay from the start; so do the
- * marks of a retry (`run.retry`).
+ * marks of a retry (`run.retry`). The stream also says when a step's files were collected
+ * (`run.artifacts`), which refreshes the run's file list, a query of its own.
  */
 export function useRunTrace(runId: string): RunTraceState {
+  const queryClient = useQueryClient();
   const [view, setView] = useState<RunView | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [connection, setConnection] = useState<Connection>("connecting");
@@ -50,6 +56,7 @@ export function useRunTrace(runId: string): RunTraceState {
     let everOpened = false;
     let buffer: SSEEvent[] = [];
     let terminalTimer: ReturnType<typeof setTimeout> | undefined;
+    let artifactsTimer: ReturnType<typeof setTimeout> | undefined;
 
     setView(null);
     setError(null);
@@ -90,6 +97,15 @@ export function useRunTrace(runId: string): RunTraceState {
     };
 
     const onEvent = (e: SSEEvent) => {
+      if (e.event === "run.artifacts" && !artifactsTimer) {
+        const d = e.data as { run_id?: unknown } | null;
+        if (d?.run_id === undefined || d.run_id === runId) {
+          artifactsTimer = setTimeout(() => {
+            artifactsTimer = undefined;
+            void queryClient.invalidateQueries({ queryKey: artifactsKey(runId) });
+          }, ARTIFACTS_REFRESH_MS);
+        }
+      }
       const live = loaded && !loading;
       if (live) {
         setView((v) => (v ? applyEvent(v, e) : v));
@@ -133,9 +149,10 @@ export function useRunTrace(runId: string): RunTraceState {
       cancelled = true;
       clearTimeout(waitTimer);
       clearTimeout(terminalTimer);
+      clearTimeout(artifactsTimer);
       stop();
     };
-  }, [runId, attempt]);
+  }, [runId, attempt, queryClient]);
 
   const applyRun = useCallback((run: Run) => {
     setView((v) => (v && v.run.id === run.id ? applyEvent(v, { event: "run.status", data: { run } }) : v));

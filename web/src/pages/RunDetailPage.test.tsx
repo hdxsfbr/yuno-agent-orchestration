@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
-import type { MergeRequest, ModelCall, Run, RunNode, ToolCall, Trace } from "@/lib/api";
+import type { Artifact, MergeRequest, ModelCall, Run, RunNode, ToolCall, Trace } from "@/lib/api";
 import { mergeRequest, projectSettings } from "@/test/fixtures";
 import RunDetailPage from "./RunDetailPage";
 
@@ -64,6 +64,8 @@ const toolCall: ToolCall = {
 };
 
 let trace: Trace;
+/** What GET /api/runs/r1/artifacts answers. */
+let artifacts: Artifact[];
 /** What GET /api/merge-requests?run_id=r1 answers, and what a sync of the record returns. */
 let requestsForRun: MergeRequest[];
 let synced: MergeRequest | undefined;
@@ -81,6 +83,7 @@ function json(body: unknown, status = 200) {
 
 beforeEach(() => {
   calls = [];
+  artifacts = [];
   requestsForRun = [];
   synced = undefined;
   trace = { run: run(), nodes: [node], model_calls: [modelCall], tool_calls: [], spans: [], agent_messages: [], approvals: [] };
@@ -89,6 +92,7 @@ beforeEach(() => {
     vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, init });
       if (url === `/api/runs/${RUN}/trace`) return json(trace);
+      if (url === `/api/runs/${RUN}/artifacts`) return json(artifacts);
       if (url === `/api/runs/${RUN}/events`) {
         const body = new ReadableStream<Uint8Array>({
           start(c) {
@@ -405,5 +409,87 @@ describe("RunDetailPage project runs", () => {
     const h = await header();
     expect(h.getByText("Trigger")).not.toBeNull();
     expect(h.queryByText("Project")).toBeNull();
+  });
+});
+
+describe("RunDetailPage artifacts", () => {
+  const file = (over: Partial<Artifact> = {}): Artifact => ({
+    id: "a1",
+    run_id: RUN,
+    node_id: "agent",
+    visit: 1,
+    path: "report.md",
+    size: 2048,
+    sha256: "1".repeat(64),
+    content_type: "text/markdown",
+    generated: false,
+    created_at: "2026-10-15T10:00:05Z",
+    updated_at: "2026-10-15T10:00:05Z",
+    ...over,
+  });
+  const artifactCalls = () => calls.filter((c) => c.url === `/api/runs/${RUN}/artifacts`);
+  const follows = (a: Element, b: Element) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+
+  it("lists the files the run delivered between the merge request and the approvals", async () => {
+    trace = {
+      ...trace,
+      run: run({ status: "waiting_approval", merge_request: mergeRequest({ run_id: RUN }) }),
+      approvals: [{ id: "ap1", run_id: RUN, run_node_id: "n1", kind: "node", node_id: "gate", message: "Deploy?", status: "pending", requested_at: "2026-10-15T10:05:00Z", expires_at: "2026-10-16T10:05:00Z" }],
+    };
+    artifacts = [file()];
+    renderPage();
+    const table = await screen.findByRole("table", { name: "Files delivered by this run" });
+    expect(within(table).getByRole("rowheader", { name: "report.md" })).not.toBeNull();
+    const mr = screen.getByRole("region", { name: "Merge request" });
+    const approvals = screen.getByRole("heading", { name: /^Approvals/ }).closest("section")!;
+    const section = screen.getByRole("heading", { name: /^Artifacts/ }).closest("section")!;
+    expect(follows(mr, section)).toBe(true);
+    expect(follows(section, approvals)).toBe(true);
+    expect(follows(section, screen.getByRole("heading", { name: "Timeline" }))).toBe(true);
+  });
+
+  it("says nothing was delivered yet while the run goes on, and that none were once it is over", async () => {
+    renderPage();
+    expect(await screen.findByText("No files delivered yet.")).not.toBeNull();
+    await screen.findByText("Live");
+    const done = run({ status: "succeeded", finished_at: "2026-10-15T10:00:09Z" });
+    trace = { ...trace, run: done };
+    send(7, "run.status", { run: done });
+    expect(await screen.findByText("No files were delivered.")).not.toBeNull();
+  });
+
+  it("loads the list again when the run's stream says files were collected", async () => {
+    renderPage();
+    await screen.findByText("No files delivered yet.");
+    await screen.findByText("Live");
+    expect(artifactCalls()).toHaveLength(1);
+
+    artifacts = [file()];
+    send(7, "run.artifacts", { run_id: RUN, count: 1 });
+    expect(await screen.findByRole("rowheader", { name: "report.md" })).not.toBeNull();
+    expect(artifactCalls()).toHaveLength(2);
+
+    // a burst of events costs one more load, not one each
+    artifacts = [file(), file({ id: "a2", path: "data.csv", content_type: "text/csv" })];
+    send(8, "run.artifacts", { run_id: RUN, count: 2 });
+    send(9, "run.artifacts", { run_id: RUN, count: 2 });
+    send(10, "run.artifacts", { run_id: RUN, count: 2 });
+    expect(await screen.findByRole("rowheader", { name: "data.csv" })).not.toBeNull();
+    await new Promise((r) => setTimeout(r, 450));
+    expect(artifactCalls()).toHaveLength(3);
+  });
+
+  it("ignores files collected for another run", async () => {
+    renderPage();
+    await screen.findByText("No files delivered yet.");
+    await screen.findByText("Live");
+    artifacts = [file()];
+    send(7, "run.artifacts", { run_id: "other-run", count: 1 });
+    // an event that does count shows the stream was handled in order
+    send(8, "log", { run_id: RUN, level: "info", message: "after the artifacts event" });
+    await screen.findByText("after the artifacts event");
+    await new Promise((r) => setTimeout(r, 450));
+    expect(artifactCalls()).toHaveLength(1);
+    expect(screen.queryByRole("rowheader", { name: "report.md" })).toBeNull();
   });
 });
