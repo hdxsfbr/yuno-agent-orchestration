@@ -6,6 +6,41 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-18
 
+**D-057 Run artifacts are one row per run and path, replaced when the file changes; the
+checkout diff comes from a private clone at the end of every agent visit; the store is a
+named volume on the api.** (coordinator, 2026-10-18, writing DESIGN 5.25) `run_artifacts`
+is unique on `(run_id, path)`: a file collected again with the same sha256 changes
+nothing, a changed file updates the row in place (same id) and replaces the stored file,
+so the run page shows the newest version of each deliverable and nothing accumulates.
+`diff.patch` is produced after every agent visit of a project run by cloning the run's
+branch into a private directory, fetching `checkout_sha`, copying the checkout's working
+tree over it and running `git diff --cached` there, never inside the agent's checkout
+(5.16 rule 10's reason: hooks or config an agent wrote would run on the api side). The
+files live under `ARTIFACT_DIR` on the named volume `artifacts`, the first volume the api
+mounts. Why: versions were out of scope (D-047) and a replace-in-place keeps ids stable
+for the UI; the diff must not trust the checkout's `.git`; a volume survives the api's
+recreation and is bounded by the per-run caps (200 files, 50 MiB) times the retention.
+Alternatives: one row per visit and file (versions, more rows); the diff only at the
+run's end (a failed later step would leave none, against D-047); the diff from the
+checkout's own `.git` (unsafe). Design: DESIGN 5.25 rules 2 to 4.
+
+**D-056 A question is an approval of kind `question`: one pending per visit, three per
+step; a parked step continues as a new visit that does not count toward the loop limit;
+a decision that arrives between the wait's end and the turn's end becomes the next
+turn's message.** (coordinator, 2026-10-18, writing DESIGN 5.24) The question reuses the
+approvals table, inbox, sweeper, expiry and announcement path (`options` and `answer`
+are two new columns), with `POST /approvals/{id}/answer` as its decision. The engine
+delivers a decision to the waiting call, else to the live visit, which sends it as its
+next turn and keeps the agent's context, else re-queues the parked run, whose
+continuation visit carries every decided question of the step in its task and is left
+out of `max_loop_visits`. Why: a second table and inbox would duplicate 5.3 for one more
+kind; a live visit that still holds its session is the cheapest place to deliver an
+answer; a continuation visit that counted against the loop limit would turn the Dev
+pipeline's three review rounds into two after one question. Alternatives: a
+`questions` table (duplicates the inbox); resuming the parked visit's own OpenClaw
+session (out of scope; D-046's new visit stands); failing the run when the wait ends
+(D-046 rejected it). Design: DESIGN 5.24 rules 2, 3, 5 and 10.
+
 **D-055 A project needs a daily or monthly budget cap before its issue intake can be
 enabled.** (Andre, 2026-10-18, the recommended answer of DESIGN 5.23's open line)
 `PUT /api/projects/{id}` with `intake.enabled: true` on a project without a cap is 422

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Yuno Agent Orchestration API
-  version: 0.6.0
+  version: 0.7.0
   description: |
     Control plane for configurable AI agents and multi-agent workflows executed on
     OpenClaw. All endpoints are JSON. When API_TOKEN is set, every /api path except
@@ -275,6 +275,36 @@ paths:
       responses:
         "200": { description: trace, content: { application/json: { schema: { $ref: "#/components/schemas/Trace" } } } }
         "404": { $ref: "#/components/responses/Error" }
+  /api/runs/{id}/artifacts:
+    get:
+      tags: [runs]
+      summary: The files the run delivered, by path
+      x-planned: wave 10
+      description: |
+        Planned for wave 10 (DESIGN 5.25). Files an agent put under `runs/<run id>/out/`,
+        collected at the end of every step, one entry per path (the newest version), plus
+        `diff.patch` for a project run whose checkout changed. Empty for a run that delivered
+        nothing; artifacts are deleted `ARTIFACT_TTL_DAYS` after the run finished.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: artifacts, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Artifact" } } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/runs/{id}/artifacts/{artifactId}:
+    get:
+      tags: [runs]
+      summary: Download one artifact
+      x-planned: wave 10
+      description: |
+        Planned for wave 10 (DESIGN 5.25 rule 5). The file's bytes with its content type
+        (`text/plain` for HTML and SVG), `Content-Disposition: attachment; filename="<base
+        name>"`, `X-Content-Type-Options: nosniff` and `Cache-Control: private, no-store`;
+        never rendered inline. 404 when the artifact is not this run's or its file is gone.
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: artifactId, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: the file, content: { "*/*": { schema: { type: string, format: binary } } } }
+        "404": { $ref: "#/components/responses/Error" }
 
   /api/approvals:
     get:
@@ -311,13 +341,36 @@ paths:
   /api/approvals/{id}/reject:
     post:
       tags: [approvals]
-      summary: Reject a pending approval
+      summary: Reject a pending approval (for a question, decline to answer it)
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       requestBody:
         required: false
         content: { application/json: { schema: { $ref: "#/components/schemas/RejectDecision" } } }
       responses:
         "200": { description: decided, content: { application/json: { schema: { $ref: "#/components/schemas/Approval" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/approvals/{id}/answer:
+    post:
+      tags: [approvals]
+      summary: Answer a pending question
+      x-planned: wave 10
+      description: |
+        Planned for wave 10 (DESIGN 5.24 rule 3). The approval must be of kind `question`
+        (422 `answer: only a question can be answered` otherwise) and pending (409
+        `not_pending`). The row becomes `approved` with `answer`. An answer that arrives while
+        the agent's tool call still waits is returned to the agent in the same turn; after
+        that it continues the step, in the same turn when the agent is still working, else
+        as a new visit of the step with the answer in its task. `approve` on a question is
+        422 `answer: a question needs an answer`.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AnswerBody" } } }
+      responses:
+        "200": { description: answered, content: { application/json: { schema: { $ref: "#/components/schemas/Approval" } } } }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
@@ -1239,6 +1292,7 @@ components:
         agent_id: { type: string }
         visit: { type: integer }
         iteration: { type: integer }
+        question_id: { type: string, x-planned: wave 10, description: "set on a continuation visit: the question (an approval of kind question) whose answer this visit of the step continues with (DESIGN 5.24 rule 5); such a visit does not count toward max_loop_visits" }
         status: { type: string, enum: [pending, running, waiting_approval, succeeded, failed, skipped] }
         messages: { type: array, items: { type: object }, description: "transcript entries mirrored from OpenClaw, never reasoning" }
         output: {}
@@ -1318,9 +1372,11 @@ components:
         run_id: { type: string }
         run_node_id: { type: string }
         tool_call_id: { type: string }
-        kind: { type: string, enum: [exec, tool, node] }
+        kind: { type: string, enum: [exec, tool, node, question], description: "question: a run asks the operator something and waits for the answer (DESIGN 5.24; planned for wave 10). It is answered through /answer, or declined through /reject; approved means answered." }
         node_id: { type: string }
-        message: { type: string }
+        message: { type: string, description: "the gated command or call, the node's message, or the question's text" }
+        options: { type: array, items: { type: string }, x-planned: wave 10, description: "question only: the answers the agent suggested, 2 to 5; an answer need not be one of them" }
+        answer: { type: string, x-planned: wave 10, description: "question only: the operator's answer, set when the status is approved" }
         status: { type: string, enum: [pending, approved, rejected, expired] }
         external_id: { type: string, description: OpenClaw approval id when the gateway raised it }
         requested_at: { type: string, format: date-time }
@@ -1371,6 +1427,30 @@ components:
       additionalProperties: false
       properties:
         reason: { type: string, maxLength: 2000 }
+    AnswerBody:
+      type: object
+      x-planned: wave 10
+      additionalProperties: false
+      required: [answer]
+      properties:
+        answer: { type: string, minLength: 1, maxLength: 4096, description: "the operator's answer, 1 to 4096 bytes after trimming; need not be one of the question's options" }
+    Artifact:
+      type: object
+      x-planned: wave 10
+      description: One file a run delivered (DESIGN 5.25), the newest version at its path.
+      required: [id, run_id, node_id, visit, path, size, sha256, content_type, generated, created_at, updated_at]
+      properties:
+        id: { type: string }
+        run_id: { type: string }
+        node_id: { type: string, description: the step whose visit last collected this version }
+        visit: { type: integer }
+        path: { type: string, description: "relative to runs/<run id>/out/, at most 512 bytes" }
+        size: { type: integer, format: int64, description: bytes }
+        sha256: { type: string }
+        content_type: { type: string, description: "sniffed, with text kinds by extension (text/markdown, application/json, text/csv, text/x-patch, text/yaml)" }
+        generated: { type: boolean, description: "true for the platform's own diff.patch of a project run" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time, description: when this version was collected }
     WorkflowNode:
       type: object
       properties:

@@ -147,7 +147,9 @@ Tests T5.2.1 to T5.2.10 stand, driven by the scripted provider (5.14 rule 9).
 
 ### 5.3 Approval gate
 
-Two kinds of gated action, one approvals table, one UI.
+Two kinds of gated action, one approvals table, one UI. Since 5.24 the same table and
+inbox also hold questions to the operator (kind `question`, answered rather than
+approved).
 
 Rules:
 
@@ -220,6 +222,7 @@ Rules:
    `tool <name> is blocked for this agent`.
 8. Decisions on non-pending approvals return 409. A run cancelled while waiting marks the
    approval `expired` with reason `run cancelled` and, for exec approvals, resolves `deny`.
+   Since 5.24 a pending question is expired the same way.
 9. Workflow `approval` nodes (5.6 rule 8) are kind `node`; nothing in OpenClaw is involved.
 
 Edge cases: an exec approval raised by a session the engine is not tracking (manual
@@ -426,7 +429,8 @@ Rules:
     the coder's second visit); regular files and directories are copied with their
     permission bits, links and special files are skipped, and deletions do not flow
     forward. (D-019, from the wave-2 evaluator agent's finding that Reviewer and
-    Deployer could not see the Coder's files.)
+    Deployer could not see the Coder's files.) Since 5.25 the `out/` directory inside it
+    is also collected as the run's artifacts at the end of every agent visit (5.25 rule 2).
 
 Edge cases: a workflow with only `start→end` is valid and succeeds instantly with zero
 model calls. An agent node whose agent lacks the tools its task needs still runs; the
@@ -486,6 +490,7 @@ Rules:
 | `deploy_release` | side_effecting | local_service | 30 s + approval wait | `{run_token, version, notes, paths[]}`; packages `<workspace>/runs/<run_id>/<paths>` through the workspace root; links anywhere on the way are refused, links inside a named directory skipped |
 | `gitlab_create_mr` | side_effecting | external | 30 s + approval wait | `{run_token, title, description, paths[]}`; registered only when `GITLAB_*` are set |
 | `read_merge_request` (since 5.22) | read_only | external | 15 s | `{run_token \| chat_token, number?, project?}`; the request's description, unresolved threads and pipeline as one `<untrusted_content>` block (5.22 rule 6) |
+| `ask_operator` (since 5.24) | computational | postgres | `MCP_TOOL_WAIT` + 30 s | `{run_token, question, options?}`; blocks for the operator's answer up to the wait, then parks the step (5.24 rules 1 to 5); never gated |
 
 `open_merge_request` (5.16 rule 10) is the project-run counterpart of `gitlab_create_mr`,
 registered always since 5.17.
@@ -1089,8 +1094,8 @@ The full design with inputs, edge cases, failure handling and tests is
    answer `one of run_token or chat_token`.
 2. Only chat-capable tools accept a chat token: `list_agents`, `list_workflows`,
    `delegate_task`, `run_status`, `memory_save`, `memory_recall`, since 5.17
-   `list_projects` and since 5.22 `read_merge_request`; others answer `<tool> is not
-   available in a conversation`.
+   `list_projects`, since 5.22 `read_merge_request` and since 5.24 `answer_question`
+   (chat-only, 5.24 rule 9); others answer `<tool> is not available in a conversation`.
 3. A chat tool call is a `tool_calls` row with `run_id` null and `conversation_id` the
    agent's most recent conversation (null when none), redacted and capped like run calls.
 4. `list_agents` returns every agent but the caller (name, role, model, allowlist, bound
@@ -1109,7 +1114,8 @@ The full design with inputs, edge cases, failure handling and tests is
    as usual.
 8. `run_status` returns status, trigger, times, duration, steps, tool calls, cost, final
    state (4 KB cap), failure reason, and a pending approval's kind and message; unknown
-   id answers `no run <id>`.
+   id answers `no run <id>`. Since 5.24 it adds `question` for a run waiting on one
+   (5.24 rule 11), since 5.25 `artifacts` and `artifact_count` (5.25 rule 5).
 9. A channel-triggered run reaching a terminal status sends one `[platform] Run <id>
    <status> after <duration>, cost $<x>: <outcome>. <url>` into its conversation's
    session with `chat.send {deliver: true}` [probed: the text is a user turn, the reply
@@ -1117,10 +1123,13 @@ The full design with inputs, edge cases, failure handling and tests is
    without a conversation ref.
 10. Entering `waiting_approval` sends one `[platform] Run <id> is waiting for an
     approval: <kind>, <message>. Decide it at <url>` per approval
-    (`approvals.reported_at`); approvals are decided in the UI.
+    (`approvals.reported_at`); approvals are decided in the UI. Since 5.24 a question
+    sends the notice of 5.24 rule 6 instead of this line and may be answered through the
+    Chief's `answer_question`.
 11. Those messages are mirrored like inbound messages with `run_id` set.
 12. The seeded `Chief of Staff` (Coordinator, `claude-opus-5-5`, the chat tools, no
-    exec) carries the coordinator prompt from the brief, extended by 5.17 rule 8.
+    exec) carries the coordinator prompt from the brief, extended by 5.17 rule 8 and,
+    since 5.24, by the answering sentence of 5.24 rule 9.
 13. Seeding instantiates both templates when no workflow carries their template key.
 14. Seeding binds the Chief of Staff when Telegram is enabled and nothing is bound; it
     never changes an existing binding.
@@ -1253,7 +1262,10 @@ Rules:
    run without a configured project gets no such lines. `AGENTS.md` states the standing
    rules (never clone or push; the checkout is the platform's). Since 5.22 a run that
    names a merge request gets the `Merge request:` paragraph of 5.22 rule 5 after the
-   repository line, whose `branch` is then the request's source branch.
+   repository line, whose `branch` is then the request's source branch. Since 5.24 a
+   visit whose agent holds `ask_operator` gets the `Questions:` paragraph of 5.24 rule
+   12, and since 5.25 every agent visit gets the `Deliverables:` line of 5.25 rule 1,
+   both after the repository lines and before the `finish` sentence, project or not.
 10. **`open_merge_request`**, a platform tool (5.7): input `{run_token, title,
     description}`; risk `side_effecting`, hits `external`, approval-gated by default
     (5.3), timeout 120 s, idempotency key as 5.4, branch `yuno/<first 12 hex of the key>`
@@ -2000,7 +2012,7 @@ Rules:
    the check, so raising a cap is how a run that died on it is retried; the visits of
    `current_node` are compared with `max_loop_visits` the same way (`max_loop_visits:
    3 of 3 used`), since the resumed visit would be refused at the node's entry
-   otherwise. The time limit
+   otherwise (since 5.24 the count leaves out continuation visits, 5.24 rule 5). The time limit
    restarts: `started_at` is set to now and `paused_total_ms` to 0 when the run is next
    claimed; the trace keeps every attempt's root span with its own start. The project
    budget (5.19 rule 3) is checked as for a trigger.
@@ -2027,7 +2039,9 @@ Rules:
    the task text is the same). A run that failed before its clone completed
    (`toolchain` unset) clones again (5.16 rule 3). An approval node reached again asks
    again (5.6 rule 8). A node that failed and followed its `on_failure` edge moved
-   `current_node` to that target, so the retry resumes there, not at the node.
+   `current_node` to that target, so the retry resumes there, not at the node. Since
+   5.24 a run failed by `question unanswered` retries at the step that asked, and the
+   new visit's task lists the unanswered question (5.24 rules 7 and 8).
 5. Side effects. A retried visit is a new visit, so an identical call gets a new
    idempotency key (5.4's edge case); `open_merge_request` is covered by 5.20 rule 2
    (the run's record is updated, never a second request); `deploy_release` and
@@ -2748,6 +2762,476 @@ Anyone who may set labels on the repository can start runs on the project, each 
 up to the workflow's `max_cost_usd` and opening a merge request behind the approval
 gate; the project cap is the only bound on that.
 
+### 5.24 Questions to the operator: a run asks and waits for the answer
+
+Purpose: an agent in a run that is missing one fact asks the operator and waits for the
+answer instead of guessing or failing; the operator answers from the Approvals inbox,
+from the run page, or by replying to the Chief of Staff on Telegram, and the step
+continues with the answer. Decision D-046 (block, then park and resume; Telegram answers
+through a Chief tool) and D-056. Roadmap: `docs/ROADMAP.md` 5.24.
+
+Inputs: the visit's run token and its agent; `MCP_TOOL_WAIT` (default 540 s); the run's
+`approval_timeout_seconds` (5.2); the run's conversation (5.15 rule 9) or the most
+recent conversation of the agent bound to Telegram (5.19 rule 6); the Chief's chat
+token; the injected clock.
+
+Units: a question is an `approvals` row of kind `question`; "the wait" is
+`MCP_TOOL_WAIT`; a visit is "parked" when its turn ended with a question of its own
+still pending and the run waits with no worker; "the step" is the node in this run,
+across its visits; a "continuation visit" is a visit of the step created because a
+parked question was decided; sizes in bytes after trimming; times UTC.
+
+Rules:
+
+1. **The tool.** `ask_operator`, a platform tool (5.7 table): input `{run_token,
+   question, options?}`; `question` 1 to 1024 bytes (`question: 1 to 1024
+   characters`); `options` absent, or 2 to 5 distinct strings of 1 to 100 bytes without
+   control characters (`options: 2 to 5 distinct options of at most 100 characters`);
+   run-capable only (a chat token answers `ask_operator is not available in a
+   conversation`, 5.15 rule 2: the Chief is in a conversation and simply asks the
+   person). Risk `computational`, hits `postgres`, timeout the wait plus 30 s. Its
+   effective policy (5.3 rule 6) is `auto` or `blocked`: `require_approval` on it is
+   refused by the agent form with `interaction_rules.ask_operator: must be auto or
+   blocked` (a gated question would wait twice and outlive OpenClaw's request timeout).
+   The shipped Coder and Researcher hold it (rule 12); an operator may give it to any
+   agent.
+2. **Asking.** The tool calls the engine's `AskOperator(ctx, token, question, options)`.
+   Under the visit's lock (the two calls of one turn are serialized there, 5.3 edge
+   cases): an unknown or finished token is `invalid run token`; a second question while
+   one of this visit is pending is the model-facing error `one question at a time:
+   question <id> is still pending`; a fourth question of the step (rows of kind
+   `question` with this run and node id, any status) is `ask fewer questions: this step
+   already asked 3`. Otherwise the row is inserted (kind `question`, `message` the
+   question, redacted; `options` in `approvals.options JSONB`, null when none;
+   `run_node_id`, `node_id`; `expires_at = now + approval_timeout_seconds`), the waiter
+   is registered, the run and the node pause (`waiting_approval`, the path of 5.3 rule
+   5; the paused time does not count toward the time limit, 5.2 rule 4), the span
+   `approval_wait` opens with `kind: question`, SSE `approval.requested` and the log line
+   `<agent> asks: <question, first 200 bytes>` follow, and the notice of rule 6 is
+   sent. The call then blocks for the decision up to the wait (`WaitApproval`). A
+   question is never registered with the gateway (5.3 rule 5a is for tool approvals).
+3. **Answering.** `POST /api/approvals/{id}/answer {answer}` (`answer` 1 to 4096 bytes,
+   redacted; `answer: 1 to 4096 characters`) on a pending question: the row becomes
+   `approved` with `answer` (`approvals.answer TEXT`), `decided_at` and `decided_by`;
+   on a row of another kind it is 422 `answer: only a question can be answered`.
+   `POST .../reject {reason?}` on a question is a decline (`rejected`); `POST
+   .../approve` on a question is 422 `answer: a question needs an answer`. A decision on
+   a question that is not pending is 409 as 5.3 rule 8. The options are suggestions:
+   an answer need not be one of them. The decision is delivered as rule 5 says.
+4. **What the model gets.** Every outcome is a result, never a tool error, so the agent
+   goes on either way: an answer within the wait `{"status": "answered", "question_id",
+   "answer"}`; a decline `{"status": "declined", "question_id", "reason"}` (the
+   operator's reason, else `the operator declined to answer`); an expiry within the
+   wait (a timeout shorter than the wait) `{"status": "unanswered", "question_id"}`;
+   and, when the wait ends first, `{"status": "pending", "question_id"}`: the row stays
+   pending, the visit is marked parked-on that question, and the run and the node return
+   to `running` (the turn goes on: the agent saves its progress and ends the turn, rule
+   12).
+5. **Delivery, parking and resumption.** A decision (an answer, a decline or an expiry)
+   goes to the first of these that applies: (a) the waiting call, when the row has a
+   waiter (5.3 rule 5's delivery); (b) the live visit that asked, through its own loop:
+   while its turn is still open the visit keeps the decision and, when that turn ends
+   normally without `finish`, starts the next turn in the same session with the
+   paragraph of rule 7 as the message, so the agent keeps its context; (c) the parked
+   run: it is re-queued (`RequeuePausedRunAt`; the parked visit's row is closed
+   `succeeded` without output), and the resumed walk (5.21 rule 4's path) runs the node
+   again as a continuation visit whose `question_id` (`run_nodes.question_id`) names
+   the question and whose task carries the paragraph of rule 7; the agent's own
+   workspace and the copy-forward of 5.6 rule 13 hold the files the parked visit left,
+   the checkout included; (d) a run waiting with neither a waiter, a live visit nor a
+   park (the api restarted while the call blocked) is re-queued as 5.3's unattended
+   re-queue does, and the new visit carries the paragraph too. The park itself: a turn
+   that ends normally (`final`) without `finish` while the visit is parked-on a question
+   that is still pending sets `run_nodes.parked_at`, moves the run to `waiting_approval`
+   with `resume_node_visit_id` the visit (one transaction, `ParkVisit`), leaves the node
+   `waiting_approval` and releases the worker (`outcome{paused: true}`, as an approval
+   node does); when the question was decided meanwhile the visit does not park: it
+   starts the next turn as (b). A visit that ends any other way (`finish` accepted, a
+   result taken from the reply, a turn error or abort, a limit, a cancel) parks nothing
+   and expires its pending question with the reason `step finished`. The continuation
+   visit's `question_id` is the newest decided question of the step whose visit parked
+   and that no later visit names (`store.ContinuationQuestion`); nil for a loop revisit
+   or a retry. A continuation visit does not count toward `max_loop_visits`
+   (`CountNodeLoopVisits` counts the step's visits with `question_id IS NULL`; 5.6's
+   entry check and 5.21 rule 2 use it); its steps count toward `max_steps` as any
+   visit's do, and `max_node_iterations` bounds each visit as today.
+6. **Where the question is announced.** (a) A run with a conversation (5.15 rule 10's
+   route): one notice per question, `[platform] Run <id> asks: <question> Options: <a>
+   | <b>. Answer it at <url>, or tell me the answer and I will pass it on (question
+   <id>).` (the `Options:` sentence only with options; `<url>` the run page), claimed
+   through `approvals.reported_at` like the waiting line of 5.15 rule 10, which a
+   question does not also get; a deferred send gives the claim back for the next sweep
+   as that rule's mechanics do. (b) A run without a conversation: the same notice goes
+   to the most recent conversation of the agent bound to Telegram through the budget
+   alerts' route (5.19 rule 6: `SendPlatformMessage`, one attempt, idempotency key
+   `question-<id>`, mirrored with the run id); without a binding or a conversation it is
+   a log line, and the inbox and the run page are the surfaces. (b) is the recommended
+   answer of the first open line below; until it is answered the rule stands as
+   written.
+7. **The answer paragraph.** Appended to the task text (before the protocol block) of a
+   continuation visit, of a retried visit and of a loop revisit of a step that asked,
+   and sent as the next turn's message to a live visit (rule 5 (b)); one block per
+   decided question of the step in this run, oldest first:
+
+   ```
+   Earlier in this step you asked the operator: "<question>"
+   The operator answered: <answer>
+   ```
+
+   The second line is `The operator declined to answer<: <reason>>. Proceed without the
+   answer and state what you assumed.` for a decline and `The operator did not answer
+   in time. Proceed without the answer and state what you assumed.` for an expired
+   question (a retry after rule 8). The answer is the operator's own text (the holder of
+   the API token, or the allowed Telegram user relayed by the Chief): redacted, not
+   wrapped as untrusted content. The next-turn message ends with `Continue your task
+   and call yuno__finish when done.`
+8. **Expiry and cancellation.** The sweeper of 5.2 rule 10 expires a pending question
+   at `expires_at`: within the wait the call gets `unanswered` (rule 4) and the agent
+   goes on; a parked question's expiry fails the run with `question unanswered`
+   (`failRun`; the parked visit's row `failed` with the same reason), and the run is
+   retryable (5.21): the retried visit carries the paragraph of rule 7 with the
+   unanswered line and may ask again. A run cancelled while parked expires the question
+   with `run cancelled` (5.3 rule 8). A run that ends while its visit's question is
+   pending expires it with `step finished` (the inbox card closes; a late answer is
+   409).
+9. **Answering through the Chief.** `answer_question`, a chat-only platform tool (5.15
+   rule 2's list gains it; a run token answers `answer_question is not available in a
+   run`): input `{chat_token, question_id, answer}` with `answer` as rule 3; it resolves
+   the row (`no question <id>`; `question <id> is already <status>`; a row of another
+   kind: `<id> is not a question`), answers it with `decided_by = "chat:<agent name>"`,
+   and returns `{status: "answered", run_id, url}`. The Chief's prompt (5.15 rule 12
+   extended) gains: `When a platform message says a run asks a question, put the
+   question and its options to the person in your own words; when they answer, call
+   answer_question with the question id from that message and their answer as they
+   wrote it, then confirm. Never answer a run's question yourself.` `make seed-reset`
+   applies it.
+10. **Limits and counting.** Each `ask_operator` call is a tool call (`max_tool_calls`);
+    the paused time is excluded from the duration (5.2 rule 4); 3 questions per step
+    per run and one pending per visit (rule 2); continuation visits are free of
+    `max_loop_visits` (rule 5).
+11. **Representation and API.** `Approval.kind` gains `question`; `Approval` gains
+    `options?: string[]` and `answer?: string`; `POST /api/approvals/{id}/answer`
+    (`AnswerBody {answer}`; 200 `Approval`, 404, 409 `not_pending`, 422, 503);
+    `RunNode` gains `question_id?`; `run_status` (5.15 rule 8 extended) adds `question:
+    {id, text, options?, asked_at}` while the run waits on one, next to the pending
+    approval it already reports. SSE `approval.requested` and `approval.decided` carry
+    the row as today (the UI reads `kind`); the inbox list is unchanged.
+12. **UI, prompts and `AGENTS.md`.** The Approvals inbox and the run page's Approvals
+    section render kind `question` as "Question": the question text, one button per
+    option (a click answers with it), a text box with an "Answer" button, and "Decline"
+    with an optional reason; the sidebar's pending count includes questions; the card
+    of an answered question shows the answer. The run header shows `Asks: <question,
+    first 120 characters>` linking to the section while the run waits on a question;
+    the Timeline's approval rows say "Question" and show the answer. The protocol block
+    (5.6 rule 5; 5.16 rule 9 amended) gets, for a visit whose agent holds
+    `ask_operator`, after the repository lines:
+
+    ```
+    Questions: when one fact you cannot find out yourself decides the work, ask the
+    operator with yuno__ask_operator: a short question, with options when a few answers
+    are likely; at most 3 per step. The answer usually comes back in the tool result. If
+    the result says "pending", save your progress in files under runs/<run id>/ and end
+    your turn without calling yuno__finish: the platform runs this step again with the
+    answer added to your task. Decide yourself what you can.
+    ```
+
+    `AGENTS.md` (5.7 rule 5): the sentence `Do not ask questions; decide, act, and
+    finish.` becomes `Do not ask questions in your reply: nobody reads it while you work;
+    decide, act, and finish.`, and an agent whose allowlist holds `ask_operator` gets a
+    `## Questions` section with the paragraph above (the materialiser, as the memory
+    section of 5.18 rule 8). Seed: the Coder and the Researcher gain `ask_operator`, and
+    each prompt gains `Ask the operator with ask_operator only when a missing fact
+    decides the work; otherwise decide and state the assumption.` No developer
+    commentary in product copy.
+
+Edge cases: two `ask_operator` calls issued in one turn: the second is refused with
+`one question at a time` (the lock serializes them). The agent gets `pending`, keeps
+working and calls `finish`: the question expires `step finished`; a later answer is
+409. The decision arrives after the wait but before the turn ends: the visit sends it
+as the next turn's message (rule 5 (b)); the agent's context is kept. The agent ends
+its turn after `pending` but the question was already decided: no park, the next turn
+carries the paragraph. The api restarts while a call blocks: the MCP call dies with the
+process, the run stays `waiting_approval` with the question pending, and the decision
+re-queues it (rule 5 (d)); the new visit's task lists the question and its answer. The
+api restarts while a run is parked: nothing changes (the park is in the rows); the
+decision re-queues it. The parked run's workflow or agent was deleted since: the run
+continues on its snapshot (5.6). A continuation visit asks again: allowed up to the
+step's 3. A loop revisit (the Reviewer sends the Coder back) of a step that asked
+earlier: the task carries the paragraph (the answer is still true) and the visit counts
+toward `max_loop_visits` as today. A question on a run with no conversation and no
+Telegram binding: the inbox and the run page only, one log line. The Chief relays an
+answer to a question decided meanwhile: `question <id> is already approved`. The
+operator answers through the UI and the Chief relays a second answer: 409 and the
+Chief's tool error. An option list with a duplicate or an empty entry: refused with
+the options text. A question whose run was retried (5.21) while parked: the retry is
+refused, the run is `waiting_approval`, not retryable. The operator declines without a
+reason: the model reads `the operator declined to answer`.
+
+Time: `expires_at` from `approval_timeout_seconds` as every approval; the wait from
+`MCP_TOOL_WAIT`; the paused time (in-wait and parked) excluded from the time limit
+(5.2 rule 4) through `paused_at` and `paused_total_ms` as today; the injected clock.
+
+Failure handling: a failed insert is the tool's internal error (the agent sees a tool
+failure and goes on); a failed notice is a log line (the inbox holds the question); a
+failed park (the update) fails the visit with `park: <error>` and expires the question
+`step finished`; a failed re-queue on a decision is logged and the next approval sweep
+re-queues a decided, parked run (`requeueParked` is idempotent); a decision between
+the turn's end and the park is never lost (Consistency).
+
+Consistency: the park (`parked_at`, the pause with `resume_node_visit_id`) is one
+transaction, committed before the worker is released. A decision, after its row is
+recorded, first tries `RequeueParkedRun` (`UPDATE runs ... WHERE status =
+'waiting_approval' AND resume_node_visit_id = <visit> AND <that visit's parked_at IS
+NOT NULL>`); when that changes no row, it is handed to the waiter, else to the live
+visit through the visit's own loop (`do`); when the loop reports the visit gone, the
+re-queue is tried once more, which now finds the park. The `step finished` expiry runs
+after the visit's result is fixed, so a question decided a moment earlier is 409 for
+the decider and nothing for the visit. The step's question count is read under the
+visit's lock, so two calls of one turn cannot both pass.
+
+Outputs: `approvals` rows of kind `question` with `options` and `answer`;
+`run_nodes.question_id` and `parked_at`; the tool results of rule 4; the notices of
+rule 6; the paragraph of rule 7; `POST /api/approvals/{id}/answer`;
+`run_status.question`; the inbox and run page cards; the protocol block paragraph and
+the `## Questions` section; the seeded prompts.
+
+Tests: T5.24.1 the tool's validation texts (question too long, one option, six
+options, a duplicate, a control character, a chat token). T5.24.2 the scripted
+provider asks; an answer within the wait returns `answered` with the text in the same
+turn; the run pauses and resumes; the row carries `answer`. T5.24.3 a decline within
+the wait returns `declined` with the reason; an expiry within the wait (a 1 s timeout)
+returns `unanswered`. T5.24.4 the wait ends (a short `MCP_TOOL_WAIT`): `pending`, the
+run back to `running`; the turn ends without `finish`: the visit parks (run
+`waiting_approval`, node `waiting_approval`, `parked_at` set, the worker free); the
+answer re-queues the run; the continuation visit has `question_id`, its task carries
+the paragraph, its agent's files are present, and `CountNodeLoopVisits` leaves it out
+while `CountNodeVisits` counts it. T5.24.5 the decision arrives after the wait and
+before the turn ends: the next turn's message is the paragraph; no park. T5.24.6 the
+agent finishes after `pending`: the question expires `step finished`; a later answer
+is 409. T5.24.7 a parked question expires: the run fails `question unanswered`; the
+retry's visit carries the unanswered line. T5.24.8 cancel while parked: the question
+expires `run cancelled`, the visit fails. T5.24.9 the fourth question of the step and
+a second pending question are refused with their texts. T5.24.10 the notices: a
+channel run gets the question notice once (claimed), not the waiting line; a manual
+run's notice goes to the Telegram-bound agent's conversation under `question-<id>`;
+without a binding, a log line. T5.24.11 `answer_question`: happy path with
+`decided_by`, unknown id, decided id, a tool approval's id, a run token. T5.24.12
+API: `answer` on a question and on a tool approval; `approve` on a question;
+`reject` as a decline; 409 on a decided question; conformance steps;
+`interaction_rules.ask_operator: require_approval` refused. T5.24.13
+`run_status.question`. T5.24.14 the materialiser writes the `## Questions` section
+only for agents holding the tool, and the amended sentence for all. T5.24.15 UI: the
+question card (options, text box, decline), the inbox count, the header line, the
+Timeline row, the answered card.
+
+Out of scope: questions from the Chief itself (it is in a conversation and asks the
+person), questions addressed to someone other than the operator, attachments in
+answers, more than one pending question per visit, continuing the parked visit's own
+OpenClaw session instead of a new visit (the files carry the progress; a later wave
+may keep the session), a `/answer` command on Telegram (D-046: the Chief's tool), a
+question that gates a side effect (that is an approval, 5.3), answering through the
+gateway's own approval surfaces.
+
+Open lines for Andre (the rules above carry the recommended answers; D-058 and D-059
+record the answers):
+
+1. A question from a run that has no conversation (started from the UI, a schedule or
+   the intake): send it to the Telegram-bound agent's most recent conversation like a
+   budget alert (recommended: the operator of a factory is on Telegram, and the route
+   exists; rule 6 (b)), or keep it to the inbox and the run page? If the inbox only,
+   rule 6 (b) and T5.24.10's second case go.
+2. When the operator declines a question: the step continues with the decline text and
+   states what it assumed (recommended, rule 7: a factory should not stop on a "no"), or
+   the run fails with `question declined`? If it fails, rule 7's decline line goes and
+   rule 8 gains the failure.
+
+### 5.25 Run artifacts: the files a run delivers
+
+Purpose: a run can deliver files, not only a merge request or a release: a report, a
+dataset, a rendered document, and for a project run the diff it produced. They are
+collected from the agents' workspaces as each step ends, kept by the api, listed and
+downloadable on the run page, and named by `run_status`. Decision D-047 (collected at
+the end of every visit, the checkout diff among them, kept 30 days) and D-057.
+Roadmap: `docs/ROADMAP.md` 5.25.
+
+Inputs: the agents' workspaces (`runs/<run id>/out/` under `WorkspaceDir(stateDir,
+id)`, read by the api through the shared state directory of 5.6 rule 13);
+`ARTIFACT_DIR` (default `/data/artifacts`, the named volume `artifacts`);
+`ARTIFACT_TTL_DAYS` (default 30); the project checkout, `runs.checkout_sha` (5.22
+rule 2) and the project's token for the diff; the injected clock.
+
+Units: an artifact is one file of a run at a path relative to `out/`; sizes in bytes;
+caps per run: 200 files and 50 MiB (the sum of the stored sizes), one file at most 20
+MiB, the generated patch at most 10 MiB; retention counted from `finished_at`; UTC.
+
+Rules:
+
+1. **The convention.** Files an agent wants delivered go under `runs/<run id>/out/` of
+   its workspace, at any depth. The protocol block (5.6 rule 5; 5.16 rule 9 amended)
+   tells every agent visit, after the repository lines: `Deliverables: put files the
+   operator should receive (reports, data, documents) under runs/<run id>/out/; the
+   platform collects them when your step ends and shows them on the run page.`
+   `AGENTS.md` carries the same sentence. The directory flows forward with the run
+   directory (5.6 rule 13), so a later agent sees, and may change, an earlier agent's
+   files.
+2. **Collection.** When an agent visit ends, whatever its outcome (succeeded, failed,
+   timed out, cancelled, or parked by 5.24), before the walk advances, the engine calls
+   the collector (`internal/artifacts`, `Collector.Collect(ctx, workspace, run, visit)`)
+   under a 60 s deadline. The workspace is opened through `os.Root`; `runs`, `runs/<run
+   id>` and `out` must be plain directories (a link at any level collects nothing, with
+   the log line `artifacts: out/ is not a plain directory`); `out/` is walked in lexical
+   order; regular files only, links and special files skipped and never followed; the
+   path relative to `out/` is at most 512 bytes; a file over 20 MiB, or past the run's
+   remaining room under 200 files and 50 MiB, is skipped. Each file is copied into the
+   store (`<ARTIFACT_DIR>/<run id>/<artifact id>`, written as `.tmp` and renamed, mode
+   0644) while its sha256 is computed, then matched with the run's row at that path
+   (`run_artifacts`, unique on `(run_id, path)`): no row, inserted with `node_id`,
+   `visit`, `size`, `sha256` and `content_type` (rule 4); a row with the same `sha256`,
+   untouched (the copy is discarded); a different one, updated in place (the same id,
+   the new file replacing the old, `node_id` and `visit` the collecting visit). Skipped
+   files are one log line per visit, `artifacts: <n> files not collected: <path>:
+   <reason>; ...` (the first three named), and the span `artifacts` on the visit carries
+   `files`, `bytes` and `skipped`. Collection is best effort: a failure (I/O, database,
+   the deadline) is a log line and never changes the visit's outcome; what was stored
+   before it stays. SSE `run.artifacts {run_id, count}` follows a collection that
+   changed anything.
+3. **`diff.patch`.** For an agent visit of a project run (the run's `toolchain` set)
+   whose agent's workspace holds the checkout at `runs/<run id>/repo/` with a `.git`
+   directory, the collector also produces the checkout's diff against the commit the
+   run cloned, without running git inside the checkout (5.16 rule 10's reason):
+   `project.Config.Diff(ctx, checkout, branch, base)` clones `branch` (the request's
+   source branch for a 5.22 run, else the default branch) at depth 1 into a private
+   directory, fetches `base` (`runs.checkout_sha`) at depth 1 and checks it out detached
+   when the clone's head is not it, empties the working tree, copies the checkout's tree
+   over it with the copy rule of 5.16 rule 10 (regular files only, links skipped, `.git`
+   and the excluded directories of 5.16 rule 3 left out), stages everything and runs
+   `git diff --cached --binary --no-color --no-ext-diff`; the private directory is
+   removed. A non-empty patch is stored as the artifact `diff.patch` (`generated =
+   true`, content type `text/x-patch`, cut at 10 MiB with the last line `# cut at 10
+   MiB`); an empty one removes an earlier generated `diff.patch`; a file the agent
+   itself put at `out/diff.patch` wins and the generated one is skipped with a log
+   line. A clone or fetch failure skips the diff with the log line `artifacts: diff
+   skipped: <reason>` and nothing else changes. Cost: one shallow clone per agent visit
+   of a project run, on the api side, inside the 60 s deadline.
+4. **Content type and storage.** `content_type` is `http.DetectContentType` on the first
+   512 bytes, overridden by extension for the text kinds it misreads: `.md`
+   `text/markdown`, `.json` `application/json`, `.csv` `text/csv`, `.patch` and `.diff`
+   `text/x-patch`, `.yaml` and `.yml` `text/yaml`, `.svg` `image/svg+xml`, and the
+   source extensions `.py .go .js .ts .tsx .sh .sql .toml .ini .log` `text/plain`;
+   otherwise as detected, `application/octet-stream` when unknown. The store is
+   `ARTIFACT_DIR` on the named volume `artifacts`, mounted on the api at
+   `/data/artifacts` (the api image creates the directory owned by `app`, so the volume
+   inherits it); a missing or unwritable directory at startup is the log line
+   `artifacts: <dir>: <error>; artifacts are disabled` and the collector is nil (visits
+   run as before, the endpoints answer empty lists and 404). Rows:
+   `run_artifacts(id, run_id REFERENCES runs ON DELETE CASCADE, node_id, visit, path,
+   size, sha256, content_type, generated, created_at, updated_at)`, unique `(run_id,
+   path)`.
+5. **API.** `GET /api/runs/{id}/artifacts` lists the run's artifacts by path
+   (`Artifact[]`; 404 for an unknown run; `[]` when none). `GET
+   /api/runs/{id}/artifacts/{artifactId}` sends the file: `Content-Type` as stored
+   except that `text/html`, `application/xhtml+xml` and `image/svg+xml` are sent as
+   `text/plain; charset=utf-8`; `Content-Length`; `Content-Disposition: attachment;
+   filename="<base name, with quotes and control characters removed>"`;
+   `X-Content-Type-Options: nosniff`; `Cache-Control: private, no-store`; 404 when the
+   row is not the run's or the file is gone (`artifact file is missing`). Nothing is
+   ever rendered inline. `run_status` (5.15 rule 8 extended) adds `artifacts: [{path,
+   size_bytes}]` (the first 20 by path) and `artifact_count`, next to the run URL it
+   already returns; the Chief links the run page, it never sends files.
+6. **Retention.** The sweeper of 5.10 (its `Also` hook) runs `artifacts.Sweep` every
+   pass: the rows and files of runs whose `finished_at` is older than
+   `ARTIFACT_TTL_DAYS` days are deleted, rows first, then the run's directory; a live or
+   unfinished run keeps its artifacts; a run directory in the store with no rows (a
+   crash between a file write and its row) is removed too; `ARTIFACT_TTL_DAYS=0` keeps
+   artifacts forever. One log line per pass with the counts when anything was removed.
+7. **UI.** The run page gets an Artifacts section (after the Merge request card, before
+   Approvals): a table of path, size, `<node> visit <n>` and when it was last collected;
+   Download (fetched with the token and saved through a blob URL, since a link carries
+   no header) and, for `text/*`, `application/json` and `text/x-patch` up to 256 KiB,
+   Preview in a `<pre>` (never as HTML; SVG previews as text), for `image/png`,
+   `image/jpeg`, `image/gif` and `image/webp` up to 256 KiB an `<img>` from a blob URL;
+   larger files download only. Empty state: `No files delivered yet.` while the run is
+   live, `No files were delivered.` once it ended; the section is hidden when the
+   collector is disabled and the run has none. The section refreshes on SSE
+   `run.artifacts`. The Logs section shows the skipped-file lines. No developer
+   commentary.
+8. **Shipped prompts.** The Writer's prompt gains `Put the finished report under
+   runs/<run id>/out/ so the operator receives it.` and the research template's writer
+   task says the same; the Coder, Reviewer and Deployer are unchanged (the merge request
+   and the release are their deliverables; the diff is generated). `make seed-reset`
+   applies it.
+
+Edge cases: `out/` does not exist: nothing is collected, no log line. `out/` is a
+symlink, or `runs/<run id>` is: nothing is collected, the log line of rule 2. A link
+inside `out/`: skipped. The same file unchanged across three visits: one row, the
+first visit's. A file changed by a later agent: the row's `node_id`, `visit`, `sha256`
+and `size` change, its id does not. A file deleted from `out/` by a later agent: its
+row stays (deletions do not flow, 5.6 rule 13). A run that ends before any agent visit
+(a validation failure): no artifacts. 201 files: the 201st in lexical order and later
+ones are skipped with the log line. A 60 MiB file: skipped (over 20 MiB). A parked
+visit (5.24): collected like any visit end; the continuation visit collects again and
+changes nothing for unchanged files. A project run without a checkout (5.16 rule 2):
+no diff. A 5.22 run: the diff is against `checkout_sha` on the request's branch, so it
+shows this run's changes only. A branch that moved since the clone: the fetch of the
+sha makes the base the right one; a sha the provider refuses to serve: the diff is
+skipped with the reason. A checkout with only excluded directories changed
+(`node_modules`): an empty diff, no artifact. The agent writes `out/diff.patch`
+itself: its file is the artifact, the generated one is skipped with a log line. The
+store volume full: the write fails, the log line, the visit continues. A retry (5.21):
+the retried visit collects into the same run's rows. A run's artifacts after the run
+is deleted: the rows cascade; the files go with the next sweep (no rows). The TTL
+shortened in `.env`: the next sweep applies it.
+
+Time: `created_at` and `updated_at` from the injected clock; retention from
+`finished_at`; the sweep on the memory sweeper's interval; the 60 s deadline per
+collection.
+
+Failure handling: as rule 2 says, nothing about artifacts fails a visit or a run; a
+failed sweep is a log line and the next pass retries; a download of a row whose file
+is gone is 404 with the message, not 500.
+
+Consistency: a file is written to its temporary name and renamed before its row is
+written or updated, so a row never points at a partial file; a crash between the two
+leaves a file the next sweep removes (no row) or a row whose file is the old version
+(the next collection writes it again, since the sha differs). The per-run caps are
+checked against the rows and the sizes read in one query before the walk, then
+against what this visit added, so two visits of one run never run at once (one visit
+per run, 5.1) and the cap holds.
+
+Outputs: the `run_artifacts` rows and the files under `ARTIFACT_DIR`; the log lines
+and the `artifacts` span; SSE `run.artifacts`; the two endpoints; the Artifacts
+section; `run_status.artifacts` and `artifact_count`; the protocol block line and the
+`AGENTS.md` sentence; the seeded Writer prompt and the research template.
+
+Tests: T5.25.1 the collector against a workspace fixture: nested files collected with
+their paths, sizes, sha256 and content types; links and special files skipped; a link
+at `out/` collects nothing with the log line; the 201st file and a 21 MiB file skipped
+with the line; the 50 MiB cap. T5.25.2 the same file across visits: one row; a
+changed file: the row updated in place; a deleted file: the row stays. T5.25.3 the
+diff: a project run against a local bare repository (the harness of 5.16's tests): a
+change in the checkout yields `diff.patch` with the hunk; no change yields none and
+removes an earlier one; an agent's own `out/diff.patch` wins; a moved branch diffs
+against `checkout_sha`; an unfetchable sha skips with the reason; excluded directories
+are left out. T5.25.4 content types by extension and by sniffing. T5.25.5 the
+endpoints: the list by path; the download's headers (attachment, nosniff, no-store,
+the sanitized filename, `text/plain` for an HTML file); 404 for another run's artifact
+and for a missing file; conformance steps. T5.25.6 the sweep: a run finished 31 days
+ago loses rows and files, one finished yesterday keeps them, an orphan directory goes,
+a live run keeps them; `ARTIFACT_TTL_DAYS=0`. T5.25.7 a disabled store (an
+unwritable directory): the log line, visits unaffected, the list empty. T5.25.8
+`run_status.artifacts` and `artifact_count`. T5.25.9 the protocol block line and the
+`AGENTS.md` sentence; `TestEnvExampleAndComposeCoverConfig` covers `ARTIFACT_DIR` and
+`ARTIFACT_TTL_DAYS`. T5.25.10 UI: the table, Download through a blob, Preview for a
+text and an image, no preview for a large or binary file, the empty states, the
+refresh on `run.artifacts`.
+
+Out of scope: sending files through Telegram (the Chief links the run page), artifacts
+as inputs of a later run, object storage, versions of a path (the newest wins),
+artifacts from the Chief's conversations, previews of PDFs or office documents, a
+signed download link without the token, collecting from the deploy target's releases
+(5.7's `deploy_release` is its own store), a per-project or per-workflow cap (the
+run's caps are fixed).
+
 ## 6. HTTP API summary
 
 Errors: `{error: {code, message, details?}}`; validation failures are 422 with
@@ -2773,6 +3257,11 @@ Wave 9 (5.22 and 5.23, planned; `x-planned: wave 9` in the contract until built)
 `merge_request_id` at queue time), `Run.checkout_sha`, `GET /runs?trigger=&merge_request_id=`,
 `Run.trigger` value `issue` with `trigger_ref` `<project id>#<n>`, `Project.intake` and
 `ProjectInput.intake`, `POST /projects/{id}/intake/poll` (409 `intake_disabled`).
+Wave 10 (5.24 and 5.25, planned; `x-planned: wave 10` in the contract until built):
+`Approval.kind` value `question` with `Approval.options` and `Approval.answer`, `POST
+/approvals/{id}/answer` (422 on another kind, 409 `not_pending`), `RunNode.question_id`,
+`GET /runs/{id}/artifacts` and `GET /runs/{id}/artifacts/{artifactId}` (a download with
+`Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`).
 
 ## 7. Frontend
 
@@ -2814,6 +3303,11 @@ requests table; the Intake section on the project form and the Intake card (last
 error, Poll now) on the project page; a Trigger filter on the runs list and `issue #n`
 links on issue runs.
 
+Wave 10 (5.24 and 5.25, planned): the Question card in the Approvals inbox and on the
+run page (option buttons, an answer box, Decline), the `Asks:` line on the run header,
+the Question rows on the Timeline; the Artifacts section on the run page (table,
+Download through a blob, Preview for small text and images, the empty states).
+
 ## 8. Docker and Makefile
 
 Services: `postgres`, `openclaw-init` (writes the baseline config, exits), `openclaw`
@@ -2825,7 +3319,8 @@ service that tags `yuno-sandbox:latest`) and `sandbox-image-{python,node,go}` (b
 the per-toolchain images of 5.16 rule 6); profiles `eval`, `tunnel`, `tools`, `build`.
 The `go` tool service is `golang:1.26-alpine` plus git (`docker/go.Dockerfile`); the
 api image carries git too (5.16 rules 3 and 10). The gateway
-image is pinned to `2026.10.3`. Volumes: `pgdata`, `releases`, caches; everything OpenClaw
+image is pinned to `2026.10.3`. Volumes: `pgdata`, `releases`, since 5.25 `artifacts` (mounted on the api at
+`/data/artifacts`, D-057), caches; everything OpenClaw
 touches is a host bind mount under `./data/` (git-ignored). `.env.example` adds
 `OPENCLAW_GATEWAY_TOKEN`, `YUNO_MCP_TOKEN`, `MODEL_PROXY_RATE_PER_MINUTE`,
 `MCP_TOOL_WAIT_SECONDS`, `DOCKER_SOCKET`. Make targets unchanged plus `make openclaw-shell`
@@ -2856,7 +3351,8 @@ guardrails; scheduler; channels, schedules and skills pages; chat approvals; tun
 Wave 4: eval cases to 20+, rubric evaluator, final report; README, diagram, ADRs, threat
 model, AI_USAGE.md, DECISIONS.md; OpenAPI tests; status p95; demo script.
 
-Waves 5 to 8 as built: the Chief of Staff and delegation (5.15), the project repository (5.16), projects as records (5.17), project instructions and notes, budgets, merge request records and retry (5.18 to 5.21). Waves 9 to 11 are planned in `docs/ROADMAP.md`: 9 is 5.22 and 5.23 (iteration on an open merge request, issue intake; designed, briefs under `docs/briefs/wave9/`), 10 is questions to the operator and run artifacts, 11 is parallel steps.
+Waves 5 to 8 as built: the Chief of Staff and delegation (5.15), the project repository (5.16), projects as records (5.17), project instructions and notes, budgets, merge request records and retry (5.18 to 5.21). Waves 9 to 11 are planned in `docs/ROADMAP.md`: 9 is 5.22 and 5.23 (iteration on an open merge request, issue intake; designed, briefs under `docs/briefs/wave9/`), 10 is 5.24 and 5.25 (questions to the operator, run artifacts; designed, briefs under
+`docs/briefs/wave10/`), 11 is parallel steps.
 
 ## 10. Product decisions and assumptions
 

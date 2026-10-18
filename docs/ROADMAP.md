@@ -431,6 +431,12 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
    (`docs/reviews/wave9-review.md`), fixed, merged to `main` as `6db1207` and deployed;
    the iteration on `!4` and the intake (issue #1 became the run that opened `!5`)
    verified live (`docs/test-results.md`).
-7. Next: wave 10 (5.24 questions to the operator, 5.25 run artifacts): write the design
-   sections and briefs when the wave starts, as wave 9's were; the demo recording with
-   projects is still pending.
+7. Done 2026-10-18 for wave 10: `docs/DESIGN.md` 5.24 and 5.25 are written in full, the
+   decisions they settle beyond D-046 and D-047 are D-056 and D-057, `api/openapi.yaml`
+   0.7.0 carries the wave 10 contract marked `x-planned: wave 10`, and the briefs are
+   under `docs/briefs/wave10/` (four Sonnet 5.5 agents: questions engine, questions tools
+   and prompts, artifacts, frontend; a Sonnet 5.5 agent lands the prerequisites first).
+8. Next: Andre answers the two open lines at the end of 5.24 (recorded as D-058 and
+   D-059) and approves the briefs; then wave 10 is built as wave 9 was, and wave 11
+   (5.26, parallel steps) is designed when it starts. The demo recording with projects
+   is still pending.
