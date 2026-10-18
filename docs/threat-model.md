@@ -191,6 +191,9 @@ derived gateway image adds only the static Docker CLI.
   branch in between is reverted by it. A run that names an existing request (DESIGN
   5.22) clones its branch and refuses the push when the branch moved since (D-050), so
   the limitation is the same-run path only.
+- A push from the api (a new request or an update onto its branch) copies regular files
+  only, so a symlink tracked by the repository is committed as a deletion; projects with
+  tracked links are not supported.
 - Issue intake polls the provider every two minutes and drives the issue's labels; the
   comments it posts are best effort (a crash between the label swap and the comment can
   repeat the comment once), and an issue's text is the run's task (above).

@@ -928,7 +928,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/ProjectSettings"
         - type: object
-          required: [id, description, token_set, created_at, updated_at]
+          required: [id, description, token_set, intake, created_at, updated_at]
           properties:
             id: { type: string }
             description: { type: string }
@@ -982,13 +982,14 @@ components:
         `intake.enabled` (a daily or monthly budget cap must be set first).
       properties:
         enabled: { type: boolean, default: false, description: "open issues carrying the label become runs" }
-        label: { type: string, default: yuno, minLength: 1, maxLength: 50, description: "the intake label; the platform moves it to <label>:running, <label>:done or <label>:failed" }
+        label: { type: string, default: yuno, minLength: 1, maxLength: 50, description: "the intake label (1 to 50 bytes, no spaces or commas, not None or Any); the platform moves it to <label>:running, <label>:done or <label>:failed" }
         workflow_id: { type: string, description: "the workflow each issue runs; its input receives the issue as task" }
     ProjectIntake:
       allOf:
         - $ref: "#/components/schemas/ProjectIntakeInput"
         - type: object
           description: "DESIGN 5.23 rule 1: the settings plus what the last poll did."
+          required: [enabled, label]
           properties:
             workflow_name: { type: string, description: "the workflow's name as the API joined it; absent when none or deleted" }
             polled_at: { type: string, format: date-time, description: "when the intake last polled the project; absent before the first poll" }

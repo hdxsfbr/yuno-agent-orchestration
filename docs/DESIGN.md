@@ -2141,7 +2141,9 @@ Rules:
      the insert (23505) maps to the same text; the second is a read of the record's run
      in the trigger transaction. A run that ends leaves the index and frees the request;
      a retry (5.21 rule 3) re-enters it, so a retry while another run updates the same
-     request is refused 409 `run_not_retryable` with the same text.
+     request is refused 409 `run_not_retryable` with the same text; the retry of a run
+     that names a request also refuses while the request's opening run is live (review
+     L3), and the retry of the opening run refuses while an updating run is live.
    The quick run of a delegation or a run request takes `merge_request_id` optionally
    like `project_id` (its one-node definition opts in through the project). `Run`
    carries `merge_request_id`, and `Run.merge_request` (5.20 rule 6) is filled from the
@@ -2249,7 +2251,10 @@ Rules:
    would be), each a 422 detail on `merge_request_id`; it requires a `project_id` on the
    schedule and the record must belong to that project. Left out on update it keeps its
    value, except when `workflow_id` or `project_id` changes, which drops it; an empty
-   string clears it. The tick passes it in the trigger request. A firing refused because
+   string clears it; a kept request is re-checked only when `merge_request_id` is in the
+   body or `workflow_id` or `project_id` changes, so a schedule whose request has ended
+   can still be disabled or have its input edited (the tick disables it; review M1). The
+   tick passes it in the trigger request. A firing refused because
    the request is `merged` or `closed` disables the schedule with `last_error = "<merge
    request !n|pull request #n> is <state>"`, since no later occurrence can succeed (like
    a deleted workflow, 5.9 rule 4; D-049); one refused because another run is updating
@@ -2473,7 +2478,9 @@ Rules:
    switched on purpose, not cleared by a form that does not know it). Validation, 422
    details on the paths: `intake.label` is trimmed, 1 to 50 bytes, no comma, no
    whitespace, no control character (`intake.label: 1 to 50 characters without spaces or
-   commas`); `intake.workflow_id` is required when `enabled` is true
+   commas`), and not `None` or `Any` in any case (`intake.label: must not be None or Any`,
+   GitLab's filter words for unlabelled and any-labelled issues; review L7); `intake.workflow_id`
+   is required when `enabled` is true
    (`intake.workflow_id: required when intake is enabled`), must be a live operator
    workflow (not a template, not a quick-run wrapper: `intake.workflow_id: no workflow
    with id <id>`), must opt in to a project (`intake.workflow_id: the workflow does not
@@ -2490,25 +2497,34 @@ Rules:
    runs the closer of rule 5. Per project, in order: (a) the budget: `project.CheckBudget`
    (5.19 rule 3) at or over a cap skips the project with one log line `intake: project
    <name> skipped: <budget text>` and the text in `intake_last_error` (the issues keep the
-   intake label and are taken when the window resets); (b) the labels: once per project
+   intake label and are taken when the window resets); the pass also stops taking, with
+   the log line `intake: project <name> at its budget with <n> runs in flight`, once the
+   cap minus the window's spend minus the sum of `max_cost_usd` of the project's live
+   runs is `<= 0` for either window, so the overshoot 5.19 rule 4 allows is bounded in
+   advance rather than discovered after (review M2); (b) the labels: once per project
    per process start, the three derived labels are created when missing (GitLab `GET
    labels?search=`, `POST labels {name, color}`; GitHub `GET labels/<name>`, `POST labels
    {name, color}`; colours `#1f75cb` running, `#2da44e` done, `#cf222e` failed; an
    "already exists" answer is fine), so a swap never names a label the provider does not
    have (D-053); (c) the listing: GitLab `GET issues?labels=<label>&state=opened&scope=all&order_by=created_at&sort=asc&per_page=50`,
    GitHub `GET issues?labels=<label>&state=open&sort=created&direction=asc&per_page=50`
-   with entries that carry `pull_request` skipped; (d) for each issue in that order, the
-   taker of rule 3, at most 10 new runs per project per poll (the rest wait for the next
-   poll; D-053). `intake_polled_at` is set after every pass over the project, `intake_last_error`
+   with entries that carry `pull_request` skipped and GitLab issues with `confidential:
+   true` skipped (their text could reach a public request's description; review L8),
+   read page by page (50 per page, oldest first) until 10 takeable issues are found or
+   4 pages were read (review L5); (d) for each issue in that order, the taker of rule 3,
+   at most 10 new runs per project per poll (the rest wait for the next poll; D-053).
+   The closer of rule 5 runs under one 5-minute deadline per pass and a provider timeout
+   ends the pass early (review L6). `intake_polled_at` is set after every pass over the project, `intake_last_error`
    to the pass's first error or cleared; a provider error on one project is logged and the
    pass continues with the next; a database error ends the pass with a log line. `POST
    /api/projects/{id}/intake/poll` runs one pass for one project at once and answers
    `{taken, closed, error?}` (the UI's "Poll now"; 409 `intake_disabled` when intake is
    off, 404 for a missing project).
-3. **The taker.** An issue is taken when no live run has `trigger = issue` and
-   `trigger_ref = "<project id>#<n>"`; when one does (a crash between the run's creation
-   and the label swap), the taker skips to the swap and the comment of (c) without
-   creating a run. Otherwise it: (a) builds the task text (rule 4); (b) triggers through
+3. **The taker.** An issue is taken when a run with `trigger = issue` and `trigger_ref =
+   "<project id>#<n>"` is live, or has ended with `reported_at` still null (its outcome is
+   not yet posted: the closer owns it); when one exists (a crash between the run's
+   creation and the label swap, or a token that cannot label, review H1), the taker
+   skips to the swap and the comment of (c) without creating a run. Otherwise it: (a) builds the task text (rule 4); (b) triggers through
    the engine `TriggerRequest{WorkflowID: intake_workflow_id, ProjectID, Trigger: issue,
    TriggerRef, Input: {"task": <text>}}` with the workflow's limits, the project's budget
    and the agents' rates checked in the trigger transaction as for any run; a refusal
@@ -2548,7 +2564,8 @@ Rules:
    whose status is terminal and whose `reported_at` is null (`runs.reported_at` is "the
    outcome was reported where the work came from": the conversation for a channel run,
    the issue for an issue run; the channel report's queries filter on `trigger = channel`
-   and never see these; D-052), at most 50 per pass, oldest first, and for each: (a)
+   and never see these; D-052), at most 50 per pass, newest `finished_at` first (so runs
+   that can never be posted do not starve newer ones; review M1), and for each: (a)
    swaps `<label>:running` for `<label>:done` when the run `succeeded` and for
    `<label>:failed` when it `failed`, `timed_out` or was `cancelled`; (b) comments `Yuno
    finished run <url>. Merge request: <merge request url>` (`Pull request:` on GitHub)
@@ -2558,8 +2575,11 @@ Rules:
    (the reason omitted when empty); (c) sets `reported_at` to now. A provider failure in
    (a) or (b) is logged, `reported_at` stays null and the next pass tries again (the swap
    is idempotent: removing a label the issue no longer has is fine; the comment may then
-   repeat once, which is accepted). A run whose project row is gone or whose token cannot
-   be read is skipped with a log line and keeps `reported_at` null.
+   repeat once, which is accepted). A run whose project row is gone, or whose issue
+   answers 404 or 410 on the swap, is marked reported with the log line `intake: run <id>
+   has nothing to post: <reason>` (nothing can ever be posted); a run whose token cannot
+   be read is skipped with a log line and keeps `reported_at` null (the operator fixes
+   the token).
 6. **Retry by re-labelling** (D-045). Removing `<label>:failed` (or `:done`) and adding
    `<label>` lists the issue again; the previous run is terminal and reported, so the
    taker creates a new run with the same `trigger_ref` (the index allows it: the old run
@@ -2587,8 +2607,8 @@ Rules:
    (default `yuno`, hint: "Issues carrying this label become runs. The platform moves it
    to <label>:running, <label>:done or <label>:failed as the work goes."), a "Workflow"
    selector of the live operator workflows (the server's 422 details map onto the
-   fields), and the budget sentence when the project has no cap ("Set a daily or
-   monthly budget before enabling intake."). The project page gets an Intake card: the
+   fields), and, while the form enables intake on a project without a cap, the budget
+   sentence ("Set a daily or monthly budget before enabling intake."; review L2). The project page gets an Intake card: the
    settings, "Last poll <relative time>" or "Not polled yet", the last error as a muted
    line, and a "Poll now" button calling the poll endpoint and showing `taken` and
    `closed`. The runs list gets a Trigger filter next to the status filter (all five
