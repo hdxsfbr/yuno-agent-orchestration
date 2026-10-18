@@ -6,6 +6,27 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-18
 
+**D-055 A project needs a daily or monthly budget cap before its issue intake can be
+enabled.** (Andre, 2026-10-18, the recommended answer of DESIGN 5.23's open line)
+`PUT /api/projects/{id}` with `intake.enabled: true` on a project without a cap is 422
+`intake.enabled: set a daily or monthly budget before enabling intake`; the form says
+the same sentence. Why: whoever may set labels on the repository can start runs on the
+project, each spending up to the workflow's `max_cost_usd` and opening a merge request
+behind the approval gate, and the project cap (5.19) is the only bound on that; a
+warning sentence alone would let an intake run uncapped. Cost: one more step before
+the first labelled issue is taken. Design: DESIGN 5.23 rule 1.
+
+**D-054 The merged or closed report of a merge request goes once to the conversation of
+the run that opened it, not to the runs that updated it.** (Andre, 2026-10-18, the
+recommended answer of DESIGN 5.22's open line) 5.20 rule 4 is unchanged in this wave:
+one `[platform]` line, keyed `report-<run id>-mr-<state>`, into the opening run's
+conversation; a run that updated the request (5.22) gets no copy, and the Chief answers
+`run_status` when asked. Why: with one operator the two conversations are the same in
+practice, and a second destination would need a second key and a second claim per
+updating run. Cost: a request opened from the UI and updated from Telegram reports its
+merge nowhere on Telegram; revisit when a second operator exists. Design: DESIGN 5.22
+rule 9.
+
 **D-053 Issue intake creates the derived labels itself, swaps the label before it
 comments, takes at most ten issues per project per poll, wraps the issue as untrusted
 content, and adds `Closes #<n>` once.** (coordinator, 2026-10-18, writing DESIGN 5.23

@@ -424,9 +424,9 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
    0.6.0 carries the wave 9 contract marked `x-planned: wave 9`, and the briefs are
    under `docs/briefs/wave9/` (four Sonnet 5.5 agents: iteration engine, iteration
    tools, intake, frontend).
-5. Next: Andre answers the two open lines at the end of 5.22 (the merged report's
-   second destination) and 5.23 (a budget cap required before intake is enabled),
-   recorded as D-054 and D-055, and approves the briefs; the coordinator lands the
-   prerequisites of `docs/briefs/wave9/00-plan.md`; the wave runs through the loop;
-   the demo, README, threat model and test results are re-derived where the wave
-   changed them; merge to main.
+5. Done 2026-10-18: Andre answered both open lines with the recommended answer (D-054:
+   one merged report, to the opening run's conversation; D-055: a budget cap before
+   intake is enabled) and approved the briefs, every agent on Sonnet 5.5.
+6. Next: the coordinator lands the prerequisites of `docs/briefs/wave9/00-plan.md`; the
+   wave runs through the loop; the demo, README, threat model and test results are
+   re-derived where the wave changed them; merge to main.

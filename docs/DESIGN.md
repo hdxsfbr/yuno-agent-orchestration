@@ -2278,7 +2278,7 @@ Rules:
    when the run pushed (an executed `open_merge_request` call whose output has
    `updated: true`), and with nothing about the request otherwise. The merged or closed
    report of 5.20 rule 4 is unchanged: it goes once to the conversation of the run that
-   opened the request (see the open line below).
+   opened the request (D-054).
 10. **Shipped prompts and templates** (5.16 rule 14). The Coder's prompt gains: `When your
     task's protocol block names a merge request this run updates, call read_merge_request
     first and address every unresolved thread before anything else; say in your summary
@@ -2396,12 +2396,10 @@ branch that moved (D-050: refuse), picking a request another run is updating (re
 reading a request of a project the caller did not name, more than one request per run,
 a record for the updating run (the request stays the opening run's), webhooks.
 
-Open line for Andre (the design stops here until it is answered): should the merged or
-closed report of 5.20 rule 4 also go to the conversation of the newest run that
-*updated* the request, when it differs from the opening run's? Recommended: no for this
-wave (one report, into the conversation that asked for the request; the Chief answers
-`run_status` when asked), since the single-operator setup makes the two conversations
-the same in practice.
+Settled 2026-10-18 (D-054, the recommended answer): the merged or closed report of 5.20
+rule 4 goes once to the conversation of the run that opened the request, not to the
+runs that updated it; the Chief answers `run_status` when asked. Revisit when a second
+operator exists.
 
 ### 5.23 Issue intake: a labelled issue becomes a run
 
@@ -2443,8 +2441,8 @@ Rules:
    against its `input_schema` (5.6 rule 11) with a one-line sample, every violation
    joined (`intake.workflow_id: the workflow's input must accept {"task": string}:
    <messages>`). Enabling intake on a project without a budget cap (5.19) is refused
-   with `intake.enabled: set a daily or monthly budget before enabling intake` (see the
-   open line; the budget is the only bound on what a labelled issue can spend).
+   with `intake.enabled: set a daily or monthly budget before enabling intake` (D-055; the
+   budget is the only bound on what a labelled issue can spend).
    `list_projects` (5.17 rule 8) adds `intake: {enabled, label}`.
 2. **The poll.** A loop in a new package `internal/intake`, started by the api like the
    scheduler, passes every `INTAKE_POLL_INTERVAL` over the live projects with
@@ -2643,12 +2641,11 @@ attachments, more than one run per issue at a time, re-running on every edit of 
 issue (D-045: one run, retry by re-labelling), an intake workflow that is a quick run on
 one agent, an intake table of its own (D-052).
 
-Open line for Andre (the design stops here until it is answered): must a project have a
-budget cap before intake can be enabled (rule 1's `intake.enabled` refusal)? Recommended:
-yes. Anyone who may set labels on the repository can start runs on the project, each
-spending up to the workflow's `max_cost_usd` and opening a merge request behind the
-approval gate; the project cap is the only bound on that, so the platform should insist
-on it. Alternative: allow it with the form's warning sentence only.
+Settled 2026-10-18 (D-055, the recommended answer): a project needs a daily or monthly
+budget cap before intake can be enabled (rule 1's `intake.enabled` refusal stands).
+Anyone who may set labels on the repository can start runs on the project, each spending
+up to the workflow's `max_cost_usd` and opening a merge request behind the approval
+gate; the project cap is the only bound on that.
 
 ## 6. HTTP API summary
 
