@@ -1004,3 +1004,61 @@ func TestQuestionNoticeOnlyForQuestions(t *testing.T) {
 		t.Fatalf("sends = %+v", env.fc.sendParams())
 	}
 }
+
+// Review L11: the notice to the Telegram-bound agent is sent from a goroutine after the
+// question was recorded; a question decided in the meantime is no longer news, so the row
+// is read again there and a decided one sends nothing (an answered one, a declined one, an
+// expired one), and neither does a question whose row is gone.
+func TestQuestionNoticeIsNotSentForADecidedQuestion(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	env.acceptingSends()
+	env.boundConversation(operatorConvKey)
+	for name, decide := range map[string]func(a *store.Approval){
+		"answered": func(a *store.Approval) {
+			if _, err := store.AnswerApprovalAt(ctx, env.pool, a.ID, "Go", "api", env.clock.Now()); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"declined": func(a *store.Approval) {
+			if _, err := store.DecideApprovalAt(ctx, env.pool, a.ID, store.ApprovalRejected, "api", "no", env.clock.Now()); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"expired": func(a *store.Approval) {
+			if _, err := store.DecideApprovalAt(ctx, env.pool, a.ID, store.ApprovalExpired, "platform", "approval expired", env.clock.Now()); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"deleted": func(a *store.Approval) {
+			if _, err := env.pool.Exec(ctx, `DELETE FROM approvals WHERE id=$1`, a.ID); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := env.captureLog()
+			before := len(env.fc.sendParams())
+			run, a := env.questionRun(store.TriggerManual, "", "Which greeting language?", []string{"Python", "Go"})
+			stale := *a // what AskOperator handed the announcement: pending
+			decide(a)
+			env.e.announceQuestion(ctx, run, &stale)
+			env.e.reports.Wait()
+			if n := len(env.fc.sendParams()) - before; n != 0 {
+				t.Fatalf("a %s question sent %d notices: %+v", name, n, env.fc.sendParams()[before:])
+			}
+			if strings.Contains(logs.String(), "has nowhere to be announced") || strings.Contains(logs.String(), "could not be announced") {
+				t.Errorf("log = %q", logs.String())
+			}
+		})
+	}
+
+	// A question that is still pending is announced as before.
+	before := len(env.fc.sendParams())
+	run, a := env.questionRun(store.TriggerManual, "", "Which greeting language?", nil)
+	env.e.announceQuestion(ctx, run, a)
+	env.e.reports.Wait()
+	if n := len(env.fc.sendParams()) - before; n != 1 {
+		t.Fatalf("a pending question sent %d notices", n)
+	}
+}

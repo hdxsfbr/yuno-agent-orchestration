@@ -40,7 +40,7 @@ func (c *Collector) Sweep(ctx context.Context, now time.Time) (int64, error) {
 			}
 			rows += n
 			runs++
-			if safeName(id) {
+			if isRunID(id) {
 				if err := os.RemoveAll(c.runDir(id)); err != nil {
 					errs = append(errs, err)
 				}
@@ -58,8 +58,9 @@ func (c *Collector) Sweep(ctx context.Context, now time.Time) (int64, error) {
 			break
 		}
 		// Only the directories the platform makes: never a link, never a name that is
-		// not a run id (the probe file, a volume's own directories).
-		if !e.IsDir() || !safeName(e.Name()) {
+		// not a 36-character run id (the probe file, a volume's own directories, whatever
+		// else a shared or mis-set ARTIFACT_DIR holds; review M1).
+		if !e.IsDir() || !isRunID(e.Name()) {
 			continue
 		}
 		id := e.Name()

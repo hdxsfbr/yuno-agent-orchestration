@@ -1,3 +1,19 @@
+# Test results, 2026-10-18 (wave 10: questions to the operator, run artifacts; DESIGN 5.24 and 5.25)
+
+Run on the development machine from the worktree branch `claude/eloquent-wu-44b501`
+after the fix pass and before its merge to `main`, everything inside throwaway containers
+on the stack's network (the compose tool services cannot be used from a worktree while
+the stack runs); CI runs the same commands on `main` and deploys the commit.
+
+| Command | Result |
+|---|---|
+| `go test ./... -count=1` (against a `yuno_test_coord` database; what `make test-go` runs) | 22 packages ok, 0 failures (new package `internal/artifacts`; new: the question row and its pause, the decision delivery order and its races, the park and the continuation visit, the loop count, the expiry cases, the answer endpoint and the agent form's refusal, `ask_operator` and `answer_question` against a fake engine, the notices on both routes, `run_status.question` and `.artifacts`, the prompts and the `## Questions` section, the collector over a fixture workspace, the diff against a local bare repository, content types, the artifact endpoints and headers, the sweep, the conformance steps of both features) |
+| `pnpm test` (vitest; what `make test-web` runs) | 47 files, 975 tests passed (new: the Question card and its states, the byte count of the answer box, the `Asks:` header line, the Timeline labels, the Artifacts section with Download and Preview, the saved name's cleaning, the `run.artifacts` refresh, the sidebar count, the tool picker's policies) |
+| `go vet ./...`, staticcheck 2026.2.2, `gofmt -l`, eslint, `tsc --noEmit` (what `make lint` runs) | clean |
+| review | two Sonnet 5.5 reviewer agents (engine, tools, collector and diff; API, store, contract and UI): one high (the generated `diff.patch` deleted after the Deployer's push moved `checkout_sha`), three mediums and the kept lows fixed in one pass by two Sonnet 5.5 fix agents, the rest recorded as limitations; `docs/reviews/wave10-review.md` |
+
+LIVE_ROWS
+
 # Test results, 2026-10-18 (wave 9: iterate on an open merge request, issue intake; DESIGN 5.22 and 5.23)
 
 Run on the development machine from the worktree branch `claude/eloquent-wu-44b501`

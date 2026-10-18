@@ -274,6 +274,24 @@ func clearWorkingTree(repo string) error {
 // directories are left out at any depth. src is opened as an os.Root so a link cannot
 // lead outside it. It returns how many files it copied.
 func copyTree(src, dst string) (int, error) {
+	return copyTreeCtx(context.Background(), src, dst, 0)
+}
+
+// ErrCheckoutTooLarge is Diff's answer for a checkout whose files add up to more than
+// MaxCheckoutBytes: the diff is skipped rather than copying them (review L1).
+var ErrCheckoutTooLarge = errors.New("the checkout is over 500 MiB")
+
+// MaxCheckoutBytes is how much of a checkout Diff copies into its private clone: the sum of
+// the sizes of the files it would copy (DESIGN 5.25 rule 3). A checkout of a repository
+// that size is not one an artifact's diff is worth the time and the disk for.
+const MaxCheckoutBytes = 500 << 20
+
+// copyTreeCtx is copyTree under a context, with a cap on the bytes copied when limit is
+// positive. A cancelled context ends the walk, and a copy of a large file, at the next
+// entry or chunk; a tree whose files add up to more than limit is ErrCheckoutTooLarge,
+// found from the sizes before a file is copied and again as it is read, since a file can
+// grow meanwhile. What was copied before the error stays in dst.
+func copyTreeCtx(ctx context.Context, src, dst string, limit int64) (int, error) {
 	root, err := os.OpenRoot(src)
 	if err != nil {
 		return 0, err
@@ -284,8 +302,12 @@ func copyTree(src, dst string) (int, error) {
 		skip[strings.TrimSuffix(d, "/")] = true
 	}
 	n := 0
+	var total int64
 	err = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if p == "." {
@@ -309,16 +331,55 @@ func copyTree(src, dst string) (int, error) {
 		if err != nil || !info.Mode().IsRegular() {
 			return err
 		}
+		if limit > 0 && total+info.Size() > limit {
+			return ErrCheckoutTooLarge
+		}
 		out, err := os.OpenFile(filepath.Join(dst, p), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode().Perm()|0o600)
 		if err != nil {
 			return err
 		}
-		if _, err := io.Copy(out, in); err != nil {
+		var from io.Reader = in
+		if limit > 0 {
+			from = io.LimitReader(in, limit-total+1)
+		}
+		copied, err := copyChunks(ctx, out, from)
+		total += copied
+		if err != nil {
 			out.Close()
 			return err
+		}
+		if limit > 0 && total > limit {
+			out.Close()
+			return ErrCheckoutTooLarge
 		}
 		n++
 		return out.Close()
 	})
 	return n, err
+}
+
+// copyChunks copies src to dst in chunks, looking at ctx between them, and returns the
+// bytes written.
+func copyChunks(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
+	buf := make([]byte, 256<<10)
+	var n int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return n, err
+		}
+		m, rerr := src.Read(buf)
+		if m > 0 {
+			w, werr := dst.Write(buf[:m])
+			n += int64(w)
+			if werr != nil {
+				return n, werr
+			}
+		}
+		if rerr == io.EOF {
+			return n, nil
+		}
+		if rerr != nil {
+			return n, rerr
+		}
+	}
 }

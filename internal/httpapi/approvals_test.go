@@ -97,6 +97,11 @@ func TestDecideApprovals(t *testing.T) {
 	if code, _ := do(t, ts, http.MethodPost, "/api/approvals/no-such-approval/approve", ""); code != http.StatusNotFound {
 		t.Fatalf("unknown approval: %d", code)
 	}
+	for _, verb := range []string{"approve", "reject"} { // an id with a NUL is no approval's either
+		if code, body := do(t, ts, http.MethodPost, "/api/approvals/no%00such/"+verb, ""); code != http.StatusNotFound {
+			t.Fatalf("%s with a NUL in the id: %d %s", verb, code, body)
+		}
+	}
 
 	// always is for exec approvals only; on one it is the approve_always decision.
 	_, tool2, _, _ := seedApprovals(t)
@@ -260,6 +265,12 @@ func TestAnswerQuestionEndpoint(t *testing.T) {
 	if code, _ := post("no-such-approval", `{"answer":"x"}`); code != http.StatusNotFound {
 		t.Fatalf("unknown approval: %d", code)
 	}
+	// An id with a NUL is no approval's: 404, not the database's refusal as a 500 (review L1).
+	for _, id := range []string{"no%00such", "%00", "no%01such"} {
+		if code, body := post(id, `{"answer":"x"}`); code != http.StatusNotFound || decodeError(t, body).Error.Code != "not_found" {
+			t.Fatalf("approval id %q: %d %s", id, code, body)
+		}
+	}
 	// 422: another kind of approval; the engine is not asked.
 	before := len(eng.calls())
 	code, body = post(rows.tool.ID, `{"answer":"yes"}`)
@@ -280,6 +291,8 @@ func TestAnswerQuestionEndpoint(t *testing.T) {
 		"no answer":        {`{}`, "1 to 4096 characters"},
 		"blank answer":     {`{"answer":" \n\t "}`, "1 to 4096 characters"},
 		"too long":         {`{"answer":` + jsonQuote(strings.Repeat("h", 4097)) + `}`, "1 to 4096 characters"},
+		"a NUL":            {`{"answer":` + jsonQuote("a\x00b") + `}`, "1 to 4096 characters"}, // review L1: the insert would fail
+		"only a NUL":       {`{"answer":` + jsonQuote("\x00") + `}`, "1 to 4096 characters"},
 		"not a string":     {`{"answer":5}`, "must be a string"},
 		"an unknown field": {`{"answer":"x","reason":"y"}`, "unknown field"},
 		"malformed":        {`{"answer":`, "unexpected EOF"},

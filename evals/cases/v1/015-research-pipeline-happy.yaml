@@ -175,7 +175,7 @@ script:
   - tool:
       name: write
       args:
-        path: "runs/$RUN_ID/report.md"
+        path: "runs/$RUN_ID/out/report.md"
         content: |
           # SQLite or PostgreSQL for a small internal tool
 
@@ -193,7 +193,7 @@ script:
         run_token: "$RUN_TOKEN"
         result:
           summary: Start on SQLite for a small tool with few writers and move to PostgreSQL when concurrent writes or growth require it; the report recommends SQLite first.
-          report_path: "runs/$RUN_ID/report.md"
+          report_path: "runs/$RUN_ID/out/report.md"
   - text: The report is written and the result has been submitted.
 expect:
   status: succeeded

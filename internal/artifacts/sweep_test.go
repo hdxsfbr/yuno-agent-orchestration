@@ -235,8 +235,7 @@ func TestSweepFailureLeavesFilesAlone(t *testing.T) {
 	closed.Close()
 	orphan := store.NewID()
 	must(t, os.MkdirAll(filepath.Join(f.c.Dir, orphan), 0o755))
-	broken := *f.c
-	broken.Pool = closed
+	broken := &Collector{Dir: f.c.Dir, Pool: closed, Log: f.c.Log, TTL: f.c.TTL}
 	if _, err := broken.Sweep(context.Background(), time.Now()); err == nil {
 		t.Fatal("a sweep without a database reported success")
 	}
@@ -245,9 +244,54 @@ func TestSweepFailureLeavesFilesAlone(t *testing.T) {
 	}
 
 	// A store directory that does not exist is an empty store, not an error.
-	empty := *f.c
-	empty.Dir = filepath.Join(t.TempDir(), "never-created")
+	empty := &Collector{Dir: filepath.Join(t.TempDir(), "never-created"), Pool: f.pool, Log: f.c.Log, TTL: f.c.TTL}
 	if n, err := empty.Sweep(context.Background(), time.Now()); err != nil || n != 0 {
 		t.Errorf("missing directory: %d, %v", n, err)
+	}
+}
+
+// DESIGN 5.25 rule 6 (review M1): only directories named by a run id are ever touched. A
+// store that shares its directory with other data, or an ARTIFACT_DIR set to the wrong
+// place, loses none of it: backups, tmp and shared-data hold files the sweep must not
+// remove, nor must it remove files in them however old; names that only look like ids (the
+// wrong length, upper case, not hex) stay too, and a real run id's directory still goes.
+func TestSweepTouchesOnlyRunIDDirectories(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now().UTC()
+	longAgo := now.Add(-100 * 24 * time.Hour)
+	foreign := []string{
+		"backups", "tmp", "shared-data", "uploads", "a", "0",
+		strings.ToUpper(store.NewID()),               // a UUID in upper case
+		store.NewID() + "-old",                       // a run id and a suffix
+		store.NewID()[:35],                           // one character short
+		"zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz",       // 36 characters, not hex
+		strings.Replace(store.NewID(), "-", "_", -1), // dashes replaced
+		"0199f0a2-0000-7000-8000-00000000e005.bak",   // a copy
+	}
+	for _, name := range foreign {
+		dir := filepath.Join(f.c.Dir, name)
+		must(t, os.MkdirAll(filepath.Join(dir, "nested"), 0o755))
+		for _, file := range []string{"data.bin", filepath.Join("nested", "more.bin")} {
+			path := filepath.Join(dir, file)
+			must(t, os.WriteFile(path, []byte("precious"), 0o644))
+			must(t, os.Chtimes(path, longAgo, longAgo)) // older than the grace for strays
+		}
+	}
+	orphan := store.NewID() // a run id with no run and no rows: the one directory that goes
+	must(t, os.MkdirAll(filepath.Join(f.c.Dir, orphan), 0o755))
+	must(t, os.WriteFile(filepath.Join(f.c.Dir, orphan, store.NewID()), []byte("orphan"), 0o644))
+
+	if _, err := f.c.Sweep(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range foreign {
+		for _, file := range []string{"data.bin", filepath.Join("nested", "more.bin")} {
+			if b, err := os.ReadFile(filepath.Join(f.c.Dir, name, file)); err != nil || string(b) != "precious" {
+				t.Errorf("%s/%s was touched: %q, %v", name, file, b, err)
+			}
+		}
+	}
+	if f.dirExists(orphan) {
+		t.Error("the orphaned run directory was kept")
 	}
 }

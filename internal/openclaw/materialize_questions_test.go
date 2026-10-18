@@ -101,14 +101,16 @@ func TestAgentsMDQuestionsSection(t *testing.T) {
 			t.Errorf("%s: AGENTS.md has a Questions section:\n%s", name, md)
 		}
 	}
-	if got := questionsSection([]string{"yuno__finish", "yuno__ask_operator"}); got != questionsHeading+questionsParagraph {
-		t.Errorf("questionsSection = %q", got)
+	for name, a := range map[string]*store.Agent{
+		"the allowlist's prefixed spelling": {ToolAllowlist: []string{"yuno__finish", "yuno__ask_operator"}},
+		"the short spelling":                {ToolAllowlist: []string{"ask_operator"}},
+	} {
+		if got := questionsSection(a); got != questionsHeading+questionsParagraph {
+			t.Errorf("questionsSection with %s = %q", name, got)
+		}
 	}
-	if got := questionsSection([]string{"ask_operator"}); got != "" {
-		t.Errorf("questionsSection of an unprefixed name = %q", got)
-	}
-	if got := questionsSection(nil); got != "" {
-		t.Errorf("questionsSection(nil) = %q", got)
+	if got := questionsSection(&store.Agent{}); got != "" {
+		t.Errorf("questionsSection of an agent with no tools = %q", got)
 	}
 }
 
@@ -120,5 +122,32 @@ func TestAgentsMDChattingListsAnswerQuestion(t *testing.T) {
 	md := plan(t.TempDir(), chief, nil).Files["AGENTS.md"]
 	if !strings.Contains(md, "yuno__answer_question, yuno__delegate_task, yuno__run_status.") {
 		t.Errorf("AGENTS.md lacks the chat tools:\n%s", md)
+	}
+}
+
+// Review M2: AllowsTool answers from the effective tools.allow (toolLists), the list the
+// materialiser writes: the allowlist and finish, less the guardrails' blocked tools and the
+// interaction rules set to blocked. The task's protocol block and AGENTS.md both ask it.
+func TestAllowsToolReadsTheEffectiveAllowList(t *testing.T) {
+	for name, tc := range map[string]struct {
+		agent *store.Agent
+		tool  string
+		want  bool
+	}{
+		"in the allowlist":             {&store.Agent{ToolAllowlist: []string{"read", "ask_operator"}}, "ask_operator", true},
+		"the prefixed spelling listed": {&store.Agent{ToolAllowlist: []string{"yuno__ask_operator"}}, "ask_operator", true},
+		"asked with the prefix":        {&store.Agent{ToolAllowlist: []string{"ask_operator"}}, "yuno__ask_operator", true},
+		"padded entries":               {&store.Agent{ToolAllowlist: []string{" ask_operator "}}, " ask_operator", true},
+		"not in the allowlist":         {&store.Agent{ToolAllowlist: []string{"read", "write"}}, "ask_operator", false},
+		"no allowlist":                 {&store.Agent{}, "ask_operator", false},
+		"blocked by a rule":            {&store.Agent{ToolAllowlist: []string{"ask_operator"}, InteractionRules: map[string]string{"ask_operator": "blocked"}}, "ask_operator", false},
+		"blocked by a rule, prefixed":  {&store.Agent{ToolAllowlist: []string{"ask_operator"}, InteractionRules: map[string]string{"yuno__ask_operator": "blocked"}}, "ask_operator", false},
+		"another rule":                 {&store.Agent{ToolAllowlist: []string{"ask_operator"}, InteractionRules: map[string]string{"ask_operator": "auto"}}, "ask_operator", true},
+		"blocked by a guardrail":       {&store.Agent{ToolAllowlist: []string{"ask_operator"}, Guardrails: store.Guardrails{BlockedTools: []string{"ask_operator"}}}, "ask_operator", false},
+		"finish is always there":       {&store.Agent{}, "finish", true},
+	} {
+		if got := AllowsTool(tc.agent, tc.tool); got != tc.want {
+			t.Errorf("%s: AllowsTool(%q) = %v, want %v", name, tc.tool, got, tc.want)
+		}
 	}
 }

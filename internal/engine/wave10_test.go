@@ -197,6 +197,28 @@ func TestTaskMessageQuestionsParagraphOnlyForAgentsHoldingTheTool(t *testing.T) 
 	if !(0 < i && i < j && j < k) {
 		t.Errorf("order: deliverables %d, questions %d, finish instruction %d:\n%s", i, j, k, asker)
 	}
+	// The effective allow list decides, as AGENTS.md reads it (review M2): an agent whose
+	// ask_operator is blocked by an interaction rule or a guardrail, though it stays on the
+	// raw allowlist, is not told to ask; the tool allowed by either spelling is.
+	for name, a := range map[string]*store.Agent{
+		"blocked by an interaction rule": {ToolAllowlist: []string{"read", "ask_operator"}, InteractionRules: map[string]string{"ask_operator": "blocked"}},
+		"blocked by a guardrail":         {ToolAllowlist: []string{"read", "ask_operator"}, Guardrails: store.Guardrails{BlockedTools: []string{"ask_operator"}}},
+		"blocked, prefixed spelling":     {ToolAllowlist: []string{"read", "yuno__ask_operator"}, InteractionRules: map[string]string{"yuno__ask_operator": "blocked"}},
+	} {
+		v := &visit{run: run, node: node, task: node.Task, token: "r_abcdefghijklmnopqrstuvwx", agent: a}
+		if msg := v.taskMessage(); strings.Contains(msg, "Questions: ") || strings.Contains(msg, "yuno__ask_operator") {
+			t.Errorf("an agent %s was told to ask:\n%s", name, msg)
+		}
+	}
+	for name, a := range map[string]*store.Agent{
+		"the prefixed spelling": {ToolAllowlist: []string{"yuno__ask_operator"}},
+		"an explicit auto rule": {ToolAllowlist: []string{"ask_operator"}, InteractionRules: map[string]string{"ask_operator": "auto"}},
+	} {
+		v := &visit{run: run, node: node, task: node.Task, token: "r_abcdefghijklmnopqrstuvwx", agent: a}
+		if msg := v.taskMessage(); strings.Count(msg, QuestionsParagraph(id)) != 1 {
+			t.Errorf("an agent with %s was not told to ask:\n%s", name, msg)
+		}
+	}
 	// The same visit with a nil agent (a bare visit in a unit test) is a plain one.
 	if msg := (&visit{run: run, node: node, task: node.Task, token: "r_x"}).taskMessage(); strings.Contains(msg, "Questions: ") {
 		t.Errorf("a visit without an agent got the questions paragraph:\n%s", msg)

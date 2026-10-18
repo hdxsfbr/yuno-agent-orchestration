@@ -25,6 +25,12 @@ import (
 // (the store is disabled) the list is empty.
 func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 	runID := r.PathValue("id")
+	if hasControl(runID) {
+		// No run has such an id; Postgres would refuse a NUL in the parameter with a 500
+		// (review L1).
+		s.storeError(w, r, "run", store.ErrNotFound)
+		return
+	}
 	if _, err := store.GetRun(r.Context(), s.pool, runID); err != nil {
 		s.storeError(w, r, "run", err)
 		return
@@ -46,7 +52,12 @@ func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 // as a page (HTML, XHTML, SVG) is sent as plain text; nosniff keeps it that way. 404 when
 // the artifact is not this run's, and 404 with its own message when the file is gone.
 func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
-	a, err := store.GetRunArtifact(r.Context(), s.pool, r.PathValue("id"), r.PathValue("artifactId"))
+	runID, artifactID := r.PathValue("id"), r.PathValue("artifactId")
+	if hasControl(runID) || hasControl(artifactID) {
+		s.storeError(w, r, "artifact", store.ErrNotFound) // as an unknown id (review L1)
+		return
+	}
+	a, err := store.GetRunArtifact(r.Context(), s.pool, runID, artifactID)
 	if err != nil {
 		s.storeError(w, r, "artifact", err)
 		return
@@ -109,15 +120,15 @@ func openArtifactFile(dir string, a *store.RunArtifact) (*os.File, error) {
 }
 
 // servedContentType is the Content-Type a download is sent with: the stored one, except
-// that HTML, XHTML and SVG, which a browser renders, are sent as plain text. A stored type
-// that cannot be read is sent as an opaque download.
+// that what a browser renders, HTML and every XML type (XHTML, SVG, and the rest of them:
+// a browser shows application/xml and text/xml as a document too), is sent as plain text
+// (review L5). A stored type that cannot be read is sent as an opaque download.
 func servedContentType(stored string) string {
 	mediaType, _, err := mime.ParseMediaType(stored)
 	if err != nil {
 		return "application/octet-stream"
 	}
-	switch mediaType {
-	case "text/html", "application/xhtml+xml", "image/svg+xml":
+	if mediaType == "text/html" || strings.Contains(mediaType, "xml") {
 		return "text/plain; charset=utf-8"
 	}
 	return stored
@@ -125,10 +136,13 @@ func servedContentType(stored string) string {
 
 // downloadName is the file name offered to the browser: the base name of the artifact's
 // path with the characters that could end the quoted string or the header removed (quotes,
-// a backslash that would escape the closing one, and control characters).
+// a backslash that would escape the closing one, and control characters) and those that
+// make a saved name read as another one: format characters (a right-to-left override
+// reverses what follows it, so a name can look like another type) and the line and
+// paragraph separators (review L4).
 func downloadName(artifactPath string) string {
 	name := strings.Map(func(r rune) rune {
-		if r == '"' || r == '\\' || unicode.IsControl(r) {
+		if r == '"' || r == '\\' || unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return -1
 		}
 		return r

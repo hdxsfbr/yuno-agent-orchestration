@@ -165,9 +165,10 @@ services:
     volumes:
       - ./data/openclaw:/home/node/.openclaw
       # The first named volume the api mounts: the files runs deliver (DESIGN 5.25 rule 4),
-      # kept until ARTIFACT_TTL_DAYS after the run finished. The image creates the directory
-      # owned by app, so the volume inherits it.
-      - artifacts:/data/artifacts
+      # kept until ARTIFACT_TTL_DAYS after the run finished, mounted where ARTIFACT_DIR says.
+      # The image creates /data/artifacts owned by app, so the volume inherits it there; any
+      # other directory needs to be writable by the app user (uid 1000).
+      - artifacts:${ARTIFACT_DIR:-/data/artifacts}
     depends_on:
       postgres:
         condition: service_healthy

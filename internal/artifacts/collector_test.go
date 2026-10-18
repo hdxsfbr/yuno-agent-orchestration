@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -680,7 +681,8 @@ func TestCollectFailuresAreLogLines(t *testing.T) {
 // DESIGN 5.25 rule 4 and T5.25.7: New creates the store directory (and its parents) when
 // it is missing, proves it writable with a probe it removes, and reads the TTL in days;
 // a directory it cannot use is an error that names the cause without the path, and the
-// coordinator then runs with no collector.
+// coordinator then runs with no collector. A negative TTL is the default, 30 days; 0 is
+// for ever.
 func TestNew(t *testing.T) {
 	pool := needDB(t)
 	dir := filepath.Join(t.TempDir(), "a", "b", "artifacts")
@@ -697,8 +699,8 @@ func TestNew(t *testing.T) {
 	if c, err = New(dir, pool, nil, nil, nil, 0); err != nil || c.TTL != 0 {
 		t.Errorf("ttl 0: %+v, %v", c, err)
 	}
-	if c, err = New(dir, pool, nil, nil, nil, -3); err != nil || c.TTL != 0 {
-		t.Errorf("negative ttl: %+v, %v", c, err)
+	if c, err = New(dir, pool, nil, nil, nil, -3); err != nil || c.TTL != 30*24*time.Hour {
+		t.Errorf("negative ttl: %+v, %v; want the default 30 days (DESIGN 5.25 rule 6, review L7)", c, err)
 	}
 
 	// Unusable: a directory below a regular file (true for any user, root included), a
@@ -769,8 +771,9 @@ func (p *projectFixture) diffRow() (store.RunArtifact, bool) {
 // DESIGN 5.25 rule 3 (T5.25.3): a visit of a project run stores the checkout's diff as
 // the generated artifact diff.patch (text/x-patch) with the hunk; the same diff collected
 // again changes nothing; a later change replaces it in place; and a checkout back at the
-// commit it was cloned from (or changed only in node_modules) has no diff: the earlier
-// generated row and its file are removed and the count is published.
+// commit it was cloned from (or changed only in node_modules) has an empty diff, which
+// leaves the earlier generated row and its file where they are (review H1: after the
+// Deployer pushes, checkout_sha is the pushed commit and the checkout matches it).
 func TestCollectProjectDiff(t *testing.T) {
 	p := newProjectFixture(t)
 	p.edit("README.md", "# demo\nsecond line\n")
@@ -808,7 +811,8 @@ func TestCollectProjectDiff(t *testing.T) {
 	p.edit("src/app.py", "print('hello')\n")
 	p.collectProject("coder", 2)
 	next, _ := p.diffRow()
-	if nextContent, _ := p.stored(next); next.ID != row.ID || next.Visit != 2 || !strings.Contains(nextContent, "src/app.py") || !next.Generated {
+	nextContent, _ := p.stored(next)
+	if next.ID != row.ID || next.Visit != 2 || !strings.Contains(nextContent, "src/app.py") || !next.Generated {
 		t.Fatalf("updated diff row = %+v, content %q", next, nextContent)
 	}
 	if left := p.leftovers(); len(left) != 0 {
@@ -816,18 +820,41 @@ func TestCollectProjectDiff(t *testing.T) {
 	}
 	p.takeEvents()
 
-	// Back to the clone's tree: no diff, the earlier generated one is removed.
+	// Back to the clone's tree: an empty diff, and the earlier generated one stays as it is.
 	p.edit("README.md", "# demo\n")
 	p.edit("src/app.py", "print('hi')\n")
 	p.collectProject("coder", 3)
-	if _, ok := p.diffRow(); ok {
-		t.Fatal("an empty diff left a diff.patch row")
+	kept, ok := p.diffRow()
+	if !ok || kept != next {
+		t.Fatalf("an empty diff changed the diff.patch row: %+v -> %+v (found %v)", next, kept, ok)
 	}
-	if _, err := os.Stat(filepath.Join(p.c.Dir, p.run.ID, row.ID)); !os.IsNotExist(err) {
-		t.Errorf("the removed diff's file: %v", err)
+	if content, found := p.stored(kept); !found || content != nextContent {
+		t.Errorf("the kept diff's file = %q (found %v), want what it was", content, found)
 	}
-	if events := p.takeEvents(); len(events) != 1 || events[0].payload["count"] != 0 {
-		t.Errorf("events = %+v, want one with count 0", events)
+	if events := p.takeEvents(); len(events) != 0 {
+		t.Errorf("events = %+v, want none", events)
+	}
+	p.noLines()
+
+	// The same after the Deployer pushed: checkout_sha is the pushed commit (5.22 rule 2),
+	// the checkout matches it, and the stored patch is still what the run changed.
+	repo := filepath.Join(p.runPath(), project.RepoDir)
+	p.edit("README.md", "# demo\nsecond line\n")
+	p.collectProject("deployer", 1)
+	pushed, _ := p.diffRow()
+	projecttest.Git(t, repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--quiet", "-a", "-m", "pushed")
+	projecttest.Git(t, repo, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+	head, err := p.cfg.HeadSHA(context.Background(), repo)
+	must(t, err)
+	p.run.CheckoutSHA = &head
+	p.takeEvents()
+	p.takeLines()
+	p.collectProject("deployer", 2)
+	if after, ok := p.diffRow(); !ok || after != pushed {
+		t.Fatalf("diff.patch after a push: %+v (found %v), want %+v", after, ok, pushed)
+	}
+	if events := p.takeEvents(); len(events) != 0 {
+		t.Errorf("events = %+v, want none", events)
 	}
 	p.noLines()
 }
@@ -1028,5 +1055,183 @@ func TestWalkOrderIsLexicalPerDirectory(t *testing.T) {
 	}
 	if line := f.onlyLine(); line.msg != "artifacts: 2 files not collected: b.txt: past the 3 files cap; c/d/e.txt: past the 3 files cap" {
 		t.Fatalf("line = %+v", line)
+	}
+}
+
+// DESIGN 5.25 rule 2 (review L9): the collections of one run do not overlap. The parked
+// visit's collection and its continuation's can be in flight together; the second waits
+// for the first, so it reads the rows the first wrote, and a run's lock is not another
+// run's.
+func TestCollectionsOfOneRunDoNotOverlap(t *testing.T) {
+	f := newFixture(t)
+	f.out("a.md", "first")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	f.c.Emit = func(context.Context, string, string, map[string]any) {
+		once.Do(func() {
+			close(entered)
+			<-release // the first collection still holds the run
+		})
+	}
+	firstDone, secondDone := make(chan struct{}), make(chan struct{})
+	go func() { f.collect("writer", 1); close(firstDone) }()
+	<-entered
+	f.out("a.md", "second")
+	go func() { f.collect("writer", 2); close(secondDone) }()
+	select {
+	case <-secondDone:
+		t.Fatal("the second collection of the run ran while the first was still in progress")
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	<-firstDone
+	<-secondDone
+	row := f.rows()["a.md"]
+	if content, _ := f.stored(row); content != "second" || row.Visit != 2 {
+		t.Fatalf("a.md = %+v, content %q; want the second visit's", row, content)
+	}
+	if left := f.leftovers(); len(left) != 0 {
+		t.Errorf("files without a row: %v", left)
+	}
+	if len(f.c.slots) != 0 {
+		t.Errorf("the collector keeps %d run locks nobody holds", len(f.c.slots))
+	}
+}
+
+// The run's lock is the run's own, a waiter gives up when its context ends, and the
+// collector does not keep a lock nobody holds or waits for.
+func TestRunLocks(t *testing.T) {
+	c := &Collector{}
+	ctx := context.Background()
+	releaseA, err := c.lockRun(ctx, "run-a")
+	must(t, err)
+	releaseB, err := c.lockRun(ctx, "run-b") // another run: no wait
+	must(t, err)
+	tctx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancel()
+	if _, err := c.lockRun(tctx, "run-a"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a second lock of run-a: %v; want the deadline", err)
+	}
+	releaseA()
+	releaseB()
+	releaseAgain, err := c.lockRun(ctx, "run-a")
+	must(t, err)
+	releaseAgain()
+	if len(c.slots) != 0 {
+		t.Errorf("%d locks kept", len(c.slots))
+	}
+}
+
+// A collection that waits for the run's lock is under the 60 s deadline too: it gives up
+// with the deadline's log line and collects nothing.
+func TestCollectGivesUpWhenTheRunStaysLocked(t *testing.T) {
+	f := newFixture(t)
+	old := collectDeadline
+	collectDeadline = 50 * time.Millisecond
+	t.Cleanup(func() { collectDeadline = old })
+	release, err := f.c.lockRun(context.Background(), f.run.ID)
+	must(t, err)
+	defer release()
+	f.out("a.md", "x")
+	f.collect("writer", 1)
+	if line := f.onlyLine(); line.level != "warn" || !strings.HasPrefix(line.msg, "artifacts: stopped at the ") ||
+		!strings.HasSuffix(line.msg, " s deadline; what was stored stays") {
+		t.Fatalf("line = %+v", line)
+	}
+	if len(f.rows()) != 0 {
+		t.Errorf("rows = %+v", f.rows())
+	}
+}
+
+// DESIGN 5.25 rule 2 (review L9): a row for the path that appears between reading it and
+// writing it (a writer the run's lock does not serialize) leaves no file behind that no
+// row names: with the same content the copy is removed, and with another the row's own
+// file takes the new content, since the upsert took the row over.
+func TestCollectDoesNotLeaveAFileNoRowNames(t *testing.T) {
+	other := func(f *fixture, content string) {
+		a := store.RunArtifact{ID: store.NewID(), RunID: f.run.ID, NodeID: "other", Visit: 9, Path: "a.md", Size: int64(len(content)),
+			SHA256: sum(content), ContentType: "text/markdown", CreatedAt: f.clock, UpdatedAt: f.clock}
+		must(t, os.WriteFile(filepath.Join(f.c.Dir, f.run.ID, a.ID), []byte(content), 0o644))
+		_, _, err := store.UpsertRunArtifact(context.Background(), f.pool, a)
+		must(t, err)
+	}
+	for name, tc := range map[string]struct{ theirs, ours, want string }{
+		"the same content":  {"same", "same", "same"},
+		"different content": {"old", "new", "new"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			must(t, os.MkdirAll(filepath.Join(f.c.Dir, f.run.ID), 0o755))
+			f.out("a.md", tc.ours)
+			putTestHook = func(path string) {
+				putTestHook = nil
+				other(f, tc.theirs)
+			}
+			t.Cleanup(func() { putTestHook = nil })
+			f.collect("writer", 1)
+			row, ok := f.rows()["a.md"]
+			if !ok {
+				t.Fatalf("no row; lines %+v", f.takeLines())
+			}
+			if content, found := f.stored(row); !found || content != tc.want {
+				t.Errorf("the row's file = %q (found %v), want %q", content, found, tc.want)
+			}
+			if left := f.leftovers(); len(left) != 0 {
+				t.Errorf("files without a row: %v", left)
+			}
+		})
+	}
+}
+
+// DESIGN 5.25 rule 2 (review L4): a name with a format character (a right-to-left
+// override, a zero-width space, a byte order mark, a soft hyphen) or a line or paragraph
+// separator can read as another name once shown or saved, so it is refused as a control
+// character is; letters of other scripts and accents are not, and the log line shows the
+// refused characters as ?.
+func TestCollectRefusesNamesThatCanReadAsAnother(t *testing.T) {
+	f := newFixture(t)
+	// Built from code points, so no invisible character sits in this file.
+	bad := []string{}
+	for _, cp := range []rune{0x202e, 0x200b, 0x2028, 0x2029, 0xfeff, 0x00ad} {
+		bad = append(bad, "name"+string(cp)+"x.md")
+	}
+	for _, n := range bad {
+		f.out(n, "x")
+	}
+	f.out("relatório.md", "ok")
+	f.out("notas/日本語.md", "ok")
+	f.collect("writer", 1)
+	rows := f.rows()
+	if len(rows) != 2 || rows["relatório.md"].Path == "" || rows["notas/日本語.md"].Path == "" {
+		t.Fatalf("rows = %+v", rows)
+	}
+	line := f.onlyLine()
+	if !strings.HasPrefix(line.msg, "artifacts: 6 files not collected: ") || !strings.Contains(line.msg, ": name is not plain text") {
+		t.Fatalf("line = %q", line.msg)
+	}
+	for _, r := range line.msg {
+		if unsafeRune(r) {
+			t.Errorf("the log line carries U+%04X: %q", r, line.msg)
+		}
+	}
+}
+
+// DESIGN 5.25 rule 3 (review L1): a checkout whose files add up to more than 500 MiB is not
+// copied for the diff; the diff is skipped with the log line `artifacts: diff skipped:
+// <reason>` and the rest of the collection stands.
+func TestCollectProjectDiffSkippedForAHugeCheckout(t *testing.T) {
+	p := newProjectFixture(t)
+	p.out("a.md", "deliverable")
+	big, err := os.Create(filepath.Join(p.runPath(), project.RepoDir, "dump.bin"))
+	must(t, err)
+	must(t, big.Truncate(project.MaxCheckoutBytes+1))
+	must(t, big.Close())
+	p.collectProject("coder", 1)
+	if line := p.onlyLine(); line.level != "warn" || line.msg != "artifacts: diff skipped: the checkout is over 500 MiB" {
+		t.Fatalf("line = %+v", line)
+	}
+	rows := p.rows()
+	if _, ok := rows["diff.patch"]; ok || rows["a.md"].Path == "" {
+		t.Fatalf("rows = %+v; want the deliverable and no diff", rows)
 	}
 }

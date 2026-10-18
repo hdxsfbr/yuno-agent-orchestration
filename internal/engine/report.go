@@ -433,6 +433,17 @@ func (e *Engine) announceQuestion(ctx context.Context, run *store.Run, a *store.
 // announceToBoundAgent sends the notice of a run that has no conversation to the
 // conversation of the agent bound to Telegram (DESIGN 5.24 rule 6 (b)).
 func (e *Engine) announceToBoundAgent(ctx context.Context, runID, approvalID, text string) {
+	// The notice is sent from a goroutine, after the question was recorded: one decided in
+	// the meantime is no longer news (review L11).
+	switch q, err := store.GetApproval(ctx, e.deps.Pool, approvalID); {
+	case errors.Is(err, store.ErrNotFound):
+		return
+	case err != nil:
+		e.reportLog(ctx, runID, "warn", "question "+approvalID+" could not be announced: "+err.Error())
+		return
+	case q.Status != store.ApprovalPending:
+		return
+	}
 	convID, ok, err := project.BoundAgentConversation(ctx, e.deps.Pool)
 	if err != nil {
 		e.reportLog(ctx, runID, "warn", "question "+approvalID+" could not be announced: "+err.Error())

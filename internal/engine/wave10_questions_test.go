@@ -376,7 +376,9 @@ func TestAnswerQuestionValidation(t *testing.T) {
 		t.Fatalf("a free-text question has options %s", q.Options)
 	}
 
-	for _, bad := range []string{"", "   \n", strings.Repeat("x", 4097)} {
+	// A NUL or invalid UTF-8 is refused with the same text (review L4): the insert would
+	// fail with a database error the operator cannot act on.
+	for _, bad := range []string{"", "   \n", strings.Repeat("x", 4097), "a\x00b", "\xff\xfe"} {
 		var ve *ValidationError
 		if _, err := env.e.AnswerQuestion(ctx, q.ID, bad, "api"); !errors.As(err, &ve) || ve.Messages[0] != "answer: 1 to 4096 characters" {
 			t.Fatalf("answer %.10q: %v", bad, err)
@@ -1703,6 +1705,16 @@ func TestLoopRevisitCarriesTheParagraph(t *testing.T) {
 	}
 }
 
+// paragraph is the step's answer paragraph, read the way a visit reads it.
+func (env *testEnv) paragraph(run *store.Run, node *workflow.Node) string {
+	env.t.Helper()
+	text, err := env.e.stepAnswers(context.Background(), run.ID, node.ID)
+	if err != nil {
+		env.t.Fatal(err)
+	}
+	return text
+}
+
 // The paragraph's blocks: oldest first, blank-line separated, one for each decided question
 // of the step in this run; none when the step asked nothing or only has a pending one.
 func TestAnswerParagraphBlocks(t *testing.T) {
@@ -1719,7 +1731,7 @@ func TestAnswerParagraphBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := &workflow.Node{ID: "agent"}
-	if got := env.e.answerParagraph(ctx, run, node); got != "" {
+	if got := env.paragraph(run, node); got != "" {
 		t.Fatalf("paragraph of a step that asked nothing = %q", got)
 	}
 	add := func(i int, question, status string, answer, reason *string) {
@@ -1737,7 +1749,7 @@ func TestAnswerParagraphBlocks(t *testing.T) {
 	add(2, "second?", store.ApprovalRejected, nil, &reason)
 	add(4, "fourth?", store.ApprovalPending, nil, nil)
 	add(5, "fifth?", store.ApprovalRejected, nil, &none)
-	got := env.e.answerParagraph(ctx, run, node)
+	got := env.paragraph(run, node)
 	want := strings.Join([]string{
 		"Earlier in this step you asked the operator: \"first?\"\nThe operator answered: Portuguese",
 		"Earlier in this step you asked the operator: \"second?\"\nThe operator declined to answer: later." + proceedText,
@@ -1747,7 +1759,7 @@ func TestAnswerParagraphBlocks(t *testing.T) {
 	if got != want {
 		t.Fatalf("paragraph:\n%s\nwant:\n%s", got, want)
 	}
-	if other := env.e.answerParagraph(ctx, run, &workflow.Node{ID: "reviewer"}); other != "" {
+	if other := env.paragraph(run, &workflow.Node{ID: "reviewer"}); other != "" {
 		t.Fatalf("paragraph of another step = %q", other)
 	}
 }

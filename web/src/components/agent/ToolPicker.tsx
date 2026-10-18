@@ -14,6 +14,22 @@ const policyOptions: { value: ToolPolicy; label: string }[] = [
   { value: "blocked", label: "Blocked" },
 ];
 
+/**
+ * The rules the server accepts for the tools whose use cannot wait for an approval: a question to the
+ * operator is already a wait for a person (DESIGN 5.24 rule 1) and `finish` is how a step reports its
+ * result, so the server keeps it on auto. The other tools take all three.
+ */
+const POLICIES_OF: Record<string, readonly ToolPolicy[]> = {
+  ask_operator: ["auto", "blocked"],
+  finish: ["auto"],
+};
+
+/** The policies to offer for a tool: those its rules allow, and the one it has now, so the choice shown is the choice held. */
+function policiesFor(name: string, current: ToolPolicy): { value: ToolPolicy; label: string }[] {
+  const allowed = POLICIES_OF[name.replace(/^yuno__/, "")];
+  return policyOptions.filter((o) => !allowed || allowed.includes(o.value) || o.value === current);
+}
+
 type Props = {
   tools: { data?: Tool[]; isLoading: boolean; error: unknown; refetch: () => void };
   selected: FormState["tools"];
@@ -147,7 +163,7 @@ function ToolRow({ tool, allowed, policy, errors, onToggle, onPolicy, hideMeta }
           onChange={(e) => onPolicy(e.target.value as ToolPolicy)}
           className={control(errors.length > 0, "!w-auto")}
         >
-          {policyOptions.map((o) => (
+          {policiesFor(tool.name, effective).map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
             </option>

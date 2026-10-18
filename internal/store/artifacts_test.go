@@ -198,47 +198,6 @@ func TestUpsertRunArtifact(t *testing.T) {
 	}
 }
 
-// DESIGN 5.25 rule 3 (DeleteGeneratedArtifact): an empty patch removes the run's generated
-// diff.patch and returns the row for its file; a diff.patch the agent wrote is never
-// touched; a run without one answers nil; another run's row stays.
-func TestDeleteGeneratedArtifact(t *testing.T) {
-	pool := needDB(t)
-	ctx := context.Background()
-	wf := w9Workflow(t, pool)
-	run, agentRun, other := w9MustRun(t, pool, wf, nil), w9MustRun(t, pool, wf, nil), w9MustRun(t, pool, wf, nil)
-	at := time.Now().UTC().Truncate(time.Microsecond)
-
-	generated := artifactAt(run, "diff.patch", sha1Hex, 40, at)
-	generated.Generated, generated.ContentType = true, "text/x-patch"
-	agents := artifactAt(agentRun, "diff.patch", sha1Hex, 41, at)
-	notDiff := artifactAt(run, "notes/diff.patch", sha2Hex, 7, at)
-	notDiff.Generated = true // only the top-level diff.patch is the platform's
-	theirs := artifactAt(other, "diff.patch", sha1Hex, 42, at)
-	theirs.Generated = true
-	for _, a := range []RunArtifact{generated, agents, notDiff, theirs} {
-		mustDo(t, insertArtifact(t, pool, a))
-	}
-
-	if got, err := DeleteGeneratedArtifact(ctx, pool, agentRun.ID); err != nil || got != nil {
-		t.Fatalf("the agent's own diff.patch: %+v, %v; want nil", got, err)
-	}
-	got, err := DeleteGeneratedArtifact(ctx, pool, run.ID)
-	if err != nil || got == nil || !sameArtifact(*got, generated) {
-		t.Fatalf("generated diff.patch: %+v, %v; want %+v", got, err, generated)
-	}
-	if got, err := DeleteGeneratedArtifact(ctx, pool, run.ID); err != nil || got != nil {
-		t.Fatalf("a second call: %+v, %v; want nil", got, err)
-	}
-	for _, c := range []struct {
-		run  *Run
-		want int
-	}{{run, 1}, {agentRun, 1}, {other, 1}} {
-		if rows, _ := ListRunArtifacts(ctx, pool, c.run.ID); len(rows) != c.want {
-			t.Errorf("run %s keeps %d rows, want %d", c.run.ID, len(rows), c.want)
-		}
-	}
-}
-
 // DESIGN 5.25 rule 6 (retention): ListExpiredArtifactRuns returns each run that has
 // artifact rows and finished before the cutoff, once; a run finished after it, a run that
 // has not finished (whatever its age) and a run without rows are not listed. DeleteRunArtifacts

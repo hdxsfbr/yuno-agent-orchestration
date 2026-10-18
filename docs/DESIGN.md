@@ -2786,7 +2786,8 @@ Rules:
 1. **The tool.** `ask_operator`, a platform tool (5.7 table): input `{run_token,
    question, options?}`; `question` 1 to 1024 bytes (`question: 1 to 1024
    characters`); `options` absent, or 2 to 5 distinct strings of 1 to 100 bytes without
-   control characters (`options: 2 to 5 distinct options of at most 100 characters`);
+   control characters (`options: 2 to 5 distinct options of at most 100 characters`); a
+   NUL or invalid UTF-8 anywhere is refused with the field's text (review L4);
    run-capable only (a chat token answers `ask_operator is not available in a
    conversation`, 5.15 rule 2: the Chief is in a conversation and simply asks the
    person). Risk `computational`, hits `postgres`, timeout the wait plus 30 s. Its
@@ -2927,7 +2928,8 @@ Rules:
     first 120 characters>` linking to the section while the run waits on a question;
     the Timeline's approval rows say "Question" and show the answer. The protocol block
     (5.6 rule 5; 5.16 rule 9 amended) gets, for a visit whose agent holds
-    `ask_operator`, after the repository lines:
+    `ask_operator` in its effective tools (the allowlist less the blocked rules and the
+    guardrails, as the materialiser computes it; review M2), after the repository lines:
 
     ```
     Questions: when one fact you cannot find out yourself decides the work, ask the
@@ -3141,9 +3143,10 @@ Rules:
    Deployer pushes, `checkout_sha` moves to the pushed commit, 5.22 rule 2, and the
    checkout matches it; the stored patch is still what the run changed); a file the
    agent itself put at `out/diff.patch` wins and the generated one is skipped with a log
-   line. A clone or fetch failure skips the diff with the log line `artifacts: diff
-   skipped: <reason>` and nothing else changes. Cost: one shallow clone per agent visit
-   of a project run, on the api side, inside the 60 s deadline.
+   line. A clone or fetch failure, or a checkout over 500 MiB (the working-tree copy
+   honours the deadline and stops there; review L1), skips the diff with the log line
+   `artifacts: diff skipped: <reason>` and nothing else changes. Cost: one shallow clone
+   per agent visit of a project run, on the api side, inside the 60 s deadline.
 4. **Content type and storage.** `content_type` is `http.DetectContentType` on the first
    512 bytes, overridden by extension for the text kinds it misreads: `.md`
    `text/markdown`, `.json` `application/json`, `.csv` `text/csv`, `.patch` and `.diff`
@@ -3154,7 +3157,7 @@ Rules:
    `/data/artifacts` (the api image creates the directory owned by `app`, so the volume
    inherits it); a missing or unwritable directory at startup is the log line
    `artifacts: <dir>: <error>; artifacts are disabled` and the collector is nil (visits
-   run as before, the endpoints answer empty lists and 404). Rows:
+   run as before; the endpoints keep serving what was stored, review L9). Rows:
    `run_artifacts(id, run_id REFERENCES runs ON DELETE CASCADE, node_id, visit, path,
    size, sha256, content_type, generated, created_at, updated_at)`, unique `(run_id,
    path)`.
@@ -3173,8 +3176,9 @@ Rules:
    pass: the rows and files of runs whose `finished_at` is older than
    `ARTIFACT_TTL_DAYS` days are deleted, rows first, then the run's directory; a live or
    unfinished run keeps its artifacts; a run directory in the store with no rows (a
-   crash between a file write and its row) is removed too; `ARTIFACT_TTL_DAYS=0` keeps
-   artifacts forever. One log line per pass with the counts when anything was removed.
+   crash between a file write and its row) is removed too, and only directories named by
+   a run id are ever touched (review M1); `ARTIFACT_TTL_DAYS=0` keeps artifacts forever,
+   a negative value is the default. One log line per pass with the counts when anything was removed.
 7. **UI.** The run page gets an Artifacts section (after the Merge request card, before
    Approvals): a table of path, size, `<node> visit <n>` and when it was last collected;
    Download (fetched with the token and saved through a blob URL, since a link carries
@@ -3182,7 +3186,7 @@ Rules:
    Preview in a `<pre>` (never as HTML; SVG previews as text), for `image/png`,
    `image/jpeg`, `image/gif` and `image/webp` up to 256 KiB an `<img>` from a blob URL;
    larger files download only. Empty state: `No files delivered yet.` while the run is
-   live, `No files were delivered.` once it ended (also when the collector is disabled:
+   live, `No files are available for this run.` once it ended (also after retention, and when the collector is disabled:
    the contract carries no signal for that, and the empty state says what is true). The
    section refreshes on SSE `run.artifacts`. The Logs section shows the skipped-file lines. No developer
    commentary.
@@ -3208,7 +3212,12 @@ is 404). The sweep also removes, in a run's directory, a file no row names that 
 than an hour (a crash leftover or a `.tmp`); directories whose names are not run ids are
 never touched. The `run.artifacts` count is the run's total after the collection. `Emit`
 and `LogEvent` are fields set once the engine exists, and the collector is created
-before the engine (an unusable directory leaves `Deps.Artifacts` nil). The UI shows the
+before the engine (an unusable directory leaves `Deps.Artifacts` nil). After the review's fix pass: an empty diff leaves the generated row (H1; the store's
+delete helper is gone), the sweep and the collector accept only 36-character run ids
+(M1), collections of one run are serialised by a per-run lock taken under the deadline
+(L9), names with format characters are refused and shown as `?` in the log line (L4), and
+`openclaw.AllowsTool` answers for both the task paragraph and the `## Questions` section
+whether an agent's effective tools hold `ask_operator` (M2). The UI shows the
 empty state also when the store is disabled (rule 7 amended), names buttons with the full
 path, revokes the object URL after the click, previews 256 KiB inclusive, and refreshes
 on `run.artifacts` 300 ms after the first event of a burst. The research template's
@@ -3245,8 +3254,8 @@ is gone is 404 with the message, not 500.
 
 Consistency: a file is written to its temporary name and renamed before its row is
 written or updated, so a row never points at a partial file; a crash between the two
-leaves a file the next sweep removes (no row) or a row whose file is the old version
-(the next collection writes it again, since the sha differs). The per-run caps are
+leaves a file the next sweep removes (no row) or, on an update, the old row over the new
+file (the next collection writes it again, since the sha differs; review L10). The per-run caps are
 checked against the rows and the sizes read in one query before the walk, then
 against what this visit added, so two visits of one run never run at once (one visit
 per run, 5.1) and the cap holds.
@@ -3263,7 +3272,7 @@ with the line; the 50 MiB cap. T5.25.2 the same file across visits: one row; a
 changed file: the row updated in place; a deleted file: the row stays. T5.25.3 the
 diff: a project run against a local bare repository (the harness of 5.16's tests): a
 change in the checkout yields `diff.patch` with the hunk; no change yields none and
-removes an earlier one; an agent's own `out/diff.patch` wins; a moved branch diffs
+leaves an earlier one in place; an agent's own `out/diff.patch` wins; a moved branch diffs
 against `checkout_sha`; an unfetchable sha skips with the reason; excluded directories
 are left out. T5.25.4 content types by extension and by sniffing. T5.25.5 the
 endpoints: the list by path; the download's headers (attachment, nosniff, no-store,

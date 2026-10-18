@@ -40,7 +40,7 @@ export default function ArtifactsSection({ runId, status }: Props) {
 
       {files.isLoading ? <Loading label="Loading files…" /> : null}
       {files.error && !files.data ? <QueryError what="the delivered files" error={files.error} onRetry={() => void files.refetch()} /> : null}
-      {files.data && list.length === 0 ? <EmptyState>{isTerminalStatus(status) ? "No files were delivered." : "No files delivered yet."}</EmptyState> : null}
+      {files.data && list.length === 0 ? <EmptyState>{isTerminalStatus(status) ? "No files are available for this run." : "No files delivered yet."}</EmptyState> : null}
 
       {list.length > 0 ? (
         <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
@@ -80,8 +80,12 @@ export default function ArtifactsSection({ runId, status }: Props) {
                       <td className="whitespace-nowrap px-4 py-2">
                         <span className="font-mono text-xs">{file.node_id}</span> visit {file.visit}
                       </td>
-                      <td className="whitespace-nowrap px-4 py-2 text-zinc-500" title={formatDateTime(file.updated_at)}>
-                        {formatAgo(file.updated_at, now)}
+                      <td className="whitespace-nowrap px-4 py-2 text-zinc-500">
+                        <time dateTime={file.updated_at} title={formatDateTime(file.updated_at)}>
+                          {formatAgo(file.updated_at, now)}
+                        </time>
+                        {/* The exact time, for those who cannot hover over the relative one. */}
+                        <span className="sr-only"> {formatDateTime(file.updated_at)}</span>
                       </td>
                       <td className="whitespace-nowrap px-4 py-2 text-right">
                         <div className="flex justify-end gap-2">
@@ -90,8 +94,10 @@ export default function ArtifactsSection({ runId, status }: Props) {
                               {showing ? "Hide" : "Preview"}
                             </Button>
                           ) : null}
-                          <Button size="sm" aria-label={`Download ${file.path}`} onClick={() => download.mutate(file)} disabled={download.isPending}>
-                            {downloading ? "Downloading…" : "Download"}
+                          {/* The name is the visible words followed by the file, so "Downloading…" is part of it too. */}
+                          <Button size="sm" onClick={() => download.mutate(file)} disabled={download.isPending}>
+                            {downloading ? "Downloading…" : "Download"}{" "}
+                            <span className="sr-only">{file.path}</span>
                           </Button>
                         </div>
                       </td>

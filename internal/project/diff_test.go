@@ -242,3 +242,73 @@ func TestDiffBinaryAndOutputLimit(t *testing.T) {
 		t.Fatalf("uncut: %d bytes, %v", len(patch), err)
 	}
 }
+
+// DESIGN 5.25 rule 3 (review L1): the copy of the checkout's working tree stops at
+// MaxCheckoutBytes. A checkout over it is ErrCheckoutTooLarge, found from the sizes before
+// a byte of the file is copied (a sparse file stands for the 500 MiB), and the private
+// clone is removed all the same.
+func TestDiffRefusesACheckoutOverTheCopyCap(t *testing.T) {
+	f := newDiffFixture(t, map[string]string{"README.md": "# demo\n"})
+	scratch := t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+
+	big, err := os.Create(filepath.Join(f.checkout, "dump.bin"))
+	must(t, err)
+	must(t, big.Truncate(MaxCheckoutBytes+1))
+	must(t, big.Close())
+
+	patch, err := f.cfg.Diff(context.Background(), f.checkout, "main", f.base)
+	if !errors.Is(err, ErrCheckoutTooLarge) || patch != nil {
+		t.Fatalf("Diff = %d bytes, %v; want ErrCheckoutTooLarge", len(patch), err)
+	}
+	if err.Error() != "the checkout is over 500 MiB" {
+		t.Errorf("error text = %q", err)
+	}
+	if left, _ := os.ReadDir(scratch); len(left) != 0 {
+		t.Errorf("the private clone was left behind: %v", left)
+	}
+
+	// Excluded directories do not count: the same file under node_modules is not copied.
+	must(t, os.Rename(filepath.Join(f.checkout, "dump.bin"), filepath.Join(f.checkout, "dump.tmp")))
+	must(t, os.MkdirAll(filepath.Join(f.checkout, "node_modules"), 0o755))
+	must(t, os.Rename(filepath.Join(f.checkout, "dump.tmp"), filepath.Join(f.checkout, "node_modules", "dump.bin")))
+	if _, err := f.cfg.Diff(context.Background(), f.checkout, "main", f.base); err != nil {
+		t.Fatalf("a dependency directory counted toward the cap: %v", err)
+	}
+}
+
+// The copy under a context and a cap (review L1): a cancelled context ends it, a tree over
+// the cap is ErrCheckoutTooLarge whether the sizes show it up front or a file grew past
+// them, a tree exactly at the cap copies, and no cap (propose's copy) copies everything.
+func TestCopyTreeCtxHonoursTheContextAndTheCap(t *testing.T) {
+	src := t.TempDir()
+	for name, size := range map[string]int{"a.txt": 60, "sub/b.txt": 40, "sub/c.txt": 1} {
+		must(t, os.MkdirAll(filepath.Join(src, filepath.Dir(name)), 0o755))
+		must(t, os.WriteFile(filepath.Join(src, name), []byte(strings.Repeat("x", size)), 0o644))
+	}
+	// The excluded directories and .git are not counted.
+	must(t, os.MkdirAll(filepath.Join(src, "node_modules"), 0o755))
+	must(t, os.WriteFile(filepath.Join(src, "node_modules", "huge.js"), []byte(strings.Repeat("x", 5000)), 0o644))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if n, err := copyTreeCtx(ctx, src, t.TempDir(), 0); !errors.Is(err, context.Canceled) || n != 0 {
+		t.Fatalf("a cancelled context: %d files, %v", n, err)
+	}
+	if _, err := copyTreeCtx(context.Background(), src, t.TempDir(), 100); !errors.Is(err, ErrCheckoutTooLarge) {
+		t.Fatalf("101 bytes under a cap of 100: %v", err)
+	}
+	if n, err := copyTreeCtx(context.Background(), src, t.TempDir(), 101); err != nil || n != 3 {
+		t.Fatalf("101 bytes under a cap of 101: %d files, %v", n, err)
+	}
+	dst := t.TempDir()
+	if n, err := copyTree(src, dst); err != nil || n != 3 {
+		t.Fatalf("no cap: %d files, %v", n, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dst, "sub", "b.txt")); err != nil || len(b) != 40 {
+		t.Fatalf("copied file: %d bytes, %v", len(b), err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "node_modules")); !os.IsNotExist(err) {
+		t.Errorf("node_modules was copied: %v", err)
+	}
+}

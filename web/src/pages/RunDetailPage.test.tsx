@@ -448,14 +448,15 @@ describe("RunDetailPage artifacts", () => {
     expect(follows(section, screen.getByRole("heading", { name: "Timeline" }))).toBe(true);
   });
 
-  it("says nothing was delivered yet while the run goes on, and that none were once it is over", async () => {
+  it("says nothing was delivered yet while the run goes on, and that none are available once it is over", async () => {
     renderPage();
     expect(await screen.findByText("No files delivered yet.")).not.toBeNull();
     await screen.findByText("Live");
     const done = run({ status: "succeeded", finished_at: "2026-10-15T10:00:09Z" });
     trace = { ...trace, run: done };
     send(7, "run.status", { run: done });
-    expect(await screen.findByText("No files were delivered.")).not.toBeNull();
+    expect(await screen.findByText("No files are available for this run.")).not.toBeNull();
+    expect(screen.queryByText("No files delivered yet.")).toBeNull();
   });
 
   it("loads the list again when the run's stream says files were collected", async () => {

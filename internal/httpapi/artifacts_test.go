@@ -126,6 +126,8 @@ func TestDownloadArtifactHeaders(t *testing.T) {
 	pool := needDB(t)
 	dir, ts := artifactServer(t, pool, nil)
 	run := newArtifactRun(t, pool)
+	// Invisible characters, written as code points so none sits in this file.
+	rlo, zwsp, lsep, psep, bom := string(rune(0x202e)), string(rune(0x200b)), string(rune(0x2028)), string(rune(0x2029)), string(rune(0xfeff))
 
 	for _, c := range []struct {
 		name, path, stored, content string
@@ -150,6 +152,20 @@ func TestDownloadArtifactHeaders(t *testing.T) {
 		{"a backslash that would escape the closing quote", `dir/name\`, "text/plain", "x", "text/plain", "name"},
 		{"unicode", "café/résumé.md", "text/markdown", "x", "text/markdown", "résumé.md"},
 		{"only characters that are removed", `"""`, "text/plain", "x", "text/plain", "artifact"},
+		// Review L5: every XML type is sent as plain text, whatever it is called.
+		{"application/xml", "feed.xml", "application/xml", "<a/>", "text/plain; charset=utf-8", "feed.xml"},
+		{"text/xml with a parameter", "feed2.xml", "text/xml; charset=utf-8", "<a/>", "text/plain; charset=utf-8", "feed2.xml"},
+		{"rss", "feed.rss", "application/rss+xml", "<rss/>", "text/plain; charset=utf-8", "feed.rss"},
+		{"atom", "feed.atom", "application/atom+xml", "<feed/>", "text/plain; charset=utf-8", "feed.atom"},
+		{"a vendor xml type", "map.kml", "application/vnd.google-earth.kml+xml", "<kml/>", "text/plain; charset=utf-8", "map.kml"},
+		{"xml in capitals", "feed3.xml", "APPLICATION/XML", "<a/>", "text/plain; charset=utf-8", "feed3.xml"},
+		{"json is not xml", "data2.json", "application/json", `{}`, "application/json", "data2.json"},
+		// Review L4: format characters and the line and paragraph separators are dropped from
+		// the name, as control characters are, so a saved name cannot read as another type.
+		{"a right-to-left override", "reports/fatura" + rlo + "fdp.exe", "text/plain", "x", "text/plain", "faturafdp.exe"},
+		{"separators, zero-width space and byte order mark", "a" + lsep + "b" + psep + "c" + zwsp + "d" + bom + ".md", "text/markdown", "x", "text/markdown", "abcd.md"},
+		{"letters of other scripts are kept", "relatório/日本語.md", "text/markdown", "x", "text/markdown", "日本語.md"},
+		{"only format characters", rlo + zwsp, "text/plain", "x", "text/plain", "artifact"},
 	} {
 		a := putArtifact(t, dir, run, c.path, c.stored, c.content)
 		resp, body := artifactRequest(t, ts, http.MethodGet, "/api/runs/"+run.ID+"/artifacts/"+a.ID, nil)
@@ -335,5 +351,29 @@ func TestArtifactConformanceSteps(t *testing.T) {
 		if code != st.want {
 			t.Fatalf("%s %s: status %d, want %d: %s", st.method, st.path, code, st.want, body)
 		}
+	}
+}
+
+// Review L1: an id with a NUL in it is no run's and no artifact's: 404 as an unknown id is,
+// where the database would refuse the parameter and the handler answer 500.
+func TestArtifactRoutesAnswerNotFoundForIDsWithANUL(t *testing.T) {
+	pool := needDB(t)
+	dir, ts := artifactServer(t, pool, nil)
+	run := newArtifactRun(t, pool)
+	a := putArtifact(t, dir, run, "report.md", "text/markdown", "# r")
+	for name, path := range map[string]string{
+		"the list of a run":              "/api/runs/no%00such/artifacts",
+		"a download, the run":            "/api/runs/no%00such/artifacts/" + a.ID,
+		"a download, the artifact":       "/api/runs/" + run.ID + "/artifacts/no%00such",
+		"a download, both":               "/api/runs/%00/artifacts/%00",
+		"a control character in the run": "/api/runs/no%01such/artifacts",
+	} {
+		code, body := do(t, ts, http.MethodGet, path, "")
+		if code != http.StatusNotFound || decodeError(t, body).Error.Code != "not_found" {
+			t.Errorf("%s: %d %s, want 404 not_found", name, code, body)
+		}
+	}
+	if code, _ := do(t, ts, http.MethodGet, "/api/runs/"+run.ID+"/artifacts/"+a.ID, ""); code != http.StatusOK {
+		t.Errorf("the real artifact: %d", code)
 	}
 }

@@ -99,12 +99,23 @@ func memorySection(allow []string) string {
 		"shared by every agent that works on that project; without a scope they use your own memory.\n"
 }
 
+// AllowsTool reports whether the agent's effective tools.allow holds the tool (DESIGN 5.24
+// rule 12, review M2): the allowlist and the finish tool less the guardrails' blocked
+// tools and the interaction rules set to "blocked", as toolLists computes what the
+// materialiser writes. name is the allowlist spelling, with or without the platform prefix.
+// The task's protocol block and AGENTS.md both ask this, so an agent whose tool is blocked
+// is told to use it by neither.
+func AllowsTool(a *store.Agent, name string) bool {
+	allow, _ := toolLists(a)
+	return slices.Contains(allow, ToolName(strings.TrimSpace(name)))
+}
+
 // questionsSection is AGENTS.md's "## Questions" section (DESIGN 5.24 rule 12) for an agent
 // that holds ask_operator: the paragraph of the task protocol block, so the rule is in the
-// agent's standing instructions as well as in each task. allow is the agent's effective
-// tools.allow; "" when it does not hold the tool.
-func questionsSection(allow []string) string {
-	if !slices.Contains(allow, PlatformToolPrefix+tools.AskOperatorName) {
+// agent's standing instructions as well as in each task. "" when the tool is not in the
+// agent's effective tools.allow (AllowsTool).
+func questionsSection(a *store.Agent) string {
+	if !AllowsTool(a, tools.AskOperatorName) {
 		return ""
 	}
 	return "\n## Questions\n\n" + QuestionsRule
@@ -320,7 +331,7 @@ func plan(stateDir string, a *store.Agent, skills []store.Skill) desired {
 	allow, _ := toolLists(a)
 	files := map[string]string{
 		"SOUL.md":   soulMD(a),
-		"AGENTS.md": AgentsMD + memorySection(allow) + questionsSection(allow) + chatSection(a, allow),
+		"AGENTS.md": AgentsMD + memorySection(allow) + questionsSection(a) + chatSection(a, allow),
 		"MEMORY.md": MemoryMD,
 	}
 	for _, s := range sorted {

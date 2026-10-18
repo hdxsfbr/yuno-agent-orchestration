@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { ApiError, answerApproval, approveApproval, rejectApproval, type Approval, type ToolCall } from "@/lib/api";
@@ -18,8 +18,13 @@ const KIND_LABEL: Record<Approval["kind"], string> = {
   question: "Question",
 };
 
-/** The most an answer can be (DESIGN 5.24 rule 3); the server counts bytes and has the last word. */
-const MAX_ANSWER = 4096;
+/** The most an answer can be, in bytes (DESIGN 5.24 rule 3): the server counts bytes after trimming and has the last word. */
+const MAX_ANSWER_BYTES = 4096;
+
+const encoder = new TextEncoder();
+
+/** The size of a text as the server counts it: its UTF-8 bytes, so "é" is 2 and a Chinese character is 3. */
+const byteLength = (text: string): number => encoder.encode(text).length;
 
 /** What a 422 says is wrong with an answer: the details on `answer`, else every detail with the field it names. */
 function answerProblems(details: unknown): string[] {
@@ -83,7 +88,7 @@ export default function ApprovalCard({ approval, toolCall, showRun = false, runE
   const failed = !!failure && !(failure instanceof ApiError && (failure.status === 409 || (failure.status === 422 && answerErrors.length > 0)));
 
   return (
-    <article aria-label={`Approval ${shortId(approval.id)}`} className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+    <article aria-label={`${question ? "Question" : "Approval"} ${shortId(approval.id)}`} className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         <Badge tone="zinc" title={approval.kind}>
           {KIND_LABEL[approval.kind] ?? approval.kind}
@@ -212,8 +217,15 @@ type QuestionControlsProps = {
  * other answer, and Decline with an optional reason. Approve is not offered: a question needs an answer.
  */
 function QuestionControls({ options, busy, errors, reason, onReason, onAnswer, onDecline }: QuestionControlsProps) {
+  const id = useId();
   const [text, setText] = useState("");
   const typed = text.trim();
+  // A paste is never cut: the box says how far over it is and Answer waits until it is short enough.
+  const size = byteLength(typed);
+  const tooLong = size > MAX_ANSWER_BYTES;
+  const excess = size - MAX_ANSWER_BYTES;
+  const invalid = tooLong || errors.length > 0;
+  const describedBy = [`${id}-size`, errors.length > 0 ? `${id}-err` : ""].filter(Boolean).join(" ");
   return (
     <div className="mt-3 space-y-3">
       {options.length > 0 ? (
@@ -232,16 +244,19 @@ function QuestionControls({ options, busy, errors, reason, onReason, onAnswer, o
             placeholder={options.length > 0 ? "Or write your own answer" : "Your answer"}
             rows={2}
             value={text}
-            maxLength={MAX_ANSWER}
-            aria-invalid={errors.length > 0 ? true : undefined}
+            aria-invalid={invalid ? true : undefined}
+            aria-describedby={describedBy}
             onChange={(e) => setText(e.target.value)}
-            className={control(errors.length > 0, "min-w-64 flex-1")}
+            className={control(invalid, "min-w-64 flex-1")}
           />
-          <Button variant="primary" onClick={() => onAnswer(typed)} disabled={busy || typed === ""}>
+          <Button variant="primary" onClick={() => onAnswer(typed)} disabled={busy || typed === "" || tooLong}>
             Answer
           </Button>
         </div>
-        <FieldErrors errors={errors} />
+        <p id={`${id}-size`} className={`mt-1 text-xs tabular-nums ${tooLong ? "text-red-600 dark:text-red-400" : "text-zinc-500"}`}>
+          {size} of {MAX_ANSWER_BYTES} bytes{tooLong ? `. Shorten the answer by ${excess} ${excess === 1 ? "byte" : "bytes"} to send it.` : ""}
+        </p>
+        <FieldErrors id={`${id}-err`} errors={errors} />
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <input

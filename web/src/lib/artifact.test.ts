@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PREVIEW_LIMIT, baseName, previewKind, saveBlob } from "./artifact";
+import { PREVIEW_LIMIT, REVOKE_DELAY_MS, baseName, previewKind, saveBlob } from "./artifact";
 
 describe("previewKind", () => {
   const kind = (content_type: string, size = 1000) => previewKind({ content_type, size });
@@ -45,6 +45,34 @@ describe("baseName", () => {
   it("falls back to the whole path when it ends in a slash", () => {
     expect(baseName("dir/")).toBe("dir/");
   });
+
+  it("drops a right-to-left override, so a name cannot read as another type", () => {
+    // shown with the override, "report\u202Egnp.exe" reads as "reportexe.png"
+    expect(baseName("report\u202Egnp.exe")).toBe("reportgnp.exe");
+    expect(baseName("out/report\u202Egnp.exe")).toBe("reportgnp.exe");
+    expect(baseName("out\u202E/summary.md")).toBe("summary.md");
+  });
+
+  it("drops the other format characters: isolates, embeddings, marks, zero-width characters and the byte-order mark", () => {
+    expect(baseName("a\u202Ab\u202Cc\u2066d\u2069e.txt")).toBe("abcde.txt");
+    expect(baseName("a\u200Eb\u200Fc\u200Bd\u200De\uFEFFf.txt")).toBe("abcdef.txt");
+    expect(baseName("soft\u00ADhyphen.md")).toBe("softhyphen.md");
+  });
+
+  it("drops the line and paragraph separators and the control characters", () => {
+    expect(baseName("a\u2028b\u2029c.txt")).toBe("abc.txt");
+    expect(baseName("a\nb\rc\td\u0000e\u007Ff\u0085g.txt")).toBe("abcdefg.txt");
+  });
+
+  it("keeps letters in any script, emoji and ordinary spaces", () => {
+    expect(baseName("relatório final – 2026 ✓.md")).toBe("relatório final – 2026 ✓.md");
+    expect(baseName("日本語/報告書.txt")).toBe("報告書.txt");
+  });
+
+  it("is never empty", () => {
+    expect(baseName("\u202E\u2028")).toBe("download");
+    expect(baseName("dir\u202E/")).toBe("dir/");
+  });
 });
 
 describe("saveBlob", () => {
@@ -53,6 +81,7 @@ describe("saveBlob", () => {
   let clicked: { download: string; href: string; hidden: boolean; attached: boolean }[];
 
   beforeEach(() => {
+    vi.useFakeTimers();
     created = [];
     revoked = [];
     clicked = [];
@@ -69,16 +98,36 @@ describe("saveBlob", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
-  it("clicks a hidden link to the object URL, named for the file, and then lets the URL go", async () => {
+  it("clicks a hidden link to the object URL, named for the file", () => {
     const blob = new Blob(["hello"], { type: "text/plain" });
     saveBlob(blob, "summary.md");
     expect(created).toEqual([blob]);
     expect(clicked).toEqual([{ download: "summary.md", href: "blob:http://localhost/one", hidden: true, attached: true }]);
     // the link does not stay in the page
     expect(document.querySelector("a[download]")).toBeNull();
-    await vi.waitFor(() => expect(revoked).toEqual(["blob:http://localhost/one"]));
+  });
+
+  it("keeps the object URL for several seconds, so a browser that starts reading late still finds the file", () => {
+    expect(REVOKE_DELAY_MS).toBeGreaterThanOrEqual(5_000);
+    saveBlob(new Blob(["hello"]), "summary.md");
+    expect(revoked).toEqual([]);
+    vi.advanceTimersByTime(0);
+    expect(revoked).toEqual([]);
+    vi.advanceTimersByTime(1_000);
+    expect(revoked).toEqual([]);
+    vi.advanceTimersByTime(REVOKE_DELAY_MS - 1_001);
+    expect(revoked).toEqual([]);
+  });
+
+  it("lets the object URL go once the delay has passed, once", () => {
+    saveBlob(new Blob(["hello"]), "summary.md");
+    vi.advanceTimersByTime(REVOKE_DELAY_MS);
+    expect(revoked).toEqual(["blob:http://localhost/one"]);
+    vi.advanceTimersByTime(REVOKE_DELAY_MS * 3);
+    expect(revoked).toEqual(["blob:http://localhost/one"]);
   });
 });

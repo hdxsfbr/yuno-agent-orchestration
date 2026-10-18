@@ -91,11 +91,20 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 		}
 		// The visits of the node the walk resumes at count against max_loop_visits as its
 		// entry check counts them (walk.enter, >=), or the run would fail again at once; a
-		// continuation visit does not count (DESIGN 5.24 rule 5).
+		// continuation visit does not count (DESIGN 5.24 rule 5). The entry check lets a
+		// visit in that would continue an answered question whatever the count, so a
+		// retry of a run with such a question counts nothing either (review L13).
 		visits := 0
 		if under.MaxLoopVisits > 0 {
-			if visits, err = store.CountNodeLoopVisits(ctx, tx, runID, *run.CurrentNode); err != nil {
-				return fmt.Errorf("run %s: count visits of %s: %w", runID, *run.CurrentNode, err)
+			switch _, cerr := store.ContinuationQuestion(ctx, tx, runID, *run.CurrentNode); {
+			case cerr == nil:
+				// The next visit is a continuation: free of the limit.
+			case errors.Is(cerr, store.ErrNotFound):
+				if visits, err = store.CountNodeLoopVisits(ctx, tx, runID, *run.CurrentNode); err != nil {
+					return fmt.Errorf("run %s: count visits of %s: %w", runID, *run.CurrentNode, err)
+				}
+			default:
+				return fmt.Errorf("run %s: continuation question of %s: %w", runID, *run.CurrentNode, cerr)
 			}
 		}
 		if details := exhaustedLimits(run, under, visits); len(details) > 0 {

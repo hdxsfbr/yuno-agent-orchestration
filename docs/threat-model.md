@@ -217,7 +217,9 @@ derived gateway image adds only the static Docker CLI.
   the limitation is the same-run path only.
 - A push from the api (a new request or an update onto its branch) copies regular files
   only, so a symlink tracked by the repository is committed as a deletion; projects with
-  tracked links are not supported.
+  tracked links are not supported. The push and the artifact diff (DESIGN 5.25) reach the
+  checkout by its path after a link check, so a process still alive in the agent's
+  sandbox could swap `repo/` for a link in between; a persistent link is refused.
 - Issue intake polls the provider every two minutes and drives the issue's labels; the
   comments it posts are best effort (a crash between the label swap and the comment can
   repeat the comment once), and an issue's text is the run's task (above).

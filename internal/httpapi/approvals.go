@@ -107,9 +107,17 @@ func (s *Server) answerApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	if hasControl(id) {
+		// No approval has such an id, and Postgres refuses a NUL in a parameter with a 500
+		// (review L1).
+		s.storeError(w, r, "approval", store.ErrNotFound)
+		return
+	}
 	answer := strings.TrimSpace(in.Answer)
 	var fe fieldErrors
-	if n := len(answer); n < 1 || n > maxAnswerBytes {
+	// A NUL or invalid UTF-8 in the answer fails the insert: it is refused with the same
+	// text as a bad length (review L1).
+	if n := len(answer); n < 1 || n > maxAnswerBytes || !utf8.ValidString(answer) || strings.ContainsRune(answer, 0) {
 		fe.add("answer", "1 to %d characters", maxAnswerBytes)
 	}
 	a, err := store.GetApproval(r.Context(), s.pool, id)
@@ -165,6 +173,10 @@ func (s *Server) answerApproval(w http.ResponseWriter, r *http.Request) {
 // unknown approval, 409 when it is no longer pending.
 func (s *Server) decide(w http.ResponseWriter, r *http.Request, decision, reason string, always bool) {
 	id := r.PathValue("id")
+	if hasControl(id) {
+		s.storeError(w, r, "approval", store.ErrNotFound) // as the answer route
+		return
+	}
 	reason = strings.TrimSpace(reason)
 	var fe fieldErrors
 	if utf8.RuneCountInString(reason) > maxDecisionReason {

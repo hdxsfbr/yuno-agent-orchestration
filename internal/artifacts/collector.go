@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -47,11 +48,19 @@ var (
 	orphanGrace = time.Hour
 )
 
+// putTestHook lets a test act between reading a path's row and writing it, where another
+// writer's row can appear; nil in production.
+var putTestHook func(path string)
+
 // cutMarker ends a patch that was cut at the cap (DESIGN 5.25 rule 3).
 const cutMarker = "\n# cut at 10 MiB\n"
 
 // logSkipNamed is how many skipped files the log line of a visit names.
 const logSkipNamed = 3
+
+// defaultTTLDays is ARTIFACT_TTL_DAYS' default (DESIGN 5.25 inputs), which a negative value
+// also means (rule 6); 0 keeps artifacts for ever.
+const defaultTTLDays = 30
 
 // Collector keeps the artifacts of runs. The zero value is not usable: build one with New.
 type Collector struct {
@@ -67,6 +76,49 @@ type Collector struct {
 	Now func() time.Time
 	// TTL is how long after finished_at a run keeps its artifacts; 0 keeps them forever.
 	TTL time.Duration
+
+	// slots serialize the collections of one run (review L9): the parked visit's and the
+	// continuation's can overlap, and two passes over one run's rows and files would race.
+	slotsMu sync.Mutex
+	slots   map[string]*runSlot
+}
+
+// runSlot is the lock of one run's collections: a channel of one, so a waiter can give
+// up when its deadline passes, and a count of the passes holding or waiting for it, so the
+// map does not keep a run once nobody uses it.
+type runSlot struct {
+	sem  chan struct{}
+	refs int
+}
+
+// lockRun waits for the run's turn, up to ctx; release gives it back. An error is the
+// context's.
+func (c *Collector) lockRun(ctx context.Context, runID string) (release func(), err error) {
+	c.slotsMu.Lock()
+	if c.slots == nil {
+		c.slots = map[string]*runSlot{}
+	}
+	s := c.slots[runID]
+	if s == nil {
+		s = &runSlot{sem: make(chan struct{}, 1)}
+		c.slots[runID] = s
+	}
+	s.refs++
+	c.slotsMu.Unlock()
+	drop := func() {
+		c.slotsMu.Lock()
+		if s.refs--; s.refs == 0 {
+			delete(c.slots, runID)
+		}
+		c.slotsMu.Unlock()
+	}
+	select {
+	case s.sem <- struct{}{}:
+		return func() { <-s.sem; drop() }, nil
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
+	}
 }
 
 var _ engine.ArtifactCollector = (*Collector)(nil)
@@ -75,7 +127,8 @@ var _ engine.ArtifactCollector = (*Collector)(nil)
 // directory when it is missing and writes and removes a probe file, so an unusable store
 // is found at start. The error names the cause without the directory; the caller logs
 // `artifacts: <dir>: <error>; artifacts are disabled` and runs without a collector. ttlDays
-// is ARTIFACT_TTL_DAYS, 0 for forever.
+// is ARTIFACT_TTL_DAYS: 0 keeps artifacts for ever, a negative value is the default 30
+// (DESIGN 5.25 rule 6, review L7).
 func New(dir string, pool *pgxpool.Pool, log *slog.Logger,
 	emit func(ctx context.Context, runID, event string, payload map[string]any),
 	logEvent func(ctx context.Context, runID, level, msg string, attrs ...any), ttlDays int) (*Collector, error) {
@@ -100,7 +153,7 @@ func New(dir string, pool *pgxpool.Pool, log *slog.Logger,
 		log = slog.New(slog.DiscardHandler)
 	}
 	if ttlDays < 0 {
-		ttlDays = 0
+		ttlDays = defaultTTLDays
 	}
 	return &Collector{Dir: dir, Pool: pool, Log: log, Emit: emit, LogEvent: logEvent,
 		TTL: time.Duration(ttlDays) * 24 * time.Hour}, nil
@@ -152,31 +205,37 @@ func slogLevel(level string) slog.Level {
 // runDir is <Dir>/<run id>, where the run's files live.
 func (c *Collector) runDir(runID string) string { return filepath.Join(c.Dir, runID) }
 
-// safeName reports whether s can be a directory name of the store: the ids the platform
-// issues, never a path.
-var safeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+// runIDPattern is the name of a run's directory in the store: the 36-character id the
+// platform issues (store.NewID, a UUID with dashes in lower case), the shape the report
+// keys accept (engine.reportRunID). Nothing else in ARTIFACT_DIR is ever touched, so a
+// store that shares its directory with other data (review M1) loses none of it.
+var runIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-func safeName(s string) bool { return safeNamePattern.MatchString(s) }
+func isRunID(s string) bool { return runIDPattern.MatchString(s) }
 
 // Collect collects what an agent visit left (DESIGN 5.25 rule 2), under a 60 s deadline.
 // It is best effort: a failure is a log line of the run and never reaches the visit; what
 // was stored before it stays. It satisfies engine.ArtifactCollector.
 func (c *Collector) Collect(ctx context.Context, in engine.ArtifactInput) {
-	if c == nil || in.Run == nil || in.Node == nil || !safeName(in.Run.ID) {
+	if c == nil || in.Run == nil || in.Node == nil || !isRunID(in.Run.ID) {
 		return
 	}
 	start := c.now()
 	dctx, cancel := context.WithTimeout(ctx, collectDeadline)
 	defer cancel()
+	// One collection of a run at a time (review L9): the parked visit's and its
+	// continuation's can overlap. The wait for the other is part of the deadline.
+	release, err := c.lockRun(dctx, in.Run.ID)
+	if err != nil {
+		c.logLine(ctx, in.Run.ID, "warn", "artifacts: "+deadlineText(err))
+		return
+	}
+	defer release()
 	p := &pass{c: c, in: in, runID: in.Run.ID, dir: c.runDir(in.Run.ID)}
-	err := p.run(dctx)
+	err = p.run(dctx)
 	p.reportSkips(ctx)
 	if err != nil {
-		msg := obs.Redact(bare(err).Error())
-		if errors.Is(err, context.DeadlineExceeded) {
-			msg = fmt.Sprintf("stopped at the %d s deadline; what was stored stays", int(collectDeadline.Seconds()))
-		}
-		c.logLine(ctx, p.runID, "warn", "artifacts: "+msg)
+		c.logLine(ctx, p.runID, "warn", "artifacts: "+deadlineText(err))
 	}
 	if p.changed > 0 && c.Emit != nil {
 		c.Emit(ctx, p.runID, "run.artifacts", map[string]any{"run_id": p.runID, "count": p.files})
@@ -186,6 +245,15 @@ func (c *Collector) Collect(ctx context.Context, in engine.ArtifactInput) {
 			"changed", p.changed, "files", p.files, "bytes", p.bytes, "skipped", p.skipN,
 			"duration_ms", c.now().Sub(start).Milliseconds())
 	}
+}
+
+// deadlineText is the text of a collection's failure for its log line: the deadline gets
+// its own sentence, anything else its redacted message.
+func deadlineText(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Sprintf("stopped at the %d s deadline; what was stored stays", int(collectDeadline.Seconds()))
+	}
+	return obs.Redact(bare(err).Error())
 }
 
 // skipped is a file that was not collected, and why.
@@ -318,12 +386,20 @@ func notRegularReason(m fs.FileMode) string {
 
 // usableName reports whether a path can be stored and shown: valid UTF-8 without control
 // characters (the database refuses a NUL and invalid UTF-8; a newline would break the log
-// line that names the file).
+// line that names the file) and without format characters or the line and paragraph
+// separators, which can make a name read as another one (a right-to-left override reverses
+// what follows it, so a name can look like another type; review L4).
 func usableName(rel string) bool {
 	if !utf8.ValidString(rel) {
 		return false
 	}
-	return !strings.ContainsFunc(rel, unicode.IsControl)
+	return !strings.ContainsFunc(rel, unsafeRune)
+}
+
+// unsafeRune is a character a stored name and the log line that names it must not carry:
+// a control character, a format character or a line or paragraph separator.
+func unsafeRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
 }
 
 // collectFile opens one regular file of out/ without following a link and stores it. A
@@ -463,12 +539,27 @@ func (p *pass) put(ctx context.Context, rel string, src io.Reader, size int64, g
 	now := p.c.now()
 	row := store.RunArtifact{ID: id, RunID: p.runID, NodeID: p.in.Node.NodeID, Visit: p.in.Node.Visit, Path: rel,
 		Size: n, SHA256: digest, ContentType: contentType(rel, head.buf), Generated: generated, CreatedAt: now, UpdatedAt: now}
-	_, changed, err := store.UpsertRunArtifact(ctx, p.c.Pool, row)
+	if putTestHook != nil {
+		putTestHook(rel)
+	}
+	saved, changed, err := store.UpsertRunArtifact(ctx, p.c.Pool, row)
 	if err != nil {
 		if existing == nil {
 			os.Remove(filepath.Join(p.dir, id)) // no row names it
 		}
 		return err
+	}
+	if saved != nil && saved.ID != id {
+		// A row at this path appeared since it was read (a writer the run's lock does not
+		// serialize): the file written under the new id belongs to no row. Where the
+		// upsert took the row over, the file replaces the row's own; otherwise it goes.
+		if changed {
+			if err := os.Rename(filepath.Join(p.dir, id), filepath.Join(p.dir, saved.ID)); err != nil {
+				return err
+			}
+		} else {
+			os.Remove(filepath.Join(p.dir, id))
+		}
 	}
 	if changed {
 		if existing == nil {
@@ -564,7 +655,10 @@ func (p *pass) diff(ctx context.Context, runRoot *os.Root) error {
 		return nil
 	}
 	if len(patch) == 0 {
-		return p.dropDiff(ctx)
+		// An empty diff leaves an earlier generated diff.patch where it is (review H1):
+		// after the Deployer pushes, checkout_sha moves to the pushed commit and the
+		// checkout matches it, but the stored patch is still what the run changed.
+		return nil
 	}
 	patch = cutPatch(patch)
 	return p.put(ctx, store.GeneratedArtifactPath, bytes.NewReader(patch), int64(len(patch)), true)
@@ -578,22 +672,6 @@ func cutPatch(patch []byte) []byte {
 	}
 	keep := max(maxPatchBytes-int64(len(cutMarker)), 0)
 	return append(patch[:keep:keep], cutMarker...)
-}
-
-// dropDiff removes an earlier generated diff.patch, row first and then its file: a
-// checkout that no longer differs from the commit it was cloned from has no diff.
-func (p *pass) dropDiff(ctx context.Context) error {
-	row, err := store.DeleteGeneratedArtifact(ctx, p.c.Pool, p.runID)
-	if err != nil || row == nil {
-		return err
-	}
-	if err := os.Remove(filepath.Join(p.dir, row.ID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		p.c.logger().Warn("artifacts: remove a file", "run_id", p.runID, "error", err)
-	}
-	p.files--
-	p.bytes -= row.Size
-	p.changed++
-	return nil
 }
 
 func (p *pass) skip(path, reason string) {
@@ -621,8 +699,8 @@ func (p *pass) reportSkips(ctx context.Context) {
 	p.c.logLine(ctx, p.runID, "info", msg)
 }
 
-// printable is a path fit for a log line: control characters and invalid UTF-8 shown as
-// ?, and a long path cut.
+// printable is a path fit for a log line: control and format characters, the separators
+// and invalid UTF-8 shown as ?, and a long path cut.
 func printable(path string) string {
 	const limit = 100
 	var b strings.Builder
@@ -631,7 +709,7 @@ func printable(path string) string {
 			b.WriteString("...")
 			break
 		}
-		if unicode.IsControl(r) || r == utf8.RuneError {
+		if unsafeRune(r) || r == utf8.RuneError {
 			r = '?'
 		}
 		b.WriteRune(r)

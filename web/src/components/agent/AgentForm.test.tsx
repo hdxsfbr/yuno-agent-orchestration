@@ -139,6 +139,55 @@ describe("AgentForm tools", () => {
   });
 });
 
+describe("AgentForm policy choices", () => {
+  const askOperator: Tool = { name: "ask_operator", description: "Ask the operator a question", risk: "computational", hits: "postgres", timeout_seconds: 570, source: "platform" };
+  const finish: Tool = { name: "finish", description: "Report the result of the step", risk: "computational", hits: "postgres", timeout_seconds: 5, source: "platform" };
+  const withBoth = [...tools, askOperator, finish];
+  const choices = (name: string) => Array.from((screen.getByLabelText(`Policy for ${name}`) as HTMLSelectElement).options).map((o) => o.textContent);
+  const allow = (name: string) => fireEvent.click(screen.getByRole("checkbox", { name: new RegExp(name) }));
+
+  it("does not offer Require approval for ask_operator: the server refuses it", () => {
+    const { onSubmit } = setup({ tools: withBoth });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: "Asker" } });
+    allow("ask_operator");
+    expect(choices("ask_operator")).toEqual(["Auto", "Blocked"]);
+    expect((screen.getByLabelText("Policy for ask_operator") as HTMLSelectElement).value).toBe("auto");
+    expect(screen.queryByRole("option", { name: "Require approval" })).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Policy for ask_operator"), { target: { value: "blocked" } });
+    submit();
+    expect(onSubmit.mock.calls[0][0].interaction_rules).toEqual({ ask_operator: "blocked" });
+  });
+
+  it("does not offer Require approval for finish, which is always allowed", () => {
+    setup({ tools: withBoth });
+    allow("finish");
+    expect(choices("finish")).toEqual(["Auto"]);
+    expect((screen.getByLabelText("Policy for finish") as HTMLSelectElement).value).toBe("auto");
+    expect(screen.queryByRole("option", { name: "Require approval" })).toBeNull();
+  });
+
+  it("still offers all three for the other tools", () => {
+    setup({ tools: withBoth });
+    allow("memory_recall");
+    allow("deploy_release");
+    expect(choices("memory_recall")).toEqual(["Auto", "Require approval", "Blocked"]);
+    expect(choices("deploy_release")).toEqual(["Auto", "Require approval", "Blocked"]);
+  });
+
+  it("shows the rule an agent already holds, even one that can no longer be chosen, so the choice shown is the choice held", () => {
+    setup({
+      tools: withBoth,
+      agent: saved({ tool_allowlist: ["ask_operator"], interaction_rules: { ask_operator: "require_approval" } }),
+    });
+    const policy = screen.getByLabelText("Policy for ask_operator") as HTMLSelectElement;
+    expect(policy.value).toBe("require_approval");
+    // once it is changed it cannot be chosen again
+    fireEvent.change(policy, { target: { value: "auto" } });
+    expect(choices("ask_operator")).toEqual(["Auto", "Blocked"]);
+  });
+});
+
 describe("AgentForm chat tools", () => {
   const toolRow = (name: string) => within(screen.getByText(name).closest("li")!);
 

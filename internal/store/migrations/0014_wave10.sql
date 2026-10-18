@@ -1,5 +1,5 @@
--- Wave 10 (DESIGN 5.24, 5.25): questions to the operator and run artifacts. Columns, one
--- partial index and one table; no data is rewritten, and every existing row reads with
+-- Wave 10 (DESIGN 5.24, 5.25): questions to the operator and run artifacts. Columns, two
+-- partial indexes and one table; no data is rewritten, and every existing row reads with
 -- the defaults (no options, no answer, no question, not parked, no artifacts).
 
 -- 5.24 rule 2: the suggested answers of a question (a JSON array of 2 to 5 strings, null
@@ -16,6 +16,9 @@ CREATE INDEX approvals_question_step_idx ON approvals (run_id, node_id) WHERE ki
 -- released its worker (null for a visit that never parked).
 ALTER TABLE run_nodes ADD COLUMN question_id TEXT REFERENCES approvals (id) ON DELETE SET NULL;
 ALTER TABLE run_nodes ADD COLUMN parked_at TIMESTAMPTZ;
+-- The continuation lookup ("no visit names this question yet") and the delete of an
+-- approval (set null) read run_nodes by question_id; most rows have none.
+CREATE INDEX run_nodes_question_idx ON run_nodes (question_id) WHERE question_id IS NOT NULL;
 
 -- 5.25 rule 4: the files a run delivers, one row per path of the run (a later visit that
 -- changes a file updates its row in place). The files themselves live under ARTIFACT_DIR

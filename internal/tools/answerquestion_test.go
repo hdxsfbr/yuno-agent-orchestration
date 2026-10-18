@@ -106,6 +106,8 @@ func TestAnswerQuestionRefusals(t *testing.T) {
 		{"an answer of 4097 bytes", Call{AgentID: chief.ID, Chat: true, Input: answerInput(pending.ID, strings.Repeat("a", 4097))},
 			"answer: 1 to 4096 characters"},
 		{"a blank id", Call{AgentID: chief.ID, Chat: true, Input: answerInput("  ", "Go")}, "question_id: must not be empty"},
+		{"a NUL in the answer", Call{AgentID: chief.ID, Chat: true, Input: answerInput(pending.ID, "G\x00o")}, "answer: 1 to 4096 characters"},
+		{"a NUL in the id", Call{AgentID: chief.ID, Chat: true, Input: answerInput("no\x00such", "Go")}, "no question nosuch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := invoke(t, tool, tc.call)

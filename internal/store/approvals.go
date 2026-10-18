@@ -78,13 +78,31 @@ func runStatuses(ctx context.Context, q Querier, ids []string) (map[string]strin
 
 // ---- questions to the operator (DESIGN 5.24) ------------------------------------------
 
+// The step queries write the kind as the literal 'question' (the value of
+// ApprovalKindQuestion; a test keeps them in step): bound as a parameter it would keep the
+// planner from using the partial index approvals_question_step_idx once it settles on a
+// generic plan (review L6).
+const (
+	countStepQuestionsSQL = `SELECT count(*) FROM approvals WHERE kind='question' AND run_id=$1 AND node_id=$2`
+
+	listStepQuestionsSQL = `SELECT ` + approvalSelect + ` FROM approvals
+		WHERE kind='question' AND run_id=$1 AND node_id=$2 AND status <> $3 ORDER BY requested_at, id`
+
+	continuationQuestionSQL = `SELECT ` + approvalSelect + ` FROM approvals
+		WHERE kind='question' AND run_id=$1 AND node_id=$2 AND status IN ($3, $4)
+		  AND EXISTS (SELECT 1 FROM run_nodes p WHERE p.id = approvals.run_node_id AND p.parked_at IS NOT NULL)
+		  AND NOT EXISTS (SELECT 1 FROM run_nodes n WHERE n.question_id = approvals.id)
+		  AND NOT EXISTS (SELECT 1 FROM approvals later WHERE later.kind = 'question' AND later.run_node_id = approvals.run_node_id
+		                  AND (later.requested_at, later.id) > (approvals.requested_at, approvals.id))
+		ORDER BY requested_at DESC, id DESC LIMIT 1`
+)
+
 // CountStepQuestions counts the questions a step has asked in a run: the rows of kind
 // question with the run and node id, whatever their status (rule 2: the fourth is
 // refused). The partial index approvals_question_step_idx serves it.
 func CountStepQuestions(ctx context.Context, q Querier, runID, nodeID string) (int, error) {
 	var n int
-	err := q.QueryRow(ctx, `SELECT count(*) FROM approvals WHERE kind=$1 AND run_id=$2 AND node_id=$3`,
-		ApprovalKindQuestion, runID, nodeID).Scan(&n)
+	err := q.QueryRow(ctx, countStepQuestionsSQL, runID, nodeID).Scan(&n)
 	return n, err
 }
 
@@ -92,9 +110,7 @@ func CountStepQuestions(ctx context.Context, q Querier, runID, nodeID string) (i
 // question with the run and node id that are no longer pending, whichever visit asked
 // them (rule 7's answer paragraph has one block for each).
 func ListStepQuestions(ctx context.Context, q Querier, runID, nodeID string) ([]Approval, error) {
-	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals
-		WHERE kind=$1 AND run_id=$2 AND node_id=$3 AND status <> $4 ORDER BY requested_at, id`,
-		ApprovalKindQuestion, runID, nodeID, ApprovalPending)
+	rows, err := q.Query(ctx, listStepQuestionsSQL, runID, nodeID, ApprovalPending)
 	if err != nil {
 		return nil, err
 	}
@@ -113,14 +129,7 @@ func ListStepQuestions(ctx context.Context, q Querier, runID, nodeID string) ([]
 // and a question the visit went on past (answered within the wait) is not the one it
 // parked on.
 func ContinuationQuestion(ctx context.Context, q Querier, runID, nodeID string) (*Approval, error) {
-	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals
-		WHERE kind=$1 AND run_id=$2 AND node_id=$3 AND status IN ($4, $5)
-		  AND EXISTS (SELECT 1 FROM run_nodes p WHERE p.id = approvals.run_node_id AND p.parked_at IS NOT NULL)
-		  AND NOT EXISTS (SELECT 1 FROM run_nodes n WHERE n.question_id = approvals.id)
-		  AND NOT EXISTS (SELECT 1 FROM approvals later WHERE later.kind = $1 AND later.run_node_id = approvals.run_node_id
-		                  AND (later.requested_at, later.id) > (approvals.requested_at, approvals.id))
-		ORDER BY requested_at DESC, id DESC LIMIT 1`,
-		ApprovalKindQuestion, runID, nodeID, ApprovalApproved, ApprovalRejected)
+	rows, err := q.Query(ctx, continuationQuestionSQL, runID, nodeID, ApprovalApproved, ApprovalRejected)
 	if err != nil {
 		return nil, err
 	}

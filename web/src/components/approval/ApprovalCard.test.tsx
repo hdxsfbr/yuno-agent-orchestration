@@ -46,7 +46,7 @@ function renderCard(approval: Approval, props: { showRun?: boolean } = {}) {
       </MemoryRouter>
     </QueryClientProvider>,
   );
-  return within(screen.getByRole("article", { name: `Approval ${shortId(approval.id)}` }));
+  return within(screen.getByRole("article", { name: `${approval.kind === "question" ? "Question" : "Approval"} ${shortId(approval.id)}` }));
 }
 
 const answered = (over: Partial<Approval> = {}) => question({ status: "approved", answer: "Spanish", decided_at: "2026-10-18T10:05:00Z", decided_by: "api", ...over });
@@ -97,9 +97,14 @@ describe("a pending question", () => {
     expect(button(card, "Answer").disabled).toBe(true);
   });
 
-  it("limits the box to 4096 characters", () => {
-    const card = renderCard(question());
-    expect((card.getByLabelText("Your answer") as HTMLTextAreaElement).maxLength).toBe(4096);
+  it("is named Question and the short id, and a command approval is named Approval", () => {
+    renderCard(question({ id: "q-0123456789abcdef" }));
+    expect(screen.getByRole("article", { name: `Question ${shortId("q-0123456789abcdef")}` })).not.toBeNull();
+    expect(screen.queryByRole("article", { name: /^Approval/ })).toBeNull();
+    cleanup();
+    renderCard({ ...question(), id: "x-0123456789abcdef", kind: "exec", options: undefined, message: "rm -rf build/" });
+    expect(screen.getByRole("article", { name: `Approval ${shortId("x-0123456789abcdef")}` })).not.toBeNull();
+    expect(screen.queryByRole("article", { name: /^Question/ })).toBeNull();
   });
 
   it("is a different card from a command approval: no box and no Decline there", () => {
@@ -107,6 +112,94 @@ describe("a pending question", () => {
     expect(card.queryByLabelText("Your answer")).toBeNull();
     expect(card.queryByRole("button", { name: "Decline" })).toBeNull();
     expect(card.getByRole("button", { name: "Approve" })).not.toBeNull();
+  });
+});
+
+describe("the size of an answer", () => {
+  const type = (card: ReturnType<typeof renderCard>, value: string) => fireEvent.change(card.getByLabelText("Your answer"), { target: { value } });
+  const size = (card: ReturnType<typeof renderCard>) => card.getByText(/ of 4096 bytes/);
+
+  it("shows the limit in bytes before anything is typed", () => {
+    const card = renderCard(question());
+    expect(size(card).textContent).toBe("0 of 4096 bytes");
+  });
+
+  it("counts bytes, not characters: an accented letter is 2, a Chinese character 3 and an emoji 4", () => {
+    const card = renderCard(question());
+    type(card, "café");
+    expect(size(card).textContent).toBe("5 of 4096 bytes");
+    type(card, "日本語");
+    expect(size(card).textContent).toBe("9 of 4096 bytes");
+    type(card, "😀");
+    expect(size(card).textContent).toBe("4 of 4096 bytes");
+  });
+
+  it("counts the text that will be sent, without the blanks around it", () => {
+    const card = renderCard(question());
+    type(card, "  hello \n ");
+    expect(size(card).textContent).toBe("5 of 4096 bytes");
+  });
+
+  it("accepts an answer of exactly 4096 bytes, however many characters that is", () => {
+    const card = renderCard(question());
+    type(card, "é".repeat(2048));
+    expect(size(card).textContent).toBe("4096 of 4096 bytes");
+    expect(button(card, "Answer").disabled).toBe(false);
+    expect(card.getByLabelText("Your answer").getAttribute("aria-invalid")).toBeNull();
+    type(card, "a".repeat(4096));
+    expect(size(card).textContent).toBe("4096 of 4096 bytes");
+    expect(button(card, "Answer").disabled).toBe(false);
+  });
+
+  it("does not cut a paste that is too long: the text stays, the box says how much to take out, and Answer waits", async () => {
+    const card = renderCard(question());
+    const box = card.getByLabelText("Your answer") as HTMLTextAreaElement;
+    // 3000 characters, 6000 bytes: a character limit of 4096 would have let all of it in, a cut would have lost some
+    const pasted = "é".repeat(3000);
+    type(card, pasted);
+    expect(box.value).toBe(pasted);
+    expect(box.getAttribute("maxlength")).toBeNull();
+    expect(size(card).textContent).toBe("6000 of 4096 bytes. Shorten the answer by 1904 bytes to send it.");
+    expect(size(card).className).toContain("text-red-600");
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    expect(button(card, "Answer").disabled).toBe(true);
+    fireEvent.click(button(card, "Answer"));
+    expect(api.made("POST", /\/answer$/)).toHaveLength(0);
+
+    // plain ASCII past 4096 characters is cut nowhere either
+    type(card, "a".repeat(5000));
+    expect(box.value).toHaveLength(5000);
+    expect(button(card, "Answer").disabled).toBe(true);
+
+    // taking the excess out brings the box back
+    type(card, "é".repeat(2048));
+    expect(size(card).textContent).toBe("4096 of 4096 bytes");
+    expect(size(card).className).not.toContain("text-red-600");
+    expect(box.getAttribute("aria-invalid")).toBeNull();
+    expect(button(card, "Answer").disabled).toBe(false);
+  });
+
+  it("one byte over is too long", () => {
+    const card = renderCard(question());
+    type(card, `${"é".repeat(2048)}a`);
+    expect(size(card).textContent).toBe("4097 of 4096 bytes. Shorten the answer by 1 byte to send it.");
+    expect(button(card, "Answer").disabled).toBe(true);
+  });
+
+  it("does not stop a suggested answer: its button works while the box holds too much", async () => {
+    api.on("POST", "/api/approvals/q1/answer", () => answered());
+    const card = renderCard(question());
+    type(card, "é".repeat(3000));
+    fireEvent.click(card.getByRole("button", { name: "Spanish" }));
+    await waitFor(() => expect(onDecided).toHaveBeenCalled());
+    expect(api.made("POST", "/api/approvals/q1/answer")[0].body).toEqual({ answer: "Spanish" });
+  });
+
+  it("is described to the box, so the count is read with it", () => {
+    const card = renderCard(question());
+    const box = card.getByLabelText("Your answer");
+    const described = (box.getAttribute("aria-describedby") ?? "").split(" ").map((id) => document.getElementById(id)?.textContent);
+    expect(described).toEqual(["0 of 4096 bytes"]);
   });
 });
 
@@ -152,15 +245,19 @@ describe("answering", () => {
     api.on("POST", "/api/approvals/q1/answer", () => apiError(422, "validation_failed", "invalid request", [{ path: "answer", message: "1 to 4096 characters" }]));
     const card = renderCard(question());
     const box = card.getByLabelText("Your answer");
-    fireEvent.change(box, { target: { value: "é".repeat(3000) } });
+    fireEvent.change(box, { target: { value: "é".repeat(2000) } });
     fireEvent.click(button(card, "Answer"));
     expect(await card.findByText("1 to 4096 characters")).not.toBeNull();
-    expect(card.getByText("1 to 4096 characters").closest("[role=alert]")).not.toBeNull();
+    const alert = card.getByText("1 to 4096 characters").closest("[role=alert]")!;
+    expect(alert).not.toBeNull();
     expect(box.getAttribute("aria-invalid")).toBe("true");
+    // the box is described by the message, so it is read out with the box
+    expect(alert.id).not.toBe("");
+    expect((box.getAttribute("aria-describedby") ?? "").split(" ")).toContain(alert.id);
     expect(card.queryByText(/Could not record the decision/)).toBeNull();
     expect(onDecided).not.toHaveBeenCalled();
     // nothing is lost: the text is still there and can be sent again
-    expect((box as HTMLTextAreaElement).value).toBe("é".repeat(3000));
+    expect((box as HTMLTextAreaElement).value).toBe("é".repeat(2000));
     expect(button(card, "Answer").disabled).toBe(false);
     expect(button(card, "Decline").disabled).toBe(false);
   });
@@ -184,6 +281,8 @@ describe("answering", () => {
     fireEvent.click(card.getByRole("button", { name: "English" }));
     await waitFor(() => expect(card.queryByText("1 to 4096 characters")).toBeNull());
     await waitFor(() => expect(onDecided).toHaveBeenCalled());
+    // and the box no longer points at a message that is gone
+    expect((card.getByLabelText("Your answer").getAttribute("aria-describedby") ?? "").split(" ")).toHaveLength(1);
   });
 
   it("says the question was decided already on a 409, takes the controls away and tells the page", async () => {

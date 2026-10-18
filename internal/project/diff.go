@@ -48,6 +48,8 @@ var ErrNoCheckout = errors.New("the checkout has no .git directory")
 //
 // checkout must hold a .git directory (ErrNoCheckout otherwise). A clone or fetch that
 // fails is the returned error, redacted like every git error; the caller skips the diff.
+// The copy of the working tree honours ctx and stops at MaxCheckoutBytes
+// (ErrCheckoutTooLarge), so a huge checkout cannot run past the caller's deadline.
 // The patch is at most MaxDiffBytes+1 bytes: a longer one is cut at that length.
 func (c Config) Diff(ctx context.Context, checkout, branch, base string) ([]byte, error) {
 	if err := requireGitDir(checkout); err != nil {
@@ -86,7 +88,10 @@ func (c Config) Diff(ctx context.Context, checkout, branch, base string) ([]byte
 	if err := clearWorkingTree(dest); err != nil {
 		return nil, err
 	}
-	if _, err := copyTree(checkout, dest); err != nil {
+	if _, err := copyTreeCtx(ctx, checkout, dest, MaxCheckoutBytes); err != nil {
+		if errors.Is(err, ErrCheckoutTooLarge) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("copy the checkout: %w", err)
 	}
 	if _, err := c.git(ctx, dest, "add", "--all"); err != nil {

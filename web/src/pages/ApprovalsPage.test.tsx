@@ -95,7 +95,8 @@ function renderPage(path = "/approvals") {
   );
 }
 
-const label = (id: string) => `Approval ${shortId(id)}`;
+// A question card is named for what it is, the others are approvals.
+const label = (id: string) => `${id === "ap-question" ? "Question" : "Approval"} ${shortId(id)}`;
 const card = async (id: string) => within(await screen.findByRole("article", { name: label(id) }));
 
 describe("ApprovalsPage", () => {
@@ -338,6 +339,8 @@ describe("questions in the inbox", () => {
     renderPage();
     const asked = await card("ap-question");
     expect(asked.getByText("Question")).not.toBeNull();
+    expect(screen.getByRole("article", { name: `Question ${shortId("ap-question")}` })).not.toBeNull();
+    expect(screen.queryByRole("article", { name: `Approval ${shortId("ap-question")}` })).toBeNull();
     expect(asked.getByText("Which greeting language should I use?")).not.toBeNull();
     expect(asked.getByRole("link", { name: shortId(RUN) }).getAttribute("href")).toBe(`/runs/${RUN}`);
     expect(asked.getByRole("button", { name: "English" })).not.toBeNull();

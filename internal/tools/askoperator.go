@@ -108,7 +108,7 @@ func execAskOperator(ctx context.Context, asker Asker, wait time.Duration, call 
 		return Result{}, &ModelError{Message: "invalid input: " + err.Error()}
 	}
 	question := strings.TrimSpace(in.Question)
-	if n := len(question); n < 1 || n > askQuestionMaxBytes {
+	if n := len(question); n < 1 || n > askQuestionMaxBytes || !plainText(question) {
 		return Result{}, &ModelError{Message: askQuestionText}
 	}
 	var options []string
@@ -190,7 +190,7 @@ func cleanOptions(in []string) ([]string, bool) {
 	seen := make(map[string]bool, len(in))
 	for _, o := range in {
 		o = strings.TrimSpace(o)
-		if n := len(o); n < 1 || n > askOptionMaxBytes || !utf8.ValidString(o) || seen[o] {
+		if n := len(o); n < 1 || n > askOptionMaxBytes || !plainText(o) || seen[o] {
 			return nil, false
 		}
 		if strings.IndexFunc(o, unicode.IsControl) >= 0 {
@@ -200,6 +200,13 @@ func cleanOptions(in []string) ([]string, bool) {
 		out = append(out, o)
 	}
 	return out, true
+}
+
+// plainText reports whether s can be stored as a question, an option or an answer: valid
+// UTF-8 without a NUL, which the database refuses with an error the model and the operator
+// cannot act on (review L4).
+func plainText(s string) bool {
+	return utf8.ValidString(s) && !strings.ContainsRune(s, 0)
 }
 
 // errorHasText reports whether err, or any error it wraps or joins, says text exactly.

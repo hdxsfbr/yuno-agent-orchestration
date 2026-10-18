@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"yuno/internal/store"
 )
@@ -69,8 +70,17 @@ func execAnswerQuestion(ctx context.Context, d PlatformDeps, call Call) (Result,
 	if id == "" {
 		return Result{}, &ModelError{Message: "question_id: must not be empty"}
 	}
+	if !plainText(id) {
+		// No row has such an id, and the database would refuse the lookup itself.
+		return Result{}, &ModelError{Message: "no question " + strings.Map(func(r rune) rune {
+			if r == 0 || r == utf8.RuneError {
+				return -1
+			}
+			return r
+		}, id)}
+	}
 	answer := strings.TrimSpace(in.Answer)
-	if n := len(answer); n < 1 || n > answerMaxBytes {
+	if n := len(answer); n < 1 || n > answerMaxBytes || !plainText(answer) {
 		return Result{}, &ModelError{Message: answerText}
 	}
 	if d.Pool == nil || d.Asker == nil {

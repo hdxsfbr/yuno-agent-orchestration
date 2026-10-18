@@ -11,7 +11,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -119,6 +118,7 @@ type visit struct {
 	turnLive bool
 
 	turn           int
+	errorRetries   int // turns started again after a model error (maxContinueRetries); answer turns are not counted
 	runID          string
 	runIDs         map[string]bool
 	steps          int
@@ -589,7 +589,9 @@ func (v *visit) taskMessageWith(x project.Extras) string {
 		sb.WriteString(text)
 	}
 	sb.WriteString(DeliverablesLine(v.run.ID))
-	if v.agent != nil && slices.Contains(v.agent.ToolAllowlist, tools.AskOperatorName) {
+	// The paragraph goes to an agent that can use the tool: the effective allow list, as
+	// AGENTS.md reads it, not the raw one (review M2).
+	if v.agent != nil && openclaw.AllowsTool(v.agent, tools.AskOperatorName) {
 		sb.WriteString(QuestionsParagraph(v.run.ID))
 	}
 	sb.WriteString(`When finished, call the tool yuno__finish with {"run_token": "` + v.token +
@@ -1541,14 +1543,17 @@ func (v *visit) turnError(ctx context.Context, ce openclaw.ChatEvent) {
 	if kind == "" {
 		kind = "unknown error"
 	}
-	if retryable && v.turn <= maxContinueRetries {
-		wait := retryBackoff(v.turn)
+	// The retries are counted apart from the turns: a turn that carries an operator's answer
+	// (DESIGN 5.24 rule 5) is not a retry and does not use the budget (review L7).
+	if retryable && v.errorRetries < maxContinueRetries {
+		wait := retryBackoff(v.errorRetries + 1)
 		if wait >= v.remaining() {
 			v.end(ctx, v.timedOut())
 			return
 		}
+		v.errorRetries++
 		v.e.logEvent(ctx, v.run.ID, "warn", fmt.Sprintf("model error (%s); continuing in a new turn, retry %d of %d",
-			kind, v.turn, maxContinueRetries))
+			kind, v.errorRetries, maxContinueRetries))
 		v.e.clock.Sleep(wait)
 		if res := v.startTurn(ctx, "Continue."); res != nil {
 			v.end(ctx, *res)

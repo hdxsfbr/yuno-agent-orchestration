@@ -179,6 +179,9 @@ func TestAskOperatorValidation(t *testing.T) {
 		{"question of 1024 bytes", askInput(strings.Repeat("q", 1024)), ""},
 		{"question of 1024 bytes inside spaces", askInput("  " + strings.Repeat("q", 1024) + "\n"), ""},
 		{"multibyte characters count as bytes", askInput(strings.Repeat("é", 513)), "question: 1 to 1024 characters"},
+		{"a NUL in the question", askInput("which\x00one?"), "question: 1 to 1024 characters"},
+		{"a NUL alone", askInput("\x00"), "question: 1 to 1024 characters"},
+		{"a newline in the question is fine", askInput("which\none?"), ""},
 		{"no options", askInput("q?"), ""},
 		{"null options", json.RawMessage(`{"run_token":"r_x","question":"q?","options":null}`), ""},
 		{"an empty list", json.RawMessage(`{"run_token":"r_x","question":"q?","options":[]}`), "options: 2 to 5 distinct options of at most 100 characters"},
@@ -392,5 +395,19 @@ func TestPlatformRegistryHasTheQuestionTools(t *testing.T) {
 	answer, ok2 := reg.Get(AnswerQuestionName)
 	if !ok1 || !ok2 || ask.Chat || !answer.Chat {
 		t.Fatalf("ask_operator %v chat %v, answer_question %v chat %v", ok1, ask != nil && ask.Chat, ok2, answer != nil && answer.Chat)
+	}
+}
+
+// Review L4: a NUL or invalid UTF-8 cannot be stored. JSON input never carries invalid
+// UTF-8 into the executor (the decoder replaces it), so the check on bytes is shown on the
+// helper both validations use.
+func TestPlainText(t *testing.T) {
+	for s, want := range map[string]bool{
+		"": true, "plain": true, "linhas\ncom acentuação": true, "日本語": true,
+		"a\x00b": false, "\x00": false, "a\xffb": false, "\xc3": false, "\xed\xa0\x80": false, // a surrogate half
+	} {
+		if got := plainText(s); got != want {
+			t.Errorf("plainText(%q) = %v, want %v", s, got, want)
+		}
 	}
 }

@@ -6,11 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"yuno/internal/obs"
 	"yuno/internal/store"
 	"yuno/internal/tools"
-	"yuno/internal/workflow"
 )
 
 // Questions to the operator (DESIGN 5.24, decisions D-046, D-056, D-058, D-059). A
@@ -37,6 +38,20 @@ const (
 	stepFinishedReason = "step finished"
 )
 
+// listStepQuestions reads a step's decided questions; a variable so a test can make the read
+// fail (review L8).
+var listStepQuestions = store.ListStepQuestions
+
+// handoffTimeout bounds the handoff of a decision to the live visit through its loop (rule 5
+// (b)): a visit whose loop is busy does not hold the decider for longer. When it passes the
+// decision stays in its row, which the visit reads at its turn's end (review L6). A variable
+// so a test can lower it.
+var handoffTimeout = 5 * time.Second
+
+// The engine is the second interface ask_operator calls: QuestionPending, when its wait
+// ends with no decision (rule 4).
+var _ tools.QuestionParker = (*Engine)(nil)
+
 // questionTestHook lets a test act at the two points of a turn's end where a decision can
 // land: "read" before the pending question is read, and "park" after it was read pending
 // and before the park. It runs on the visit goroutine; nil in production.
@@ -56,9 +71,22 @@ func (e *Engine) AskOperator(ctx context.Context, token, question string, option
 		return nil, ErrInvalidRunToken
 	}
 	v := t.v
+	// The tool checked these; the engine does too, since a NUL or invalid UTF-8 would fail
+	// the insert with a database error nobody can act on (review L4).
+	if !plainText(question) {
+		return nil, &tools.ModelError{Message: "question: 1 to 1024 characters"}
+	}
 	var opts json.RawMessage
 	if len(options) > 0 {
-		b, err := json.Marshal(options)
+		// Each option is redacted as the question is (review L3).
+		redacted := make([]string, len(options))
+		for i, o := range options {
+			if !plainText(o) {
+				return nil, &tools.ModelError{Message: "options: 2 to 5 distinct options of at most 100 characters"}
+			}
+			redacted[i] = obs.Redact(o)
+		}
+		b, err := json.Marshal(redacted)
 		if err != nil {
 			return nil, fmt.Errorf("encode options: %w", err)
 		}
@@ -85,6 +113,11 @@ func (e *Engine) AskOperator(ctx context.Context, token, question string, option
 // askQuestion is AskOperator on the visit goroutine.
 func (v *visit) askQuestion(ctx context.Context, question string, options json.RawMessage) (*store.Approval, *store.Run, error) {
 	e := v.e
+	// A question after the step's result was accepted, or while the turn is being stopped,
+	// would be a card and a notice that close at once (review L12).
+	if _, accepted := v.finished(); accepted || v.aborting != nil {
+		return nil, nil, &tools.ModelError{Message: "the step has finished"}
+	}
 	wctx := context.WithoutCancel(ctx)
 	n, err := store.CountStepQuestions(wctx, e.deps.Pool, v.run.ID, v.node.ID)
 	if err != nil {
@@ -129,6 +162,15 @@ func (v *visit) askQuestion(ctx context.Context, question string, options json.R
 	return a, v.run, nil
 }
 
+// handoff runs fn on the visit's loop for a decision (rule 5 (b)), waiting for the loop no
+// longer than handoffTimeout. ErrInvalidRunToken says the loop is gone; any other error
+// says it stayed busy (or ctx ended) and nothing ran.
+func (e *Engine) handoff(ctx context.Context, v *visit, fn func()) error {
+	hctx, cancel := context.WithTimeout(ctx, handoffTimeout)
+	defer cancel()
+	return v.do(hctx, fn)
+}
+
 func (e *Engine) dropWaiter(id string) {
 	e.waitMu.Lock()
 	delete(e.waiters, id)
@@ -154,7 +196,15 @@ func (e *Engine) QuestionPending(ctx context.Context, token, id string) error {
 	}
 	v := t.v
 	wctx := context.WithoutCancel(ctx)
-	return v.do(wctx, func() {
+	// The work runs without the caller's cancellation, but the handoff to the visit's loop
+	// keeps its deadline: a busy loop does not hold the caller beyond it (review L5).
+	cctx := wctx
+	if d, ok := ctx.Deadline(); ok {
+		var cancel context.CancelFunc
+		cctx, cancel = context.WithDeadline(wctx, d)
+		defer cancel()
+	}
+	return v.do(cctx, func() {
 		delete(v.toolBlocking, id)
 		// A decision that reached the visit meanwhile (questionDecided) already cleared
 		// the question: the turn's end then sends it, there is nothing to park on.
@@ -186,7 +236,7 @@ func (v *visit) questionDecided(a *store.Approval) {
 // ErrNotPending, an unknown one wraps store.ErrNotFound.
 func (e *Engine) AnswerQuestion(ctx context.Context, id, answer, by string) (*store.Approval, error) {
 	answer = strings.TrimSpace(answer)
-	if n := len(answer); n < 1 || n > maxAnswerBytes {
+	if n := len(answer); n < 1 || n > maxAnswerBytes || !plainText(answer) {
 		return nil, &ValidationError{Messages: []string{"answer: 1 to 4096 characters"}}
 	}
 	if strings.TrimSpace(by) == "" {
@@ -246,11 +296,13 @@ func (e *Engine) deliverQuestion(ctx context.Context, a *store.Approval) {
 		return
 	}
 	if v := e.visitOf(a); v != nil {
-		if err := v.do(wctx, func() { v.questionDecided(a) }); err == nil {
+		if err := e.handoff(wctx, v, func() { v.questionDecided(a) }); err == nil {
 			return
 		}
 		// The loop is gone: the visit may have parked after step (i) looked. If it ended
 		// any other way, the run goes on with the walk and nothing waits for the answer.
+		// A loop that stayed busy past the bound is still there, and its turn's end reads
+		// the decided row (review L6); trying the re-queue is harmless then.
 		e.requeueParked(wctx, a)
 		return
 	}
@@ -321,7 +373,11 @@ func (e *Engine) sweepQuestion(ctx context.Context, a *store.Approval) {
 	}
 	wctx := context.WithoutCancel(ctx)
 	if v := e.visitOf(decided); v != nil {
-		if err := v.do(wctx, func() { v.questionDecided(decided) }); err == nil {
+		err := e.handoff(wctx, v, func() { v.questionDecided(decided) })
+		if err == nil || !errors.Is(err, ErrInvalidRunToken) {
+			// Handed over, or the visit's loop stayed busy past the bound: the visit is
+			// alive and its turn's end reads the expired row (review L6). Failing the run
+			// here would fail one whose visit goes on.
 			return
 		}
 	}
@@ -438,8 +494,15 @@ func (v *visit) continueWithAnswer(ctx context.Context, taken string) bool {
 			v.parkedOn = ""
 		}
 	}
+	// A visit never runs on a silently incomplete prompt (DESIGN 5.18): when the step's
+	// questions cannot be read, the visit fails with the read's error (review L8).
 	message := continueMessage
-	if text := e.answerParagraph(ctx, v.run, v.node); text != "" {
+	text, err := e.stepAnswers(ctx, v.run.ID, v.node.ID)
+	if err != nil {
+		v.end(ctx, failed(store.RunFailed, "read the step's answers: "+err.Error()))
+		return true
+	}
+	if text != "" {
 		message = text + "\n\n" + continueMessage
 	}
 	e.logEvent(ctx, v.run.ID, "info", "question answered; continuing "+v.node.ID, "node_id", v.node.ID)
@@ -451,21 +514,11 @@ func (v *visit) continueWithAnswer(ctx context.Context, taken string) bool {
 
 // ---- the answer paragraph (rule 7) -----------------------------------------------------
 
-// answerParagraph is the paragraph of DESIGN 5.24 rule 7 for a step: one block per decided
+// stepAnswers is the paragraph of DESIGN 5.24 rule 7 for a step: one block per decided
 // question of the step in this run, oldest first, separated by blank lines; empty when
-// the step asked none. A failed read is logged and gives no paragraph.
-func (e *Engine) answerParagraph(ctx context.Context, run *store.Run, node *workflow.Node) string {
-	text, err := e.stepAnswers(ctx, run.ID, node.ID)
-	if err != nil {
-		e.log.Warn("read the step's answers failed", "run_id", run.ID, "node_id", node.ID, "error", err)
-		return ""
-	}
-	return text
-}
-
-// stepAnswers is answerParagraph with its error.
+// the step asked none. A failed read is the error: the callers fail the visit.
 func (e *Engine) stepAnswers(ctx context.Context, runID, nodeID string) (string, error) {
-	qs, err := store.ListStepQuestions(ctx, e.deps.Pool, runID, nodeID)
+	qs, err := listStepQuestions(ctx, e.deps.Pool, runID, nodeID)
 	if err != nil {
 		return "", err
 	}
@@ -503,4 +556,10 @@ func firstBytes(s string, n int) string {
 		return s
 	}
 	return strings.ToValidUTF8(s[:n], "")
+}
+
+// plainText reports whether s can be stored as the text of a question, an option or an
+// answer: valid UTF-8 without a NUL, which the database refuses (review L4).
+func plainText(s string) bool {
+	return utf8.ValidString(s) && !strings.ContainsRune(s, 0)
 }

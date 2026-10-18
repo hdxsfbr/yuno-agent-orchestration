@@ -384,3 +384,49 @@ func TestSimulatorRejectsADeployOfAnotherAgentsFile(t *testing.T) {
 		t.Errorf("problems = %v, want the deployer's path to be refused", got.problems)
 	}
 }
+
+// The research pipeline case mirrors the shipped template's writer task, which names
+// runs/$RUN_ID/out/report.md (DESIGN 5.25 rules 1 and 8): the report the scripted writer
+// writes and the path it reports are that file, so what the case plays is what a real
+// writer is told to do and what the collector delivers (review M1).
+func TestResearchPipelineCaseWritesTheReportWhereItsTaskSays(t *testing.T) {
+	c := shippedCase(t, "015-research-pipeline-happy")
+	def, err := c.Definition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "runs/$RUN_ID/out/report.md"
+	var task string
+	for _, n := range def.Nodes {
+		if n.ID == "writer" {
+			task = n.Task
+		}
+	}
+	if !strings.Contains(task, "Write the report to "+want) {
+		t.Fatalf("the writer's task does not name %s:\n%s", want, task)
+	}
+	var written, reported []string
+	for _, step := range c.Script {
+		if step.Tool == nil {
+			continue
+		}
+		switch step.Tool.Name {
+		case "write":
+			if p, _ := step.Tool.Args["path"].(string); strings.HasSuffix(p, "report.md") {
+				written = append(written, p)
+			}
+		case "yuno__finish":
+			if res, ok := step.Tool.Args["result"].(map[string]any); ok {
+				if p, ok := res["report_path"].(string); ok {
+					reported = append(reported, p)
+				}
+			}
+		}
+	}
+	if len(written) != 1 || written[0] != want {
+		t.Errorf("the scripted writer writes %v, want [%s]", written, want)
+	}
+	if len(reported) != 1 || reported[0] != want {
+		t.Errorf("the scripted writer reports %v as report_path, want [%s]", reported, want)
+	}
+}

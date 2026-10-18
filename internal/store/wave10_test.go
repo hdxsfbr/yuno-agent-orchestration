@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Wave 10 (DESIGN 5.24, 5.25, migration 0014): the question columns of approvals and run
@@ -247,6 +249,37 @@ func TestMigration0014Upgrade(t *testing.T) {
 		t.Errorf("the step's question count does not use the index:\n%s", plan)
 	}
 
+	// The continuation lookup and the delete of an approval read run_nodes by question_id
+	// through the partial index of review L6 (migration 0014, not yet deployed when it was
+	// added).
+	err = pool.QueryRow(ctx, `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = 'run_nodes_question_idx'`, schema).Scan(&def)
+	mustDo(t, err)
+	for _, part := range []string{"(question_id)", "question_id IS NOT NULL"} {
+		if !strings.Contains(def, part) {
+			t.Errorf("index run_nodes_question_idx = %s, missing %q", def, part)
+		}
+	}
+	// The three step queries, as the functions run them, are served by the partial indexes
+	// even from a generic plan, which is the plan a prepared statement settles on after a few
+	// runs and which cannot use a partial index whose predicate is a bound parameter.
+	for name, c := range map[string]struct {
+		sql     string
+		types   string
+		args    string
+		indexes []string
+	}{
+		"CountStepQuestions":   {countStepQuestionsSQL, "text, text", "'r1', 'coder'", []string{"approvals_question_step_idx"}},
+		"ListStepQuestions":    {listStepQuestionsSQL, "text, text, text", "'r1', 'coder', 'pending'", []string{"approvals_question_step_idx"}},
+		"ContinuationQuestion": {continuationQuestionSQL, "text, text, text, text", "'r1', 'coder', 'approved', 'rejected'", []string{"approvals_question_step_idx", "run_nodes_question_idx"}},
+	} {
+		plan := explainGeneric(t, ctx, pool, c.sql, c.types, c.args)
+		for _, index := range c.indexes {
+			if !strings.Contains(plan, index) {
+				t.Errorf("%s does not use %s from a generic plan:\n%s", name, index, plan)
+			}
+		}
+	}
+
 	// The new table accepts a row and refuses a second at the same path of the run.
 	insert := `INSERT INTO run_artifacts (id, run_id, node_id, visit, path, size, sha256, content_type, created_at, updated_at)
 		VALUES ($1, 'r1', 'coder', 1, 'report.md', 10, $2, 'text/markdown', now(), now())`
@@ -258,5 +291,51 @@ func TestMigration0014Upgrade(t *testing.T) {
 	got, err := ListRunArtifacts(ctx, pool, "r1")
 	if err != nil || len(got) != 1 || got[0].Generated {
 		t.Fatalf("artifacts = %+v %v; want one, not generated", got, err)
+	}
+}
+
+// explainGeneric is the generic plan of a statement with parameters, as a prepared
+// statement settles on after a few executions, with sequential scans off so an index the
+// planner can use is the plan it picks even on a table of a few rows. types and args are
+// the statement's parameter types and values as SQL text.
+func explainGeneric(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql, types, args string) string {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	mustDo(t, err)
+	defer tx.Rollback(ctx) //nolint:errcheck
+	// A prepared statement belongs to the connection, not to the transaction: name it anew.
+	name := "step_query_" + strings.ReplaceAll(NewID(), "-", "")
+	for _, stmt := range []string{`SET LOCAL enable_seqscan = off`, `SET LOCAL plan_cache_mode = force_generic_plan`,
+		`PREPARE ` + name + `(` + types + `) AS ` + sql} {
+		_, err = tx.Exec(ctx, stmt)
+		mustDo(t, err)
+	}
+	rows, err := tx.Query(ctx, `EXPLAIN EXECUTE `+name+`(`+args+`)`)
+	mustDo(t, err)
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		mustDo(t, rows.Scan(&line))
+		plan.WriteString(line + "\n")
+	}
+	mustDo(t, rows.Err())
+	return plan.String()
+}
+
+// Review L6: the step queries write the kind as the literal that ApprovalKindQuestion is, and
+// bind nothing for it, since a parameter in its place keeps the partial index out of reach.
+func TestStepQueriesWriteTheQuestionKindAsALiteral(t *testing.T) {
+	if ApprovalKindQuestion != "question" {
+		t.Fatalf("ApprovalKindQuestion = %q; the step queries write 'question'", ApprovalKindQuestion)
+	}
+	for name, sql := range map[string]string{"count": countStepQuestionsSQL, "list": listStepQuestionsSQL, "continuation": continuationQuestionSQL} {
+		compact := strings.Join(strings.Fields(sql), " ")
+		if !strings.Contains(compact, "kind='question'") {
+			t.Errorf("%s: %s", name, compact)
+		}
+		if strings.Contains(compact, "kind=$") || strings.Contains(compact, "kind = $") {
+			t.Errorf("%s binds the kind: %s", name, compact)
+		}
 	}
 }

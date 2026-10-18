@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Artifact, RunStatus } from "@/lib/api";
+import { REVOKE_DELAY_MS } from "@/lib/artifact";
 import { clearToken, setToken } from "@/lib/auth";
 import { formatDateTime } from "@/lib/format";
 import { artifactsKey } from "@/lib/useRunArtifacts";
@@ -19,6 +20,8 @@ let contents: Record<string, { body: BodyInit; type: string } | Response>;
 let created: Blob[];
 let revoked: string[];
 let clicked: { download: string; href: string }[];
+/** The callbacks the page asked to run when the object URL of a saved file is due to go, in place of a real wait. */
+let revokeTimers: (() => void)[];
 
 const artifact = (over: Partial<Artifact> = {}): Artifact => ({
   id: "a1",
@@ -42,6 +45,15 @@ beforeEach(() => {
   created = [];
   revoked = [];
   clicked = [];
+  revokeTimers = [];
+  const wait = globalThis.setTimeout;
+  vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number, ...args: unknown[]) => {
+    if (ms === REVOKE_DELAY_MS) {
+      revokeTimers.push(fn);
+      return 0;
+    }
+    return wait(fn, ms, ...args);
+  }) as typeof setTimeout);
   api.on("GET", `/api/runs/${RUN}/artifacts`, () => files);
   api.on("GET", /^\/api\/runs\/r1\/artifacts\/([^/]+)$/, (r) => {
     const c = contents[decodeURIComponent(r.match[1])];
@@ -102,6 +114,10 @@ describe("the table", () => {
     expect(report.getByText("writer").parentElement!.textContent).toBe("writer visit 1");
     expect(report.getByText("5 min ago")).not.toBeNull();
     expect(report.getByText("5 min ago").getAttribute("title")).toBe(formatDateTime(files[0].updated_at));
+    // the exact time is also text, for anyone who cannot hover over the relative one
+    const exact = report.getByText(formatDateTime(files[0].updated_at));
+    expect(exact.className).toContain("sr-only");
+    expect(exact.closest("td")).toBe(report.getByText("5 min ago").closest("td"));
 
     const rows = await rowOf("data/rows.csv");
     expect(rows.getByText("1.5 MiB")).not.toBeNull();
@@ -144,12 +160,13 @@ describe("empty and failed", () => {
     }
   });
 
-  it("says no files were delivered once the run is over", async () => {
+  it("says no files are available for the run once it is over, which is also true after the files were removed", async () => {
     files = [];
     for (const status of ["succeeded", "failed", "cancelled", "timed_out"] as const) {
       renderSection(status);
-      expect(await screen.findByText("No files were delivered.")).not.toBeNull();
+      expect(await screen.findByText("No files are available for this run.")).not.toBeNull();
       expect(screen.queryByText("No files delivered yet.")).toBeNull();
+      expect(screen.queryByText("No files were delivered.")).toBeNull();
       cleanup();
     }
   });
@@ -157,7 +174,7 @@ describe("empty and failed", () => {
   it("treats a null list as empty", async () => {
     api.on("GET", `/api/runs/${RUN}/artifacts`, () => null);
     renderSection("failed");
-    expect(await screen.findByText("No files were delivered.")).not.toBeNull();
+    expect(await screen.findByText("No files are available for this run.")).not.toBeNull();
     expect(screen.getByRole("heading", { name: "Artifacts" }).textContent).toBe("Artifacts");
   });
 
@@ -201,10 +218,29 @@ describe("Download", () => {
     expect(created).toHaveLength(1);
     expect(await created[0].text()).toBe("numbers");
     expect(clicked[0]).toEqual({ download: "summary.md", href: "blob:http://localhost/1" });
-    await waitFor(() => expect(revoked).toEqual(["blob:http://localhost/1"]));
     // no link is left in the page
     expect(document.querySelector("a[download]")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps the object URL until the delay has passed, and then lets it go", async () => {
+    renderSection();
+    fireEvent.click(await screen.findByRole("button", { name: "Download report.md" }));
+    await waitFor(() => expect(clicked).toHaveLength(1));
+    // the browser has the file now, but may still be reading from the URL
+    expect(revoked).toEqual([]);
+    expect(revokeTimers).toHaveLength(1);
+    revokeTimers[0]();
+    expect(revoked).toEqual(["blob:http://localhost/1"]);
+  });
+
+  it("saves a name with a right-to-left override without it, so the file cannot read as another type", async () => {
+    files = [artifact({ id: "a9", path: "reports/report\u202Egnp.exe", content_type: "application/octet-stream" })];
+    contents = { a9: { body: "MZ", type: "application/octet-stream" } };
+    renderSection();
+    fireEvent.click(await screen.findByRole("button", { name: /^Download/ }));
+    await waitFor(() => expect(clicked).toHaveLength(1));
+    expect(clicked[0].download).toBe("reportgnp.exe");
   });
 
   it("downloads a file that cannot be previewed, such as an archive", async () => {
@@ -237,11 +273,26 @@ describe("Download", () => {
     });
     renderSection();
     fireEvent.click(await screen.findByRole("button", { name: "Download report.md" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Download report.md" }).textContent).toBe("Downloading…"));
+    // the name carries the words on the button, so what is read out is what is on screen
+    const busy = await screen.findByRole("button", { name: "Downloading… report.md" });
+    expect(busy.firstChild!.textContent!.trim()).toBe("Downloading…");
+    expect(screen.queryByRole("button", { name: "Download report.md" })).toBeNull();
     expect((screen.getByRole("button", { name: "Download b.txt" }) as HTMLButtonElement).disabled).toBe(true);
     release();
     await waitFor(() => expect(clicked).toHaveLength(1));
     await waitFor(() => expect((screen.getByRole("button", { name: "Download b.txt" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByRole("button", { name: "Download report.md" })).not.toBeNull();
+  });
+
+  it("names every button after the words on it, followed by the file", async () => {
+    files = [artifact(), artifact({ id: "z1", path: "bundle.zip", content_type: "application/zip" })];
+    renderSection();
+    await table();
+    for (const button of screen.getAllByRole("button")) {
+      const visible = button.firstChild!.textContent!.trim();
+      const name = button.getAttribute("aria-label") ?? button.textContent!;
+      expect(name.toLowerCase()).toContain(visible.toLowerCase());
+    }
   });
 });
 

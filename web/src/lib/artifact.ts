@@ -26,11 +26,22 @@ export function previewKind(a: Pick<Artifact, "content_type" | "size">): Preview
   return undefined;
 }
 
-/** The last segment of a path: "reports/q3/summary.md" is "summary.md". */
+/**
+ * What must not reach a saved file name: control characters, Unicode format characters (the
+ * right-to-left override U+202E turns `report\u202Egnp.exe` into a name that reads as `reportexe.png`,
+ * and zero-width characters hide parts of a name) and the line and paragraph separators U+2028 and U+2029.
+ */
+const UNSAFE_IN_NAME = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/** The last segment of a path without the characters of {@link UNSAFE_IN_NAME}: "reports/q3/summary.md" is "summary.md". */
 export function baseName(path: string): string {
-  const name = path.slice(path.lastIndexOf("/") + 1);
-  return name || path;
+  const clean = path.replace(UNSAFE_IN_NAME, "");
+  const name = clean.slice(clean.lastIndexOf("/") + 1);
+  return name || clean || "download";
 }
+
+/** How long a file's object URL lives after the click: long enough for any browser to have started reading it. */
+export const REVOKE_DELAY_MS = 10_000;
 
 /**
  * Hands a blob to the browser as a file named `filename`: a link carries no token, so the file
@@ -45,6 +56,6 @@ export function saveBlob(blob: Blob, filename: string): void {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  // After the click has been handled, so a browser that starts the download later still finds the file.
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  // Not at once: a browser may start reading the file some time after the click, and a revoked URL gives it nothing.
+  setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
 }

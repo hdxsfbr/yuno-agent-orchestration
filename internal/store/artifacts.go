@@ -32,7 +32,9 @@ func ListRunArtifacts(ctx context.Context, q Querier, runID string) ([]RunArtifa
 }
 
 // GeneratedArtifactPath is the path of the platform's own diff of a project run's
-// checkout (DESIGN 5.25 rule 3): the one artifact a row can carry generated = true at.
+// checkout (DESIGN 5.25 rule 3): the one artifact a row can carry generated = true at. An
+// empty diff leaves an earlier generated row in place, so nothing deletes it but the
+// run's retention.
 const GeneratedArtifactPath = "diff.patch"
 
 // ArtifactTotals is how many files a run has stored and their sizes added up, the room
@@ -90,19 +92,6 @@ func UpsertRunArtifact(ctx context.Context, q Querier, a RunArtifact) (*RunArtif
 		return nil, false, err
 	}
 	return got, true, nil
-}
-
-// DeleteGeneratedArtifact removes the run's generated diff.patch row (DESIGN 5.25 rule 3:
-// an empty patch removes an earlier one) and returns it so the caller can remove its
-// file; nil, nil when the run has none. A diff.patch the agent wrote itself
-// (generated = false) is never touched.
-func DeleteGeneratedArtifact(ctx context.Context, q Querier, runID string) (*RunArtifact, error) {
-	a, err := oneRunArtifact(ctx, q, `DELETE FROM run_artifacts WHERE run_id=$1 AND path=$2 AND generated
-		RETURNING `+artifactColumns, runID, GeneratedArtifactPath)
-	if errors.Is(err, ErrNotFound) {
-		return nil, nil
-	}
-	return a, err
 }
 
 // ListExpiredArtifactRuns returns the ids of the runs that have artifact rows and

@@ -176,3 +176,33 @@ func TestArtifactSettings(t *testing.T) {
 		t.Fatalf("a TTL that is not a number = %d, want the default 30", c.ArtifactTTLDays)
 	}
 }
+
+// Review L7: the artifacts volume is mounted on the api where ARTIFACT_DIR says, not at a
+// fixed path, with config's default as the compose default; it is mounted nowhere else.
+func TestComposeMountsTheArtifactVolumeWhereArtifactDirSays(t *testing.T) {
+	raw, err := os.ReadFile("../../compose.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Services map[string]struct {
+			Volumes []string `yaml:"volumes"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARTIFACT_DIR", "")
+	want := "artifacts:${ARTIFACT_DIR:-" + FromEnv().ArtifactDir + "}"
+	var mounts []string
+	for name, svc := range doc.Services {
+		for _, v := range svc.Volumes {
+			if strings.HasPrefix(v, "artifacts:") {
+				mounts = append(mounts, name+" "+v)
+			}
+		}
+	}
+	if len(mounts) != 1 || mounts[0] != "api "+want {
+		t.Fatalf("the artifacts volume is mounted as %q; want only the api's %q", mounts, want)
+	}
+}
