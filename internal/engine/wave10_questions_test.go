@@ -198,8 +198,12 @@ func TestQuestionAnsweredWithinTheWait(t *testing.T) {
 		q.ExternalID != nil || q.ToolCallID != nil || q.Answer != nil || !q.ExpiresAt.Equal(q.RequestedAt.Add(86400*time.Second)) {
 		t.Fatalf("question = %+v", q)
 	}
-	eventually(t, "open approval_wait spans of the question", func() bool { return env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='approval_wait' AND ended_at IS NULL AND attrs->>'kind'='question' AND attrs->>'approval_id'=$2`, run.ID, q.ID) == 1 }) // written after the pause or the delivery is visible
-	eventually(t, "approval.requested events", func() bool { return env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='approval.requested' AND data->'approval'->>'kind'='question'`, run.ID) == 1 }) // written after the pause or the delivery is visible
+	eventually(t, "open approval_wait spans of the question", func() bool {
+		return env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='approval_wait' AND ended_at IS NULL AND attrs->>'kind'='question' AND attrs->>'approval_id'=$2`, run.ID, q.ID) == 1
+	}) // written after the pause or the delivery is visible
+	eventually(t, "approval.requested events", func() bool {
+		return env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='approval.requested' AND data->'approval'->>'kind'='question'`, run.ID) == 1
+	}) // written after the pause or the delivery is visible
 	eventually(t, "the asks log line", func() bool { return env.logged(run.ID, "Test Agent asks: Which greeting language?") == 1 }) // written after the pause or the delivery is visible
 	if len(env.fc.callsFor("plugin.approval.request")) != 0 {
 		t.Fatal("a question was registered with the gateway")
@@ -237,8 +241,12 @@ func TestQuestionAnsweredWithinTheWait(t *testing.T) {
 	if snt.len() != 1 {
 		t.Fatalf("chat.send calls = %d; the answer came in the tool result, not as a turn", snt.len())
 	}
-	eventually(t, "closed approval spans", func() bool { return env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='approval_wait' AND ended_at IS NOT NULL`, run.ID) == 1 }) // written after the pause or the delivery is visible
-	eventually(t, "approval.decided events with the answer", func() bool { return env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='approval.decided' AND data->'approval'->>'answer'='Portuguese'`, run.ID) == 1 }) // written after the pause or the delivery is visible
+	eventually(t, "closed approval spans", func() bool {
+		return env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='approval_wait' AND ended_at IS NOT NULL`, run.ID) == 1
+	}) // written after the pause or the delivery is visible
+	eventually(t, "approval.decided events with the answer", func() bool {
+		return env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='approval.decided' AND data->'approval'->>'answer'='Portuguese'`, run.ID) == 1
+	}) // written after the pause or the delivery is visible
 	if n := env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='run.status' AND data->'run'->>'status'='waiting_approval'`, run.ID); n == 0 {
 		t.Fatal("no run.status event for the pause")
 	}
@@ -571,11 +579,15 @@ func TestQuestionParksAfterTheWaitAndContinues(t *testing.T) {
 	if _, live := env.e.ResolveRunToken(rig.token); live {
 		t.Fatal("the parked visit's run token is still valid")
 	}
-	eventually(t, "open root spans", func() bool { return env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='run' AND parent_id IS NULL AND ended_at IS NULL`, run.ID) == 1 }) // written after the pause or the delivery is visible
+	eventually(t, "open root spans", func() bool {
+		return env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='run' AND parent_id IS NULL AND ended_at IS NULL`, run.ID) == 1
+	}) // written after the pause or the delivery is visible
 	if n := env.openSpans(run.ID); n != 2 { // the root span and the question's approval_wait
 		t.Fatalf("open spans = %d, want the root span and the question's wait", n)
 	}
-	eventually(t, "park log lines", func() bool { return env.logged(run.ID, "waits for the answer to question "+q.ID+"; the step continues when it arrives") == 1 }) // written after the pause or the delivery is visible
+	eventually(t, "park log lines", func() bool {
+		return env.logged(run.ID, "waits for the answer to question "+q.ID+"; the step continues when it arrives") == 1
+	}) // written after the pause or the delivery is visible
 	if keys := env.fc.callsFor("sessions.delete"); len(keys) != 1 || !strings.Contains(string(keys[0]), rig.snt.at(0).SessionKey) {
 		t.Fatalf("sessions.delete calls = %s; the parked visit's session is deleted when the worker lets go", keys)
 	}
