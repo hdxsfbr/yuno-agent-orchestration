@@ -6,6 +6,7 @@ import { inputFields } from "./runInput";
 const form = (over: Partial<ScheduleFormState> = {}): ScheduleFormState => ({
   workflowId: "w1",
   projectId: "",
+  mergeRequestId: "",
   kind: "cron",
   cronExpr: "0 9 * * *",
   tz: "Europe/London",
@@ -83,6 +84,30 @@ describe("buildSchedule", () => {
     expect(missing.errors).toEqual({ project_id: ["Choose a project"] });
   });
 
+  describe("the merge request", () => {
+    const on = (over: Partial<ScheduleFormState> = {}) => form({ projectId: "p1", ...over });
+
+    it("is sent when one is chosen for a new schedule, and left out when none is", () => {
+      expect(buildSchedule(on({ mergeRequestId: "mr1" }), [], true).value?.merge_request_id).toBe("mr1");
+      expect(buildSchedule(on(), [], true).value).not.toHaveProperty("merge_request_id");
+    });
+
+    it("is left out on an edit that leaves the choice as it was saved, so the stored one stays", () => {
+      expect(buildSchedule(on({ mergeRequestId: "mr1" }), [], true, "mr1").value).not.toHaveProperty("merge_request_id");
+      expect(buildSchedule(on(), [], true, "").value).not.toHaveProperty("merge_request_id");
+    });
+
+    it("is sent as an empty string when the saved one was cleared, and as the new id when another was chosen", () => {
+      expect(buildSchedule(on({ mergeRequestId: "" }), [], true, "mr1").value?.merge_request_id).toBe("");
+      expect(buildSchedule(on({ mergeRequestId: "mr2" }), [], true, "mr1").value?.merge_request_id).toBe("mr2");
+    });
+
+    it("is never sent for a workflow that works on no project, except to clear one a schedule still names", () => {
+      expect(buildSchedule(form({ mergeRequestId: "mr1" }), []).value).not.toHaveProperty("merge_request_id");
+      expect(buildSchedule(form({ mergeRequestId: "mr1" }), [], false, "mr1").value?.merge_request_id).toBe("");
+    });
+  });
+
   it("reads the whole input as a JSON object when the workflow has no fields", () => {
     expect(buildSchedule(form({ whole: '{"a":1}' }), []).value?.input).toEqual({ a: 1 });
     expect(buildSchedule(form({ whole: "[1]" }), []).errors.input).toEqual(["The input must be a JSON object"]);
@@ -123,6 +148,12 @@ describe("schedule display and round trip", () => {
   it("describes a cron schedule by its expression and a one-off by its time", () => {
     expect(describeWhen(base)).toBe("0 9 * * *");
     expect(describeWhen({ kind: "delay", run_at: "2026-10-20T15:00:00Z" })).toMatch(/^At Oct 20,/);
+  });
+
+  it("leaves the merge request out of a request made from a stored schedule, so a toggle keeps it", () => {
+    const named: Schedule = { ...base, project_id: "p1", merge_request_id: "mr1", merge_request_number: 12 };
+    expect(scheduleToInput(named)).not.toHaveProperty("merge_request_id");
+    expect(scheduleToInput(named)).not.toHaveProperty("merge_request_number");
   });
 
   it("turns a schedule back into a request without the fields the server owns", () => {

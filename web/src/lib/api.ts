@@ -295,7 +295,9 @@ export type Tool = {
 
 export const RUN_STATUSES = ["queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "timed_out"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
-export type RunTrigger = "manual" | "schedule" | "channel" | "eval";
+/** Where a run came from; "issue" is a run the issue intake created for a labelled issue (DESIGN 5.23). */
+export const RUN_TRIGGERS = ["manual", "schedule", "channel", "eval", "issue"] as const;
+export type RunTrigger = (typeof RUN_TRIGGERS)[number];
 
 const CONVERSATION_REF = "conversation:";
 
@@ -314,6 +316,23 @@ export function delegatedConversationId(run: Pick<Run, "trigger" | "trigger_ref"
 /** A run started from a conversation: trigger "channel" with a conversation reference, or with none. Any other reference is shown as it is. */
 export const isDelegatedRun = (run: Pick<Run, "trigger" | "trigger_ref">): boolean =>
   run.trigger === "channel" && (!!delegatedConversationId(run) || !run.trigger_ref?.trim());
+
+/**
+ * The issue an issue run came from: its number and, when the run kept a snapshot of its project, the address of the
+ * issue on the provider. An issue run's trigger_ref is "<project id>#<issue number>" (DESIGN 5.23 rule 3); the address
+ * is the repository address without ".git" plus "/-/issues/<n>" on GitLab and "/issues/<n>" on GitHub. Undefined for
+ * any other run and for a reference that carries no issue number.
+ */
+export function issueRef(run: Pick<Run, "trigger" | "trigger_ref" | "project">): { number: number; url?: string } | undefined {
+  if (run.trigger !== "issue") return undefined;
+  const m = /^.+#(\d+)$/.exec(run.trigger_ref?.trim() ?? "");
+  if (!m) return undefined;
+  const number = Number(m[1]);
+  if (!Number.isSafeInteger(number) || number < 1) return undefined;
+  const repo = run.project?.repo_url?.trim().replace(/\/+$/, "").replace(/\.git$/, "");
+  if (!repo) return { number };
+  return { number, url: `${repo}${run.project?.provider === "github" ? "" : "/-"}/issues/${number}` };
+}
 
 export type Run = {
   id: string;
@@ -351,8 +370,12 @@ export type Run = {
   project?: ProjectSettings;
   /** How many times the operator retried the run from the step it stopped at (DESIGN 5.21). */
   retries?: number;
-  /** The merge or pull request the run opened; absent when it opened none (DESIGN 5.20). */
+  /** The merge or pull request the run opened, or the one it names when it updates one; absent when none (DESIGN 5.20, 5.22). */
   merge_request?: MergeRequest;
+  /** The merge request record the run updates: its branch was cloned and is pushed onto; absent for a run that opens its own (DESIGN 5.22). */
+  merge_request_id?: string;
+  /** The commit the run's checkout was cloned at, moved to each commit the run pushed; absent without a checkout (DESIGN 5.22). */
+  checkout_sha?: string;
   created_at: string;
   started_at?: string;
   finished_at?: string;
@@ -369,6 +392,8 @@ export type RunCreate = {
   limits?: Limits;
   /** The project the run works on: required for a workflow that opts in, refused for one that does not, optional for a quick run. */
   project_id?: string;
+  /** An open merge request record of that project: the run works on its branch and pushes onto it instead of opening a new request (DESIGN 5.22). */
+  merge_request_id?: string;
 };
 
 // ---------------------------------------------------------------------------------------
@@ -421,6 +446,36 @@ export type Project = ProjectSettings & {
   /** The UTC-month cap in USD; absent when there is none. */
   max_cost_usd_per_month?: number;
   spend?: ProjectSpend;
+  /** The issue intake settings and what its last poll did (DESIGN 5.23). */
+  intake?: ProjectIntake;
+};
+
+/** What the form sends for the issue intake; absent on an update keeps the stored settings. */
+export type ProjectIntakeInput = {
+  /** Open issues carrying the label become runs. */
+  enabled: boolean;
+  /** The intake label; the platform moves it to <label>:running, <label>:done or <label>:failed. */
+  label: string;
+  /** The workflow each issue runs, with the issue as its task; required when enabled. */
+  workflow_id?: string | null;
+};
+
+export type ProjectIntake = ProjectIntakeInput & {
+  /** The workflow's name; absent when there is none or it was deleted. */
+  workflow_name?: string | null;
+  /** When the intake last polled the project; absent before the first poll. */
+  polled_at?: string | null;
+  /** Why the last poll took nothing or could not update an issue; absent when it was clean. */
+  last_error?: string | null;
+};
+
+/** What one intake pass over a project did. */
+export type IntakePollResult = {
+  /** Runs created for issues in this pass. */
+  taken: number;
+  /** Finished issue runs whose outcome was posted on their issue in this pass. */
+  closed: number;
+  error?: string;
 };
 
 export type ProjectInput = {
@@ -439,6 +494,8 @@ export type ProjectInput = {
   max_cost_usd_per_day?: number | null;
   /** The UTC-month cap in USD; null or absent clears it. */
   max_cost_usd_per_month?: number | null;
+  /** The issue intake settings; absent keeps the stored ones. */
+  intake?: ProjectIntakeInput;
 };
 
 /** A note an agent saved for the project; any agent of a run on the project reads and writes them (DESIGN 5.18). */
@@ -735,11 +792,16 @@ export const getAgentRuntime = (id: string) => api<AgentRuntime>(`/api/agents/${
 
 export const listTools = async () => (await api<Tool[] | null>("/api/tools")) ?? [];
 
-/** The newest runs first; `project_id` keeps the runs of one project (the filter is the server's, so `limit` counts that project's runs). */
-export async function listRuns(opts: { status?: RunStatus; project_id?: string; limit?: number } = {}) {
+/**
+ * The newest runs first. The filters are the server's, so `limit` counts the runs that match: `project_id` keeps the runs
+ * of one project, `trigger` the runs started one way and `merge_request_id` the runs that named that merge request record.
+ */
+export async function listRuns(opts: { status?: RunStatus; project_id?: string; trigger?: RunTrigger; merge_request_id?: string; limit?: number } = {}) {
   const q = new URLSearchParams();
   if (opts.status) q.set("status", opts.status);
   if (opts.project_id) q.set("project_id", opts.project_id);
+  if (opts.trigger) q.set("trigger", opts.trigger);
+  if (opts.merge_request_id) q.set("merge_request_id", opts.merge_request_id);
   q.set("limit", String(opts.limit ?? 100));
   return (await api<Run[] | null>(`/api/runs?${q}`)) ?? [];
 }
@@ -834,6 +896,11 @@ export type ScheduleInput = {
   workflow_id: string;
   /** The project the schedule's runs work on: required for a workflow that opts in, refused for one that does not. */
   project_id?: string;
+  /**
+   * An open merge request record of that project whose branch the runs work on (DESIGN 5.22 rule 7). Left out on an
+   * update it keeps its value; an empty string clears it.
+   */
+  merge_request_id?: string;
   kind: ScheduleKind;
   cron_expr?: string;
   tz: string;
@@ -848,6 +915,8 @@ export type Schedule = ScheduleInput & {
   workflow_name?: string;
   /** The project's name as the API joined it; it survives the project's deletion. */
   project_name?: string;
+  /** The merge request's number as the API joined it; it survives the record's deletion. */
+  merge_request_number?: number;
   next_run_at?: string | null;
   last_run_at?: string | null;
   last_run_id?: string | null;
@@ -908,6 +977,8 @@ export const createProject = (input: ProjectInput) => api<Project>("/api/project
 export const updateProject = (id: string, input: ProjectInput) => api<Project>(`/api/projects/${seg(id)}`, withBody("PUT", input));
 export const deleteProject = (id: string) => api<void>(`/api/projects/${seg(id)}`, withBody("DELETE"));
 export const checkProject = (id: string) => api<ProjectCheck>(`/api/projects/${seg(id)}/check`, withBody("POST"));
+/** Runs one intake pass over the project now. A 409 `intake_disabled` says the project's intake is off. */
+export const pollIntake = (id: string) => api<IntakePollResult>(`/api/projects/${seg(id)}/intake/poll`, withBody("POST"));
 
 /** The project's live notes, newest first. */
 export const listProjectFacts = async (projectId: string) => (await api<ProjectFact[] | null>(`/api/projects/${seg(projectId)}/facts`)) ?? [];

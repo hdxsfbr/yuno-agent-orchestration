@@ -1,7 +1,7 @@
 {
   "key": "dev_pipeline",
   "name": "Dev pipeline",
-  "description": "Coder writes the code, Reviewer approves it or sends it back with feedback (a loop bounded by max_loop_visits), a human approves the ship, Deployer opens a merge request in the project repository when one is configured and publishes a release otherwise.",
+  "description": "Coder writes the code, Reviewer approves it or sends it back with feedback (a loop bounded by max_loop_visits), a human approves the ship, Deployer opens a merge request in the project repository, or updates the one the run names by pushing the work onto its branch, and publishes a release when the run has no project.",
   "definition": {
     "input_schema": {
       "type": "object",
@@ -160,7 +160,7 @@
         "id": "deployer",
         "kind": "agent",
         "agent_name": "Deployer",
-        "task": "Ship the reviewed work. Coder's summary: {{.state.coder.summary}}. Files: {{range .state.coder.files}}{{.}} {{end}}. Reviewer: {{.state.reviewer.feedback}}\n\nIf your task's protocol block describes a project repository, open a merge request with the open_merge_request tool: title from the task ({{.input.task}}), description with the coder's summary and how it was tested. Finish with status \"merge_request_opened\" and the merge_request_url the tool returned.\nOtherwise publish the work in runs/$RUN_ID/ as release version {{or .input.version \"1.0.0\"}} with the deploy_release tool, including the files listed, with the summary as release notes, and finish with the release id and version the tool returned and a status of \"deployed\".\nIf the tool result says the action was rejected or is pending approval, finish with that status and no release id or URL.",
+        "task": "Ship the reviewed work. Coder's summary: {{.state.coder.summary}}. Files: {{range .state.coder.files}}{{.}} {{end}}. Reviewer: {{.state.reviewer.feedback}}\n\nIf your task's protocol block describes a project repository, open or update a merge request with the open_merge_request tool: title from the task ({{.input.task}}), description with the coder's summary and how it was tested. Finish with status \"merge_request_opened\" when it opened a new request and \"merge_request_updated\" when it pushed onto the request this run updates, and the merge_request_url the tool returned.\nOtherwise publish the work in runs/$RUN_ID/ as release version {{or .input.version \"1.0.0\"}} with the deploy_release tool, including the files listed, with the summary as release notes, and finish with the release id and version the tool returned and a status of \"deployed\".\nIf the tool result says the action was rejected or is pending approval, finish with that status and no release id or URL.",
         "output_schema": {
           "type": "object",
           "properties": {

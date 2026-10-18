@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
-import type { Project, Schedule, ScheduleInput, Workflow } from "@/lib/api";
+import type { MergeRequest, Project, Schedule, ScheduleInput, Workflow } from "@/lib/api";
 import { formatDateTime, shortId } from "@/lib/format";
 import { apiError, installFakeApi } from "@/test/fakeApi";
-import { project } from "@/test/fixtures";
+import { mergeRequest, project } from "@/test/fixtures";
 import SchedulesPage from "./SchedulesPage";
 
 const RUN = "01a14161-d5ef-7d96-ba96-a45d5d4bb0f2";
@@ -40,6 +40,7 @@ const schedule = (over: Partial<Schedule>): Schedule => ({
 let workflows: Workflow[];
 let schedules: Schedule[];
 let projects: Project[];
+let requests: MergeRequest[];
 let api: ReturnType<typeof installFakeApi>;
 
 beforeEach(() => {
@@ -58,7 +59,12 @@ beforeEach(() => {
       definition: { nodes: [], edges: [], project: true, input_schema: { type: "object", properties: { task: { type: "string" } }, required: ["task"] } },
     }),
   ];
-  projects = [project({}), project({ id: "p2", name: "docs-site" })];
+  projects = [project({}), project({ id: "p2", name: "docs-site", provider: "github" })];
+  requests = [
+    mergeRequest({ id: "mr1", number: 12, title: "Add the health endpoint" }),
+    mergeRequest({ id: "mr2", number: 9, title: "Fix the build" }),
+    mergeRequest({ id: "mr3", project_id: "p2", provider: "github", number: 3, title: "Update the docs" }),
+  ];
   schedules = [
     schedule({}),
     schedule({
@@ -80,6 +86,11 @@ beforeEach(() => {
   api.on("GET", "/api/workflows", () => workflows);
   api.on("GET", "/api/schedules", () => schedules);
   api.on("GET", "/api/projects", () => projects);
+  // Like the real list: narrowed to the project and the state when the query names them.
+  api.on("GET", /^\/api\/merge-requests\?/, ({ url }) => {
+    const query = new URL(url, "http://yuno.test").searchParams;
+    return requests.filter((r) => r.project_id === query.get("project_id") && (!query.get("state") || r.state === query.get("state")));
+  });
 });
 
 afterEach(() => {
@@ -555,5 +566,177 @@ describe("a schedule on a project", () => {
     expect(d.queryByLabelText(/^Project/)).toBeNull();
     fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w5" } });
     expect((d.getByLabelText(/^Project/) as HTMLSelectElement).value).toBe("");
+  });
+});
+
+describe("a schedule that updates a merge request", () => {
+  const updating = (over: Partial<Schedule> = {}): Schedule =>
+    schedule({
+      id: "s5",
+      workflow_id: "w5",
+      cron_expr: "0 7 * * *",
+      tz: "UTC",
+      project_id: "p1",
+      project_name: "yuno-playground",
+      merge_request_id: "mr1",
+      merge_request_number: 12,
+      input: { task: "ship" },
+      ...over,
+    });
+  const labels = (s: HTMLSelectElement) => Array.from(s.options).map((o) => o.textContent);
+  const requestSelect = async (d: ReturnType<typeof within>) => (await d.findByLabelText("Merge request")) as HTMLSelectElement;
+  const edit = async () => {
+    fireEvent.click(await screen.findByRole("button", { name: /Edit Dev pipeline/ }));
+    return dialog();
+  };
+  const sentBody = () => api.made("PUT", "/api/schedules/s5")[0].body as Record<string, unknown>;
+
+  beforeEach(() => {
+    api.on("PUT", /^\/api\/schedules\/([^/]+)$/, (r) => ({ ...schedules.find((x) => x.id === r.match[1])!, ...(r.body as ScheduleInput) }));
+    api.on("POST", "/api/schedules", (r) => ({ ...schedule({ id: "s9" }), ...(r.body as ScheduleInput) }));
+  });
+
+  it("offers the selector under the Project select once a project is chosen, and sends the choice", async () => {
+    renderPage();
+    const d = await openNew();
+    await waitFor(() => expect(d.getByRole("option", { name: "Dev pipeline (ours)" })).not.toBeNull());
+    fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w5" } });
+    const project = (await d.findByLabelText(/^Project/)) as HTMLSelectElement;
+    expect(d.queryByLabelText("Merge request")).toBeNull();
+    expect(api.made("GET", /merge-requests/)).toHaveLength(0);
+
+    fireEvent.change(project, { target: { value: "p1" } });
+    const select = await requestSelect(d);
+    expect(labels(select)).toEqual(["None: open a new one", "!12 Add the health endpoint", "!9 Fix the build"]);
+    expect(select.value).toBe("");
+    expect(select.parentElement?.textContent).toContain("The run works on the request's branch and pushes onto it.");
+    expect(project.compareDocumentPosition(select) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.change(select, { target: { value: "mr2" } });
+    fireEvent.change(d.getByLabelText(/^Cron expression/), { target: { value: "0 7 * * *" } });
+    fireEvent.change(d.getByLabelText(/^task/), { target: { value: "ship" } });
+    fireEvent.click(d.getByRole("button", { name: "Create schedule" }));
+    await waitFor(() => expect(api.made("POST", "/api/schedules")).toHaveLength(1));
+    expect(api.made("POST", "/api/schedules")[0].body).toEqual({
+      workflow_id: "w5",
+      project_id: "p1",
+      merge_request_id: "mr2",
+      kind: "cron",
+      cron_expr: "0 7 * * *",
+      tz: BROWSER_ZONE,
+      enabled: true,
+      input: { task: "ship" },
+    });
+  });
+
+  it("sends no request while None stays chosen, and none for a workflow that works on no project", async () => {
+    renderPage();
+    const d = await openNew();
+    await waitFor(() => expect(d.getByRole("option", { name: "Dev pipeline (ours)" })).not.toBeNull());
+    fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w5" } });
+    fireEvent.change(await d.findByLabelText(/^Project/), { target: { value: "p2" } });
+    expect(labels(await requestSelect(d))).toEqual(["None: open a new one", "#3 Update the docs"]);
+    fireEvent.change(d.getByLabelText(/^Cron expression/), { target: { value: "0 7 * * *" } });
+    fireEvent.change(d.getByLabelText(/^task/), { target: { value: "ship" } });
+    fireEvent.click(d.getByRole("button", { name: "Create schedule" }));
+    await waitFor(() => expect(api.made("POST", "/api/schedules")).toHaveLength(1));
+    expect(api.made("POST", "/api/schedules")[0].body).not.toHaveProperty("merge_request_id");
+  });
+
+  it("goes with the project: another workflow takes it away, and choosing the project again starts from None", async () => {
+    renderPage();
+    const d = await openNew();
+    await waitFor(() => expect(d.getByRole("option", { name: "Dev pipeline (ours)" })).not.toBeNull());
+    fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w5" } });
+    fireEvent.change(await d.findByLabelText(/^Project/), { target: { value: "p1" } });
+    fireEvent.change(await requestSelect(d), { target: { value: "mr1" } });
+
+    fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w2" } });
+    expect(d.queryByLabelText("Merge request")).toBeNull();
+    fireEvent.change(d.getByLabelText(/^Workflow/), { target: { value: "w5" } });
+    expect(d.queryByLabelText("Merge request")).toBeNull();
+    fireEvent.change(d.getByLabelText(/^Project/), { target: { value: "p1" } });
+    expect((await requestSelect(d)).value).toBe("");
+  });
+
+  it("opens an existing schedule on its request, and keeps it by leaving the field out when it is not touched", async () => {
+    schedules = [updating()];
+    renderPage();
+    const d = await edit();
+    const select = await requestSelect(d);
+    await waitFor(() => expect(select.value).toBe("mr1"));
+    expect(labels(select)).toEqual(["None: open a new one", "!12 Add the health endpoint", "!9 Fix the build"]);
+    fireEvent.click(d.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(api.made("PUT", "/api/schedules/s5")).toHaveLength(1));
+    expect(sentBody()).not.toHaveProperty("merge_request_id");
+    expect(sentBody().project_id).toBe("p1");
+  });
+
+  it("clears the request with an empty string when None is chosen, and changes it with the new id", async () => {
+    schedules = [updating()];
+    renderPage();
+    let d = await edit();
+    fireEvent.change(await requestSelect(d), { target: { value: "" } });
+    fireEvent.click(d.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(api.made("PUT", "/api/schedules/s5")).toHaveLength(1));
+    expect(sentBody().merge_request_id).toBe("");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    d = await edit();
+    fireEvent.change(await requestSelect(d), { target: { value: "mr2" } });
+    fireEvent.click(d.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(api.made("PUT", "/api/schedules/s5")).toHaveLength(2));
+    expect((api.made("PUT", "/api/schedules/s5")[1].body as Record<string, unknown>).merge_request_id).toBe("mr2");
+  });
+
+  it("goes back to None when another project is chosen, and clears the saved request", async () => {
+    schedules = [updating()];
+    renderPage();
+    const d = await edit();
+    await waitFor(() => expect((d.getByLabelText("Merge request") as HTMLSelectElement).value).toBe("mr1"));
+    fireEvent.change(d.getByLabelText(/^Project/), { target: { value: "p2" } });
+    await waitFor(() => expect(labels(d.getByLabelText("Merge request") as HTMLSelectElement)).toEqual(["None: open a new one", "#3 Update the docs"]));
+    expect((d.getByLabelText("Merge request") as HTMLSelectElement).value).toBe("");
+    fireEvent.click(d.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(api.made("PUT", "/api/schedules/s5")).toHaveLength(1));
+    expect(sentBody()).toMatchObject({ project_id: "p2", merge_request_id: "" });
+  });
+
+  it("still shows a saved request that is no longer open, marked, and keeps it when the form is saved untouched", async () => {
+    requests = requests.map((r) => (r.id === "mr1" ? { ...r, state: "merged" as const } : r));
+    schedules = [updating()];
+    renderPage();
+    const d = await edit();
+    const select = await requestSelect(d);
+    expect(labels(select)).toEqual(["None: open a new one", "!9 Fix the build", "!12 (no longer open)"]);
+    expect(select.value).toBe("mr1");
+    fireEvent.click(d.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(api.made("PUT", "/api/schedules/s5")).toHaveLength(1));
+    expect(sentBody()).not.toHaveProperty("merge_request_id");
+  });
+
+  it("puts the API's refusal of the request next to the select", async () => {
+    api.on("PUT", /^\/api\/schedules\/([^/]+)$/, () =>
+      apiError(422, "validation_failed", "validation failed", [{ path: "merge_request_id", message: "merge request !9 is being updated by run 0192ab" }]),
+    );
+    schedules = [updating()];
+    renderPage();
+    const d = await edit();
+    fireEvent.change(await requestSelect(d), { target: { value: "mr2" } });
+    fireEvent.click(d.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(d.getByLabelText("Merge request").parentElement?.textContent).toContain("merge request !9 is being updated by run 0192ab"));
+    expect(d.getByLabelText("Merge request").getAttribute("aria-invalid")).toBe("true");
+    expect(d.queryByText("merge_request_id: merge request !9 is being updated by run 0192ab")).toBeNull();
+    expect(screen.getByRole("dialog")).not.toBeNull();
+  });
+
+  it("keeps the request when the enabled switch is toggled, by leaving it out of the request", async () => {
+    schedules = [updating()];
+    renderPage();
+    const r = await row(/Enable Dev pipeline/);
+    fireEvent.click(r.getByRole("switch"));
+    await waitFor(() => expect(api.made("PUT", "/api/schedules/s5")).toHaveLength(1));
+    expect(sentBody()).not.toHaveProperty("merge_request_id");
+    expect(sentBody()).toMatchObject({ workflow_id: "w5", project_id: "p1", enabled: false });
   });
 });

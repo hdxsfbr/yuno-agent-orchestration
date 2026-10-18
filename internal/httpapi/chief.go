@@ -28,7 +28,7 @@ func (d delegator) Delegate(ctx context.Context, req tools.Delegation) (*store.R
 	}
 	run, err := s.engine.Trigger(ctx, engine.TriggerRequest{
 		AgentID: req.AgentID, Task: req.Task, WorkflowID: req.WorkflowID, Input: req.Input,
-		ProjectID: req.ProjectID, Trigger: store.TriggerChannel, TriggerRef: req.TriggerRef,
+		ProjectID: req.ProjectID, MergeRequestID: req.MergeRequestID, Trigger: store.TriggerChannel, TriggerRef: req.TriggerRef,
 	})
 	var ve *engine.ValidationError
 	var rl *guardrails.RateLimitError
@@ -47,7 +47,7 @@ func (d delegator) Delegate(ctx context.Context, req tools.Delegation) (*store.R
 		return nil, err
 	}
 	s.log.Info("delegated run", "run_id", run.ID, "agent_id", req.CallerAgentID, "to_agent_id", req.AgentID,
-		"workflow_id", req.WorkflowID, "project_id", req.ProjectID, "trigger_ref", req.TriggerRef)
+		"workflow_id", req.WorkflowID, "project_id", req.ProjectID, "merge_request_id", req.MergeRequestID, "trigger_ref", req.TriggerRef)
 	return run, nil
 }
 

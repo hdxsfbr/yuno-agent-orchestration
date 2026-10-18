@@ -195,13 +195,14 @@ paths:
       parameters:
         - { name: status, in: query, schema: { type: string } }
         - { name: project_id, in: query, description: "only the runs that work on this project (runs.project_id, kept by a deleted project's runs); an unknown id lists none", schema: { type: string } }
-        - { name: trigger, in: query, description: "Planned for wave 9 (DESIGN 5.23 rule 8): only the runs started this way; another value is 422", schema: { type: string, enum: [manual, schedule, channel, eval, issue] } }
-        - { name: merge_request_id, in: query, description: "Planned for wave 9 (DESIGN 5.22 rule 11): only the runs that named this merge request record (runs.merge_request_id); an unknown id lists none", schema: { type: string } }
+        - { name: trigger, in: query, description: "DESIGN 5.23 rule 8: only the runs started this way; another value is 422", schema: { type: string, enum: [manual, schedule, channel, eval, issue] } }
+        - { name: merge_request_id, in: query, description: "DESIGN 5.22 rule 11: only the runs that named this merge request record (runs.merge_request_id); an unknown id lists none", schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
       responses:
         "200":
           description: runs
           content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Run" } } } }
+        "422": { $ref: "#/components/responses/Error" }
     post:
       tags: [runs]
       summary: Trigger a run (manual trigger)
@@ -217,7 +218,7 @@ paths:
         answer is also 429, with code `project_budget_reached`, the message `project
         <name> has reached its <daily|monthly> budget ($<cap>); new runs are refused
         until <time>` and `details` `{project_id, window, max_cost_usd, spent_usd,
-        until}`. Planned for wave 9 (DESIGN 5.22 rule 1): `merge_request_id` names the
+        until}`. DESIGN 5.22 rule 1: `merge_request_id` names the
         open merge request record of the run's project whose branch the run works on;
         it is refused with a 422 detail on `merge_request_id` when the workflow uses no
         project, the id is unknown, the record belongs to another project, the request
@@ -433,7 +434,7 @@ paths:
         computed from now. 422 details: `cron_expr` and `tz` carry the parser's message
         (`cron_expr: no future occurrence` for an expression that names no date to come,
         such as `0 0 31 2 *`), `input.<field>` the workflow's input schema violations.
-        Planned for wave 9 (DESIGN 5.22 rule 7): `merge_request_id` carries the same
+        DESIGN 5.22 rule 7: `merge_request_id` carries the same
         details as a run request's (DESIGN 5.22 rule 1) and needs `project_id`.
       requestBody:
         required: true
@@ -664,9 +665,8 @@ paths:
     post:
       tags: [projects]
       summary: Poll the project's issue intake now
-      x-planned: wave 9
       description: |
-        Planned for wave 9 (DESIGN 5.23 rule 2). Runs one intake pass for the project at
+        DESIGN 5.23 rule 2. Runs one intake pass for the project at
         once: lists the open issues carrying the intake label, creates a run for each one
         not yet taken (at most 10), swaps the label and comments, then posts the outcome of
         the project's finished issue runs on their issues. Provider errors are results
@@ -863,7 +863,7 @@ components:
         run_at: { type: string, format: date-time, description: "kind delay: when it fires" }
         enabled: { type: boolean, description: default true }
         input: { type: object, description: "the run input, checked against the workflow's input schema" }
-        merge_request_id: { type: string, description: "Planned for wave 9 (DESIGN 5.22 rule 7): the open merge request record of the schedule's project whose branch its runs work on; checked as a run request's merge_request_id is (5.22 rule 1). Left out on update it keeps its value, unless workflow_id or project_id changes, which drops it; an empty string clears it." }
+        merge_request_id: { type: string, description: "DESIGN 5.22 rule 7: the open merge request record of the schedule's project whose branch its runs work on; checked as a run request's merge_request_id is (5.22 rule 1). Left out on update it keeps its value, unless workflow_id or project_id changes, which drops it; an empty string clears it." }
     Schedule:
       type: object
       required: [id, workflow_id, workflow_name, kind, tz, enabled, input, created_at, updated_at]
@@ -873,8 +873,8 @@ components:
         workflow_name: { type: string }
         project_id: { type: string, description: "the project the schedule's runs work on; absent for a workflow without one" }
         project_name: { type: string, description: "the project's name as the API joined it; it survives the project's deletion" }
-        merge_request_id: { type: string, description: "Planned for wave 9 (DESIGN 5.22 rule 7): the merge request record the schedule's runs update; absent when none" }
-        merge_request_number: { type: integer, description: "Planned for wave 9: the request's provider number as the API joined it; it survives the record's deletion" }
+        merge_request_id: { type: string, description: "DESIGN 5.22 rule 7: the merge request record the schedule's runs update; absent when none" }
+        merge_request_number: { type: integer, description: "the request's provider number as the API joined it; absent once the record is gone (the schedule then fires without a request)" }
         kind: { type: string, enum: [cron, delay] }
         cron_expr: { type: string }
         tz: { type: string }
@@ -974,9 +974,8 @@ components:
         month_until: { type: string, format: date-time, description: "when the month window ends" }
     ProjectIntakeInput:
       type: object
-      x-planned: wave 9
       description: |
-        Planned for wave 9 (DESIGN 5.23 rule 1): the project's issue intake settings. Absent on
+        DESIGN 5.23 rule 1: the project's issue intake settings. Absent on
         update keeps the stored settings. 422 details: `intake.label` (1 to 50 characters
         without spaces or commas), `intake.workflow_id` (required when enabled; a live operator
         workflow that uses a project and whose input accepts `{"task": string}`),
@@ -989,16 +988,14 @@ components:
       allOf:
         - $ref: "#/components/schemas/ProjectIntakeInput"
         - type: object
-          x-planned: wave 9
-          description: "Planned for wave 9 (DESIGN 5.23 rule 1): the settings plus what the last poll did."
+          description: "DESIGN 5.23 rule 1: the settings plus what the last poll did."
           properties:
             workflow_name: { type: string, description: "the workflow's name as the API joined it; absent when none or deleted" }
             polled_at: { type: string, format: date-time, description: "when the intake last polled the project; absent before the first poll" }
             last_error: { type: string, description: "why the last poll took nothing or could not update an issue: the budget text, a provider's or the trigger's message; absent when the last poll was clean" }
     IntakePollResult:
       type: object
-      x-planned: wave 9
-      description: "Planned for wave 9 (DESIGN 5.23 rule 2): what one intake pass over a project did."
+      description: "DESIGN 5.23 rule 2: what one intake pass over a project did."
       required: [taken, closed]
       properties:
         taken: { type: integer, description: "runs created for issues in this pass" }
@@ -1159,7 +1156,7 @@ components:
         script_id: { type: string, description: "Script registered via /api/evals/scripts that the scripted provider replays for this run" }
         trigger: { type: string, enum: [manual, eval], default: manual, description: "Who starts the run: an operator, or the eval runner (eval runs can be filtered out of the run list); schedules and channels start their own runs" }
         project_id: { type: string, description: "The project the run works on (DESIGN 5.17 rule 4): required for a workflow whose definition has `project: true`, refused for one without it, optional for a quick run, whose one-node workflow then opts in. The engine clones the project into the first agent's run directory before its turn." }
-        merge_request_id: { type: string, description: "Planned for wave 9 (DESIGN 5.22 rule 1): the open merge request record of the project whose source branch the run clones and pushes onto instead of opening a new request; optional, needs project_id (or a workflow that uses a project); 422 details on merge_request_id." }
+        merge_request_id: { type: string, description: "DESIGN 5.22 rule 1: the open merge request record of the project whose source branch the run clones and pushes onto instead of opening a new request; optional, needs project_id (or a workflow that uses a project); 422 details on merge_request_id." }
     ScriptStep:
       type: object
       description: One scripted model response; exactly one of text or tool.
@@ -1189,8 +1186,8 @@ components:
         id: { type: string }
         workflow_id: { type: string }
         workflow_version: { type: integer }
-        trigger: { type: string, enum: [manual, schedule, channel, eval, issue], description: "issue is planned for wave 9 (DESIGN 5.23): a run the issue intake created" }
-        trigger_ref: { type: string, description: "schedule: the occurrence fired, <schedule id>@<occurrence time, RFC 3339 UTC>; channel: conversation:<conversation id> for a run an agent delegated while chatting (absent when it had no conversation); eval: the case id; issue (planned for wave 9): <project id>#<issue number>" }
+        trigger: { type: string, enum: [manual, schedule, channel, eval, issue], description: "issue: a run the issue intake created (DESIGN 5.23)" }
+        trigger_ref: { type: string, description: "schedule: the occurrence fired, <schedule id>@<occurrence time, RFC 3339 UTC>; channel: conversation:<conversation id> for a run an agent delegated while chatting (absent when it had no conversation); eval: the case id; issue: <project id>#<issue number>" }
         status: { type: string, enum: [queued, running, waiting_approval, succeeded, failed, cancelled, timed_out] }
         input: { type: object }
         state: { type: object }
@@ -1219,7 +1216,7 @@ components:
         started_at: { type: string, format: date-time }
         finished_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
-        reported_at: { type: string, format: date-time, description: "when a channel run's outcome was sent back into its conversation or (planned for wave 9, DESIGN 5.23 rule 5) an issue run's outcome was posted on its issue; absent otherwise" }
+        reported_at: { type: string, format: date-time, description: "when a channel run's outcome was sent back into its conversation or (DESIGN 5.23 rule 5) an issue run's outcome was posted on its issue; absent otherwise" }
         toolchain: { type: string, enum: [go, node, python, default], description: "what the project checkout's manifest said when the engine cloned it (go.mod, package.json with a lockfile, uv.lock, requirements*.txt, pyproject.toml); absent for a run without a checkout" }
         project_id: { type: string, description: "the project the run works on; absent for a run without one" }
         project:
@@ -1228,9 +1225,9 @@ components:
         retries: { type: integer, description: "DESIGN 5.21: how many times the operator retried the run from the step it stopped at" }
         merge_request:
           allOf: [ { $ref: "#/components/schemas/MergeRequest" } ]
-          description: "DESIGN 5.20 rule 6: the request the run opened, or (planned for wave 9, DESIGN 5.22 rule 1) the one it names; absent when none"
-        merge_request_id: { type: string, description: "Planned for wave 9 (DESIGN 5.22 rule 1): the merge request record the run updates (its branch was cloned); absent for a run that opens its own or none" }
-        checkout_sha: { type: string, description: "Planned for wave 9 (DESIGN 5.22 rule 2): the commit the run's checkout was cloned at, moved to each commit the run pushed; absent for a run without a checkout" }
+          description: "DESIGN 5.20 rule 6: the request the run opened, or (DESIGN 5.22 rule 1) the one it names; absent when none"
+        merge_request_id: { type: string, description: "DESIGN 5.22 rule 1: the merge request record the run updates (its branch was cloned); absent for a run that opens its own or none" }
+        checkout_sha: { type: string, description: "DESIGN 5.22 rule 2: the commit the run's checkout was cloned at, moved to each commit the run pushed; absent for a run without a checkout" }
     RunNode:
       type: object
       required: [id, run_id, node_id, visit, iteration, status]

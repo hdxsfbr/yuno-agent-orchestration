@@ -525,3 +525,129 @@ func TestLateMergeRequestFollowUp(t *testing.T) {
 		t.Fatalf("follow-up = %+v", follow)
 	}
 }
+
+// openMergeRequestCall stores a tool call row of the run's trace: open_merge_request with
+// the given status, error flag and output, started at offset seconds after the run.
+func (f *iterFixture) openMergeRequestCall(run *store.Run, tool, status string, isError bool, output string, offset int) {
+	f.env.t.Helper()
+	at := run.CreatedAt.Add(time.Duration(offset) * time.Second)
+	call := &store.ToolCall{RunID: run.ID, ToolUseID: "call-" + store.NewID(), ToolName: tool, Status: status, IsError: isError,
+		Output: json.RawMessage(output), StartedAt: &at, FinishedAt: &at}
+	if err := store.InsertToolCall(context.Background(), f.env.pool, call); err != nil {
+		f.env.t.Fatal(err)
+	}
+}
+
+// T5.22.10, DESIGN 5.22 rule 9: the report of a run that names a request ends with
+// " Updated merge request: <url>" (" Updated pull request:" on GitHub) when an executed
+// open_merge_request call of its trace answered updated: true, the newest such call's
+// URL; with nothing about the request otherwise. A run that names none keeps the text of
+// 5.17 rule 10.
+func TestReportBackTextOfAnIteratingRun(t *testing.T) {
+	f := newIterFixture(t)
+	env, ctx := f.env, context.Background()
+	env.e.deps.Cfg.PublicBaseURL = "https://yuno.example/"
+	const url = "https://gitlab.test/g/p/-/merge_requests/4"
+	updated := `{"number":4,"url":"` + url + `","branch":"` + iterBranch + `","provider":"gitlab","replayed":true,"updated":true}`
+	replayed := `{"number":4,"url":"` + url + `","branch":"` + iterBranch + `","provider":"gitlab","replayed":true}`
+
+	text := func(run *store.Run) string {
+		t.Helper()
+		r := env.run(run.ID)
+		r.Status = store.RunSucceeded // the text of a finished run; the fixture's run never ran
+		return env.e.runReportText(ctx, r)
+	}
+	// Each case is a run of its own on the request, queued after the earlier one ended.
+	fresh := func() *store.Run {
+		t.Helper()
+		run, err := env.e.Trigger(ctx, f.request())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return run
+	}
+	end := func(run *store.Run) { f.setRunStatus(run.ID, store.RunSucceeded) }
+	runURL := func(run *store.Run) string { return "https://yuno.example/runs/" + run.ID }
+	noRequestText := func(what, got string, run *store.Run) {
+		t.Helper()
+		if !strings.HasSuffix(got, " "+runURL(run)) {
+			t.Errorf("%s: the report does not end with the run's link: %q", what, got)
+		}
+		if strings.Contains(got, "Updated") || strings.Contains(got, "Merge request:") || strings.Contains(got, "merge_requests") {
+			t.Errorf("%s: the report mentions the request: %q", what, got)
+		}
+	}
+
+	// No call at all: nothing about the request.
+	run := fresh()
+	noRequestText("no call", text(run), run)
+	// Only a replay (an unchanged tree), a failed call, one not executed: nothing.
+	f.openMergeRequestCall(run, "open_merge_request", store.ToolExecuted, false, replayed, 1)
+	f.openMergeRequestCall(run, "open_merge_request", store.ToolExecuted, true, updated, 2)
+	f.openMergeRequestCall(run, "open_merge_request", store.ToolAwaitingApproval, false, updated, 3)
+	f.openMergeRequestCall(run, "open_merge_request", store.ToolRejected, false, updated, 4)
+	f.openMergeRequestCall(run, "deploy_release", store.ToolExecuted, false, updated, 5)
+	noRequestText("replayed, failed, gated and other calls", text(run), run)
+
+	// An executed call that updated: the sentence, with the URL of the call's answer.
+	f.openMergeRequestCall(run, "open_merge_request", store.ToolExecuted, false, updated, 6)
+	if got, want := text(run), " "+runURL(run)+" Updated merge request: "+url; !strings.HasSuffix(got, want) {
+		t.Errorf("after a push: %q does not end with %q", got, want)
+	}
+	// A later replay does not take it back: the run did push.
+	f.openMergeRequestCall(run, "open_merge_request", store.ToolExecuted, false, replayed, 7)
+	if got, want := text(run), " "+runURL(run)+" Updated merge request: "+url; !strings.HasSuffix(got, want) {
+		t.Errorf("push then replay: %q does not end with %q", got, want)
+	}
+	// The newest push wins, whichever name the gateway recorded the tool under.
+	f.openMergeRequestCall(run, "yuno__open_merge_request", store.ToolExecuted, false,
+		strings.ReplaceAll(updated, "/merge_requests/4", "/merge_requests/5"), 8)
+	if got, want := text(run), " Updated merge request: https://gitlab.test/g/p/-/merge_requests/5"; !strings.HasSuffix(got, want) {
+		t.Errorf("two pushes: %q does not end with %q", got, want)
+	}
+	end(run)
+
+	// GitHub's name for it.
+	run = fresh()
+	f.openMergeRequestCall(run, "open_merge_request", store.ToolExecuted, false,
+		`{"number":4,"url":"https://github.test/g/p/pull/4","provider":"github","replayed":true,"updated":true}`, 1)
+	if got, want := text(run), " Updated pull request: https://github.test/g/p/pull/4"; !strings.HasSuffix(got, want) {
+		t.Errorf("github: %q does not end with %q", got, want)
+	}
+	end(run)
+
+	// A run that names none keeps today's text: its own record's sentence, and no
+	// "Updated" even when its trace holds a call that updated (the same-run update path).
+	opener := env.run(f.opener.ID)
+	opener.Status = store.RunSucceeded
+	f.openMergeRequestCall(opener, "open_merge_request", store.ToolExecuted, false, updated, 1)
+	if got, want := env.e.runReportText(ctx, opener), " "+runURL(opener)+" Merge request: "+f.rec.URL; !strings.HasSuffix(got, want) || strings.Contains(got, "Updated") {
+		t.Errorf("run without a named request: %q, want it to end with %q", got, want)
+	}
+}
+
+// T5.22.10, DESIGN 5.22 rule 9 end to end: a delegated run that iterated on a request
+// reports into its conversation once, ending with the Updated line.
+func TestReportBackSendsTheUpdatedMergeRequest(t *testing.T) {
+	f := newIterFixture(t)
+	env, ctx := f.env, context.Background()
+	conv := env.chiefConversation(chiefConvKey)
+	env.finishing(`{"summary":"fixed the threads"}`)
+	const url = "https://gitlab.test/g/p/-/merge_requests/4"
+	run, err := env.e.Trigger(ctx, TriggerRequest{AgentID: f.agent.ID, Task: "fix the review comments", ProjectID: f.proj.ID,
+		MergeRequestID: f.rec.ID, Trigger: store.TriggerChannel, TriggerRef: store.ConversationRef(conv.ID)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.openMergeRequestCall(run, "open_merge_request", store.ToolExecuted, false,
+		`{"number":4,"url":"`+url+`","provider":"gitlab","replayed":true,"updated":true}`, 1)
+	if r := env.resume(env.e, run.ID); r.Status != store.RunSucceeded {
+		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+	env.e.reports.Wait()
+	sends := env.reportSends()
+	if len(sends) != 1 || !strings.HasSuffix(sends[0].Message, "/runs/"+run.ID+" Updated merge request: "+url) ||
+		sends[0].IdempotencyKey != "report-"+run.ID+"-end" {
+		t.Fatalf("reports = %+v", sends)
+	}
+}

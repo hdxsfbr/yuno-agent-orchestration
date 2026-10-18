@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,20 @@ type fakeDelegator struct {
 	mu   sync.Mutex
 	got  []Delegation
 	err  error
+	// queued are the ids of the runs it stored.
+	queued []string
+}
+
+// dropRunsAfter deletes the runs the delegator queued when the test ends.
+func (d *fakeDelegator) dropRunsAfter(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		for _, runID := range d.queued {
+			_, _ = d.pool.Exec(context.Background(), `DELETE FROM runs WHERE id = $1`, runID)
+		}
+	})
 }
 
 func (d *fakeDelegator) Delegate(ctx context.Context, req Delegation) (*store.Run, error) {
@@ -41,6 +56,9 @@ func (d *fakeDelegator) Delegate(ctx context.Context, req Delegation) (*store.Ru
 	if err := store.CreateRun(ctx, d.pool, run); err != nil {
 		return nil, err
 	}
+	d.mu.Lock()
+	d.queued = append(d.queued, run.ID)
+	d.mu.Unlock()
 	return run, nil
 }
 
@@ -530,5 +548,237 @@ func TestRunStatusProjectAndMergeRequest(t *testing.T) {
 	}
 	if out["retries"] != float64(0) {
 		t.Fatalf("retries = %v", out["retries"])
+	}
+}
+
+// T5.22.8 (DESIGN 5.22 rule 8): delegate_task's merge_request resolves a number or a link
+// against the named project's records; the id goes on the delegation; the refusals are the
+// texts of the rule, in the provider's own words, and nothing is delegated for them.
+func TestDelegateTaskMergeRequest(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	sfx := uniq()
+	chief := chiefAgent(t, pool, "Chief-"+sfx, "delegate_task")
+	coder := chiefAgent(t, pool, "Coder-"+sfx)
+	dev := &store.Workflow{Name: "Dev-" + sfx, Definition: json.RawMessage(`{"project":true,"nodes":[],"edges":[]}`)}
+	must(t, store.CreateWorkflow(ctx, pool, dev))
+	plain := &store.Workflow{Name: "Research-" + sfx, Definition: json.RawMessage(`{"nodes":[],"edges":[]}`)}
+	must(t, store.CreateWorkflow(ctx, pool, plain))
+	play := testProject(t, pool, "Playground-"+sfx, nil)
+	hub := testProject(t, pool, "Hub-"+sfx, func(p *store.Project) { p.Provider = "github" })
+	other := testProject(t, pool, "Other-"+sfx, nil)
+	t.Cleanup(func() {
+		for _, p := range []*store.Project{play, hub, other} {
+			_, _ = pool.Exec(ctx, `DELETE FROM merge_requests WHERE project_id = $1`, p.ID)
+		}
+	})
+	rec := func(p *store.Project, n int64, state string) *store.MergeRequest {
+		return projectRecord(t, p, projectRun(t, p, nil), n, state)
+	}
+	open12, merged13 := rec(play, 12, store.MergeRequestOpen), rec(play, 13, store.MergeRequestMerged)
+	open4, closed5 := rec(hub, 4, store.MergeRequestOpen), rec(hub, 5, store.MergeRequestClosed)
+	rec(other, 20, store.MergeRequestOpen)
+
+	d := &fakeDelegator{pool: pool}
+	d.dropRunsAfter(t)
+	tool := NewDelegateTask(ChiefDeps{Pool: pool, Delegator: d})
+	chat := func(input string) Result {
+		return invoke(t, tool, Call{AgentID: chief.ID, Chat: true, Input: json.RawMessage(input)})
+	}
+	wf := func(project, mr string) string {
+		return `{"workflow_name":"Dev-` + sfx + `","input":{"task":"fix it"},"project":"` + project + `","merge_request":"` + mr + `"}`
+	}
+
+	// The number in every form, and the link, by workflow; the id and the project reach the engine.
+	for i, mr := range []string{"12", "!12", "#12", " 12 ", "https://gitlab.example/g/playground/-/merge_requests/12", "https://gitlab.example/g/playground/-/merge_requests/12/diffs"} {
+		res := chat(wf(play.Name, mr))
+		if res.IsError || len(d.got) != i+1 {
+			t.Fatalf("merge_request %q: %+v", mr, res)
+		}
+		if g := d.got[i]; g.MergeRequestID != open12.ID || g.ProjectID != play.ID || g.WorkflowID != dev.ID {
+			t.Fatalf("merge_request %q: delegation = %+v", mr, g)
+		}
+	}
+	// A pull request on GitHub, by link, and an agent instead of a workflow.
+	n := len(d.got)
+	res := chat(`{"agent_name":"Coder-` + sfx + `","task":"address the review","project":"` + hub.Name + `","merge_request":"https://github.com/owner/demo/pull/4/files"}`)
+	if res.IsError || len(d.got) != n+1 || d.got[n].MergeRequestID != open4.ID || d.got[n].ProjectID != hub.ID || d.got[n].AgentID != coder.ID {
+		t.Fatalf("agent with a pull request: %+v %+v", res, d.got)
+	}
+	// Left out or blank: no request, as before.
+	n = len(d.got)
+	for _, input := range []string{`{"workflow_name":"Dev-` + sfx + `","input":{"task":"x"},"project":"` + play.Name + `"}`, wf(play.Name, "  ")} {
+		if res := chat(input); res.IsError || len(d.got) != n+1 || d.got[n].MergeRequestID != "" {
+			t.Fatalf("%s: %+v %+v", input, res, d.got)
+		}
+		n++
+	}
+
+	n = len(d.got)
+	for _, tc := range []struct{ name, input, want string }{
+		{"unknown on GitLab", wf(play.Name, "99"), "no merge request !99 on project " + play.Name},
+		{"unknown on GitHub", wf(hub.Name, "#99"), "no pull request #99 on project " + hub.Name},
+		{"the other project's request, by link", wf(play.Name, "https://gitlab.example/g/other/-/merge_requests/20"), "no merge request !20 on project " + play.Name},
+		{"merged", wf(play.Name, "13"), merged13.Label() + " is merged"},
+		{"closed on GitHub", wf(hub.Name, "5"), closed5.Label() + " is closed"},
+		{"not a number", wf(play.Name, "the second one"), "merge_request must be a merge request number or URL"},
+		{"an issue link", wf(play.Name, "https://gitlab.example/g/playground/-/issues/12"), "merge_request must be a merge request number or URL"},
+		{"an agent without a project", `{"agent_name":"Coder-` + sfx + `","task":"t","merge_request":"12"}`, "merge_request needs a project"},
+		{"an agent with an empty project", `{"agent_name":"Coder-` + sfx + `","task":"t","project":"","merge_request":"12"}`, "merge_request needs a project"},
+		{"a workflow that takes no project", `{"workflow_name":"Research-` + sfx + `","input":{},"merge_request":"12"}`, "merge_request needs a project"},
+		{"a number, not a string", `{"workflow_name":"Dev-` + sfx + `","input":{},"project":"` + play.Name + `","merge_request":12}`, "merge_request"},
+	} {
+		res := chat(tc.input)
+		if !res.IsError || res.Blocked || !strings.Contains(res.Text, tc.want) {
+			t.Errorf("%s: %+v, want %q", tc.name, res, tc.want)
+		}
+		if tc.name != "a number, not a string" && res.Text != tc.want {
+			t.Errorf("%s: text = %q, want exactly %q", tc.name, res.Text, tc.want)
+		}
+	}
+	if len(d.got) != n {
+		t.Fatalf("refused calls delegated: %+v", d.got[n:])
+	}
+
+	// The engine's refusals of rule 1 reach the model as the delegator words them.
+	d.err = &ModelError{Message: "the run was not started: merge_request_id: " + open12.Label() + " is being updated by run run-1"}
+	if res := chat(wf(play.Name, "12")); !res.IsError || res.Text != "the run was not started: merge_request_id: merge request !12 is being updated by run run-1" {
+		t.Fatalf("engine refusal = %+v", res)
+	}
+}
+
+// The tool's schema names merge_request as a string (DESIGN 5.22 rule 8).
+func TestDelegateTaskSchemaHasMergeRequest(t *testing.T) {
+	var schema struct {
+		Properties map[string]struct {
+			Type        string `json:"type"`
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	must(t, json.Unmarshal(delegateTaskSchema, &schema))
+	mr, ok := schema.Properties["merge_request"]
+	if !ok || mr.Type != "string" || !strings.Contains(mr.Description, "#12") || !strings.Contains(mr.Description, "link") || !strings.Contains(mr.Description, "Needs project") {
+		t.Fatalf("merge_request = %+v", mr)
+	}
+	if !slices.IsSorted(ChatToolNames) || !slices.Contains(ChatToolNames, ReadMergeRequestName) {
+		t.Fatalf("ChatToolNames = %v", ChatToolNames)
+	}
+}
+
+// T5.22.8 (approval sentence, DESIGN 5.22 rule 8): the sentence of 5.15 rule 7 ends with
+// ", updating <merge request !n|pull request #n>". It is built from the input alone: the
+// sigil the person wrote, or the link's, and "!" for a bare number.
+func TestDescribeDelegationUpdating(t *testing.T) {
+	tool := NewDelegateTask(ChiefDeps{})
+	for input, want := range map[string]string{
+		`{"workflow_name":"Dev","input":{},"project":"Playground","merge_request":"12"}`:                                               "Run the workflow Dev on project Playground, updating merge request !12",
+		`{"workflow_name":"Dev","input":{},"project":"Playground","merge_request":"!12"}`:                                              "Run the workflow Dev on project Playground, updating merge request !12",
+		`{"workflow_name":"Dev","input":{},"project":"Playground","merge_request":"#12"}`:                                              "Run the workflow Dev on project Playground, updating pull request #12",
+		`{"workflow_name":"Dev","input":{},"project":"Playground","merge_request":"https://gitlab.test/g/p/-/merge_requests/7/diffs"}`: "Run the workflow Dev on project Playground, updating merge request !7",
+		`{"workflow_name":"Dev","input":{},"project":"Playground","merge_request":"https://github.com/o/r/pull/7"}`:                    "Run the workflow Dev on project Playground, updating pull request #7",
+		`{"agent_name":"Coder","task":"fix it","project":"Playground","merge_request":"!3"}`:                                           "Delegate to Coder on project Playground: fix it, updating merge request !3",
+		`{"workflow_name":"Dev","input":{},"project":"Playground"}`:                                                                    "Run the workflow Dev on project Playground",
+		`{"workflow_name":"Dev","input":{},"project":"Playground","merge_request":" "}`:                                                "Run the workflow Dev on project Playground",
+		`{"workflow_name":"Dev","input":{},"project":"Playground","merge_request":"soon"}`:                                             "Run the workflow Dev on project Playground",
+	} {
+		if got := tool.Message(json.RawMessage(input)); got != want {
+			t.Errorf("%s\n got %q\nwant %q", input, got, want)
+		}
+	}
+}
+
+// T5.22.8 and T5.23.9: run_status says whether the run opened the request or updates one
+// (role), keeps merge_request_url, and gives an issue run's issue with its link.
+func TestRunStatusRoleAndIssue(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	sfx := uniq()
+	play := testProject(t, pool, "Playground-"+sfx, nil)
+	hub := testProject(t, pool, "Hub-"+sfx, func(p *store.Project) {
+		p.Provider = "github"
+		p.RepoURL = "https://github.com/owner/" + strings.ToLower(sfx) + ".git"
+	})
+	t.Cleanup(func() {
+		for _, p := range []*store.Project{play, hub} {
+			_, _ = pool.Exec(ctx, `DELETE FROM merge_requests WHERE project_id = $1`, p.ID)
+		}
+	})
+	status := func(run *store.Run) map[string]any {
+		t.Helper()
+		res := invoke(t, NewRunStatus(pool, ""), Call{Input: json.RawMessage(`{"run_id":"` + run.ID + `"}`)})
+		if res.IsError {
+			t.Fatalf("run_status: %+v", res)
+		}
+		var out map[string]any
+		must(t, json.Unmarshal(res.Output, &out))
+		return out
+	}
+
+	// The run that opened a request: role opened.
+	opener := projectRun(t, play, nil)
+	rec := projectRecord(t, play, opener, 3, store.MergeRequestOpen)
+	mr, _ := status(opener)["merge_request"].(map[string]any)
+	if mr["role"] != "opened" || mr["number"] != float64(3) || mr["url"] != rec.URL || mr["state"] != "open" || status(opener)["merge_request_url"] != rec.URL {
+		t.Fatalf("opener = %v", status(opener))
+	}
+	// A run that names it: role updates, the request's url, no record of its own.
+	updater := projectRun(t, play, func(r *store.Run) { r.MergeRequestID = &rec.ID })
+	out := status(updater)
+	mr, _ = out["merge_request"].(map[string]any)
+	if mr["role"] != "updates" || mr["number"] != float64(3) || mr["url"] != rec.URL || out["merge_request_url"] != rec.URL || mr["ci_status"] != "none" {
+		t.Fatalf("updater = %v", out)
+	}
+	// A run with neither.
+	if out := status(projectRun(t, play, nil)); out["merge_request"] != nil || out["merge_request_url"] != nil {
+		t.Fatalf("no request = %v", out)
+	}
+
+	// An issue run: the number from the ref and the link from the project's snapshot.
+	issueRun := func(p *store.Project, ref string) *store.Run {
+		return projectRun(t, p, func(r *store.Run) { r.Trigger, r.TriggerRef = store.TriggerIssue, &ref })
+	}
+	out = status(issueRun(play, play.ID+"#7"))
+	issue, _ := out["issue"].(map[string]any)
+	if out["trigger"] != "issue" || issue["number"] != float64(7) || issue["url"] != strings.TrimSuffix(play.RepoURL, ".git")+"/-/issues/7" {
+		t.Fatalf("gitlab issue run = %v", out)
+	}
+	out = status(issueRun(hub, hub.ID+"#12"))
+	issue, _ = out["issue"].(map[string]any)
+	if issue["number"] != float64(12) || issue["url"] != strings.TrimSuffix(hub.RepoURL, ".git")+"/issues/12" {
+		t.Fatalf("github issue run = %v", out)
+	}
+	for _, ref := range []string{"nohash-" + sfx, play.ID + "#", play.ID + "#x", play.ID + "#0"} {
+		if out := status(issueRun(play, ref)); out["issue"] != nil {
+			t.Fatalf("ref %q gave an issue: %v", ref, out["issue"])
+		}
+	}
+	if out := status(opener); out["issue"] != nil {
+		t.Fatalf("a manual run has an issue: %v", out["issue"])
+	}
+}
+
+// T5.23.9: list_projects carries intake: {enabled, label} for every project.
+func TestListProjectsIntake(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	sfx := uniq()
+	plain := testProject(t, pool, "Plain-"+sfx, nil)
+	watched := testProject(t, pool, "Watched-"+sfx, nil)
+	_, err := pool.Exec(ctx, `UPDATE projects SET intake_enabled = true, intake_label = 'triage' WHERE id = $1`, watched.ID)
+	must(t, err)
+	res := invoke(t, NewListProjects(pool), Call{AgentID: "x", Chat: true, Input: json.RawMessage(`{"chat_token":"x"}`)})
+	var out struct {
+		Projects []struct {
+			Name   string          `json:"name"`
+			Intake json.RawMessage `json:"intake"`
+		} `json:"projects"`
+	}
+	must(t, json.Unmarshal(res.Output, &out))
+	got := map[string]string{}
+	for _, p := range out.Projects {
+		got[p.Name] = string(p.Intake)
+	}
+	if got[plain.Name] != `{"enabled":false,"label":"yuno"}` || got[watched.Name] != `{"enabled":true,"label":"triage"}` {
+		t.Fatalf("intake = %v", got)
 	}
 }

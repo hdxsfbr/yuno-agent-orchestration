@@ -2,7 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { CIStatus, MergeRequest, MergeRequestState } from "@/lib/api";
+import { MemoryRouter } from "react-router";
+import type { CIStatus, MergeRequest, MergeRequestState, Run } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { apiError, installFakeApi } from "@/test/fakeApi";
 import { mergeRequest } from "@/test/fixtures";
@@ -23,11 +24,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function renderCard(mr: MergeRequest = mergeRequest()) {
+function renderCard(mr: MergeRequest = mergeRequest(), run?: Pick<Run, "id" | "merge_request_id">) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const view = render(
     <QueryClientProvider client={client}>
-      <MergeRequestCard mr={mr} onChange={onChange} />
+      <MemoryRouter>
+        <MergeRequestCard mr={mr} run={run} onChange={onChange} />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
   return { ...view, card: () => within(screen.getByRole("region", { name: /request/ })) };
@@ -53,6 +56,38 @@ describe("the title line", () => {
     expect(card().getByRole("link", { name: "Pull request #3" }).getAttribute("href")).toBe("https://github.com/o/r/pull/3");
     expect(screen.getByRole("region", { name: "Pull request" })).not.toBeNull();
     expect(card().getByText(/→ develop$/)).not.toBeNull();
+  });
+});
+
+describe("the line for a run that updates the request", () => {
+  const LINE = /This run updates it; opened by run/;
+
+  it("says so, and links to the run that opened the request, when the run names it and did not open it", () => {
+    const { card } = renderCard(mergeRequest({ id: "mr1", run_id: "01a14161-d5ef-7d96-ba96-a45d5d4bb0f2" }), { id: "r2", merge_request_id: "mr1" });
+    const line = card().getByText(LINE);
+    expect(line.textContent).toBe("This run updates it; opened by run 5d4bb0f2");
+    const link = within(line).getByRole("link");
+    expect(link.getAttribute("href")).toBe("/runs/01a14161-d5ef-7d96-ba96-a45d5d4bb0f2");
+    expect(link.getAttribute("title")).toBe("01a14161-d5ef-7d96-ba96-a45d5d4bb0f2");
+  });
+
+  it("is not there for the run that opened the request", () => {
+    const { card } = renderCard(mergeRequest({ id: "mr1", run_id: "r1" }), { id: "r1", merge_request_id: undefined });
+    expect(card().queryByText(LINE)).toBeNull();
+  });
+
+  it("is not there when the run names another request, none, or when the card is not told the run", () => {
+    const { card } = renderCard(mergeRequest({ id: "mr1", run_id: "r0" }), { id: "r2", merge_request_id: "mr9" });
+    expect(card().queryByText(LINE)).toBeNull();
+    cleanup();
+    expect(renderCard(mergeRequest({ id: "mr1", run_id: "r0" }), { id: "r2", merge_request_id: undefined }).card().queryByText(LINE)).toBeNull();
+    cleanup();
+    expect(renderCard(mergeRequest({ id: "mr1", run_id: "r0" })).card().queryByText(LINE)).toBeNull();
+  });
+
+  it("stays with a request that is final, since the run still updated it", () => {
+    const { card } = renderCard(mergeRequest({ id: "mr1", run_id: "r0", state: "merged", closed_at: "2026-10-15T11:00:00Z" }), { id: "r2", merge_request_id: "mr1" });
+    expect(card().getByText(LINE)).not.toBeNull();
   });
 });
 
@@ -251,7 +286,9 @@ describe("a merged or closed request", () => {
     await dialog();
     rerender(
       <QueryClientProvider client={new QueryClient()}>
-        <MergeRequestCard mr={merged} onChange={onChange} />
+        <MemoryRouter>
+          <MergeRequestCard mr={merged} onChange={onChange} />
+        </MemoryRouter>
       </QueryClientProvider>,
     );
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -335,7 +372,9 @@ describe("refreshing when the card appears", () => {
     const client = new QueryClient();
     rerender(
       <QueryClientProvider client={client}>
-        <MergeRequestCard mr={mergeRequest({ synced_at: null, ci_status: "pending" })} onChange={onChange} />
+        <MemoryRouter>
+          <MergeRequestCard mr={mergeRequest({ synced_at: null, ci_status: "pending" })} onChange={onChange} />
+        </MemoryRouter>
       </QueryClientProvider>,
     );
     await new Promise((r) => setTimeout(r, 30));

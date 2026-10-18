@@ -251,6 +251,41 @@ func UpdateProject(ctx context.Context, q Querier, p *Project) error {
 	return nil
 }
 
+// ListIntakeProjects returns the live projects the intake loop passes over (DESIGN 5.23
+// rule 2): intake enabled and a workflow set, oldest first. A project whose workflow was
+// soft-deleted is still listed: the loop finds that out and says so in intake_last_error.
+func ListIntakeProjects(ctx context.Context, q Querier) ([]Project, error) {
+	rows, err := q.Query(ctx, projectSelect+` WHERE p.deleted_at IS NULL AND p.intake_enabled
+		AND p.intake_workflow_id IS NOT NULL ORDER BY p.created_at, p.id`)
+	if err != nil {
+		return nil, err
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByName[Project])
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].fillIntake()
+	}
+	return out, nil
+}
+
+// SetProjectIntakePoll records what a pass over a project did (DESIGN 5.23 rule 2): when
+// it ran and its first error, nil for a clean pass. It is the poll's bookkeeping, not a
+// change of settings, so updated_at stays; the row may be soft-deleted (a project deleted
+// during the pass). ErrNotFound when there is no row.
+func SetProjectIntakePoll(ctx context.Context, q Querier, id string, at time.Time, lastError *string) error {
+	tag, err := q.Exec(ctx, `UPDATE projects SET intake_polled_at=$2, intake_last_error=$3 WHERE id=$1`,
+		id, at.UTC(), lastError)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetProjectToken replaces a live project's sealed token.
 func SetProjectToken(ctx context.Context, q Querier, id string, tokenEnc []byte) error {
 	tag, err := q.Exec(ctx, `UPDATE projects SET token_enc=$2, updated_at=now() WHERE id=$1 AND deleted_at IS NULL`, id, tokenEnc)

@@ -113,6 +113,9 @@ func newFakeGitHub(t *testing.T, bare string) (*fakeGitHub, *httptest.Server) {
 type staticProjects struct {
 	pc  project.Config
 	err error
+	// tokenErr, when set, is what opening a project's token answers (read_merge_request in
+	// a conversation).
+	tokenErr error
 }
 
 func (s staticProjects) ForRunID(context.Context, string) (*project.Config, error) {
@@ -121,6 +124,13 @@ func (s staticProjects) ForRunID(context.Context, string) (*project.Config, erro
 	}
 	pc := s.pc
 	return &pc, nil
+}
+
+func (s staticProjects) Token(context.Context, string) (string, error) {
+	if s.tokenErr != nil {
+		return "", s.tokenErr
+	}
+	return s.pc.Token, nil
 }
 
 // forProject is a tool configured for one project (tests).

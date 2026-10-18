@@ -8,6 +8,7 @@ import { projectsKey, useProjects } from "@/lib/useProjects";
 import Button from "../Button";
 import InputFields from "../InputFields";
 import { Modal } from "../Modal";
+import MergeRequestSelect from "../project/MergeRequestSelect";
 import { InlineError, Loading, QueryError, errorText } from "../QueryState";
 import { SelectField } from "../fields";
 
@@ -35,10 +36,18 @@ export default function RunWorkflowDialog({ workflow, onClose }: Props) {
   // A project deleted since it was chosen no longer counts as chosen.
   const projectId = projects.data?.some((p) => p.id === projectChoice) ? projectChoice : "";
   const noProjects = needsProject && !!projects.data && projects.data.length === 0;
+  // The run may update an open merge request of the chosen project; none is chosen until the person says so.
+  const [mergeRequestChoice, setMergeRequestChoice] = useState("");
+  const mergeRequestId = projectId ? mergeRequestChoice : "";
 
   const start = useMutation({
-    mutationFn: ({ input, project }: { input: Record<string, unknown>; project: string }) =>
-      createRun({ workflow_id: workflow.id, input, ...(needsProject ? { project_id: project } : {}) }),
+    mutationFn: ({ input, project, mergeRequest }: { input: Record<string, unknown>; project: string; mergeRequest: string }) =>
+      createRun({
+        workflow_id: workflow.id,
+        input,
+        ...(needsProject ? { project_id: project } : {}),
+        ...(needsProject && mergeRequest ? { merge_request_id: mergeRequest } : {}),
+      }),
     onSuccess: (run) => {
       void qc.invalidateQueries({ queryKey: ["runs"] });
       navigate(`/runs/${run.id}`);
@@ -48,7 +57,11 @@ export default function RunWorkflowDialog({ workflow, onClose }: Props) {
         setServerErrors(parseFieldErrors(err.details));
         setFormError(err.message);
         // A refused project may be one that was just deleted: show the current list.
-        if (needsProject) void qc.invalidateQueries({ queryKey: projectsKey });
+        if (needsProject) {
+          void qc.invalidateQueries({ queryKey: projectsKey });
+          // A refused request may be one that was just merged or closed.
+          void qc.invalidateQueries({ queryKey: ["merge-requests"] });
+        }
       } else {
         setFormError(errorText(err));
       }
@@ -76,7 +89,7 @@ export default function RunWorkflowDialog({ workflow, onClose }: Props) {
       setClientErrors(built.errors);
       if (Object.keys(built.errors).length === 0) input = built.input;
     }
-    if (input && !missingProject) start.mutate({ input, project: projectId });
+    if (input && !missingProject) start.mutate({ input, project: projectId, mergeRequest: mergeRequestId });
   };
 
   const set = (name: string, value: string | boolean) => {
@@ -92,10 +105,12 @@ export default function RunWorkflowDialog({ workflow, onClose }: Props) {
   const errorsOf = (name: string) => [...(clientErrors[name] ? [clientErrors[name]] : []), ...errorsFor(serverErrors, name)];
   const known = new Set(fields.map((f) => f.name));
   if (needsProject) known.add("project_id");
+  if (needsProject && projectId) known.add("merge_request_id");
   const unplaced = Object.entries(serverErrors)
     .filter(([k]) => !known.has(k.split(".")[0]))
     .flatMap(([k, m]) => m.map((x) => (k ? `${k}: ${x}` : x)));
   const projectErrors = [...(projectError ? [projectError] : []), ...errorsFor(serverErrors, "project_id")];
+  const mergeRequestErrors = errorsFor(serverErrors, "merge_request_id");
 
   return (
     <Modal title={`Run ${workflow.name}`} onClose={start.isPending ? () => undefined : onClose}>
@@ -118,6 +133,7 @@ export default function RunWorkflowDialog({ workflow, onClose }: Props) {
               value={projectId}
               onChange={(v) => {
                 setProjectChoice(v);
+                setMergeRequestChoice("");
                 setProjectError(null);
               }}
               options={[{ value: "", label: "Choose a project" }, ...projects.data.map((p) => ({ value: p.id, label: p.name }))]}
@@ -127,6 +143,10 @@ export default function RunWorkflowDialog({ workflow, onClose }: Props) {
           ) : (
             <Loading label="Loading projects…" />
           )
+        ) : null}
+
+        {needsProject && projectId ? (
+          <MergeRequestSelect projectId={projectId} value={mergeRequestId} onChange={setMergeRequestChoice} errors={mergeRequestErrors} />
         ) : null}
 
         <InputFields

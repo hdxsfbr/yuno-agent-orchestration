@@ -1,8 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { listRuns } from "@/lib/api";
 import { formatDateTime, shortId } from "@/lib/format";
-import { projectRunsKey } from "@/lib/useProjects";
+import { useProjectRuns } from "@/lib/useProjects";
 import { RunStatusBadge } from "../Badge";
 import { cardClass } from "../Card";
 import { Loading, QueryError } from "../QueryState";
@@ -10,13 +8,10 @@ import { Loading, QueryError } from "../QueryState";
 /** How many runs the card lists. */
 const SHOWN = 10;
 
-/** The project's newest runs, newest first. */
+/** The project's newest runs, newest first: the top of the list the page reads once for its Merge requests table too. */
 export default function ProjectRuns({ projectId }: { projectId: string }) {
-  const q = useQuery({
-    queryKey: projectRunsKey(projectId),
-    queryFn: () => listRuns({ project_id: projectId, limit: SHOWN }),
-  });
-  const runs = q.data ?? [];
+  const q = useProjectRuns(projectId);
+  const runs = (q.data ?? []).slice(0, SHOWN);
   return (
     <section aria-labelledby="project-runs">
       <h2 id="project-runs" className="mb-2 text-base font-semibold">

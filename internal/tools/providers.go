@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -169,7 +170,50 @@ type RequestProvider interface {
 	// Merge merges the request: *ErrNotMergeable when the provider refuses,
 	// ErrRequestNotFound on a 404.
 	Merge(ctx context.Context, number int64) error
+	// Details reads what the request says (DESIGN 5.22 rule 6): ErrRequestNotFound on
+	// a 404 for the request itself.
+	Details(ctx context.Context, number int64) (RequestDetails, error)
+	// Threads reads the request's unresolved review threads, oldest first (the first
+	// 100 the provider lists); *ErrThreadsUnavailable when the provider refuses to list
+	// them (a GitHub token without GraphQL access).
+	Threads(ctx context.Context, number int64) ([]Thread, error)
+	// CIStatus is the pipeline status of the request now, one of the store's ci_status
+	// values, by the mapping tables of Status. headSHA is the request's head commit
+	// (Details gives it); GitLab reads the request's own pipelines and ignores it.
+	CIStatus(ctx context.Context, number int64, headSHA string) (string, error)
 }
+
+// RequestDetails is what a merge or pull request says about itself (DESIGN 5.22 rule 6).
+// State is one of the store's merge request states; HeadSHA is empty when the provider
+// gave none.
+type RequestDetails struct {
+	Title        string
+	Description  string
+	State        string
+	SourceBranch string
+	TargetBranch string
+	URL          string
+	HeadSHA      string
+}
+
+// Thread is an unresolved review thread: its first comment, where it points (Path empty
+// and Line nil for a thread that is not on a line of the diff) and when it was written
+// (nil when the provider gave no time).
+type Thread struct {
+	ID        string
+	Path      string
+	Line      *int
+	Author    string
+	Body      string
+	CreatedAt *time.Time
+}
+
+// ErrThreadsUnavailable is the provider's refusal to list the review threads (DESIGN
+// 5.22 rule 6: a GitHub token without GraphQL access): the request is still readable,
+// its threads are unknown. Message is the provider's first line.
+type ErrThreadsUnavailable struct{ Message string }
+
+func (e *ErrThreadsUnavailable) Error() string { return e.Message }
 
 // ProviderFor builds the provider client of a project (DESIGN 5.16 rule 11) over client,
 // which should come from ProviderClient so that no redirect is followed. The token is
@@ -348,21 +392,30 @@ func (g *gitlabProvider) Status(ctx context.Context, number int64) (RequestStatu
 	}
 	st.UnresolvedThreads = &unresolved
 
+	ci, err := g.pipelineStatus(ctx, base)
+	if err != nil {
+		return RequestStatus{}, err
+	}
+	st.CIStatus = ci
+	return st, nil
+}
+
+// pipelineStatus is the request's ci_status from its newest pipeline (DESIGN 5.20 rule
+// 3), shared by Status and CIStatus; base is .../merge_requests/<iid>.
+func (g *gitlabProvider) pipelineStatus(ctx context.Context, base string) (string, error) {
 	var pipelines []struct {
 		Status string `json:"status"`
 	}
 	if _, err := g.api.do(ctx, http.MethodGet, base+"/pipelines?per_page=1", nil, &pipelines); err != nil {
-		return RequestStatus{}, err
+		return "", err
 	}
-	st.CIStatus = store.CIStatusNone
-	if len(pipelines) > 0 {
-		if ci, ok := gitlabPipelines[pipelines[0].Status]; ok {
-			st.CIStatus = ci
-		} else {
-			st.CIStatus = store.CIStatusPending
-		}
+	if len(pipelines) == 0 {
+		return store.CIStatusNone, nil
 	}
-	return st, nil
+	if ci, ok := gitlabPipelines[pipelines[0].Status]; ok {
+		return ci, nil
+	}
+	return store.CIStatusPending, nil
 }
 
 // Merge is PUT merge_requests/<iid>/merge removing the source branch (rule 5).
@@ -370,6 +423,94 @@ func (g *gitlabProvider) Merge(ctx context.Context, number int64) error {
 	_, err := g.api.do(ctx, http.MethodPut, fmt.Sprintf("%s/merge_requests/%d/merge", g.base, number),
 		map[string]any{"should_remove_source_branch": true}, nil)
 	return mergeError(err)
+}
+
+// Details is DESIGN 5.22 rule 6 for GitLab: GET merge_requests/<iid>. Only the request's
+// own 404 is ErrRequestNotFound.
+func (g *gitlabProvider) Details(ctx context.Context, number int64) (RequestDetails, error) {
+	var mr struct {
+		Title        string `json:"title"`
+		Description  string `json:"description"`
+		State        string `json:"state"`
+		SourceBranch string `json:"source_branch"`
+		TargetBranch string `json:"target_branch"`
+		WebURL       string `json:"web_url"`
+		SHA          string `json:"sha"`
+	}
+	if status, err := g.api.do(ctx, http.MethodGet, fmt.Sprintf("%s/merge_requests/%d", g.base, number), nil, &mr); err != nil {
+		return RequestDetails{}, notFoundOr(status, err)
+	}
+	state, ok := gitlabStates[mr.State]
+	if !ok {
+		return RequestDetails{}, fmt.Errorf("gitlab: unknown merge request state %q", mr.State)
+	}
+	return RequestDetails{Title: mr.Title, Description: mr.Description, State: state, SourceBranch: mr.SourceBranch,
+		TargetBranch: mr.TargetBranch, URL: mr.WebURL, HeadSHA: mr.SHA}, nil
+}
+
+// Threads is DESIGN 5.22 rule 6 for GitLab: the first 100 discussions, those whose first
+// note is resolvable and not resolved, oldest first. A note on a line of the diff gives
+// the path (position.new_path) and the line (position.new_line, else old_line); any other
+// note has neither.
+func (g *gitlabProvider) Threads(ctx context.Context, number int64) ([]Thread, error) {
+	var discussions []struct {
+		ID    string `json:"id"`
+		Notes []struct {
+			Body       string `json:"body"`
+			CreatedAt  string `json:"created_at"`
+			Resolvable bool   `json:"resolvable"`
+			Resolved   bool   `json:"resolved"`
+			Author     struct {
+				Username string `json:"username"`
+			} `json:"author"`
+			Position *struct {
+				NewPath string `json:"new_path"`
+				OldPath string `json:"old_path"`
+				NewLine *int   `json:"new_line"`
+				OldLine *int   `json:"old_line"`
+			} `json:"position"`
+		} `json:"notes"`
+	}
+	if _, err := g.api.do(ctx, http.MethodGet, fmt.Sprintf("%s/merge_requests/%d/discussions?per_page=100", g.base, number), nil, &discussions); err != nil {
+		return nil, err
+	}
+	out := []Thread{}
+	for _, d := range discussions {
+		if len(d.Notes) == 0 || !d.Notes[0].Resolvable || d.Notes[0].Resolved {
+			continue
+		}
+		n := d.Notes[0]
+		t := Thread{ID: d.ID, Author: n.Author.Username, Body: n.Body, CreatedAt: parseProviderTime(&n.CreatedAt)}
+		if n.Position != nil {
+			t.Path = n.Position.NewPath
+			if t.Path == "" {
+				t.Path = n.Position.OldPath
+			}
+			t.Line = n.Position.NewLine
+			if t.Line == nil {
+				t.Line = n.Position.OldLine
+			}
+		}
+		out = append(out, t)
+	}
+	sortThreads(out)
+	return out, nil
+}
+
+// CIStatus is the request's newest pipeline through the mapping of Status.
+func (g *gitlabProvider) CIStatus(ctx context.Context, number int64, _ string) (string, error) {
+	return g.pipelineStatus(ctx, fmt.Sprintf("%s/merge_requests/%d", g.base, number))
+}
+
+// sortThreads orders threads oldest first (DESIGN 5.22 rule 6). The providers list them
+// in the order they were opened, so a list where a time is missing keeps that order.
+func sortThreads(ts []Thread) {
+	for _, t := range ts {
+		if t.CreatedAt == nil {
+			return
+		}
+	}
+	sort.SliceStable(ts, func(i, j int) bool { return ts[i].CreatedAt.Before(*ts[j].CreatedAt) })
 }
 
 // githubProvider is GitHub's pull request API for one repository (DESIGN 5.16 rule
@@ -577,4 +718,125 @@ func (g *githubProvider) ciStatus(ctx context.Context, sha string) (string, erro
 func (g *githubProvider) Merge(ctx context.Context, number int64) error {
 	_, err := g.api.do(ctx, http.MethodPut, fmt.Sprintf("%s/pulls/%d/merge", g.base, number), map[string]any{"merge_method": "merge"}, nil)
 	return mergeError(err)
+}
+
+// Details is DESIGN 5.22 rule 6 for GitHub: GET pulls/<n>. Only the pull request's own 404
+// is ErrRequestNotFound.
+func (g *githubProvider) Details(ctx context.Context, number int64) (RequestDetails, error) {
+	var pr struct {
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		State   string `json:"state"`
+		Merged  bool   `json:"merged"`
+		HTMLURL string `json:"html_url"`
+		Head    struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}
+	if status, err := g.api.do(ctx, http.MethodGet, fmt.Sprintf("%s/pulls/%d", g.base, number), nil, &pr); err != nil {
+		return RequestDetails{}, notFoundOr(status, err)
+	}
+	d := RequestDetails{Title: pr.Title, Description: pr.Body, SourceBranch: pr.Head.Ref, TargetBranch: pr.Base.Ref,
+		URL: pr.HTMLURL, HeadSHA: pr.Head.SHA}
+	switch {
+	case pr.Merged:
+		d.State = store.MergeRequestMerged
+	case pr.State == "closed":
+		d.State = store.MergeRequestClosed
+	case pr.State == "open":
+		d.State = store.MergeRequestOpen
+	default:
+		return RequestDetails{}, fmt.Errorf("github: unknown pull request state %q", pr.State)
+	}
+	return d, nil
+}
+
+// reviewThreadsDetailQuery is the query of DESIGN 5.22 rule 6, with the thread's own id for the
+// thread's identity.
+const reviewThreadsDetailQuery = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes {
+    id isResolved path line comments(first: 1) { nodes { author { login } body createdAt url } }
+  } } } }
+}`
+
+// Threads is DESIGN 5.22 rule 6 for GitHub: the first 100 review threads through GraphQL,
+// the unresolved ones, oldest first. A refusal (an HTTP 4xx answer, GraphQL's errors
+// member, no pull request in the data) is *ErrThreadsUnavailable with the provider's
+// first line, since the pull request itself is readable without GraphQL; a 5xx answer or
+// a transport failure is the error as it came.
+func (g *githubProvider) Threads(ctx context.Context, number int64) ([]Thread, error) {
+	var out struct {
+		Data struct {
+			Repository *struct {
+				PullRequest *struct {
+					ReviewThreads struct {
+						Nodes []struct {
+							ID         string `json:"id"`
+							IsResolved bool   `json:"isResolved"`
+							Path       string `json:"path"`
+							Line       *int   `json:"line"`
+							Comments   struct {
+								Nodes []struct {
+									Author *struct {
+										Login string `json:"login"`
+									} `json:"author"`
+									Body      string `json:"body"`
+									CreatedAt string `json:"createdAt"`
+									URL       string `json:"url"`
+								} `json:"nodes"`
+							} `json:"comments"`
+						} `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	body := map[string]any{"query": reviewThreadsDetailQuery, "variables": map[string]any{"owner": g.owner, "name": g.repo, "number": number}}
+	if _, err := g.api.do(ctx, http.MethodPost, g.graphqlURL(), body, &out); err != nil {
+		var se *errAPIStatus
+		if errors.As(err, &se) && se.status >= 400 && se.status < 500 {
+			msg := se.message
+			if msg == "" {
+				msg = fmt.Sprintf("HTTP %d", se.status)
+			}
+			return nil, &ErrThreadsUnavailable{Message: msg}
+		}
+		return nil, err
+	}
+	if len(out.Errors) > 0 {
+		return nil, &ErrThreadsUnavailable{Message: providerMessage([]byte(out.Errors[0].Message))}
+	}
+	if out.Data.Repository == nil || out.Data.Repository.PullRequest == nil {
+		return nil, &ErrThreadsUnavailable{Message: "the pull request was not returned"}
+	}
+	threads := []Thread{}
+	for _, n := range out.Data.Repository.PullRequest.ReviewThreads.Nodes {
+		if n.IsResolved || len(n.Comments.Nodes) == 0 {
+			continue
+		}
+		c := n.Comments.Nodes[0]
+		t := Thread{ID: n.ID, Path: n.Path, Line: n.Line, Body: c.Body, CreatedAt: parseProviderTime(&c.CreatedAt)}
+		if t.ID == "" {
+			t.ID = c.URL
+		}
+		if c.Author != nil {
+			t.Author = c.Author.Login
+		}
+		threads = append(threads, t)
+	}
+	sortThreads(threads)
+	return threads, nil
+}
+
+// CIStatus is the head commit's check runs and combined status through the mapping of
+// Status (an empty head is none).
+func (g *githubProvider) CIStatus(ctx context.Context, _ int64, headSHA string) (string, error) {
+	return g.ciStatus(ctx, headSHA)
 }

@@ -32,7 +32,7 @@ const PlatformToolPrefix = "yuno__"
 // entry with one of these names is materialised with PlatformToolPrefix; every other
 // name is an OpenClaw built-in and keeps its name.
 var PlatformTools = []string{"finish", "http_fetch", "memory_save", "memory_recall", "deploy_release", "gitlab_create_mr",
-	"open_merge_request", "list_agents", "list_workflows", "delegate_task", "run_status"}
+	"open_merge_request", "list_agents", "list_workflows", "list_projects", "delegate_task", "run_status", "read_merge_request"}
 
 // FinishTool is the platform tool every managed agent must be able to call.
 const FinishTool = PlatformToolPrefix + "finish"
@@ -54,7 +54,8 @@ const AgentsMD = "You run on the Yuno platform. Work only inside the directory r
 // the platform clones and pushes; agents only edit.
 const ProjectRule = "When your task describes a project repository, its checkout at runs/<run_id>/repo/ is the " +
 	"platform's: work inside it, never clone, commit or push, and never change its .git directory; " +
-	"the platform commits your working tree when a merge request is opened."
+	"the platform commits your working tree when a merge request is opened or pushed onto the merge " +
+	"request the run updates."
 
 // ChatRule is the AGENTS.md sentence for an agent bound to a channel: a person's message
 // has no task, run token or run directory, and the rules above are about runs.

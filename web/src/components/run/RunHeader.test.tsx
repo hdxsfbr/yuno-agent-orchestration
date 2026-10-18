@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import type { Run, RunStatus, ToolCall } from "@/lib/api";
 import { apiError, installFakeApi } from "@/test/fakeApi";
-import { run } from "@/test/fixtures";
+import { mergeRequest, projectSettings, run } from "@/test/fixtures";
 import RunHeader from "./RunHeader";
 
 let api: ReturnType<typeof installFakeApi>;
@@ -268,5 +268,77 @@ describe("the merge request", () => {
     } as ToolCall;
     renderHeader(run({ status: "running" }), [call]);
     expect(header().queryByRole("link", { name: /request/i })).toBeNull();
+  });
+});
+
+describe("a run that updates a merge request", () => {
+  const updating = (over: Partial<Run> = {}) =>
+    run({ status: "running", project_id: "p1", project: projectSettings(), merge_request_id: "mr1", merge_request: mergeRequest({ id: "mr1", run_id: "r0" }), ...over });
+  const projectItem = () => header().getByText("Project").nextElementSibling as HTMLElement;
+
+  it("says Updates merge request !12, linked to the provider, next to the project link", () => {
+    renderHeader(updating());
+    const link = within(projectItem()).getByRole("link", { name: "Updates merge request !12" });
+    expect(link.getAttribute("href")).toBe("https://gitlab.com/andrebatista/yuno-playground/-/merge_requests/12");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toContain("noreferrer");
+    expect(within(projectItem()).getByRole("link", { name: "yuno-playground" }).getAttribute("href")).toBe("/projects/p1");
+  });
+
+  it("says Updates pull request #4 on GitHub", () => {
+    renderHeader(updating({ project: projectSettings({ provider: "github" }), merge_request: mergeRequest({ id: "mr1", provider: "github", number: 4, url: "https://github.com/o/r/pull/4" }) }));
+    const link = within(projectItem()).getByRole("link", { name: "Updates pull request #4" });
+    expect(link.getAttribute("href")).toBe("https://github.com/o/r/pull/4");
+  });
+
+  it("says nothing for a run that opens its own request, or none", () => {
+    renderHeader(run({ status: "running", project_id: "p1", project: projectSettings(), merge_request: mergeRequest({ run_id: "r1" }) }));
+    expect(header().queryByText(/Updates/)).toBeNull();
+    cleanup();
+    renderHeader(run({ status: "running", project_id: "p1", project: projectSettings() }));
+    expect(header().queryByText(/Updates/)).toBeNull();
+  });
+
+  it("says nothing when the record it names is not joined onto the run", () => {
+    renderHeader(updating({ merge_request: undefined }));
+    expect(header().queryByText(/Updates/)).toBeNull();
+    cleanup();
+    renderHeader(updating({ merge_request: mergeRequest({ id: "other" }) }));
+    expect(header().queryByText(/Updates/)).toBeNull();
+  });
+});
+
+describe("an issue run", () => {
+  const issue = (over: Partial<Run> = {}) => run({ status: "running", trigger: "issue", trigger_ref: "p1#7", project_id: "p1", project: projectSettings(), ...over });
+  const triggerItem = () => header().getByText("Trigger").nextElementSibling as HTMLElement;
+
+  it("shows issue #7 in place of the trigger, linking to the issue on GitLab, and not the raw reference", () => {
+    renderHeader(issue());
+    const link = within(triggerItem()).getByRole("link", { name: "issue #7" });
+    expect(link.getAttribute("href")).toBe("https://gitlab.com/andrebatista/yuno-playground/-/issues/7");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(triggerItem().textContent).toBe("issue #7");
+  });
+
+  it("links to the issue on GitHub", () => {
+    renderHeader(issue({ project: projectSettings({ provider: "github", repo_url: "https://github.com/acme/docs.git" }) }));
+    expect(within(triggerItem()).getByRole("link", { name: "issue #7" }).getAttribute("href")).toBe("https://github.com/acme/docs/issues/7");
+  });
+
+  it("shows issue #7 without a link when the run kept no snapshot of its project", () => {
+    renderHeader(issue({ project: undefined, project_id: undefined }));
+    expect(triggerItem().textContent).toBe("issue #7");
+    expect(within(triggerItem()).queryByRole("link")).toBeNull();
+  });
+
+  it("shows the trigger and the reference as they are when the reference carries no issue number", () => {
+    renderHeader(issue({ trigger_ref: "p1" }));
+    expect(triggerItem().textContent).toBe("issuep1");
+    expect(within(triggerItem()).queryByRole("link")).toBeNull();
+  });
+
+  it("is not marked as delegated", () => {
+    renderHeader(issue());
+    expect(header().queryByText("Delegated")).toBeNull();
   });
 });

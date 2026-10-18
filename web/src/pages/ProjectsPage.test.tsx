@@ -29,6 +29,8 @@ beforeEach(() => {
   ];
   api = installFakeApi();
   api.on("GET", "/api/projects", () => projects);
+  // The project form lists the workflows the issue intake can run.
+  api.on("GET", "/api/workflows", () => []);
 });
 
 afterEach(() => {

@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
+	"yuno/internal/obs"
 	"yuno/internal/project"
 	"yuno/internal/store"
 )
@@ -20,9 +23,11 @@ import (
 const OpenMergeRequestName = "open_merge_request"
 
 // ProjectResolver gives the tool the project of the run that calls it (DESIGN 5.17
-// rule 6); the project package's Resolver implements it.
+// rule 6) and opens the token of a project a conversation names (read_merge_request,
+// 5.22 rule 6); the project package's Resolver implements it.
 type ProjectResolver interface {
 	ForRunID(ctx context.Context, runID string) (*project.Config, error)
+	Token(ctx context.Context, projectID string) (string, error)
 }
 
 // MergeRequestConfig is what open_merge_request needs. The tool is registered always:
@@ -78,16 +83,19 @@ func NewOpenMergeRequest(cfg MergeRequestConfig) *Tool {
 	m := &mergeRequest{cfg: cfg}
 	return &Tool{
 		Name: OpenMergeRequestName,
-		Description: "Propose the changes in the project checkout (runs/<run_id>/repo/) as a merge request (GitLab) " +
-			"or pull request (GitHub) against the project's default branch: the platform commits the working " +
-			"tree, pushes a branch and opens the request with your title and description. The title is a short " +
-			"summary of the change, like a commit subject (at most 72 characters), never the task text; put " +
-			"what changed and why and how it was tested in the description. A run has one request: calling " +
-			"this again in the same run adds the working tree to that request as a new commit (the answer then " +
-			"has replayed and updated true) and never opens a second one. Needs a human approval unless " +
-			"the operator allowed it to run automatically. Returns the request's number and URL; if a human " +
-			"has not decided yet it returns status pending_approval, and if they refused it returns status " +
-			"rejected with a reason.",
+		Description: "Open or update a merge request: propose the changes in the project checkout (runs/<run_id>/repo/) " +
+			"as a merge request (GitLab) or pull request (GitHub) against the project's default branch. The " +
+			"platform commits the working tree, pushes a branch and opens the request with your title and " +
+			"description. The title is a short summary of the change, like a commit subject (at most 72 " +
+			"characters), never the task text; put what changed and why and how it was tested in the " +
+			"description. A run has one request: calling this again in the same run adds the working tree to " +
+			"that request as a new commit (the answer then has replayed and updated true) and never opens a " +
+			"second one. A run that updates an existing merge request pushes your working tree onto that " +
+			"request's branch as a new commit, with the title as its message, instead of opening a new " +
+			"request; when the answer has replayed without updated, nothing new was pushed. Needs a human " +
+			"approval unless the operator allowed it to run automatically. Returns the request's number and " +
+			"URL; if a human has not decided yet it returns status pending_approval, and if they refused it " +
+			"returns status rejected with a reason.",
 		InputSchema: mergeRequestSchema,
 		Risk:        RiskSideEffecting,
 		Hits:        HitsExternal,
@@ -150,25 +158,43 @@ func (m *mergeRequest) exec(ctx context.Context, call Call) (Result, error) {
 	return res, err
 }
 
-// run is open_merge_request after the checks (DESIGN 5.16 rule 10, 5.20 rule 2). A run
-// that has a request already pushes onto its branch and opens no second one; otherwise
-// the branch is pushed, the request found or opened, and the record written in the
-// side effect's transaction right after the provider answered, so a failed insert rolls
-// the result back and releases the key. Without a transaction (the tool called on its
-// own, as the unit tests of the provider flow do) no record is read or written.
+// run is open_merge_request after the checks (DESIGN 5.16 rule 10, 5.20 rule 2, 5.22 rule
+// 4). A run that names a request (runs.merge_request_id) pushes onto that record's branch
+// under the branch guard; a run that has a request of its own already pushes onto its
+// branch and opens no second one; otherwise the branch is pushed, the request found or
+// opened, and the record written in the side effect's transaction right after the provider
+// answered, so a failed insert rolls the result back and releases the key. Without a
+// transaction (the tool called on its own, as the unit tests of the provider flow do) no
+// record is read or written.
 func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, provider RequestProvider, in mergeRequestInput, checkout, branch string) (Result, error) {
+	var run *store.Run
 	if call.Tx != nil {
 		// Two calls of one run with different keys must not both find no record and open
 		// two requests: the second waits for the first's transaction, then finds the record.
 		if err := store.LockRunMergeRequest(ctx, call.Tx, call.RunID); err != nil {
 			return Result{}, err
 		}
+		var err error
+		if run, err = store.GetRun(ctx, call.Tx, call.RunID); err != nil {
+			return Result{}, fmt.Errorf("read the run: %w", err)
+		}
+		// The lookup is the record the run names first, then the run's own (5.22 rule 4).
+		if run.MergeRequestID != nil && *run.MergeRequestID != "" {
+			named, err := store.GetMergeRequest(ctx, call.Tx, *run.MergeRequestID)
+			switch {
+			case err == nil:
+				return m.updateRecorded(ctx, call, pc, named, in, checkout, run)
+			case !errors.Is(err, store.ErrNotFound):
+				return Result{}, err
+			}
+		}
 		rec, err := store.MergeRequestByRun(ctx, call.Tx, call.RunID)
 		if err != nil {
 			return Result{}, err
 		}
 		if rec != nil {
-			return m.updateRecorded(ctx, pc, rec, in, checkout)
+			// The same-run path of 5.20 rule 2: no guard (L4 stays recorded for it).
+			return m.updateRecorded(ctx, call, pc, rec, in, checkout, nil)
 		}
 	}
 	exists, err := provider.BranchExists(ctx, branch)
@@ -194,7 +220,7 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 	if open != nil {
 		out.Number, out.URL, out.Replayed = open.Number, open.URL, true
 	} else {
-		ref, err := provider.Create(ctx, branch, pc.DefaultBranch, in.Title, in.Description)
+		ref, err := provider.Create(ctx, branch, pc.DefaultBranch, in.Title, withIssueCloses(in.Description, run))
 		if err != nil {
 			return Result{}, err
 		}
@@ -208,28 +234,71 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 	return JSONResult(out), nil
 }
 
-// updateRecorded answers a later call of a run that has its request (DESIGN 5.20 rule
-// 2): the working tree goes onto the record's source branch as a new commit with the
-// title as its message, and the answer is the record's, replayed, with updated set when
-// a commit was pushed. A tree equal to the branch pushes nothing. The request's title
-// and description stay as they were.
-func (m *mergeRequest) updateRecorded(ctx context.Context, pc *project.Config, rec *store.MergeRequest, in mergeRequestInput, checkout string) (Result, error) {
+// withIssueCloses is the description of a request being created (DESIGN 5.23 rule 7): for
+// a run that came from an issue, "\n\nCloses #<n>" is appended so that merging the request
+// closes the issue through the provider's keywords, unless the description already says
+// "closes #<n>" (any case). It is for creation only: a later update never rewrites the
+// description (5.20 rule 2), and any other run's description is returned as it is.
+func withIssueCloses(description string, run *store.Run) string {
+	if run == nil || run.Trigger != store.TriggerIssue || run.TriggerRef == nil {
+		return description
+	}
+	i := strings.LastIndexByte(*run.TriggerRef, '#')
+	if i < 0 {
+		return description
+	}
+	n := (*run.TriggerRef)[i+1:]
+	if n == "" || strings.Trim(n, "0123456789") != "" {
+		return description
+	}
+	// "closes #12" inside "closes #123" does not close issue 12.
+	if regexp.MustCompile(`(?i)closes #` + n + `(?:\D|$)`).MatchString(description) {
+		return description
+	}
+	return description + "\n\nCloses #" + n
+}
+
+// updateRecorded answers a later call of a run that has a request to push onto (DESIGN
+// 5.20 rule 2, 5.22 rule 4): the working tree goes onto the record's source branch as a new
+// commit with the title as its message, and the answer is the record's, replayed, with
+// updated set when a commit was pushed. A tree equal to the branch pushes nothing. The
+// request's title and description stay as they were.
+//
+// updating is the run that names the request (runs.merge_request_id), nil on the same-run
+// path of 5.20 rule 2 (a run that opened the request it pushes to; L4 stays recorded for
+// it). The run's checkout_sha is the branch guard's base: the branch must still be at the
+// commit the run cloned it at, else the push is refused with the text of rule 4 and
+// nothing is pushed (D-050), and after a push the new commit becomes the run's
+// checkout_sha so that a later call passes the guard. A null checkout_sha (a run cloned
+// before migration 0013) skips the guard.
+func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *project.Config, rec *store.MergeRequest, in mergeRequestInput, checkout string, updating *store.Run) (Result, error) {
 	if rec.State != store.MergeRequestOpen {
-		// DESIGN 5.20 edge cases: nothing more can be pushed to a request that was
-		// merged or closed; the model is told instead of git failing on the branch.
-		return Result{}, &ModelError{Message: fmt.Sprintf("the run's %s %s%d is %s; nothing more can be pushed to it",
-			requestNoun(rec.Provider), requestSigil(rec.Provider), rec.Number, rec.State)}
+		// DESIGN 5.20 edge cases, 5.22 rule 3: nothing more can be pushed to a request that
+		// was merged or closed; the model is told instead of git failing on the branch.
+		return Result{}, &ModelError{Message: fmt.Sprintf("the run's %s is %s; nothing more can be pushed to it", rec.Label(), rec.State)}
 	}
 	out := mergeRequestOutput{Number: rec.Number, URL: rec.URL, Branch: rec.SourceBranch, Provider: rec.Provider, Replayed: true}
-	// No branch guard here yet: "" is the same-run path of DESIGN 5.20 rule 2 (5.22 rule 4
-	// passes the run's checkout_sha for a run that cloned the branch it pushes to).
-	_, err := pc.ProposeOnto(ctx, checkout, rec.SourceBranch, "", in.Title)
+	base := ""
+	if updating != nil && updating.CheckoutSHA != nil {
+		base = *updating.CheckoutSHA
+	}
+	proposal, err := pc.ProposeOnto(ctx, checkout, rec.SourceBranch, base, in.Title)
+	var moved *project.ErrBranchMoved
 	switch {
 	case err == nil:
 		out.Updated = true
 	case errors.Is(err, project.ErrNoChanges):
+		return JSONResult(out), nil
+	case errors.As(err, &moved):
+		return Result{}, &ModelError{Message: moved.Error()}
 	default:
 		return Result{IsError: true, Text: "propose the changes: " + err.Error()}, nil
+	}
+	if updating != nil && call.Tx != nil {
+		if err := store.SetRunCheckoutSHA(ctx, call.Tx, call.RunID, proposal.Commit); err != nil {
+			return Result{IsError: true, Text: "record the new checkout commit after the push: " + obs.Redact(err.Error()) +
+				"; the commit was pushed to " + rec.SourceBranch}, nil
+		}
 	}
 	return JSONResult(out), nil
 }
@@ -286,20 +355,4 @@ func checkoutDir(workspace, runID string) (string, error) {
 		return "", &ModelError{Message: "this run has no project checkout at " + rel + "/: no .git directory"}
 	}
 	return filepath.Join(workspace, rel), nil
-}
-
-// requestNoun and requestSigil are what the provider calls a request and how it numbers
-// it: "merge request !12" on GitLab, "pull request #12" on GitHub.
-func requestNoun(provider string) string {
-	if provider == "github" {
-		return "pull request"
-	}
-	return "merge request"
-}
-
-func requestSigil(provider string) string {
-	if provider == "github" {
-		return "#"
-	}
-	return "!"
 }

@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { mergeMergeRequest, syncMergeRequest, type MergeRequest } from "@/lib/api";
-import { formatAgo, formatDateTime } from "@/lib/format";
+import { Link } from "react-router";
+import { mergeMergeRequest, syncMergeRequest, type MergeRequest, type Run } from "@/lib/api";
+import { formatAgo, formatDateTime, shortId } from "@/lib/format";
 import { isStale, mergeBlockedReason, requestNoun, requestRef, threadsText } from "@/lib/mergeRequest";
 import { providerLabel } from "@/lib/project";
 import { useNow } from "@/lib/useNow";
@@ -16,6 +17,8 @@ const FRESH_MS = 30_000;
 
 type Props = {
   mr: MergeRequest;
+  /** The run the page shows: when it updates the request instead of having opened it, the card says so. */
+  run?: Pick<Run, "id" | "merge_request_id">;
   /** Called with the record the API returns after a sync or a merge. */
   onChange: (mr: MergeRequest) => void;
 };
@@ -26,7 +29,7 @@ type Props = {
  * a way to merge it. Once it is merged or closed the card shows the state and when it ended,
  * and neither button is offered.
  */
-export default function MergeRequestCard({ mr, onChange }: Props) {
+export default function MergeRequestCard({ mr, run, onChange }: Props) {
   const now = useNow(true, 10_000);
   const [confirming, setConfirming] = useState(false);
   const sync = useMutation({ mutationFn: () => syncMergeRequest(mr.id), onSuccess: (record) => onChange(record) });
@@ -56,6 +59,7 @@ export default function MergeRequestCard({ mr, onChange }: Props) {
   const blocked = mergeBlockedReason(mr);
   const final = mr.state !== "open";
   const finalAt = mr.closed_at ?? mr.updated_at;
+  const updatedByThisRun = !!run && run.merge_request_id === mr.id && mr.run_id !== run.id;
 
   return (
     <section aria-label={noun}>
@@ -78,6 +82,14 @@ export default function MergeRequestCard({ mr, onChange }: Props) {
             <p className="mt-1 font-mono text-xs text-zinc-500">
               {mr.source_branch} → {mr.target_branch}
             </p>
+            {updatedByThisRun ? (
+              <p className="mt-1 text-xs text-zinc-500">
+                This run updates it; opened by run{" "}
+                <Link to={`/runs/${encodeURIComponent(mr.run_id)}`} className="font-mono underline" title={mr.run_id}>
+                  {shortId(mr.run_id)}
+                </Link>
+              </p>
+            ) : null}
           </div>
           {final ? null : (
             <div className="flex items-center gap-2">

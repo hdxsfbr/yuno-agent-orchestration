@@ -40,8 +40,8 @@ type TriggerRequest struct {
 	ProjectID string
 	// MergeRequestID names the merge request record the run updates, from its source
 	// branch instead of the default one (DESIGN 5.22 rule 1): the store's id of the
-	// record, never the provider's number, "" for a run that names none. The engine
-	// ignores it until the queue-time checks and the clone of that rule are built.
+	// record, never the provider's number, "" for a run that names none; checked at
+	// queue time (MergeRequestForRequest) and cloned from by the first visit (rule 2).
 	MergeRequestID string
 }
 

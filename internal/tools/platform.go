@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"net/http"
 	"sort"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -29,9 +30,14 @@ type PlatformDeps struct {
 	Fetch  FetchConfig
 	// GitLab registers gitlab_create_mr when set (D-010).
 	GitLab *GitLabConfig
-	// Projects resolves a run's project for open_merge_request (DESIGN 5.17 rule 6);
-	// nil leaves the tool answering that no run has a project.
+	// Projects resolves a run's project for open_merge_request (DESIGN 5.17 rule 6) and
+	// read_merge_request (5.22 rule 6, which also opens the token of the project a
+	// conversation names); nil leaves both answering that no run has a project.
 	Projects ProjectResolver
+	// ProviderClient reaches the merge request providers (GitLab, GitHub) for
+	// open_merge_request and read_merge_request; nil means ProviderClient(nil). It should
+	// come from ProviderClient, so that no redirect is followed.
+	ProviderClient *http.Client
 	// MemorySaved runs after every memory_save; nil skips it.
 	MemorySaved MemorySaved
 	// MaxOutputBytes is the cap the MCP server applies to every result (0: none).
@@ -61,7 +67,9 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 	if d.GitLab != nil {
 		r.Register(NewGitLabCreateMR(*d.GitLab))
 	}
-	r.Register(NewOpenMergeRequest(MergeRequestConfig{Projects: d.Projects}))
+	r.Register(NewOpenMergeRequest(MergeRequestConfig{Projects: d.Projects, Client: d.ProviderClient}))
+	r.Register(NewReadMergeRequest(ReadMergeRequestConfig{Projects: d.Projects, Pool: d.Pool, Client: d.ProviderClient,
+		MaxOutputBytes: d.MaxOutputBytes}))
 	return r
 }
 

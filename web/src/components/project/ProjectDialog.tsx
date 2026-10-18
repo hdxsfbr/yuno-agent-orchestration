@@ -1,15 +1,20 @@
 import { useState, type FormEvent } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ApiError, createProject, updateProject, type Project, type ProjectInput, type ProjectProvider } from "@/lib/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ApiError, createProject, listWorkflows, updateProject, type Project, type ProjectInput, type ProjectProvider } from "@/lib/api";
 import { addError, errorsFor, parseFieldErrors, type FieldErrors } from "@/lib/agentForm";
 import { capText, parseCap } from "@/lib/project";
 import { projectsKey } from "@/lib/useProjects";
 import Button from "../Button";
 import { Modal } from "../Modal";
-import { InlineError, errorText } from "../QueryState";
-import { CheckboxField, Field, NumberField, SelectField, TextAreaField, TextField, control } from "../fields";
+import { InlineError, Loading, QueryError, errorText } from "../QueryState";
+import { CheckboxField, Field, FieldErrors as FieldErrorList, NumberField, SelectField, TextAreaField, TextField, control } from "../fields";
 
 const FIELDS = ["name", "repo_url", "provider", "default_branch", "token", "description", "instructions", "max_cost_usd_per_day", "max_cost_usd_per_month"];
+/** The intake settings the form places next to their fields; any other `intake` error is listed under the form. */
+const INTAKE_FIELDS = ["intake.enabled", "intake.label", "intake.workflow_id"];
+/** The label the intake starts with. */
+const DEFAULT_INTAKE_LABEL = "yuno";
+const INTAKE_LABEL_MAX = 50;
 const NAME_MAX = 64;
 const DESCRIPTION_MAX = 1024;
 const INSTRUCTIONS_MAX = 8192;
@@ -38,11 +43,22 @@ export default function ProjectDialog({ project, onClose }: { project?: Project;
   const [instructions, setInstructions] = useState(project?.instructions ?? "");
   const [dayCap, setDayCap] = useState(capText(project?.max_cost_usd_per_day));
   const [monthCap, setMonthCap] = useState(capText(project?.max_cost_usd_per_month));
+  const [intakeEnabled, setIntakeEnabled] = useState(project?.intake?.enabled ?? false);
+  const [intakeLabel, setIntakeLabel] = useState(project?.intake?.label || DEFAULT_INTAKE_LABEL);
+  const [intakeWorkflow, setIntakeWorkflow] = useState(project?.intake?.workflow_id ?? "");
+  // The settings are sent only once the section was touched: an update without them keeps the stored ones.
+  const [intakeTouched, setIntakeTouched] = useState(false);
   const [clientErrors, setClientErrors] = useState<FieldErrors>({});
   const [serverErrors, setServerErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
 
   const tokenSet = !!project?.token_set;
+
+  // The workflows an issue can run: the operator's own, never a shipped template.
+  const workflows = useQuery({ queryKey: ["workflows"], queryFn: listWorkflows });
+  const operatorWorkflows = (workflows.data ?? []).filter((w) => !w.template_key);
+  // A workflow deleted since it was chosen no longer counts as chosen; until the list is known the stored choice stands.
+  const workflowId = !workflows.data || operatorWorkflows.some((w) => w.id === intakeWorkflow) ? intakeWorkflow : "";
 
   const save = useMutation({
     mutationFn: (input: ProjectInput) => (project ? updateProject(project.id, input) : createProject(input)),
@@ -78,6 +94,11 @@ export default function ProjectDialog({ project, onClose }: { project?: Project;
     if (!day.ok) addError(found, "max_cost_usd_per_day", day.message);
     const month = parseCap(monthCap);
     if (!month.ok) addError(found, "max_cost_usd_per_month", month.message);
+    if (intakeTouched) {
+      const label = intakeLabel.trim();
+      if (label === "" || label.length > INTAKE_LABEL_MAX || /[\s,]/.test(label)) addError(found, "intake.label", `1 to ${INTAKE_LABEL_MAX} characters without spaces or commas`);
+      if (intakeEnabled && workflowId === "") addError(found, "intake.workflow_id", "Choose a workflow");
+    }
     setClientErrors(found);
     if (Object.keys(found).length > 0 || !day.ok || !month.ok) return;
 
@@ -92,6 +113,7 @@ export default function ProjectDialog({ project, onClose }: { project?: Project;
       max_cost_usd_per_day: day.value,
       max_cost_usd_per_month: month.value,
     };
+    if (intakeTouched) input.intake = { enabled: intakeEnabled, label: intakeLabel.trim(), ...(workflowId ? { workflow_id: workflowId } : {}) };
     if (branch.trim() !== "") input.default_branch = branch.trim();
     // A token left empty on an edit keeps the stored one, so it stays out of the body.
     if (token.trim() !== "") input.token = token.trim();
@@ -100,8 +122,17 @@ export default function ProjectDialog({ project, onClose }: { project?: Project;
 
   const errors = (path: string) => [...errorsFor(clientErrors, path), ...errorsFor(serverErrors, path)];
   const unplaced = Object.entries(serverErrors)
-    .filter(([k]) => !FIELDS.includes(k.split(".")[0]))
+    .filter(([k]) => !FIELDS.includes(k.split(".")[0]) && !INTAKE_FIELDS.includes(k))
     .flatMap(([k, m]) => m.map((x) => (k ? `${k}: ${x}` : x)));
+  // With no cap in the form, the server refuses to enable the intake.
+  const dayCapNow = parseCap(dayCap);
+  const monthCapNow = parseCap(monthCap);
+  const noBudget = dayCapNow.ok && dayCapNow.value === null && monthCapNow.ok && monthCapNow.value === null;
+  const touchIntake = <T,>(set: (v: T) => void) => (v: T) => {
+    setIntakeTouched(true);
+    set(v);
+  };
+  const shownLabel = intakeLabel.trim() || DEFAULT_INTAKE_LABEL;
   const showSummary = formError && unplaced.length === 0 && Object.keys(serverErrors).length === 0;
 
   return (
@@ -175,6 +206,41 @@ export default function ProjectDialog({ project, onClose }: { project?: Project;
             <NumberField label="Per month (USD)" value={monthCap} onChange={setMonthCap} placeholder="No cap" errors={errors("max_cost_usd_per_month")} />
           </div>
           <p className="text-xs text-zinc-500">Leave empty for no cap. New runs are refused once the cap is reached; running runs finish.</p>
+        </fieldset>
+        <fieldset className="space-y-3">
+          <legend className="mb-1 text-sm font-medium">Issue intake</legend>
+          <CheckboxField role="switch" checked={intakeEnabled} onChange={touchIntake(setIntakeEnabled)} label="Enabled" errors={errors("intake.enabled")} />
+          {intakeEnabled && noBudget ? <p className="text-xs text-zinc-500">Set a daily or monthly budget before enabling intake.</p> : null}
+          <TextField
+            label="Label"
+            mono
+            value={intakeLabel}
+            onChange={touchIntake(setIntakeLabel)}
+            placeholder={DEFAULT_INTAKE_LABEL}
+            hint={`Issues carrying this label become runs. The platform moves it to ${shownLabel}:running, ${shownLabel}:done or ${shownLabel}:failed as the work goes.`}
+            errors={errors("intake.label")}
+          />
+          {workflows.error ? (
+            <>
+              <QueryError what="the workflows" error={workflows.error} onRetry={() => void workflows.refetch()} />
+              <FieldErrorList errors={errors("intake.workflow_id")} />
+            </>
+          ) : workflows.data ? (
+            <SelectField
+              label="Workflow"
+              required={intakeEnabled}
+              value={workflowId}
+              onChange={touchIntake(setIntakeWorkflow)}
+              options={[{ value: "", label: "Choose a workflow" }, ...operatorWorkflows.map((w) => ({ value: w.id, label: w.name }))]}
+              hint="Each issue starts a run of this workflow, with the issue as its task."
+              errors={errors("intake.workflow_id")}
+            />
+          ) : (
+            <>
+              <Loading label="Loading workflows…" />
+              <FieldErrorList errors={errors("intake.workflow_id")} />
+            </>
+          )}
         </fieldset>
         {unplaced.map((m, i) => (
           <InlineError key={i}>{m}</InlineError>

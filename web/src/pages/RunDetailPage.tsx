@@ -52,7 +52,7 @@ export default function RunDetailPage() {
     <div className="max-w-5xl space-y-5">
       {back}
       <RunHeader run={view.run} connection={connection} now={now} toolCalls={view.tool_calls} onRunChange={applyRun} />
-      {view.run.merge_request ? <MergeRequestCard key={view.run.merge_request.id} mr={view.run.merge_request} onChange={applyMergeRequest} /> : null}
+      {view.run.merge_request ? <MergeRequestCard key={view.run.merge_request.id} mr={view.run.merge_request} run={view.run} onChange={applyMergeRequest} /> : null}
 
       {view.approvals.length > 0 || view.run.status === "waiting_approval" ? (
         <Section title="Approvals" count={view.approvals.length}>

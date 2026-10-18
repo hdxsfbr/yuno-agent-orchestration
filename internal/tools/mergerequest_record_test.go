@@ -33,6 +33,13 @@ type recordEnv struct {
 	// calls it has answered.
 	requests func() int
 	seen     func() int
+	// pc is the project as the tool reaches it (git on the bare repository); gl or gh is
+	// the fake provider, and description the description the provider was given for its
+	// first request ("" before one exists).
+	pc          project.Config
+	gl          *fakeGitLab
+	gh          *fakeGitHub
+	description func() string
 }
 
 func newRecordEnv(t *testing.T, provider project.Provider) *recordEnv {
@@ -41,18 +48,39 @@ func newRecordEnv(t *testing.T, provider project.Provider) *recordEnv {
 	ctx := context.Background()
 	e := &recordEnv{t: t, bare: projecttest.BareRepo(t, map[string]string{"README.md": "# demo\n", "keep/old.txt": "old\n"})}
 	pc := project.Config{RepoURL: e.bare, Token: "glpat-not-a-real-token-00", DefaultBranch: "main", Provider: provider}
+	e.pc = pc
 	switch provider {
 	case project.ProviderGitHub:
 		g, srv := newFakeGitHub(t, e.bare)
+		e.gh = g
 		e.tool = forProject(pc, srv.URL+"/repos/owner/demo", "owner/demo")
 		e.requests = func() int { g.mu.Lock(); defer g.mu.Unlock(); return len(g.pulls) }
 		e.seen = func() int { g.mu.Lock(); defer g.mu.Unlock(); return len(g.calls) }
+		e.description = func() string {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if len(g.pulls) == 0 {
+				return ""
+			}
+			body, _ := g.pulls[0]["body"].(string)
+			return body
+		}
 	default:
 		g, srv := newFakeGitLab(t)
+		e.gl = g
 		gitlabOnBare(t, g, e.bare)
 		e.tool = forProject(pc, srv.URL+"/api/v4/projects/group%2Fdemo", "")
 		e.requests = func() int { g.mu.Lock(); defer g.mu.Unlock(); return len(g.mrs) }
 		e.seen = func() int { g.mu.Lock(); defer g.mu.Unlock(); return len(g.calls) }
+		e.description = func() string {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if len(g.mrs) == 0 {
+				return ""
+			}
+			body, _ := g.mrs[0]["description"].(string)
+			return body
+		}
 	}
 	e.svc = &Service{Pool: pool, Registry: NewRegistry(), Sleep: (&noSleep{}).sleep}
 
@@ -81,6 +109,7 @@ func (e *recordEnv) newRun(t *testing.T) *store.Run {
 	run := &store.Run{WorkflowID: wf.ID, WorkflowVersion: 1, WorkflowSnapshot: wf.Definition, Trigger: store.TriggerManual,
 		Status: store.RunRunning, ProjectID: &e.project.ID, Project: &settings}
 	must(t, store.CreateRun(ctx, testPool, run))
+	dropRunAfter(t, run.ID)
 	return run
 }
 

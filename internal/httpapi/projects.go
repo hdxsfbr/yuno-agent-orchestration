@@ -52,10 +52,10 @@ type projectInput struct {
 	MaxCostUSDPerDay   *float64 `json:"max_cost_usd_per_day"`
 	MaxCostUSDPerMonth *float64 `json:"max_cost_usd_per_month"`
 
-	// Intake (DESIGN 5.23 rule 1) is accepted and not applied yet, so a client can PUT back
-	// the project it fetched, whose view now carries it; the intake settings check and
-	// the write replace this member.
-	Intake json.RawMessage `json:"intake"`
+	// Intake is the project's issue intake settings (DESIGN 5.23 rule 1): present
+	// replaces the three, absent on an update keeps the stored ones (switched on purpose,
+	// not cleared by a form that does not know it). applyIntake checks and applies it.
+	Intake *intakeInput `json:"intake"`
 
 	ID        json.RawMessage `json:"id"`
 	TokenSet  json.RawMessage `json:"token_set"`
@@ -63,6 +63,20 @@ type projectInput struct {
 	UpdatedAt json.RawMessage `json:"updated_at"`
 	LastRun   json.RawMessage `json:"last_run"`
 	Spend     json.RawMessage `json:"spend"`
+}
+
+// intakeInput is ProjectIntakeInput. Label is a pointer to tell an absent member (the
+// default, yuno) from an empty one (422). The members after WorkflowID belong to the
+// Project view of intake and are accepted and ignored, so a client can PUT back what it
+// fetched.
+type intakeInput struct {
+	Enabled    bool    `json:"enabled"`
+	Label      *string `json:"label"`
+	WorkflowID string  `json:"workflow_id"`
+
+	WorkflowName json.RawMessage `json:"workflow_name"`
+	PolledAt     json.RawMessage `json:"polled_at"`
+	LastError    json.RawMessage `json:"last_error"`
 }
 
 // validate checks the input (DESIGN 5.17 rules 1 to 3) and returns the project it
@@ -238,7 +252,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, token, fe := in.validate(true)
-	if len(fe) > 0 {
+	ife, err := s.applyIntake(ctx, &in, p, nil)
+	if err != nil {
+		s.internalError(w, r, "check the intake settings", err)
+		return
+	}
+	if fe = append(fe, ife...); len(fe) > 0 {
 		writeValidation(w, "invalid project", fe)
 		return
 	}
@@ -288,7 +307,12 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next, token, fe := in.validate(false)
-	if len(fe) > 0 {
+	ife, err := s.applyIntake(ctx, &in, next, cur)
+	if err != nil {
+		s.internalError(w, r, "check the intake settings", err)
+		return
+	}
+	if fe = append(fe, ife...); len(fe) > 0 {
 		writeValidation(w, "invalid project", fe)
 		return
 	}

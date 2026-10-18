@@ -32,23 +32,29 @@ type scheduleInput struct {
 	// ProjectID names the project the schedule's runs work on (DESIGN 5.9 rule 6):
 	// required for a workflow that opts in, refused for one that does not; an empty
 	// string clears it.
-	ProjectID *string         `json:"project_id"`
-	Kind      *string         `json:"kind"`
-	CronExpr  *string         `json:"cron_expr"`
-	TZ        *string         `json:"tz"`
-	RunAt     *string         `json:"run_at"`
-	Enabled   *bool           `json:"enabled"`
-	Input     json.RawMessage `json:"input"`
+	ProjectID *string `json:"project_id"`
+	// MergeRequestID names the merge request record the schedule's runs update (DESIGN 5.22
+	// rule 7): the project's, open, checked as a run request's is. Left out it keeps its
+	// value, unless workflow_id or project_id changes, which drops it; an empty string
+	// clears it.
+	MergeRequestID *string         `json:"merge_request_id"`
+	Kind           *string         `json:"kind"`
+	CronExpr       *string         `json:"cron_expr"`
+	TZ             *string         `json:"tz"`
+	RunAt          *string         `json:"run_at"`
+	Enabled        *bool           `json:"enabled"`
+	Input          json.RawMessage `json:"input"`
 
-	ID           json.RawMessage `json:"id"`
-	WorkflowName json.RawMessage `json:"workflow_name"`
-	ProjectName  json.RawMessage `json:"project_name"`
-	NextRunAt    json.RawMessage `json:"next_run_at"`
-	LastRunAt    json.RawMessage `json:"last_run_at"`
-	LastRunID    json.RawMessage `json:"last_run_id"`
-	LastError    json.RawMessage `json:"last_error"`
-	CreatedAt    json.RawMessage `json:"created_at"`
-	UpdatedAt    json.RawMessage `json:"updated_at"`
+	ID                 json.RawMessage `json:"id"`
+	WorkflowName       json.RawMessage `json:"workflow_name"`
+	ProjectName        json.RawMessage `json:"project_name"`
+	MergeRequestNumber json.RawMessage `json:"merge_request_number"`
+	NextRunAt          json.RawMessage `json:"next_run_at"`
+	LastRunAt          json.RawMessage `json:"last_run_at"`
+	LastRunID          json.RawMessage `json:"last_run_id"`
+	LastError          json.RawMessage `json:"last_error"`
+	CreatedAt          json.RawMessage `json:"created_at"`
+	UpdatedAt          json.RawMessage `json:"updated_at"`
 }
 
 // apply merges the input onto sc, validates the result (DESIGN 5.9 rules 1 and 6) and
@@ -58,6 +64,10 @@ type scheduleInput struct {
 func (s *Server) applySchedule(ctx context.Context, in *scheduleInput, sc *store.Schedule, now time.Time) (fieldErrors, error) {
 	var fe fieldErrors
 	prevWorkflow := sc.WorkflowID
+	prevProject := ""
+	if sc.ProjectID != nil {
+		prevProject = *sc.ProjectID
+	}
 	if in.WorkflowID != nil {
 		sc.WorkflowID = strings.TrimSpace(*in.WorkflowID)
 	}
@@ -72,6 +82,22 @@ func (s *Server) applySchedule(ctx context.Context, in *scheduleInput, sc *store
 		// The project goes with the workflow choice: an update that moves the schedule
 		// to another workflow without naming a project drops the stored one.
 		sc.ProjectID = nil
+	}
+	projectID := ""
+	if sc.ProjectID != nil {
+		projectID = *sc.ProjectID
+	}
+	switch {
+	case in.MergeRequestID != nil:
+		if id := strings.TrimSpace(*in.MergeRequestID); id == "" {
+			sc.MergeRequestID = nil
+		} else {
+			sc.MergeRequestID = &id
+		}
+	case sc.WorkflowID != prevWorkflow || projectID != prevProject:
+		// The request goes with the workflow and project choice (DESIGN 5.22 rule 7): it
+		// belongs to a project's records, so moving the schedule drops it.
+		sc.MergeRequestID = nil
 	}
 	if in.Kind != nil {
 		sc.Kind = *in.Kind
@@ -140,15 +166,23 @@ func (s *Server) applySchedule(ctx context.Context, in *scheduleInput, sc *store
 	if def != nil {
 		// The same check the trigger makes (DESIGN 5.17 rule 4), so a schedule the
 		// engine would refuse at fire time is refused when it is saved (rule 6).
-		var projectID string
-		if sc.ProjectID != nil {
-			projectID = *sc.ProjectID
-		}
-		_, msgs, err := engine.ProjectForRequest(ctx, s.pool, projectID, def.Project)
+		proj, msgs, err := engine.ProjectForRequest(ctx, s.pool, projectID, def.Project)
 		if err != nil {
 			return nil, err
 		}
 		fe = append(fe, validationDetails(msgs)...)
+		// And the request it updates, by the checks of DESIGN 5.22 rule 1, after the
+		// project's: a project that was refused leaves the request unchecked.
+		if sc.MergeRequestID != nil && len(msgs) == 0 && proj != nil {
+			_, mrMsgs, err := engine.MergeRequestForRequest(ctx, s.pool, *sc.MergeRequestID, proj)
+			if err != nil {
+				return nil, err
+			}
+			fe = append(fe, validationDetails(mrMsgs)...)
+		}
+	}
+	if sc.MergeRequestID != nil && sc.ProjectID == nil {
+		fe.add("merge_request_id", "needs a project")
 	}
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(sc.Input, &obj) != nil {

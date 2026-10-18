@@ -11,6 +11,8 @@ export type ScheduleFormState = {
   workflowId: string;
   /** The project the runs work on; only sent when the workflow opts in. */
   projectId: string;
+  /** The merge request record whose branch the runs work on, or "" for none; only sent with a project. */
+  mergeRequestId: string;
   kind: ScheduleKind;
   cronExpr: string;
   tz: string;
@@ -94,8 +96,11 @@ export type BuiltSchedule = { value?: ScheduleInput; errors: FieldErrors };
 /**
  * The request for the form, or the problems that stop it. `fields` come from the workflow's input
  * schema; `needsProject` says the workflow works on a project, which the request then names.
+ * `savedMergeRequestId` is the merge request the schedule being edited names now ("" for none): the
+ * request carries `merge_request_id` only when the choice differs from it, so an edit that leaves
+ * the choice alone keeps the stored value, and an empty string clears it.
  */
-export function buildSchedule(f: ScheduleFormState, fields: InputField[], needsProject = false): BuiltSchedule {
+export function buildSchedule(f: ScheduleFormState, fields: InputField[], needsProject = false, savedMergeRequestId = ""): BuiltSchedule {
   const errors: FieldErrors = {};
   const add = (path: string, message: string) => (errors[path] ??= []).push(message);
 
@@ -122,11 +127,13 @@ export function buildSchedule(f: ScheduleFormState, fields: InputField[], needsP
   }
 
   if (Object.keys(errors).length > 0) return { errors };
+  const mergeRequestId = needsProject ? f.mergeRequestId : "";
   return {
     errors,
     value: {
       workflow_id: f.workflowId,
       ...(needsProject ? { project_id: f.projectId } : {}),
+      ...(mergeRequestId !== savedMergeRequestId ? { merge_request_id: mergeRequestId } : {}),
       kind: f.kind,
       ...(f.kind === "cron" ? { cron_expr: f.cronExpr.trim() } : { run_at: runAt }),
       tz: f.tz,

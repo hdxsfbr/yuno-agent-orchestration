@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Route, Routes, useParams } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation, useParams } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Run } from "@/lib/api";
 import { installFakeApi } from "@/test/fakeApi";
+import { mergeRequest, projectSettings } from "@/test/fixtures";
 import RunsPage from "./RunsPage";
 
 const DONE = "01a14161-d5ef-7d96-ba96-a45d5d4bb0f2";
@@ -101,11 +102,17 @@ function ConversationMarker() {
   return <p>conversation page {conversationId}</p>;
 }
 
-function renderPage() {
+function Where() {
+  const { pathname, search } = useLocation();
+  return <p data-testid="where">{pathname + search}</p>;
+}
+
+function renderPage(path = "/runs") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={["/runs"]}>
+      <MemoryRouter initialEntries={[path]}>
+        <Where />
         <Routes>
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:id" element={<RunMarker />} />
@@ -244,5 +251,196 @@ describe("RunsPage live list", () => {
     await waitFor(() => expect(api.made("GET", /^\/api\/runs\?/)).toHaveLength(2));
     await act(async () => void (await new Promise((r) => setTimeout(r, 800))));
     expect(api.made("GET", /^\/api\/runs\?/)).toHaveLength(2);
+  });
+});
+
+describe("RunsPage trigger filter", () => {
+  let api: ReturnType<typeof installFakeApi>;
+  let listed: Run[];
+  const runUrls = () => api.made("GET", /^\/api\/runs\?/).map((c) => c.url);
+  const triggerSelect = () => screen.getByLabelText("Trigger") as HTMLSelectElement;
+  const where = () => screen.getByTestId("where").textContent;
+
+  beforeEach(() => {
+    listed = [base({ agent_names: ["Coder"] })];
+    api = installFakeApi();
+    api.on("GET", /^\/api\/runs\?/, () => listed);
+  });
+
+  it("sits next to the status filter with All and the five triggers, All chosen", async () => {
+    renderPage();
+    await screen.findByTitle(DONE);
+    const select = triggerSelect();
+    expect(Array.from(select.options).map((o) => o.textContent)).toEqual(["All", "Manual", "Schedule", "Channel", "Eval", "Issue"]);
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(["", "manual", "schedule", "channel", "eval", "issue"]);
+    expect(select.value).toBe("");
+    expect(screen.getByLabelText("Status").parentElement?.parentElement).toBe(select.parentElement?.parentElement);
+    expect(runUrls()).toEqual(["/api/runs?limit=100"]);
+  });
+
+  it("asks the server for the chosen trigger, keeps it in the address and drops it again with All", async () => {
+    renderPage();
+    await screen.findByTitle(DONE);
+    fireEvent.change(triggerSelect(), { target: { value: "issue" } });
+    await waitFor(() => expect(runUrls()).toContain("/api/runs?trigger=issue&limit=100"));
+    expect(where()).toBe("/runs?trigger=issue");
+    fireEvent.change(triggerSelect(), { target: { value: "" } });
+    await waitFor(() => expect(where()).toBe("/runs"));
+    expect(runUrls().at(-1)).toBe("/api/runs?limit=100");
+  });
+
+  it("reads the trigger and the status from the address, and changes one without losing the other", async () => {
+    renderPage("/runs?status=failed&trigger=schedule");
+    await screen.findByTitle(DONE);
+    expect(triggerSelect().value).toBe("schedule");
+    expect((screen.getByLabelText("Status") as HTMLSelectElement).value).toBe("failed");
+    expect(runUrls()).toEqual(["/api/runs?status=failed&trigger=schedule&limit=100"]);
+    fireEvent.change(triggerSelect(), { target: { value: "eval" } });
+    await waitFor(() => expect(runUrls()).toContain("/api/runs?status=failed&trigger=eval&limit=100"));
+    expect(where()).toBe("/runs?status=failed&trigger=eval");
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "" } });
+    await waitFor(() => expect(where()).toBe("/runs?trigger=eval"));
+  });
+
+  it("ignores a trigger in the address that is not one of the five", async () => {
+    renderPage("/runs?trigger=webhook");
+    await screen.findByTitle(DONE);
+    expect(triggerSelect().value).toBe("");
+    expect(runUrls()).toEqual(["/api/runs?limit=100"]);
+  });
+
+  it("says no run matches when a filtered list is empty", async () => {
+    listed = [];
+    renderPage("/runs?trigger=issue");
+    expect(await screen.findByText("No runs match.")).not.toBeNull();
+  });
+});
+
+describe("RunsPage issue runs", () => {
+  const ISSUE = "01a14170-0000-7000-8000-000000000001";
+  const ISSUE_GITHUB = "01a14170-0000-7000-8000-000000000002";
+  const ISSUE_BARE = "01a14170-0000-7000-8000-000000000003";
+  const ISSUE_ODD = "01a14170-0000-7000-8000-000000000004";
+  let api: ReturnType<typeof installFakeApi>;
+  const triggerCell = async (id: string) => within((await screen.findByTitle(id)).closest("tr")!).getAllByRole("cell")[5];
+
+  beforeEach(() => {
+    api = installFakeApi();
+    api.on("GET", /^\/api\/runs\?/, () => [
+      base({ id: ISSUE, trigger: "issue", trigger_ref: "p1#7", project_id: "p1", project: projectSettings() }),
+      base({ id: ISSUE_GITHUB, trigger: "issue", trigger_ref: "p2#31", project_id: "p2", project: projectSettings({ name: "docs-site", provider: "github", repo_url: "https://github.com/acme/docs.git" }) }),
+      base({ id: ISSUE_BARE, trigger: "issue", trigger_ref: "p9#4" }),
+      base({ id: ISSUE_ODD, trigger: "issue", trigger_ref: "p1", project_id: "p1", project: projectSettings() }),
+    ]);
+  });
+
+  it("shows issue #n linking to the issue on GitLab, and not the raw reference", async () => {
+    renderPage();
+    const cell = within(await triggerCell(ISSUE));
+    const link = cell.getByRole("link", { name: "issue #7" });
+    expect(link.getAttribute("href")).toBe("https://gitlab.com/andrebatista/yuno-playground/-/issues/7");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(cell.queryByText("p1#7")).toBeNull();
+    expect(cell.queryByText("issue")).toBeNull();
+  });
+
+  it("links to the issue on GitHub", async () => {
+    renderPage();
+    expect(within(await triggerCell(ISSUE_GITHUB)).getByRole("link", { name: "issue #31" }).getAttribute("href")).toBe("https://github.com/acme/docs/issues/31");
+  });
+
+  it("shows issue #n without a link when the run kept no snapshot of its project", async () => {
+    renderPage();
+    const cell = within(await triggerCell(ISSUE_BARE));
+    expect(cell.getByText("issue #4")).not.toBeNull();
+    expect(cell.queryByRole("link")).toBeNull();
+  });
+
+  it("shows the trigger with its reference as it is when the reference carries no issue number", async () => {
+    renderPage();
+    const cell = await triggerCell(ISSUE_ODD);
+    expect(cell.textContent).toBe("issue");
+    expect(within(cell).queryByRole("link")).toBeNull();
+  });
+
+  it("opens the issue, not the run, when the link is clicked", async () => {
+    renderPage();
+    fireEvent.click(within(await triggerCell(ISSUE)).getByRole("link", { name: "issue #7" }));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(screen.queryByText(`run page ${ISSUE}`)).toBeNull();
+  });
+});
+
+describe("RunsPage runs that update a merge request", () => {
+  const UPDATING = "01a14180-0000-7000-8000-000000000001";
+  const UPDATING_GITHUB = "01a14180-0000-7000-8000-000000000002";
+  const OPENED = "01a14180-0000-7000-8000-000000000003";
+  const PLAIN = "01a14180-0000-7000-8000-000000000004";
+  let api: ReturnType<typeof installFakeApi>;
+  let listed: Run[];
+  const projectCell = async (id: string) => within((await screen.findByTitle(id)).closest("tr")!).getAllByRole("cell")[3];
+  const where = () => screen.getByTestId("where").textContent;
+
+  beforeEach(() => {
+    listed = [
+      base({ id: UPDATING, project_id: "p1", project: projectSettings(), merge_request_id: "mr1", merge_request: mergeRequest({ id: "mr1", run_id: OPENED }) }),
+      base({
+        id: UPDATING_GITHUB,
+        project_id: "p2",
+        project: projectSettings({ name: "docs-site", provider: "github" }),
+        merge_request_id: "mr2",
+        merge_request: mergeRequest({ id: "mr2", provider: "github", number: 4, url: "https://github.com/acme/docs/pull/4" }),
+      }),
+      base({ id: OPENED, project_id: "p1", project: projectSettings(), merge_request: mergeRequest({ id: "mr1", run_id: OPENED }) }),
+      base({ id: PLAIN, project_id: "p1", project: projectSettings() }),
+    ];
+    api = installFakeApi();
+    api.on("GET", /^\/api\/runs\?/, () => listed);
+  });
+
+  it("shows !12 after the project's name, linking to the request on the provider", async () => {
+    renderPage();
+    const cell = await projectCell(UPDATING);
+    expect(cell.textContent).toBe("yuno-playground!12");
+    const mark = within(cell).getByRole("link", { name: "!12" });
+    expect(mark.getAttribute("href")).toBe("https://gitlab.com/andrebatista/yuno-playground/-/merge_requests/12");
+    expect(mark.getAttribute("title")).toBe("Updates merge request !12");
+    expect(within(cell).getByRole("link", { name: "yuno-playground" }).getAttribute("href")).toBe("/projects/p1");
+  });
+
+  it("writes #4 on GitHub", async () => {
+    renderPage();
+    const mark = within(await projectCell(UPDATING_GITHUB)).getByRole("link", { name: "#4" });
+    expect(mark.getAttribute("title")).toBe("Updates pull request #4");
+  });
+
+  it("marks neither the run that opened a request nor a run that names none", async () => {
+    renderPage();
+    expect((await projectCell(OPENED)).textContent).toBe("yuno-playground");
+    expect((await projectCell(PLAIN)).textContent).toBe("yuno-playground");
+  });
+
+  it("lists the runs that named a request when the address says so, and says which request", async () => {
+    renderPage("/runs?merge_request_id=mr1");
+    await screen.findByTitle(UPDATING);
+    expect(api.made("GET", /^\/api\/runs\?/).map((c) => c.url)).toEqual(["/api/runs?merge_request_id=mr1&limit=100"]);
+    expect(screen.getByText("Merge request")).not.toBeNull();
+    expect(screen.getByText("!12", { selector: "span" })).not.toBeNull();
+  });
+
+  it("goes back to every run with Clear", async () => {
+    renderPage("/runs?status=failed&merge_request_id=mr1");
+    await screen.findByTitle(UPDATING);
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(where()).toBe("/runs?status=failed"));
+    expect(screen.queryByRole("button", { name: "Clear" })).toBeNull();
+    expect(api.made("GET", /^\/api\/runs\?/).map((c) => c.url).at(-1)).toBe("/api/runs?status=failed&limit=100");
+  });
+
+  it("names the request by the end of its id until a row tells its number, and says no run matches when the list is empty", async () => {
+    listed = [];
+    renderPage("/runs?merge_request_id=0192-abcdef12");
+    expect(await screen.findByText("No runs match.")).not.toBeNull();
+    expect(screen.getByText("abcdef12")).not.toBeNull();
   });
 });

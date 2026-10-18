@@ -157,20 +157,37 @@ export function CheckboxField({
   onChange,
   label,
   hint,
+  errors = [],
+  role,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   label: string;
   hint?: string;
+  errors?: string[];
+  /** "switch" for a setting that is on or off; a plain checkbox otherwise. */
+  role?: "switch";
 }) {
   const id = useId();
   return (
-    <div className="flex items-start gap-2">
-      <input id={id} type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="mt-0.5 size-4 rounded border-zinc-300 accent-zinc-900 dark:accent-zinc-100" />
-      <label htmlFor={id} className="text-sm">
-        <span className="font-medium">{label}</span>
-        {hint ? <span className="block text-xs text-zinc-500">{hint}</span> : null}
-      </label>
+    <div>
+      <div className="flex items-start gap-2">
+        <input
+          id={id}
+          type="checkbox"
+          role={role}
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          aria-invalid={errors.length ? true : undefined}
+          aria-describedby={errors.length ? `${id}-err` : undefined}
+          className="mt-0.5 size-4 rounded border-zinc-300 accent-zinc-900 dark:accent-zinc-100"
+        />
+        <label htmlFor={id} className="text-sm">
+          <span className="font-medium">{label}</span>
+          {hint ? <span className="block text-xs text-zinc-500">{hint}</span> : null}
+        </label>
+      </div>
+      <FieldErrors id={`${id}-err`} errors={errors} />
     </div>
   );
 }

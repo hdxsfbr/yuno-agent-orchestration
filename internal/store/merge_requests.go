@@ -109,6 +109,74 @@ func MergeRequestByRun(ctx context.Context, q Querier, runID string) (*MergeRequ
 	return mr, err
 }
 
+// MergeRequestByNumber returns the project's record with the provider's number (the
+// unique (project_id, number) pair of rule 1), or nil when the project has none: the
+// answer shape of MergeRequestByRun, so a missing record is not an error. The Chief of
+// Staff resolves the number or URL a person gave against it (DESIGN 5.22 rule 8).
+func MergeRequestByNumber(ctx context.Context, q Querier, projectID string, number int64) (*MergeRequest, error) {
+	rows, err := q.Query(ctx, `SELECT `+mergeRequestColumnList+` FROM merge_requests WHERE project_id=$1 AND number=$2`,
+		projectID, number)
+	if err != nil {
+		return nil, err
+	}
+	mr, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[MergeRequest])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return mr, err
+}
+
+// ProjectNameAny returns the name of a project, deleted or not (a soft-deleted project
+// keeps its row and its name, DESIGN 5.17), or ErrNotFound when there is no such row.
+// A refusal that says which project a merge request belongs to reads it (DESIGN 5.22
+// rule 1), since the record outlives the project's deletion.
+func ProjectNameAny(ctx context.Context, q Querier, id string) (string, error) {
+	var name string
+	err := q.QueryRow(ctx, `SELECT name FROM projects WHERE id=$1`, id).Scan(&name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return name, err
+}
+
+// liveRunStatuses are the statuses of a live run, the ones the two live-run indexes of
+// migration 0013 hold (DESIGN 5.22 units).
+const liveRunStatuses = `('queued', 'running', 'waiting_approval')`
+
+// LiveRunForMergeRequest returns the live run (queued, running or waiting for an
+// approval) that names the merge request record, the one runs_merge_request_live_idx
+// allows at most once; ErrNotFound when no run does. A refusal that says which run is
+// updating the request reads it (DESIGN 5.22 rule 1, 5.21 rule 3).
+func LiveRunForMergeRequest(ctx context.Context, q Querier, mrID string) (*Run, error) {
+	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE merge_request_id=$1 AND status IN `+liveRunStatuses+`
+		ORDER BY created_at LIMIT 1`, mrID)
+	if err != nil {
+		return nil, err
+	}
+	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
+}
+
+// LiveRunForTrigger returns the live run of a trigger reference (GetRunByTrigger for a
+// run that has not ended): the run runs_issue_live_idx allows at most once per issue,
+// trigger "issue" and ref "<project id>#<n>" (DESIGN 5.23 rule 3). ErrNotFound when
+// none is live. The oldest live run answers if the trigger has several.
+func LiveRunForTrigger(ctx context.Context, q Querier, trigger, ref string) (*Run, error) {
+	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE trigger=$1 AND trigger_ref=$2
+		AND status IN `+liveRunStatuses+` ORDER BY created_at LIMIT 1`, trigger, ref)
+	if err != nil {
+		return nil, err
+	}
+	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
+}
+
 // LockRunMergeRequest takes a transaction-scoped advisory lock on the run's merge
 // request, so two calls of one run that carry different idempotency keys cannot both
 // find no record and open two requests (rule 2: never a second request). q must be a
@@ -247,17 +315,24 @@ func MarkMergeRequestReported(ctx context.Context, q Querier, id, state string) 
 	return tag.RowsAffected() == 1, nil
 }
 
-// FillRunMergeRequests sets MergeRequest on each run that has a record (rule 6), the way
-// FillRunParticipants sets the agent names.
+// FillRunMergeRequests sets MergeRequest on each run that has one (rule 6), the way
+// FillRunParticipants sets the agent names: the record the run names (runs.merge_request_id)
+// when it names one, else the record the run opened (merge_requests.run_id), so a header,
+// a card and run_status need no second lookup (DESIGN 5.22 rule 1, 5.20 rule 6 amended).
 func FillRunMergeRequests(ctx context.Context, q Querier, runs []Run) error {
 	if len(runs) == 0 {
 		return nil
 	}
 	ids := make([]string, len(runs))
+	var named []string
 	for i := range runs {
 		ids[i] = runs[i].ID
+		if runs[i].MergeRequestID != nil {
+			named = append(named, *runs[i].MergeRequestID)
+		}
 	}
-	rows, err := q.Query(ctx, `SELECT `+mergeRequestColumnList+` FROM merge_requests WHERE run_id = ANY($1)`, ids)
+	rows, err := q.Query(ctx, `SELECT `+mergeRequestColumnList+` FROM merge_requests WHERE run_id = ANY($1) OR id = ANY($2)`,
+		ids, named)
 	if err != nil {
 		return err
 	}
@@ -266,11 +341,20 @@ func FillRunMergeRequests(ctx context.Context, q Querier, runs []Run) error {
 		return err
 	}
 	byRun := make(map[string]*MergeRequest, len(list))
+	byID := make(map[string]*MergeRequest, len(list))
 	for i := range list {
 		byRun[list[i].RunID] = &list[i]
+		byID[list[i].ID] = &list[i]
 	}
 	for i := range runs {
 		runs[i].MergeRequest = byRun[runs[i].ID]
+		if runs[i].MergeRequestID != nil {
+			// The foreign key sets the column null with the record, so a named record
+			// is there; the run's own would only fill in if a race had lost it.
+			if mr := byID[*runs[i].MergeRequestID]; mr != nil {
+				runs[i].MergeRequest = mr
+			}
+		}
 	}
 	return nil
 }

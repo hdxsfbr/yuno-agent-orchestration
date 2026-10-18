@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createSSEParser, delegatedConversationId, isDelegatedRun, type SSEEvent } from "./api";
+import { projectSettings } from "@/test/fixtures";
+import { createSSEParser, delegatedConversationId, isDelegatedRun, issueRef, type SSEEvent } from "./api";
 
 describe("createSSEParser", () => {
   it("parses events split across chunks and ignores comments", () => {
@@ -53,5 +54,39 @@ describe("isDelegatedRun", () => {
     expect(isDelegatedRun({ trigger: "channel", trigger_ref: "telegram:1001" })).toBe(false);
     expect(isDelegatedRun({ trigger: "channel", trigger_ref: "conversation:" })).toBe(false);
     expect(isDelegatedRun({ trigger: "manual" })).toBe(false);
+  });
+});
+
+describe("issueRef", () => {
+  const issue = (ref: string | undefined, project = projectSettings()) => ({ trigger: "issue" as const, trigger_ref: ref, project });
+
+  it("reads the issue number from the reference and builds the GitLab address from the project's snapshot", () => {
+    expect(issueRef(issue("p1#7"))).toEqual({ number: 7, url: "https://gitlab.com/andrebatista/yuno-playground/-/issues/7" });
+  });
+
+  it("builds the GitHub address without the dash", () => {
+    const project = projectSettings({ provider: "github", repo_url: "https://github.com/acme/docs.git" });
+    expect(issueRef(issue("0192-ab#31", project))).toEqual({ number: 31, url: "https://github.com/acme/docs/issues/31" });
+  });
+
+  it("takes the repository address with or without .git and with a trailing slash", () => {
+    expect(issueRef(issue("p1#7", projectSettings({ repo_url: "https://gitlab.com/g/p" })))?.url).toBe("https://gitlab.com/g/p/-/issues/7");
+    expect(issueRef(issue("p1#7", projectSettings({ repo_url: "https://gitlab.com/g/p.git/" })))?.url).toBe("https://gitlab.com/g/p/-/issues/7");
+    expect(issueRef(issue("p1#7", projectSettings({ repo_url: "https://gitlab.example.com/a/b/c.git" })))?.url).toBe("https://gitlab.example.com/a/b/c/-/issues/7");
+  });
+
+  it("has the number but no address for a run that kept no snapshot of its project", () => {
+    expect(issueRef({ trigger: "issue", trigger_ref: "p1#7" })).toEqual({ number: 7 });
+  });
+
+  it("is undefined for a run that did not come from an issue", () => {
+    expect(issueRef({ trigger: "manual", trigger_ref: "p1#7", project: projectSettings() })).toBeUndefined();
+    expect(issueRef({ trigger: "channel", trigger_ref: "conversation:c1" })).toBeUndefined();
+  });
+
+  it("is undefined for a reference that carries no issue number", () => {
+    for (const ref of [undefined, "", "p1", "p1#", "#7", "p1#seven", "p1#0", "p1#7x", "p1#99999999999999999999"]) {
+      expect(issueRef(issue(ref))).toBeUndefined();
+    }
   });
 });

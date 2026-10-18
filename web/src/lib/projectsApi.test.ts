@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { installFakeApi } from "@/test/fakeApi";
-import { project, projectFact } from "@/test/fixtures";
-import { checkProject, createProject, deleteProject, deleteProjectFact, getProject, listProjectFacts, listProjects, listRuns, updateProject, type ProjectInput } from "./api";
+import { apiError, installFakeApi } from "@/test/fakeApi";
+import { intake, project, projectFact } from "@/test/fixtures";
+import { ApiError, checkProject, createProject, deleteProject, deleteProjectFact, getProject, listProjectFacts, listProjects, listRuns, pollIntake, updateProject, type ProjectInput } from "./api";
 
 let fake: ReturnType<typeof installFakeApi>;
 
@@ -97,5 +97,48 @@ describe("listing a project's runs", () => {
     fake.on("GET", /^\/api\/runs\?/, () => []);
     await listRuns({ status: "failed" });
     expect(fake.made("GET", /^\/api\/runs\?/).map((c) => c.url)).toEqual(["/api/runs?status=failed&limit=100"]);
+  });
+});
+
+describe("listing runs by trigger and merge request", () => {
+  it("names the trigger and the merge request record in the query, between the project and the limit", async () => {
+    fake.on("GET", /^\/api\/runs\?/, () => []);
+    await listRuns({ status: "failed", project_id: "p1", trigger: "issue", merge_request_id: "mr 1", limit: 200 });
+    await listRuns({ trigger: "schedule" });
+    await listRuns({ merge_request_id: "mr1" });
+    expect(fake.made("GET", /^\/api\/runs\?/).map((c) => c.url)).toEqual([
+      "/api/runs?status=failed&project_id=p1&trigger=issue&merge_request_id=mr+1&limit=200",
+      "/api/runs?trigger=schedule&limit=100",
+      "/api/runs?merge_request_id=mr1&limit=100",
+    ]);
+  });
+});
+
+describe("issue intake", () => {
+  it("sends the intake settings with the project and returns them with what the last poll did", async () => {
+    const settings = { enabled: true, label: "yuno", workflow_id: "w1" };
+    fake.on("PUT", "/api/projects/p1", (r) => project({ intake: intake({ polled_at: "2026-10-18T09:00:00Z", last_error: "intake: no workflow", ...(r.body as ProjectInput).intake }) }));
+    const saved = await updateProject("p1", { name: "n", repo_url: "https://gitlab.com/g/p", intake: settings });
+    expect(fake.made("PUT", "/api/projects/p1")[0].body).toMatchObject({ intake: settings });
+    expect(saved.intake).toMatchObject({ enabled: true, label: "yuno", workflow_name: "Dev pipeline (ours)", polled_at: "2026-10-18T09:00:00Z", last_error: "intake: no workflow" });
+  });
+
+  it("leaves intake out of the body when the form did not send it", async () => {
+    fake.on("PUT", "/api/projects/p1", () => project());
+    await updateProject("p1", { name: "n", repo_url: "https://gitlab.com/g/p" });
+    expect(fake.made("PUT", "/api/projects/p1")[0].body).not.toHaveProperty("intake");
+  });
+
+  it("polls with POST and no body, encoding the id, and returns what the pass did", async () => {
+    fake.on("POST", "/api/projects/a%2Fb/intake/poll", () => ({ taken: 2, closed: 1 }));
+    expect(await pollIntake("a/b")).toEqual({ taken: 2, closed: 1 });
+    expect(fake.made("POST", "/api/projects/a%2Fb/intake/poll")[0].body).toBeUndefined();
+  });
+
+  it("raises the 409 of a project whose intake is off with the server's code and message", async () => {
+    fake.on("POST", "/api/projects/p1/intake/poll", () => apiError(409, "intake_disabled", "issue intake is off for this project"));
+    const err = await pollIntake("p1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ status: 409, code: "intake_disabled", message: "issue intake is off for this project" });
   });
 });

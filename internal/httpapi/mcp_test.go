@@ -81,7 +81,7 @@ func TestMCPListsTools(t *testing.T) {
 	}
 	slices.Sort(names)
 	want := []string{"delegate_task", "deploy_release", "finish", "http_fetch", "list_agents", "list_projects", "list_workflows",
-		"memory_recall", "memory_save", "open_merge_request", "run_status"}
+		"memory_recall", "memory_save", "open_merge_request", "read_merge_request", "run_status"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("tools = %v, want %v", names, want)
 	}

@@ -350,3 +350,25 @@ refused) and one it decided (the shipped Coder and Reviewer get the memory tools
 "As built" paragraphs of 5.18 to 5.21 record the interpretations. Two Sonnet 5.5
 reviewer agents reviewed the backend and the API, store and UI separately; the
 coordinator ran the full suite, lint and the fix pass.
+
+**Designing and building wave 9 (2026-10-18).** A side session (Claude Fable 5.1 as the
+coordinator) read the roadmap entries, the settled decisions, the wave 8 design sections,
+briefs and review, and the code the two features touch, then wrote DESIGN 5.22 (iterate
+on an open merge request) and 5.23 (issue intake) in full with the design-first template,
+amended the older rules they change with "since 5.22/5.23" notes, recorded the product
+decisions it settled beyond Andre's (D-049 to D-053), extended `api/openapi.yaml` to
+0.6.0 with the wave 9 contract marked `x-planned`, and wrote one plan and four briefs
+under `docs/briefs/wave9/`, stopping on the two lines Andre had to answer. Andre answered
+both with the recommended answer (D-054, D-055) and asked that every subagent be Sonnet
+5.5 to spare the stronger model's tokens, so the coordinator wrote the prerequisites as a
+fifth brief and had a Sonnet agent land them (migration 0013, the shared types and store
+plumbing, the config, the branch guard in the git helpers, the route stub), verified the
+whole Go suite itself in a throwaway container with its own test database, and launched
+four Sonnet agents on disjoint files with one test database each: the engine side of the
+iteration (queue-time checks, the branch clone, the protocol paragraph, schedules, the
+report), the tools side (`open_merge_request` onto a named request, `read_merge_request`,
+the Chief's `merge_request` argument, prompts and the template), the intake (settings,
+provider issue client, the poll and closer loop, the API), and the UI for both. The
+coordinator did the integration, the full suite and lint, the review filtering and the
+derived docs; the "As built" paragraphs of 5.22 and 5.23 record the agents'
+interpretations.

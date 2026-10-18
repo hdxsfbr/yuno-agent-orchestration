@@ -107,7 +107,7 @@ func TestSeedIsIdempotent(t *testing.T) {
 }
 
 // DESIGN 5.15 rule 12: the Chief of Staff is seeded with the coordinator's role, model,
-// the six chat tools and no exec, memory on, and the coordinator prompt.
+// the chat tools and no exec, memory on, and the coordinator prompt.
 func TestSeedCreatesChief(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
@@ -119,7 +119,7 @@ func TestSeedCreatesChief(t *testing.T) {
 		!chief.MemoryPolicy.Enabled || !strings.HasPrefix(chief.ChatToken, "c_") {
 		t.Fatalf("chief = %+v", chief)
 	}
-	want := []string{"delegate_task", "list_agents", "list_projects", "list_workflows", "memory_recall", "memory_save", "run_status"}
+	want := []string{"delegate_task", "list_agents", "list_projects", "list_workflows", "memory_recall", "memory_save", "read_merge_request", "run_status"}
 	got := slices.Sorted(slices.Values(chief.ToolAllowlist))
 	if !slices.Equal(got, want) || slices.Contains(chief.ToolAllowlist, "exec") {
 		t.Fatalf("chief tools = %v", chief.ToolAllowlist)

@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { ApiError, cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, retryRun, type Run, type ToolCall } from "@/lib/api";
+import { ApiError, cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, issueRef, retryRun, type Run, type ToolCall } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, shortId } from "@/lib/format";
+import { requestNoun, requestRef } from "@/lib/mergeRequest";
 import { toolchainLabel } from "@/lib/project";
 import { canRetry, repeatsSideEffects } from "@/lib/runRetry";
 import type { Connection } from "@/lib/useEventStream";
@@ -23,8 +24,18 @@ function Item({ label, children, title }: { label: string; children: ReactNode; 
   );
 }
 
-/** The Trigger value: where a delegated run came from, or the trigger and its reference. */
+/** The Trigger value: where a delegated run came from, the issue an issue run came from, or the trigger and its reference. */
 function TriggerValue({ run }: { run: Run }) {
+  const issue = issueRef(run);
+  if (issue) {
+    return issue.url ? (
+      <a href={issue.url} target="_blank" rel="noreferrer" className="underline" title="Open the issue on the provider">
+        issue #{issue.number}
+      </a>
+    ) : (
+      <>issue #{issue.number}</>
+    );
+  }
   if (isDelegatedRun(run)) {
     const conversation = delegatedConversationId(run);
     return conversation ? (
@@ -40,6 +51,17 @@ function TriggerValue({ run }: { run: Run }) {
       {run.trigger}
       {run.trigger_ref ? <span className="ml-1.5 font-mono text-xs font-normal text-zinc-500">{run.trigger_ref}</span> : null}
     </>
+  );
+}
+
+/** The request a run updates, as a link to the provider next to the project: "Updates merge request !12", "Updates pull request #12" on GitHub. */
+function UpdatedRequest({ run }: { run: Run }) {
+  const mr = run.merge_request;
+  if (!run.merge_request_id || !mr || mr.id !== run.merge_request_id) return null;
+  return (
+    <a href={mr.url} target="_blank" rel="noreferrer" className="ml-3 whitespace-nowrap font-normal underline" title={mr.title}>
+      Updates {requestNoun(mr.provider).toLowerCase()} {requestRef(mr)}
+    </a>
   );
 }
 
@@ -138,6 +160,7 @@ export default function RunHeader({ run, connection, now, toolCalls = [], onRunC
           {hasProject(run) ? (
             <Item label="Project">
               <ProjectLink run={run} className="underline" />
+              <UpdatedRequest run={run} />
             </Item>
           ) : null}
           {run.current_node && !terminal ? (

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"yuno/internal/obs"
+	"yuno/internal/project"
 	"yuno/internal/store"
 )
 
@@ -29,8 +31,10 @@ const (
 )
 
 // ChatToolNames are the tools callable with a chat token (DESIGN 5.15 rule 2, 5.17 rule
-// 8), sorted. The registry marks the same tools Chat; a test keeps the two in step.
-var ChatToolNames = []string{DelegateTaskName, ListAgentsName, ListProjectsName, ListWorkflowsName, MemoryRecallName, MemorySaveName, RunStatusName}
+// 8, 5.22 rule 6), sorted. The registry marks the same tools Chat; a test keeps the two
+// in step.
+var ChatToolNames = []string{DelegateTaskName, ListAgentsName, ListProjectsName, ListWorkflowsName, MemoryRecallName, MemorySaveName,
+	ReadMergeRequestName, RunStatusName}
 
 // IsChatTool reports whether name (with or without the platform prefix) is
 // chat-capable.
@@ -69,7 +73,8 @@ var delegateTaskSchema = json.RawMessage(`{
     "task": {"type": "string", "description": "With agent_name: the complete, self-contained task. The agent sees nothing of your conversation, so include every detail it needs."},
     "workflow_name": {"type": "string", "description": "The name of the workflow to run, as list_workflows shows it."},
     "input": {"type": "object", "description": "With workflow_name: the workflow's input, matching the input_schema list_workflows shows for it."},
-    "project": {"type": "string", "description": "The name of the project (a repository) the run works on, as list_projects shows it. Required for a workflow that works on a project repository, not accepted for one that does not; optional with agent_name."}
+    "project": {"type": "string", "description": "The name of the project (a repository) the run works on, as list_projects shows it. Required for a workflow that works on a project repository, not accepted for one that does not; optional with agent_name."},
+    "merge_request": {"type": "string", "description": "An existing merge request or pull request of the project to change, fix or continue instead of opening a new one: its number with or without ! or # (12, !12, #12) or its link. The run works on that request's branch. Needs project, the one the request belongs to."}
   },
   "additionalProperties": false
 }`)
@@ -96,6 +101,10 @@ type Delegation struct {
 	// TriggerRef is "conversation:<id>" for a call made in a conversation, "" otherwise
 	// (DESIGN 5.15 rule 6).
 	TriggerRef string
+	// MergeRequestID is the record of the open merge request the run updates (DESIGN 5.22
+	// rule 8): the store's id, resolved from the number or link the person gave; "" for a
+	// run that works from the default branch.
+	MergeRequestID string
 }
 
 // Delegator queues a delegated run with Trigger = channel and default limits: the
@@ -295,6 +304,7 @@ type delegateInput struct {
 	WorkflowName *string         `json:"workflow_name"`
 	Input        json.RawMessage `json:"input"`
 	Project      *string         `json:"project"`
+	MergeRequest *string         `json:"merge_request"`
 }
 
 // errDelegateShape is the model's message for any input that is not exactly one of the
@@ -312,8 +322,10 @@ func NewDelegateTask(d ChiefDeps) *Tool {
 		Name: DelegateTaskName,
 		Description: "Hand work to another agent or a workflow as a platform run, which the operator can follow in " +
 			"the UI. Give agent_name with a complete, self-contained task, or workflow_name with an input that " +
-			"matches its input_schema. Returns the run id, its status and a link; when the run ends, its outcome " +
-			"arrives in your conversation as a message that starts with [platform].",
+			"matches its input_schema. To change, fix or continue an existing merge request instead of opening a new " +
+			"one, also give merge_request with the project it belongs to. Returns the run id, its status and a " +
+			"link; when the run ends, its outcome arrives in your conversation as a message that starts with " +
+			"[platform].",
 		InputSchema: delegateTaskSchema,
 		Risk:        RiskComputational,
 		Hits:        HitsPostgres,
@@ -351,6 +363,12 @@ func NewDelegateTask(d ChiefDeps) *Tool {
 				}
 				req.WorkflowID = wf.ID
 				if req.ProjectID, err = projectForDelegation(ctx, d.Pool, in.Project, wf); err != nil {
+					return Result{}, err
+				}
+			}
+			if in.MergeRequest != nil && strings.TrimSpace(*in.MergeRequest) != "" {
+				var err error
+				if req.MergeRequestID, err = mergeRequestForDelegation(ctx, d.Pool, req.ProjectID, *in.MergeRequest); err != nil {
 					return Result{}, err
 				}
 			}
@@ -429,19 +447,74 @@ func projectForDelegation(ctx context.Context, pool *pgxpool.Pool, name *string,
 		}
 		return "", &ModelError{Message: "workflow " + wfName + " needs a project; choose one of: " + strings.Join(names, ", ")}
 	}
-	want := strings.TrimSpace(*name)
-	for _, p := range projects {
-		if strings.EqualFold(strings.TrimSpace(p.Name), want) {
-			return p.ID, nil
+	p, err := matchProject(projects, *name)
+	if err != nil {
+		return "", err
+	}
+	return p.ID, nil
+}
+
+// matchProject finds the project called name among the live projects (trimmed, ignoring
+// case); the model's error when there is none lists the live ones (DESIGN 5.17 rule 8).
+func matchProject(projects []store.Project, name string) (*store.Project, error) {
+	want := strings.TrimSpace(name)
+	for i := range projects {
+		if strings.EqualFold(strings.TrimSpace(projects[i].Name), want) {
+			return &projects[i], nil
 		}
 	}
 	msg := "no project named " + want
-	if len(names) > 0 {
+	if len(projects) > 0 {
+		names := make([]string, 0, len(projects))
+		for _, p := range projects {
+			names = append(names, p.Name)
+		}
 		msg += "; choose one of: " + strings.Join(names, ", ")
 	} else {
 		msg += "; none exists yet"
 	}
-	return "", &ModelError{Message: msg}
+	return nil, &ModelError{Message: msg}
+}
+
+// projectByName is matchProject over the live projects of the database: the project
+// delegate_task and read_merge_request name (DESIGN 5.17 rule 8, 5.22 rule 6).
+func projectByName(ctx context.Context, pool *pgxpool.Pool, name string) (*store.Project, error) {
+	projects, err := store.ListProjects(ctx, pool)
+	if err != nil {
+		return nil, err
+	}
+	return matchProject(projects, name)
+}
+
+// mergeRequestForDelegation resolves delegate_task's merge_request (DESIGN 5.22 rule 8):
+// a number or a link, against the records of the named project by number. It answers the
+// record's id. The model's errors: no project to resolve against, a form that is neither
+// number nor link, no record with that number (the provider's own noun and sigil), and a
+// record that is merged or closed (D-044 refuses at queue time; the engine's refusals of
+// rule 1 follow at the trigger).
+func mergeRequestForDelegation(ctx context.Context, pool *pgxpool.Pool, projectID, raw string) (string, error) {
+	if projectID == "" {
+		return "", &ModelError{Message: "merge_request needs a project"}
+	}
+	number, _, ok := parseRequestNumber(raw)
+	if !ok {
+		return "", &ModelError{Message: "merge_request must be a merge request number or URL"}
+	}
+	rec, err := store.MergeRequestByNumber(ctx, pool, projectID, number)
+	if err != nil {
+		return "", err
+	}
+	if rec == nil {
+		p, err := store.GetProject(ctx, pool, projectID)
+		if err != nil {
+			return "", err
+		}
+		return "", &ModelError{Message: "no " + requestLabel(p.Provider, number) + " on project " + p.Name}
+	}
+	if rec.State != store.MergeRequestOpen {
+		return "", &ModelError{Message: rec.Label() + " is " + rec.State}
+	}
+	return rec.ID, nil
 }
 
 // NewListProjects builds list_projects (DESIGN 5.17 rule 8): every live project with
@@ -454,8 +527,9 @@ func NewListProjects(pool *pgxpool.Pool) *Tool {
 		Description: "List the projects (git repositories) the platform can work on: name, repository, provider, " +
 			"default branch, whether the sandbox has network access, and the last run on each; a project with a " +
 			"budget cap also shows the cap and what it has spent today and this month, since new runs on it are " +
-			"refused once a cap is reached. Call it to find the project a person names, then pass its name as " +
-			"project to delegate_task; a workflow that works on a project repository needs one.",
+			"refused once a cap is reached; intake says whether labelled issues become runs on it and which label. " +
+			"Call it to find the project a person names, then pass its name as project to delegate_task; a " +
+			"workflow that works on a project repository needs one.",
 		InputSchema: listAgentsSchema,
 		Risk:        RiskReadOnly,
 		Hits:        HitsPostgres,
@@ -484,6 +558,11 @@ func NewListProjects(pool *pgxpool.Pool) *Tool {
 				Toolchain  *string `json:"toolchain,omitempty"`
 				FinishedAt *string `json:"finished_at,omitempty"`
 			}
+			// DESIGN 5.23 rule 1: whether labelled issues become runs on the project.
+			type intakeView struct {
+				Enabled bool   `json:"enabled"`
+				Label   string `json:"label"`
+			}
 			type projectView struct {
 				Name           string      `json:"name"`
 				Repository     string      `json:"repository"`
@@ -492,11 +571,12 @@ func NewListProjects(pool *pgxpool.Pool) *Tool {
 				SandboxNetwork bool        `json:"sandbox_network"`
 				LastRun        *lastRun    `json:"last_run"`
 				Budget         *budgetView `json:"budget,omitempty"`
+				Intake         intakeView  `json:"intake"`
 			}
 			out := []projectView{}
 			for _, p := range projects {
 				v := projectView{Name: p.Name, Repository: p.RepoURL, Provider: p.Provider, DefaultBranch: p.DefaultBranch, SandboxNetwork: p.SandboxNetwork,
-					Budget: budgetOf(&p)}
+					Budget: budgetOf(&p), Intake: intakeView{Enabled: p.IntakeEnabled, Label: p.IntakeLabel}}
 				if r, ok := latest[p.ID]; ok {
 					v.LastRun = &lastRun{RunID: r.ID, Status: r.Status, Toolchain: r.Toolchain}
 					if r.FinishedAt != nil {
@@ -580,7 +660,8 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
 	return &Tool{
 		Name: RunStatusName,
 		Description: "Check on a platform run: its status, timing, steps, tool calls, cost, its final state when it " +
-			"has ended, the failure reason if it failed, and the approval it waits for, if any.",
+			"has ended, the failure reason if it failed, the approval it waits for, if any, the merge request it " +
+			"opened or updates, and the issue it came from.",
 		InputSchema: runStatusSchema,
 		Risk:        RiskReadOnly,
 		Hits:        HitsPostgres,
@@ -628,13 +709,19 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
 			if run.Project != nil {
 				out["project"] = run.Project.Name
 			}
-			// DESIGN 5.20 rule 6: the run's merge request record; 5.21 rule 7: its retries.
-			if mr, err := store.MergeRequestByRun(ctx, pool, run.ID); err != nil {
+			// DESIGN 5.20 rule 6: the run's merge request record, the one it names (role
+			// "updates", 5.22 rule 8) else the one it opened (role "opened"); 5.21 rule 7:
+			// its retries.
+			if mr, role, err := runRequest(ctx, pool, run); err != nil {
 				return Result{}, err
 			} else if mr != nil {
 				out["merge_request_url"] = mr.URL
 				out["merge_request"] = map[string]any{"number": mr.Number, "url": mr.URL, "state": mr.State,
-					"ci_status": mr.CIStatus, "unresolved_threads": mr.UnresolvedThreads}
+					"ci_status": mr.CIStatus, "unresolved_threads": mr.UnresolvedThreads, "role": role}
+			}
+			// DESIGN 5.23 rule 8: the issue an intake run came from.
+			if issue := issueOf(run); issue != nil {
+				out["issue"] = issue
 			}
 			out["retries"] = run.Retries
 			if run.Status == store.RunWaitingApproval {
@@ -649,6 +736,45 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
 			return JSONResult(out), nil
 		},
 	}
+}
+
+// runRequest is the merge request record run_status shows for a run (DESIGN 5.22 rule 8):
+// the record the run names (role "updates"), else the one it opened (role "opened"); nil
+// when it has neither.
+func runRequest(ctx context.Context, pool *pgxpool.Pool, run *store.Run) (mr *store.MergeRequest, role string, err error) {
+	if run.MergeRequestID != nil && *run.MergeRequestID != "" {
+		mr, err = store.GetMergeRequest(ctx, pool, *run.MergeRequestID)
+		if err == nil {
+			return mr, "updates", nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return nil, "", err
+		}
+	}
+	mr, err = store.MergeRequestByRun(ctx, pool, run.ID)
+	return mr, "opened", err
+}
+
+// issueOf is run_status's issue of an intake run (DESIGN 5.23 rule 8): its number, from
+// the run's trigger_ref "<project id>#<n>", and its link from the project's snapshot; nil
+// for any other run. A snapshot the run lacks leaves the number alone.
+func issueOf(run *store.Run) map[string]any {
+	if run.Trigger != store.TriggerIssue || run.TriggerRef == nil {
+		return nil
+	}
+	i := strings.LastIndexByte(*run.TriggerRef, '#')
+	if i < 0 {
+		return nil
+	}
+	n, err := strconv.ParseInt((*run.TriggerRef)[i+1:], 10, 64)
+	if err != nil || n <= 0 {
+		return nil
+	}
+	issue := map[string]any{"number": n}
+	if run.Project != nil {
+		issue["url"] = project.IssueURL(*run.Project, n)
+	}
+	return issue
 }
 
 // capJSON returns raw as JSON when it fits in max bytes, else its text cut to max with
@@ -675,11 +801,31 @@ func describeDelegation(input json.RawMessage) string {
 	if in.Project != nil && strings.TrimSpace(*in.Project) != "" {
 		on = " on project " + strings.TrimSpace(*in.Project)
 	}
+	var sentence string
 	switch {
 	case in.AgentName != nil && in.Task != nil:
-		return fmt.Sprintf("Delegate to %s%s: %s", strings.TrimSpace(*in.AgentName), on, obs.Truncate(*in.Task, 300))
+		sentence = fmt.Sprintf("Delegate to %s%s: %s", strings.TrimSpace(*in.AgentName), on, obs.Truncate(*in.Task, 300))
 	case in.WorkflowName != nil:
-		return "Run the workflow " + strings.TrimSpace(*in.WorkflowName) + on
+		sentence = "Run the workflow " + strings.TrimSpace(*in.WorkflowName) + on
+	default:
+		return ""
 	}
-	return ""
+	// DESIGN 5.22 rule 8: the request the run updates. The sentence is built from the
+	// input alone, so the sigil is the one the person wrote (or the link's): "!" for a
+	// merge request, "#" for a pull request, "!" for a bare number.
+	if in.MergeRequest != nil {
+		if n, sigil, ok := parseRequestNumber(*in.MergeRequest); ok {
+			sentence += ", updating " + inputRequestLabel(n, sigil)
+		}
+	}
+	return sentence
+}
+
+// inputRequestLabel names request n from the sigil its input carried: "pull request #n"
+// for "#", "merge request !n" otherwise.
+func inputRequestLabel(n int64, sigil string) string {
+	if sigil == "#" {
+		return requestLabel("github", n)
+	}
+	return requestLabel("gitlab", n)
 }

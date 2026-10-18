@@ -10,6 +10,7 @@ import { Card } from "@/components/Card";
 import { ConfirmDialog } from "@/components/Modal";
 import BudgetCard from "@/components/project/BudgetCard";
 import { CheckNote, useProjectChecks } from "@/components/project/CheckResult";
+import IntakeCard from "@/components/project/IntakeCard";
 import ProjectDialog from "@/components/project/ProjectDialog";
 import ProjectMergeRequests from "@/components/project/ProjectMergeRequests";
 import ProjectNotes from "@/components/project/ProjectNotes";
@@ -120,7 +121,10 @@ export default function ProjectPage() {
         </Card>
       </section>
 
-      <BudgetCard project={project} />
+      <div className="grid items-start gap-5 md:grid-cols-2">
+        <BudgetCard project={project} />
+        <IntakeCard project={project} />
+      </div>
 
       <section aria-labelledby="project-instructions">
         <h2 id="project-instructions" className="mb-2 text-base font-semibold">

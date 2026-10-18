@@ -99,8 +99,13 @@ so the Deployer gets `open_merge_request`, the Chief of Staff gets `list_project
 its new prompt, the Coder and the Reviewer get the memory tools and the prompt lines
 about project notes (wave 8), and the Dev pipeline opts into projects. The reset keeps
 memory settings, so after it enable memory on the Coder's and the Reviewer's agent
-pages once. `BUDGET_TICK` and `MERGE_REQUEST_SYNC_INTERVAL` (wave 8) have defaults and
-need no entry in `.env`.
+pages once. `BUDGET_TICK` and `MERGE_REQUEST_SYNC_INTERVAL` (wave 8) and
+`INTAKE_POLL_INTERVAL` (wave 9, how often projects with issue intake enabled are polled)
+have defaults and need no entry in `.env`. After the wave 9 deploy run `make seed-reset`
+once more: the Coder and the Reviewer gain `read_merge_request` and the prompt lines
+about a merge request the run updates, the Deployer the update wording, the Chief the
+`merge_request` argument and the intake sentence, and the Dev pipeline's deployer task
+names both statuses.
 
 ## Deploying from GitLab CI
 

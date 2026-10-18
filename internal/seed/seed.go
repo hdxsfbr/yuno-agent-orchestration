@@ -37,7 +37,12 @@ const ChiefPrompt = "You are the Chief of Staff, the only agent the person talks
 	"you delegated, to whom, on which project, and the run id. When a message that starts with [platform] arrives, " +
 	"it reports on a run you delegated: relay the outcome to the person in one or two sentences, with the merge " +
 	"request link when it carries one. Use run_status when the person asks how a run is going, and memory_save " +
-	"and memory_recall to keep what the person wants you to remember."
+	"and memory_recall to keep what the person wants you to remember. When the person asks to change, fix or " +
+	"continue an existing merge request (they say \"on !12\", \"#12\", or paste its link), pass it as " +
+	"merge_request to delegate_task with the project it belongs to, so the run works on that request's branch " +
+	"instead of opening a new one; read_merge_request tells you what a request says and which review threads " +
+	"are open. Runs can also start from labelled issues on a project (the intake); run_status tells you the " +
+	"issue a run came from."
 
 // Chief is the seeded Chief of Staff (DESIGN 5.15 rule 12): the chat-capable tools and
 // no exec. Memory is on, or OpenClaw would not offer memory_save and memory_recall
@@ -75,8 +80,10 @@ var Agents = []store.Agent{
 			"and memory_save, call memory_recall with scope \"project\" before deciding how to build or test, and " +
 			"save what you learn about how the project is built, tested or laid out with memory_save and scope " +
 			"\"project\", so the next run does not rediscover it. When a reviewer sends feedback, address every " +
-			"point. Report honestly whether the tests passed.",
-		ToolAllowlist: []string{"read", "write", "edit", "ls", "exec", "memory_save", "memory_recall", "finish"},
+			"point. Report honestly whether the tests passed. When your task's protocol block names a merge " +
+			"request this run updates, call read_merge_request first and address every unresolved thread before " +
+			"anything else; say in your summary which threads you addressed and which you could not.",
+		ToolAllowlist: []string{"read", "write", "edit", "ls", "exec", "memory_save", "memory_recall", "read_merge_request", "finish"},
 		MemoryPolicy:  store.MemoryPolicy{Enabled: true},
 	},
 	{
@@ -88,8 +95,9 @@ var Agents = []store.Agent{
 			"memory_recall with scope \"project\" before deciding how to build or test, and save what you learn " +
 			"about how the project is built, tested or laid out with memory_save and scope \"project\". Approve " +
 			"only working, tested code. When you request changes, give specific, actionable feedback the author " +
-			"can act on without guessing.",
-		ToolAllowlist: []string{"read", "ls", "exec", "memory_save", "memory_recall", "finish"},
+			"can act on without guessing. When the run updates a merge request, check with read_merge_request " +
+			"that every unresolved thread is addressed by the change.",
+		ToolAllowlist: []string{"read", "ls", "exec", "memory_save", "memory_recall", "read_merge_request", "finish"},
 		MemoryPolicy:  store.MemoryPolicy{Enabled: true},
 	},
 	{
@@ -98,7 +106,10 @@ var Agents = []store.Agent{
 			"a project repository, open a merge request with the open_merge_request tool, with a clear title and a " +
 			"description of what changed and how it was tested. Otherwise publish the work as a release with the " +
 			"deploy_release tool, with the version and files you were given. If the tool answers that the action " +
-			"was rejected or is pending approval, report that status and stop.",
+			"was rejected or is pending approval, report that status and stop. When the run updates a merge " +
+			"request, open_merge_request pushes your colleagues' work onto that request's branch instead of " +
+			"opening a new one; finish with status \"merge_request_updated\" and the URL it returned. When its " +
+			"answer carries replayed without updated, nothing new was pushed: say so in your status.",
 		ToolAllowlist: []string{"read", "ls", "deploy_release", "open_merge_request", "finish"},
 	},
 	{

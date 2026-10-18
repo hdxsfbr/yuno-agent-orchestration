@@ -132,6 +132,8 @@ func TestOpenAPIConformance(t *testing.T) {
 	steps = append(steps, projectWave8ConformanceSteps(t)...)
 	steps = append(steps, mergeRequestConformanceSteps(t)...)
 	steps = append(steps, retryConformanceSteps(t, fe)...)
+	steps = append(steps, iterationConformanceSteps(t)...)
+	steps = append(steps, intakeConformanceSteps(t)...)
 	var agentID string
 	for _, st := range steps {
 		code, body := checkConformance(t, router, ts.URL, st.method, st.path, st.body, st.want < 300)
@@ -223,7 +225,7 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 		// DESIGN 5.15 (wave 5).
 		"ToolCall": {"conversation_id"},
 		"Tool":     {"chat"},
-		"Run":      {"reported_at", "toolchain", "project_id", "project", "retries", "merge_request"},
+		"Run":      {"reported_at", "toolchain", "project_id", "project", "retries", "merge_request", "merge_request_id", "checkout_sha"},
 		"Workflow": {"from_template"},
 		// DESIGN 5.17 (wave 7).
 		"ProjectSettings": {"name", "repo_url", "provider", "default_branch", "sandbox_network"},
@@ -231,16 +233,23 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 		// DESIGN 5.18 and 5.19 add the instructions and the two caps to the input, and the
 		// spend to what a project returns.
 		"ProjectInput": {"name", "repo_url", "provider", "default_branch", "sandbox_network", "description", "token",
-			"instructions", "max_cost_usd_per_day", "max_cost_usd_per_month", "spend"},
+			"instructions", "max_cost_usd_per_day", "max_cost_usd_per_month", "spend", "intake"},
 		"ProjectCheck": {"ok", "message", "default_branch", "branch_exists", "can_push", "checked_at"},
 		// DESIGN 5.18 to 5.21 (wave 8).
-		"Project":      {"instructions", "max_cost_usd_per_day", "max_cost_usd_per_month", "spend"},
+		"Project":      {"instructions", "max_cost_usd_per_day", "max_cost_usd_per_month", "spend", "intake"},
 		"ProjectSpend": {"day_usd", "month_usd", "day_until", "month_until"},
 		"ProjectFact":  {"id", "project_id", "key", "value", "agent_id", "agent_name", "source_run_id", "created_at", "updated_at", "expires_at"},
 		"MergeRequest": {"id", "project_id", "run_id", "provider", "number", "url", "source_branch", "target_branch", "title", "state",
 			"ci_status", "head_sha", "unresolved_threads", "last_sync_error", "synced_at", "reported_state", "merged_by", "created_at",
 			"updated_at", "closed_at"},
 		"RunRetry": {"limits"},
+		// DESIGN 5.22 and 5.23 (wave 9).
+		"RunCreate":          {"merge_request_id"},
+		"ScheduleInput":      {"merge_request_id"},
+		"Schedule":           {"merge_request_id", "merge_request_number"},
+		"ProjectIntakeInput": {"enabled", "label", "workflow_id"},
+		"ProjectIntake":      {"enabled", "label", "workflow_id", "workflow_name", "polled_at", "last_error"},
+		"IntakePollResult":   {"taken", "closed", "error"},
 	} {
 		ref := doc.Components.Schemas[schema]
 		if ref == nil || ref.Value == nil {

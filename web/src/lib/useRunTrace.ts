@@ -146,7 +146,8 @@ export function useRunTrace(runId: string): RunTraceState {
   }, []);
 
   const applyMergeRequest = useCallback((mr: MergeRequest) => {
-    setView((v) => (v && v.run.id === mr.run_id ? { ...v, run: { ...v.run, merge_request: mr } } : v));
+    // The run that opened the request and a run that updates it both show the record.
+    setView((v) => (v && (v.run.id === mr.run_id || v.run.merge_request_id === mr.id) ? { ...v, run: { ...v.run, merge_request: mr } } : v));
   }, []);
 
   return { view, error, connection, retry, applyRun, applyApproval, applyMergeRequest };

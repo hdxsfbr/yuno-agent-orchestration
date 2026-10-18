@@ -4,12 +4,14 @@ import { Link } from "react-router";
 import { ApiError, createSchedule, listWorkflows, updateSchedule, type Schedule, type ScheduleInput, type Workflow } from "@/lib/api";
 import { errorsFor, type FieldErrors } from "@/lib/agentForm";
 import { draftFromInput, emptyDraft, inputFields } from "@/lib/runInput";
+import { requestRef } from "@/lib/mergeRequest";
 import { browserTimeZone, buildSchedule, scheduleErrors, timeZones, toLocalInput, type ScheduleFormState } from "@/lib/schedule";
 import { projectsKey, useProjects } from "@/lib/useProjects";
 import { isShippedTemplate } from "@/lib/workflow";
 import Button from "../Button";
 import InputFields from "../InputFields";
 import { Modal } from "../Modal";
+import MergeRequestSelect from "../project/MergeRequestSelect";
 import { InlineError, Loading, QueryError, errorText } from "../QueryState";
 import { CheckboxField, Field, SelectField, TextField, control, toOptions } from "../fields";
 
@@ -21,6 +23,7 @@ function initialState(workflows: Workflow[], schedule?: Schedule): ScheduleFormS
   return {
     workflowId: schedule?.workflow_id ?? "",
     projectId: schedule?.project_id ?? "",
+    mergeRequestId: schedule?.merge_request_id ?? "",
     kind: schedule?.kind ?? "cron",
     cronExpr: schedule?.cron_expr ?? "",
     tz: schedule?.tz || browserTimeZone(),
@@ -63,7 +66,11 @@ function ScheduleForm({ workflows, schedule, onClose }: FormProps) {
         setServerErrors(scheduleErrors(err.details));
         setFormError(err.message);
         // A refused project may be one that was just deleted: show the current list.
-        if (needsProject) void qc.invalidateQueries({ queryKey: projectsKey });
+        if (needsProject) {
+          void qc.invalidateQueries({ queryKey: projectsKey });
+          // A refused request may be one that was just merged or closed.
+          void qc.invalidateQueries({ queryKey: ["merge-requests"] });
+        }
       } else {
         setFormError(errorText(err));
       }
@@ -75,13 +82,23 @@ function ScheduleForm({ workflows, schedule, onClose }: FormProps) {
     if (save.isPending) return;
     setServerErrors({});
     setFormError(null);
-    const built = buildSchedule({ ...form, projectId }, fields, needsProject);
+    const built = buildSchedule({ ...form, projectId }, fields, needsProject, schedule?.merge_request_id ?? "");
     setClientErrors(built.errors);
     if (built.value) save.mutate(built.value);
   };
 
   const errors = (path: string) => [...errorsFor(clientErrors, path), ...errorsFor(serverErrors, path)];
-  const known = new Set(["workflow_id", "project_id", "kind", "cron_expr", "tz", "run_at", "enabled", "input"]);
+  const mergeRequestShown = needsProject && projectId !== "";
+  const known = new Set(["workflow_id", "project_id", "kind", "cron_expr", "tz", "run_at", "enabled", "input", ...(mergeRequestShown ? ["merge_request_id"] : [])]);
+  // The request a saved schedule names stays on offer while its project is the chosen one.
+  const savedProject = projects.data?.find((p) => p.id === schedule?.project_id);
+  const current =
+    schedule?.merge_request_id && schedule.project_id === projectId
+      ? {
+          id: schedule.merge_request_id,
+          label: savedProject && schedule.merge_request_number != null ? requestRef({ provider: savedProject.provider, number: schedule.merge_request_number }) : "Merge request",
+        }
+      : undefined;
   const unplaced = Object.entries(serverErrors)
     .filter(([k]) => !known.has(k.split(".")[0]))
     .flatMap(([k, m]) => m.map((x) => (k ? `${k}: ${x}` : x)));
@@ -105,7 +122,7 @@ function ScheduleForm({ workflows, schedule, onClose }: FormProps) {
           errors={errors("workflow_id")}
           onChange={(id) => {
             const next = workflows.find((w) => w.id === id);
-            set({ workflowId: id, projectId: "", draft: emptyDraft(inputFields(next?.definition.input_schema)), whole: "{}" });
+            set({ workflowId: id, projectId: "", mergeRequestId: "", draft: emptyDraft(inputFields(next?.definition.input_schema)), whole: "{}" });
           }}
           options={[
             { value: "", label: "Choose a workflow" },
@@ -131,7 +148,7 @@ function ScheduleForm({ workflows, schedule, onClose }: FormProps) {
             label="Project"
             required
             value={projectId}
-            onChange={(v) => set({ projectId: v })}
+            onChange={(v) => set({ projectId: v, mergeRequestId: "" })}
             options={[{ value: "", label: "Choose a project" }, ...projects.data.map((p) => ({ value: p.id, label: p.name }))]}
             hint="Each run works on a checkout of this project's repository."
             errors={errors("project_id")}
@@ -139,6 +156,16 @@ function ScheduleForm({ workflows, schedule, onClose }: FormProps) {
         ) : (
           <Loading label="Loading projects…" />
         )
+      ) : null}
+
+      {mergeRequestShown ? (
+        <MergeRequestSelect
+          projectId={projectId}
+          value={form.mergeRequestId}
+          onChange={(mergeRequestId) => set({ mergeRequestId })}
+          errors={errors("merge_request_id")}
+          current={current}
+        />
       ) : null}
 
       <SelectField

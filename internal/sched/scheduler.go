@@ -149,7 +149,13 @@ func (s *Scheduler) fire(ctx context.Context, d *store.DueSchedule, now time.Tim
 	if d.ProjectID != nil {
 		req.ProjectID = *d.ProjectID
 	}
+	if d.MergeRequestID != nil {
+		// The request the schedule's runs update (DESIGN 5.22 rule 7); the engine checks it
+		// again as a manual request's.
+		req.MergeRequestID = *d.MergeRequestID
+	}
 	run, err := s.Engine.Trigger(ctx, req)
+	var final *engine.MergeRequestStateError
 	var ve *engine.ValidationError
 	var rl *guardrails.RateLimitError
 	var be *project.BudgetError
@@ -166,6 +172,14 @@ func (s *Scheduler) fire(ctx context.Context, d *store.DueSchedule, now time.Tim
 			out.LastRunAt, out.LastRunID = &prev.CreatedAt, &prev.ID
 		}
 		return out, nil
+	case errors.As(err, &final):
+		// The request merged or closed (DESIGN 5.22 rule 7, D-049): no later occurrence can
+		// succeed, so the schedule stops with the state as its reason, like a deleted
+		// workflow (rule 4). Every other refusal, "being updated by run <id>" included,
+		// is a transient one that records its text and moves on.
+		msg := final.Label + " is " + final.State
+		log.Warn("schedule disabled: its merge request ended", "reason", msg)
+		return disabled(out, msg), nil
 	case errors.As(err, &ve):
 		msg := "the workflow cannot run: " + strings.Join(ve.Messages, "; ")
 		log.Warn("scheduled run refused", "reason", msg)

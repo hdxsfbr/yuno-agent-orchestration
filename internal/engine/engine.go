@@ -386,8 +386,15 @@ func (e *Engine) Trigger(ctx context.Context, req TriggerRequest) (*store.Run, e
 		return nil, err
 	}
 	msgs = append(msgs, projMsgs...)
+	// The request's merge request, after the project check (DESIGN 5.22 rule 1): a quick
+	// run takes one like a project, its one-node definition opting in through the project.
+	mrMsgs, mrFinal, err := e.requestedMergeRequest(ctx, req.MergeRequestID, proj, len(projMsgs) > 0)
+	if err != nil {
+		return nil, err
+	}
+	msgs = append(msgs, mrMsgs...)
 	if len(msgs) > 0 {
-		return nil, &ValidationError{Messages: msgs}
+		return nil, newValidationError(msgs, mrFinal)
 	}
 	a, err := store.GetAgent(ctx, e.deps.Pool, req.AgentID)
 	if err != nil {
@@ -477,7 +484,13 @@ func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow
 		run.ProjectID, run.Project = &pid, &settings
 		logAttrs = append(logAttrs, "project_id", pid)
 	}
-	err = pgx.BeginFunc(ctx, e.deps.Pool, func(tx pgx.Tx) error {
+	if id := strings.TrimSpace(req.MergeRequestID); id != "" {
+		// The request the run updates (DESIGN 5.22 rule 1): its record was checked before,
+		// and the live-run index below settles a concurrent run on the same record.
+		run.MergeRequestID = &id
+		logAttrs = append(logAttrs, "merge_request_id", id)
+	}
+	insert := func(tx pgx.Tx) error {
 		// An occurrence fired again must not count its own first run against the rate
 		// limit; the unique index settles a concurrent insert.
 		if trigger == store.TriggerSchedule && run.TriggerRef != nil {
@@ -499,7 +512,21 @@ func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow
 			}
 		}
 		return store.CreateRun(ctx, tx, run)
-	})
+	}
+	err = pgx.BeginFunc(ctx, e.deps.Pool, insert)
+	for tries := 0; errors.Is(err, store.ErrMergeRequestBusy) && run.MergeRequestID != nil && tries < 2; tries++ {
+		// Another live run names the record (rule 1, the index runs_merge_request_live_idx):
+		// the 422 says which. A run that ended between the refusal and the read leaves
+		// nothing to name, and the insert goes again.
+		busy, berr := e.mergeRequestBusy(ctx, *run.MergeRequestID)
+		if berr != nil {
+			return nil, fmt.Errorf("create run: %w", berr)
+		}
+		if busy != nil {
+			return nil, busy
+		}
+		err = pgx.BeginFunc(ctx, e.deps.Pool, insert)
+	}
 	var rl *guardrails.RateLimitError
 	if errors.As(err, &rl) {
 		e.log.Info("run refused by a guardrail", "workflow_id", wf.ID, "agent_id", rl.AgentID, "trigger", trigger, "reason", rl.Error())
@@ -525,6 +552,28 @@ func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow
 	e.emit(ctx, created.ID, "run.status", map[string]any{"run": created})
 	e.log.Info("run queued", append([]any{"run_id", created.ID, "workflow_id", wf.ID, "trigger", trigger}, logAttrs...)...)
 	return created, nil
+}
+
+// mergeRequestBusy is the 422 for a run request that lost the live-run index of DESIGN 5.22
+// rule 1 to another run: "merge_request_id: <merge request !n|pull request #n> is being
+// updated by run <id>". It is nil when no run is live on the record any more, or the
+// record is gone.
+func (e *Engine) mergeRequestBusy(ctx context.Context, mrID string) (*ValidationError, error) {
+	live, err := store.LiveRunForMergeRequest(ctx, e.deps.Pool, mrID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	mr, err := store.GetMergeRequest(ctx, e.deps.Pool, mrID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ValidationError{Messages: []string{"merge_request_id: " + mr.Label() + " is being updated by run " + live.ID}}, nil
 }
 
 func (e *Engine) quickRunWorkflow(ctx context.Context, a *store.Agent, def *workflow.Definition) (*store.Workflow, error) {

@@ -117,12 +117,21 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 				}
 			}
 		}
-		// Rule 3: the one conditional update.
-		retried, err = store.RetryRun(ctx, tx, runID, applied, now)
+		// Rule 3: the one conditional update. The two live-run indexes can refuse it
+		// (DESIGN 5.22 rule 1, 5.23 rule 3); the refusal names the run that holds the
+		// request or the issue.
+		if err := e.checkOpenedRequestIdle(ctx, tx, run); err != nil {
+			return err
+		}
+		retried, err = e.retryRow(ctx, tx, run, applied, now)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				// The row is locked, so this is not expected; answer as a lost race.
 				return &RetryError{Code: RetryNotRetryable, Message: "run is " + run.Status}
+			}
+			var re *RetryError
+			if errors.As(err, &re) {
+				return err
 			}
 			return fmt.Errorf("run %s: %w", runID, err)
 		}
@@ -144,6 +153,84 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 	e.logEvent(ctx, runID, "info", fmt.Sprintf("retry %d: continuing from %s", retried.Retries, from),
 		"node_id", from, "by", by)
 	return retried, nil
+}
+
+// retryRow is store.RetryRun with the answers of the two live-run indexes turned into
+// refusals (DESIGN 5.21 rule 3 amended): another live run names the same merge request
+// (store.ErrMergeRequestBusy, "<merge request !n|pull request #n> is being updated by run
+// <id>", 5.22 rule 1), or has the same issue (store.ErrIssueBusy, "issue #<n> already
+// has a running run <id>", 5.23 rule 6), both 409 run_not_retryable. The update runs under
+// a savepoint, because a violated index aborts the statement's transaction and the run
+// that holds the request has to be read in it afterwards; a run that ended meanwhile
+// leaves nothing to name, and the update goes again.
+func (e *Engine) retryRow(ctx context.Context, tx pgx.Tx, run *store.Run, limits *store.Limits, now time.Time) (*store.Run, error) {
+	var last error
+	for attempt := 0; attempt < 2; attempt++ {
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		retried, err := store.RetryRun(ctx, sp, run.ID, limits, now)
+		if err == nil {
+			return retried, sp.Commit(ctx)
+		}
+		if rbErr := sp.Rollback(ctx); rbErr != nil {
+			return nil, rbErr
+		}
+		last = err
+		var msg string
+		switch {
+		case errors.Is(err, store.ErrMergeRequestBusy) && run.MergeRequestID != nil:
+			live, lerr := store.LiveRunForMergeRequest(ctx, tx, *run.MergeRequestID)
+			if lerr == nil {
+				mr, merr := store.GetMergeRequest(ctx, tx, *run.MergeRequestID)
+				if merr != nil {
+					return nil, merr
+				}
+				msg = mr.Label() + " is being updated by run " + live.ID
+			} else if !errors.Is(lerr, store.ErrNotFound) {
+				return nil, lerr
+			}
+		case errors.Is(err, store.ErrIssueBusy) && run.TriggerRef != nil:
+			live, lerr := store.LiveRunForTrigger(ctx, tx, store.TriggerIssue, *run.TriggerRef)
+			if lerr == nil {
+				msg = "issue #" + (*run.TriggerRef)[strings.LastIndex(*run.TriggerRef, "#")+1:] + " already has a running run " + live.ID
+			} else if !errors.Is(lerr, store.ErrNotFound) {
+				return nil, lerr
+			}
+		default:
+			return nil, err
+		}
+		if msg != "" {
+			return nil, &RetryError{Code: RetryNotRetryable, Message: msg}
+		}
+	}
+	return nil, last
+}
+
+// checkOpenedRequestIdle refuses the retry of a run that opened a merge request while
+// another live run updates it (DESIGN 5.22 edge cases, rule 1): the opening run names no
+// request, so the live-run index does not see its retry, yet its next open_merge_request
+// would push onto the branch the other run works on.
+func (e *Engine) checkOpenedRequestIdle(ctx context.Context, tx pgx.Tx, run *store.Run) error {
+	if run.MergeRequestID != nil {
+		return nil // the index covers a run that names one
+	}
+	opened, err := store.MergeRequestByRun(ctx, tx, run.ID)
+	if err != nil {
+		return fmt.Errorf("run %s: read its merge request: %w", run.ID, err)
+	}
+	if opened == nil {
+		return nil
+	}
+	live, err := store.LiveRunForMergeRequest(ctx, tx, opened.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("run %s: %w", run.ID, err)
+	}
+	return &RetryError{Code: RetryNotRetryable, Message: opened.Label() + " is being updated by run " + live.ID}
 }
 
 // endOpenRootSpan ends the run's open root span, if it has one, marked as retried with

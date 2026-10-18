@@ -1,10 +1,23 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router";
-import { RUN_STATUSES, delegatedConversationId, isDelegatedRun, isTerminalStatus, listRuns, type Run, type RunStatus } from "@/lib/api";
+import {
+  RUN_STATUSES,
+  RUN_TRIGGERS,
+  delegatedConversationId,
+  isDelegatedRun,
+  isTerminalStatus,
+  issueRef,
+  listRuns,
+  type Run,
+  type RunStatus,
+  type RunTrigger,
+} from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, humanize, shortId } from "@/lib/format";
+import { requestNoun, requestRef } from "@/lib/mergeRequest";
 import { useNow } from "@/lib/useNow";
 import { useRefreshOnEvents } from "@/lib/useRefreshOnEvents";
 import { Badge, RunStatusBadge } from "@/components/Badge";
+import Button from "@/components/Button";
 import { cardClass, PageHeader } from "@/components/Card";
 import ConnectionIndicator from "@/components/ConnectionIndicator";
 import { control } from "@/components/fields";
@@ -13,8 +26,29 @@ import { EmptyState, Loading, QueryError } from "@/components/QueryState";
 
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** How a run started: the trigger as a word, or a Delegated badge with a way back to the conversation. */
+/** The request a run updates, after its project's name: "!12" on GitLab, "#12" on GitHub, linking to the provider. */
+function UpdatedRequest({ run }: { run: Run }) {
+  const mr = run.merge_request;
+  if (!run.merge_request_id || !mr || mr.id !== run.merge_request_id) return null;
+  return (
+    <a href={mr.url} target="_blank" rel="noreferrer" className="ml-1.5 font-mono text-xs underline" title={`Updates ${requestNoun(mr.provider).toLowerCase()} ${requestRef(mr)}`}>
+      {requestRef(mr)}
+    </a>
+  );
+}
+
+/** How a run started: the trigger as a word, the issue an issue run came from, or a Delegated badge with a way back to the conversation. */
 function TriggerCell({ run }: { run: Run }) {
+  const issue = issueRef(run);
+  if (issue) {
+    return issue.url ? (
+      <a href={issue.url} target="_blank" rel="noreferrer" className="underline" title="Open the issue on the provider">
+        issue #{issue.number}
+      </a>
+    ) : (
+      <>issue #{issue.number}</>
+    );
+  }
   if (!isDelegatedRun(run)) {
     return (
       <>
@@ -40,16 +74,32 @@ function parseStatus(value: string | null): RunStatus | undefined {
   return RUN_STATUSES.find((s) => s === value);
 }
 
+function parseTrigger(value: string | null): RunTrigger | undefined {
+  return RUN_TRIGGERS.find((t) => t === value);
+}
+
 export default function RunsPage() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const status = parseStatus(params.get("status"));
+  const trigger = parseTrigger(params.get("trigger"));
+  // The runs that named one merge request record: the project page's Merge requests table links here.
+  const mergeRequestId = params.get("merge_request_id")?.trim() || undefined;
 
   const q = useQuery({
-    queryKey: ["runs", status ?? "all"],
-    queryFn: () => listRuns({ status }),
+    queryKey: ["runs", status ?? "all", trigger ?? "all", mergeRequestId ?? "all"],
+    queryFn: () => listRuns({ status, trigger, merge_request_id: mergeRequestId }),
     refetchOnWindowFocus: true,
   });
+
+  const setFilter = (name: string, value: string) => {
+    const next = new URLSearchParams(params);
+    if (value) next.set(name, value);
+    else next.delete(name);
+    setParams(next, { replace: true });
+  };
+  // The request's own number, read from the rows that name it; the id is all the address carries.
+  const filteredRequest = mergeRequestId ? q.data?.find((r) => r.merge_request?.id === mergeRequestId)?.merge_request : undefined;
 
   // Any run event may change a row (status, steps, cost), so every event refreshes the list.
   const connection = useRefreshOnEvents(["runs"]);
@@ -63,16 +113,7 @@ export default function RunsPage() {
         <ConnectionIndicator state={connection} />
         <label className="flex items-center gap-2 text-sm">
           <span className="text-zinc-500">Status</span>
-          <select
-            value={status ?? ""}
-            onChange={(e) => {
-              const next = new URLSearchParams(params);
-              if (e.target.value) next.set("status", e.target.value);
-              else next.delete("status");
-              setParams(next, { replace: true });
-            }}
-            className={control(false, "!w-auto")}
-          >
+          <select value={status ?? ""} onChange={(e) => setFilter("status", e.target.value)} className={control(false, "!w-auto")}>
             <option value="">All</option>
             {RUN_STATUSES.map((s) => (
               <option key={s} value={s}>
@@ -81,12 +122,38 @@ export default function RunsPage() {
             ))}
           </select>
         </label>
+        <label className="flex items-center gap-2 text-sm">
+          <span className="text-zinc-500">Trigger</span>
+          <select value={trigger ?? ""} onChange={(e) => setFilter("trigger", e.target.value)} className={control(false, "!w-auto")}>
+            <option value="">All</option>
+            {RUN_TRIGGERS.map((t) => (
+              <option key={t} value={t}>
+                {capitalize(t)}
+              </option>
+            ))}
+          </select>
+        </label>
+        {mergeRequestId ? (
+          <span className="flex items-center gap-2 text-sm">
+            <span className="text-zinc-500">Merge request</span>
+            <span className="font-mono">{filteredRequest ? requestRef(filteredRequest) : shortId(mergeRequestId)}</span>
+            <Button size="sm" variant="ghost" onClick={() => setFilter("merge_request_id", "")}>
+              Clear
+            </Button>
+          </span>
+        ) : null}
       </PageHeader>
 
       {q.isLoading ? <Loading label="Loading runs…" /> : null}
       {q.error ? <QueryError what="runs" error={q.error} onRetry={() => void q.refetch()} /> : null}
       {q.data && q.data.length === 0 ? (
-        <EmptyState>{status ? `No ${humanize(status)} runs.` : "No runs yet. Start one from an agent."}</EmptyState>
+        <EmptyState>
+          {trigger || mergeRequestId
+            ? "No runs match."
+            : status
+              ? `No ${humanize(status)} runs.`
+              : "No runs yet. Start one from an agent."}
+        </EmptyState>
       ) : null}
       {q.data && q.data.length > 0 ? (
         <div className={`${cardClass} overflow-x-auto`}>
@@ -123,7 +190,16 @@ export default function RunsPage() {
                   </td>
                   <td className="px-4 py-2.5">{r.agent_names?.length ? r.agent_names.join(", ") : "—"}</td>
                   <td className="px-4 py-2.5 font-mono text-xs">{r.models?.length ? r.models.join(", ") : "—"}</td>
-                  <td className="px-4 py-2.5">{hasProject(r) ? <ProjectLink run={r} /> : "—"}</td>
+                  <td className="px-4 py-2.5">
+                    {hasProject(r) ? (
+                      <>
+                        <ProjectLink run={r} />
+                        <UpdatedRequest run={r} />
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
                   <td className="px-4 py-2.5">
                     <span className="inline-flex flex-wrap items-center gap-1.5">
                       <RunStatusBadge status={r.status} />

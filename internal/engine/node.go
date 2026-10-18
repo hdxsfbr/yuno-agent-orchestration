@@ -81,6 +81,9 @@ type visit struct {
 	project     *project.Config
 	toolchain   project.Toolchain
 	sandboxHeld bool
+	// mergeRequest is the record the run names and updates (DESIGN 5.22 rule 1), read once
+	// in prepareProject: nil for a run that names none.
+	mergeRequest *store.MergeRequest
 
 	events <-chan openclaw.Event
 	unsub  func()
@@ -383,10 +386,34 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 	}
 	ws := openclaw.WorkspaceDir(e.deps.StateDir, v.ocID)
 	repo := filepath.Join(ws, project.RepoRel(v.run.ID))
+	// A run that names a merge request works on that request's branch (DESIGN 5.22 rule 2):
+	// the record is read once per visit, for the clone and for the protocol paragraph of
+	// rule 5. Nothing checks its state here (rule 3, D-044).
+	branch := v.project.DefaultBranch
+	if v.run.MergeRequestID != nil && v.mergeRequest == nil {
+		mr, err := store.GetMergeRequest(ctx, e.deps.Pool, *v.run.MergeRequestID)
+		switch {
+		case err == nil:
+			v.mergeRequest = mr
+		case errors.Is(err, store.ErrNotFound) && v.run.Toolchain == nil:
+			o := failed(store.RunFailed, "project clone: merge request "+*v.run.MergeRequestID+" no longer exists")
+			return &o
+		case errors.Is(err, store.ErrNotFound):
+			// A later visit of a run already cloned: the checkout is there, and there is
+			// no request left to tell the agent about.
+			e.log.Warn("merge request of the run no longer exists", "run_id", v.run.ID, "merge_request_id", *v.run.MergeRequestID)
+		default:
+			o := failed(store.RunFailed, "read merge request: "+err.Error())
+			return &o
+		}
+	}
+	if v.mergeRequest != nil {
+		branch = v.mergeRequest.SourceBranch
+	}
 	if v.run.Toolchain == nil {
 		cctx, done := v.boundedContext(ctx, project.GitTimeout)
 		start := e.clock.Now()
-		err := cloneInto(cctx, *v.project, ws, v.run.ID)
+		sha, err := cloneInto(cctx, *v.project, ws, v.run.ID, branch)
 		done()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -400,8 +427,17 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 		}
 		tc := project.Detect(repo)
 		end := e.clock.Now()
-		e.startSpan(ctx, v.run.ID, &v.nodeSpan, "project", "project_clone", start, &end,
-			map[string]any{"repo": v.project.RepoURL, "branch": v.project.DefaultBranch, "toolchain": tc.Name, "duration_ms": end.Sub(start).Milliseconds()})
+		attrs := map[string]any{"repo": v.project.RepoURL, "branch": branch, "toolchain": tc.Name, "duration_ms": end.Sub(start).Milliseconds()}
+		if v.mergeRequest != nil {
+			attrs["merge_request"] = v.mergeRequest.Number
+		}
+		e.startSpan(ctx, v.run.ID, &v.nodeSpan, "project", "project_clone", start, &end, attrs)
+		// The checkout's commit is the base the branch guard of rule 4 compares against;
+		// it is written before the toolchain, which marks the clone as done.
+		if err := store.SetRunCheckoutSHA(context.WithoutCancel(ctx), e.deps.Pool, v.run.ID, sha); err != nil {
+			o := failed(store.RunFailed, "record checkout sha: "+err.Error())
+			return &o
+		}
 		if err := store.SetRunToolchain(context.WithoutCancel(ctx), e.deps.Pool, v.run.ID, tc.Name); err != nil {
 			o := failed(store.RunFailed, "record toolchain: "+err.Error())
 			return &o
@@ -410,7 +446,7 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 		v.run.Toolchain = &name
 		v.refreshRun(ctx)
 		e.emit(ctx, v.run.ID, "run.status", map[string]any{"run": v.run})
-		e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("project repository cloned: %s (%s), toolchain %s", v.project.RepoURL, v.project.DefaultBranch, tc.Name))
+		e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("project repository cloned: %s (%s), toolchain %s", v.project.RepoURL, branch, tc.Name))
 	}
 	v.toolchain = project.Detect(repo)
 	if v.toolchain.Name != *v.run.Toolchain {
@@ -442,30 +478,36 @@ func (v *visit) boundedContext(ctx context.Context, d time.Duration) (context.Co
 	}
 }
 
-// cloneInto clones the project into runs/<run id>/repo of a workspace. The run
-// directory is checked through an os.Root of the workspace (a link planted at runs or
-// runs/<run id> is refused, as the copy-forward does), and a repo entry left by an
-// earlier attempt is removed first.
-func cloneInto(ctx context.Context, pc project.Config, ws, runID string) error {
+// cloneInto clones branch of the project into runs/<run id>/repo of a workspace and
+// returns the commit the checkout is at (DESIGN 5.22 rule 2: the project's default branch,
+// or the source branch of the merge request the run updates). The run directory is
+// checked through an os.Root of the workspace (a link planted at runs or runs/<run id> is
+// refused, as the copy-forward does), and a repo entry left by an earlier attempt is
+// removed first.
+func cloneInto(ctx context.Context, pc project.Config, ws, runID, branch string) (string, error) {
 	root, err := os.OpenRoot(ws)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer root.Close()
 	runRel := filepath.Join("runs", runID)
 	for _, rel := range []string{"runs", runRel} {
 		info, err := root.Lstat(rel)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if !info.IsDir() {
-			return fmt.Errorf("%s: run directory is not a plain directory", rel)
+			return "", fmt.Errorf("%s: run directory is not a plain directory", rel)
 		}
 	}
 	if err := root.RemoveAll(filepath.Join(runRel, project.RepoDir)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+		return "", err
 	}
-	return pc.Clone(ctx, filepath.Join(ws, runRel, project.RepoDir))
+	dest := filepath.Join(ws, runRel, project.RepoDir)
+	if err := pc.CloneBranch(ctx, dest, branch); err != nil {
+		return "", err
+	}
+	return pc.HeadSHA(ctx, dest)
 }
 
 // taskMessage is the rendered node task plus the fixed protocol block (DESIGN 5.6
@@ -515,12 +557,33 @@ func (v *visit) taskMessageWith(x project.Extras) string {
 	}
 	sb.WriteString("Work inside the directory runs/" + v.run.ID + "/ of your workspace.\n")
 	if v.project != nil && v.toolchain.Name != "" {
-		sb.WriteString(project.InstructionsWith(*v.project, v.run.ID, v.toolchain, x))
+		cfg := *v.project
+		if v.mergeRequest != nil {
+			// The repository line names the branch the checkout is on (DESIGN 5.22 rule 5);
+			// the project's own default branch stays the merge target.
+			cfg.DefaultBranch = v.mergeRequest.SourceBranch
+		}
+		text := project.InstructionsWith(cfg, v.run.ID, v.toolchain, x)
+		if v.mergeRequest != nil {
+			// After the repository line, before the sandbox network line.
+			first, rest, _ := strings.Cut(text, "\n")
+			text = first + "\n" + mergeRequestParagraph(v.mergeRequest) + rest
+		}
+		sb.WriteString(text)
 	}
 	sb.WriteString(`When finished, call the tool yuno__finish with {"run_token": "` + v.token +
 		`", "result": <object matching this JSON schema>}:` + "\n")
 	sb.Write(schema)
 	return sb.String()
+}
+
+// mergeRequestParagraph is the paragraph of DESIGN 5.22 rule 5 that tells a visit of a run
+// updating a merge request what it is working on: one line of two sentences, newline
+// included.
+func mergeRequestParagraph(mr *store.MergeRequest) string {
+	return "Merge request: this run updates " + mr.Label() + " (" + mr.URL + "), whose branch " + mr.SourceBranch +
+		" is the checkout. Read it first with read_merge_request when you have that tool and address its unresolved threads; " +
+		"the platform pushes your working tree onto that branch as a new commit when open_merge_request is called.\n"
 }
 
 // remaining is the time left before the run's deadline.

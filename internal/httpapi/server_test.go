@@ -131,11 +131,11 @@ func TestListTools(t *testing.T) {
 	for _, tv := range got {
 		names = append(names, string(tv.Source)+":"+tv.Name)
 	}
-	// open_merge_request is registered always and list_projects is the Chief's seventh
-	// chat tool (DESIGN 5.17 rules 6 and 8).
+	// open_merge_request is registered always, list_projects is the Chief's seventh chat
+	// tool (DESIGN 5.17 rules 6 and 8) and read_merge_request its eighth (5.22 rule 6).
 	want := "platform:delegate_task platform:deploy_release platform:finish platform:http_fetch platform:list_agents " +
 		"platform:list_projects platform:list_workflows platform:memory_recall platform:memory_save " +
-		"platform:open_merge_request platform:run_status " +
+		"platform:open_merge_request platform:read_merge_request platform:run_status " +
 		"openclaw:apply_patch openclaw:edit openclaw:exec openclaw:ls openclaw:process openclaw:read openclaw:write"
 	if strings.Join(names, " ") != want {
 		t.Fatalf("tools = %v", names)
@@ -156,6 +156,7 @@ func TestListTools(t *testing.T) {
 		"memory_recall":      {"read_only", "postgres", 5, true, true},
 		"memory_save":        {"computational", "postgres", 5, false, true},
 		"open_merge_request": {"side_effecting", "external", 120, false, false},
+		"read_merge_request": {"read_only", "external", 15, true, true},
 		"run_status":         {"read_only", "postgres", 5, false, true},
 	}
 	var chat []string

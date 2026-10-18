@@ -29,6 +29,10 @@ var runStatuses = []string{
 	store.RunSucceeded, store.RunFailed, store.RunCancelled, store.RunTimedOut,
 }
 
+// runTriggers are the values of runs.trigger, the ones GET /api/runs?trigger= takes
+// (DESIGN 5.22 rule 11, 5.23 rule 8).
+var runTriggers = []string{store.TriggerManual, store.TriggerSchedule, store.TriggerChannel, store.TriggerEval, store.TriggerIssue}
+
 // runCreate is RunCreate.
 type runCreate struct {
 	WorkflowID string          `json:"workflow_id"`
@@ -43,6 +47,9 @@ type runCreate struct {
 	// a workflow that opts in, refused for one that does not, optional for a quick run.
 	// The engine checks that against the workflow.
 	ProjectID string `json:"project_id"`
+	// MergeRequestID names the merge request record the run updates (DESIGN 5.22 rule 1):
+	// its source branch is cloned and pushed onto. The engine checks it after the project.
+	MergeRequestID string `json:"merge_request_id"`
 }
 
 // apiTriggers are the triggers a client may name; schedules and channels start their
@@ -78,6 +85,10 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	if status != "" && !slices.Contains(runStatuses, status) {
 		fe.add("status", "must be one of %s", strings.Join(runStatuses, ", "))
 	}
+	trigger := q.Get("trigger")
+	if trigger != "" && !slices.Contains(runTriggers, trigger) {
+		fe.add("trigger", "must be one of %s", strings.Join(runTriggers, ", "))
+	}
 	limit := defaultRunsLimit
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -92,7 +103,8 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runs, err := store.ListRuns(r.Context(), s.pool, store.RunFilter{Status: status,
-		ProjectID: strings.TrimSpace(q.Get("project_id")), Limit: limit})
+		ProjectID: strings.TrimSpace(q.Get("project_id")), Trigger: trigger,
+		MergeRequestID: strings.TrimSpace(q.Get("merge_request_id")), Limit: limit})
 	if err != nil {
 		s.internalError(w, r, "list runs", err)
 		return
@@ -141,6 +153,8 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		Model:      in.Model,
 		ScriptID:   in.ScriptID,
 		ProjectID:  strings.TrimSpace(in.ProjectID),
+		// DESIGN 5.22 rule 1: the engine's checks answer 422 details on merge_request_id.
+		MergeRequestID: strings.TrimSpace(in.MergeRequestID),
 	})
 	if err != nil {
 		s.engineError(w, r, err)

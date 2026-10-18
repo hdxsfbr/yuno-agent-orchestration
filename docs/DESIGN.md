@@ -2311,6 +2311,46 @@ Rules:
     `merge_request_id`. The runs list shows `!12` after the project name for a run that
     names a request. No developer commentary in product copy.
 
+As built (wave 9): the queue-time check is `engine.MergeRequestForRequest`, skipped when
+the project check already failed (so `the workflow does not use a project` is not repeated
+on top of `project_id: ...`); the final-state refusal is a typed
+`*engine.MergeRequestStateError` wrapping the validation error, returned only when it is
+the request's sole message, which is what disables a schedule (rule 7); a live run that
+names the record is caught by the index at insert, mapped to the text with the holder's
+id after a lookup (retried twice when the holder ended in between), and the opening run's
+status is read outside the insert transaction. A retry of the run that opened a request
+while another run updates it is refused with the same text (the index cannot see that
+case), and the two index mappings use a savepoint so the holder is read inside the
+aborted transaction. The report sentence of rule 9 reads the newest executed
+`open_merge_request` call whose output has `updated: true`; a late grant that pushes onto
+a named request says `updated after the run ended` instead of `opened`. At clone time
+`checkout_sha` is written before `toolchain` (the clone's completion mark); a missing
+record on a later visit of an already-cloned run drops the paragraph with a warning
+instead of failing. A schedule update that changes `workflow_id` or `project_id` drops
+the request only when `merge_request_id` is left out; one named in the same body is
+checked against the new project. `merge_request_number` on a schedule is absent once the
+record is gone (the column is set null), and the schedule then fires without a request.
+`open_merge_request` writes `checkout_sha` through the side effect's transaction (not
+outside it, as the consistency line said), so it commits or rolls back with the call; a
+null or empty `checkout_sha` skips the guard silently (the tool has no run log); the
+same-run path never writes it. `read_merge_request`'s cuts include the `…` and fall on a
+rune boundary; `threads_omitted` counts both the 50 cap and the byte-cap drops, so
+`unresolved_count = len(threads) + threads_omitted`; `path`, `line` and `created_at` are
+null when the provider has none; a refused GraphQL leaves `threads` and
+`unresolved_count` null with `threads_error`; a 5xx or a transport failure is a transient
+tool error, not a refusal; in a run a `project` argument is ignored; the model-facing
+text for a malformed `merge_request` on `delegate_task` is `merge_request must be a merge
+request number or URL`. The `Closes #<n>` check (5.23 rule 7) requires a non-digit after
+`<n>`, so `closes #70` does not stop `Closes #7`. `RequestProvider` gained `Details`,
+`Threads` and `CIStatus`, `ProjectResolver` gained `Token`, and `list_projects` joined the
+prefixed platform tool names (it had been missing since 5.17; the Chief's materialised
+state changes once). The UI sends `""` to clear a schedule's request (the contract's
+rule), lists up to 200 open records in the selector, shows the short run id in "opened by
+run", and `useRunTrace` now applies a synced or merged record to a run that names it
+(before, Sync and Merge did nothing on an updating run's card); `issueRef` returns the
+number without a URL when the run has no project snapshot. The Schedules table does not
+show the request a schedule updates; the edit form does.
+
 Edge cases: a request opened by a run without a project (`gitlab_create_mr`) has no
 record and cannot be named. A run names a request whose source branch the provider
 deleted while the request stayed open (a force-push or a manual delete): the clone fails
@@ -2558,6 +2598,34 @@ Rules:
     the issue is their task. The Chief's prompt gains one sentence: `Runs can also start
     from labelled issues on a project (the intake); run_status tells you the issue a run
     came from.` `make seed-reset` applies it.
+
+As built (wave 9): `IssueTask` lives in `internal/tools/issues.go` (the project package
+cannot import the tools package), `IssueURL` in `internal/project/issues.go`;
+`store.IssueTriggerRef` and `ParseIssueTriggerRef` build and read the ref. An `intake`
+member present in a request replaces all three settings, an absent member taking its
+default (off, `yuno`, no workflow); `intake: null` counts as absent; the workflow is
+looked up only when intake is enabled or the workflow differs from the stored one, so a
+project whose workflow was deleted can be saved with intake off; the D-055 refusal looks
+at the caps of the same request and also applies to an update that leaves `intake` out
+while clearing both caps of a project whose intake is on (the resulting state is what
+matters). The closer's swap removes `:running` and the opposite outcome label in one call
+(a retry that succeeds turns `:failed` into `:done`); on GitHub a label creation is fine
+only on a 422 that says the label exists; `ErrIssueBusy` from a concurrent take is
+skipped without a swap or a comment and not counted; a rate-limit, budget or unknown
+refusal stops further takes in the pass while the repair path for issues that already
+have a run still runs, and a validation refusal stops nothing (it can be specific to one
+issue); a label-creation failure is the pass's first error but the pass continues, so
+the run exists even when the token cannot label. The workflow is checked with
+`GetWorkflow` at the start of each pass (the API soft-deletes workflows, so the column's
+set-null never fires); the closer has a per-project sibling for "Poll now" (the global
+one takes the 50 oldest unreported runs, which a run that fails forever can head);
+`SetRunReportedAt` writes only for a terminal, unreported run; a poll without an engine
+answers 200 with an error text; failure reasons in comments go through the redactor. The
+label-created cache is keyed by (project, label) and the handler builds a fresh loop per
+request, so "Poll now" re-checks the labels. Changing the intake label while issues are
+in flight leaves their old derived labels behind; on GitHub a derived label longer than
+50 characters is an error on the project rather than swallowed; a pattern-style schema
+violation can echo up to 500 bytes of an issue's text into the stored error.
 
 Edge cases: an issue labelled while its project is at its budget: skipped each poll with
 the log line until the window resets, then taken. An issue whose body is empty: the

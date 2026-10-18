@@ -6,6 +6,7 @@ import { errorsFor, parseFieldErrors, type FieldErrors } from "@/lib/agentForm";
 import { projectsKey, useProjects } from "@/lib/useProjects";
 import Button from "./Button";
 import { Modal } from "./Modal";
+import MergeRequestSelect from "./project/MergeRequestSelect";
 import { InlineError, errorText } from "./QueryState";
 import { SelectField, control } from "./fields";
 
@@ -22,8 +23,17 @@ export default function QuickRunDialog({ agent, onClose }: { agent: Pick<Agent, 
   const list = projects.data ?? [];
   // A project deleted since it was chosen no longer counts as chosen.
   const projectId = list.some((p) => p.id === projectChoice) ? projectChoice : "";
+  // With a project chosen, the run may update one of its open merge requests instead of opening a new one.
+  const [mergeRequestChoice, setMergeRequestChoice] = useState("");
+  const mergeRequestId = projectId ? mergeRequestChoice : "";
   const start = useMutation({
-    mutationFn: () => createRun({ agent_id: agent.id, task: task.trim(), ...(projectId ? { project_id: projectId } : {}) }),
+    mutationFn: () =>
+      createRun({
+        agent_id: agent.id,
+        task: task.trim(),
+        ...(projectId ? { project_id: projectId } : {}),
+        ...(projectId && mergeRequestId ? { merge_request_id: mergeRequestId } : {}),
+      }),
     onSuccess: (run) => {
       void qc.invalidateQueries({ queryKey: ["runs"] });
       navigate(`/runs/${run.id}`);
@@ -34,6 +44,8 @@ export default function QuickRunDialog({ agent, onClose }: { agent: Pick<Agent, 
         setFormError(err.message);
         // A refused project may be one that was just deleted: show the current list.
         void qc.invalidateQueries({ queryKey: projectsKey });
+        // A refused request may be one that was just merged or closed.
+        void qc.invalidateQueries({ queryKey: ["merge-requests"] });
       } else {
         setFormError(errorText(err));
       }
@@ -51,8 +63,10 @@ export default function QuickRunDialog({ agent, onClose }: { agent: Pick<Agent, 
   // The select shows its own errors; when it is gone (the last project was deleted) they are listed below like the rest.
   const selectShown = list.length > 0;
   const projectErrors = selectShown ? errorsFor(serverErrors, "project_id") : [];
+  const mergeRequestShown = selectShown && projectId !== "";
+  const mergeRequestErrors = mergeRequestShown ? errorsFor(serverErrors, "merge_request_id") : [];
   const unplaced = Object.entries(serverErrors)
-    .filter(([k]) => !(selectShown && k.split(".")[0] === "project_id"))
+    .filter(([k]) => !(selectShown && k.split(".")[0] === "project_id") && !(mergeRequestShown && k.split(".")[0] === "merge_request_id"))
     .flatMap(([k, m]) => m.map((x) => (k ? `${k}: ${x}` : x)));
   const messages = formError && Object.keys(serverErrors).length === 0 ? [formError] : unplaced;
 
@@ -79,11 +93,17 @@ export default function QuickRunDialog({ agent, onClose }: { agent: Pick<Agent, 
             className="mt-3"
             label="Project"
             value={projectId}
-            onChange={setProjectChoice}
+            onChange={(v) => {
+              setProjectChoice(v);
+              setMergeRequestChoice("");
+            }}
             options={[{ value: "", label: "None" }, ...list.map((p) => ({ value: p.id, label: p.name }))]}
             hint="Choose one to have the agent work on a checkout of its repository."
             errors={projectErrors}
           />
+        ) : null}
+        {mergeRequestShown ? (
+          <MergeRequestSelect className="mt-3" projectId={projectId} value={mergeRequestId} onChange={setMergeRequestChoice} errors={mergeRequestErrors} />
         ) : null}
         {messages.length > 0 ? (
           <div className="mt-3 space-y-1">

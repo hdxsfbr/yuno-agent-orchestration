@@ -46,6 +46,12 @@ func (e *Engine) triggerWorkflow(ctx context.Context, req TriggerRequest) (*stor
 		return nil, err
 	}
 	msgs = append(msgs, projMsgs...)
+	// The request's merge request, after the project check (DESIGN 5.22 rule 1).
+	mrMsgs, mrFinal, err := e.requestedMergeRequest(ctx, req.MergeRequestID, proj, len(projMsgs) > 0)
+	if err != nil {
+		return nil, err
+	}
+	msgs = append(msgs, mrMsgs...)
 
 	input := req.Input
 	if t := bytes.TrimSpace(input); len(t) == 0 || string(t) == "null" {
@@ -58,7 +64,7 @@ func (e *Engine) triggerWorkflow(ctx context.Context, req TriggerRequest) (*stor
 		msgs = append(msgs, def.ValidateTemplates(input)...)
 	}
 	if len(msgs) > 0 {
-		return nil, &ValidationError{Messages: msgs}
+		return nil, newValidationError(msgs, mrFinal)
 	}
 	limits, err := resolveLayeredLimits("workflow limits.", req.Limits, def.Limits, e.deps.Cfg)
 	if err != nil {
@@ -72,6 +78,108 @@ func (e *Engine) triggerWorkflow(ctx context.Context, req TriggerRequest) (*stor
 	}
 	def.Limits = guardrails.EffectiveLimits(limits, agents, e.deps.Cfg.MaxCostUSD)
 	return e.queueRun(ctx, wf, def, input, req, agents, proj)
+}
+
+// MergeRequestStateError is the ValidationError of a run request whose only fault is that
+// the merge request it names has ended, merged or closed (DESIGN 5.22 rule 1, the
+// fourth check). It is the typed marker the scheduler matches on, not the text: no later
+// occurrence of a schedule on such a request can succeed, so the tick disables the
+// schedule with "<Label> is <State>" in last_error (rule 7, D-049). It unwraps to its
+// *ValidationError, so the API and every other caller treat it as the 422 it is. A
+// request that has other faults too (a bad input, say) is a plain *ValidationError.
+type MergeRequestStateError struct {
+	*ValidationError
+	Label string // "merge request !12" or "pull request #12"
+	State string // "merged" or "closed"
+}
+
+// Unwrap makes errors.As find the *ValidationError.
+func (e *MergeRequestStateError) Unwrap() error { return e.ValidationError }
+
+// newValidationError is the 422 for msgs; it is a *MergeRequestStateError when the one
+// message is the final-state refusal of rule 1 (final non-nil), so a caller can tell
+// that refusal apart without reading the text.
+func newValidationError(msgs []string, final *MergeRequestStateError) error {
+	if final != nil && len(msgs) == 1 && msgs[0] == final.Messages[0] {
+		return final
+	}
+	return &ValidationError{Messages: msgs}
+}
+
+// requestedMergeRequest runs the merge request checks of DESIGN 5.22 rule 1 for a trigger
+// on the engine's pool. A project check that already failed (projectFailed) leaves the
+// merge request unchecked: "the workflow does not use a project" would only repeat it.
+func (e *Engine) requestedMergeRequest(ctx context.Context, id string, proj *store.Project, projectFailed bool) ([]string, *MergeRequestStateError, error) {
+	if projectFailed {
+		return nil, nil, nil
+	}
+	_, msgs, final, err := checkMergeRequest(ctx, e.deps.Pool, id, proj)
+	return msgs, final, err
+}
+
+// MergeRequestForRequest resolves the merge request a run request or a schedule names
+// (DESIGN 5.22 rule 1): the record of the project the run works on, open, and not being
+// updated. An empty id names none and answers nil. Otherwise the checks run in this order
+// and the first that fails answers its message, path-qualified like ProjectForRequest's
+// (the schedule handlers check a schedule's request with it when it is saved, so a
+// schedule is refused as its run would be, rule 7):
+//
+//   - proj is nil: "merge_request_id: the workflow does not use a project";
+//   - no record with that id: "merge_request_id: no merge request with id <id>";
+//   - the record is another project's: "merge_request_id: <merge request !n|pull request
+//     #n> belongs to project <name>";
+//   - the record is not open: "merge_request_id: <label> is <state>";
+//   - the run that opened the record is live: "merge_request_id: <label> is being
+//     updated by run <id>".
+//
+// The record is returned only when every check passed. Another live run that names the
+// record is not read here: runs_merge_request_live_idx refuses its insert and queueRun
+// maps that to the same last text, so two concurrent requests cannot both pass.
+func MergeRequestForRequest(ctx context.Context, q store.Querier, id string, proj *store.Project) (*store.MergeRequest, []string, error) {
+	mr, msgs, _, err := checkMergeRequest(ctx, q, id, proj)
+	return mr, msgs, err
+}
+
+// checkMergeRequest is MergeRequestForRequest, plus the typed marker for the final-state
+// refusal (non-nil exactly when the one message is that refusal).
+func checkMergeRequest(ctx context.Context, q store.Querier, id string, proj *store.Project) (*store.MergeRequest, []string, *MergeRequestStateError, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, nil, nil, nil
+	}
+	if proj == nil {
+		return nil, []string{"merge_request_id: the workflow does not use a project"}, nil, nil
+	}
+	mr, err := store.GetMergeRequest(ctx, q, id)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, []string{"merge_request_id: no merge request with id " + id}, nil, nil
+	}
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("merge request %s: %w", id, err)
+	}
+	if mr.ProjectID != proj.ID {
+		// The record's project may be deleted since: its name is read either way.
+		name, err := store.ProjectNameAny(ctx, q, mr.ProjectID)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("merge request %s: project %s: %w", id, mr.ProjectID, err)
+		}
+		return nil, []string{"merge_request_id: " + mr.Label() + " belongs to project " + name}, nil, nil
+	}
+	if mr.State != store.MergeRequestOpen {
+		msg := "merge_request_id: " + mr.Label() + " is " + mr.State
+		return nil, []string{msg}, &MergeRequestStateError{ValidationError: &ValidationError{Messages: []string{msg}},
+			Label: mr.Label(), State: mr.State}, nil
+	}
+	// The run that opened the request must have ended (rule 1): until it does, it may
+	// still push to the branch.
+	opener, err := store.GetRun(ctx, q, mr.RunID)
+	switch {
+	case err == nil && !store.IsTerminal(opener.Status):
+		return nil, []string{"merge_request_id: " + mr.Label() + " is being updated by run " + opener.ID}, nil, nil
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		return nil, nil, nil, fmt.Errorf("merge request %s: run %s: %w", id, mr.RunID, err)
+	}
+	return mr, nil, nil, nil
 }
 
 // checkAgentNodes requires every agent node to name an existing agent by id (a

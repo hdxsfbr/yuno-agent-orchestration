@@ -40,6 +40,25 @@ eval suite has a prompt-injection case for command output (012) and for fetched 
 (021, private). Residual risk: an operator who sets a side-effecting tool to `auto`
 (D-009) removes the human from that path; the UI warns.
 
+**Work that nobody typed (issue intake, DESIGN 5.23).** A labelled issue on a project's
+repository becomes a run: its title and body are the task, written by whoever opened the
+issue, and whoever may set labels on the repository (Developer and above on GitLab, push
+on GitHub) can start runs on the project. Mitigation: the issue's text reaches the agents
+only inside an `<untrusted_content source="issue #n">` block with closing tags escaped
+(5.7 rule 5), cut at 16 KiB; intake is off by default, per project, and cannot be enabled
+without a daily or monthly budget cap (D-055), so a label spree spends at most the cap
+plus the running runs' own caps (5.19); at most ten issues are taken per project per
+poll; every side effect of the run (the merge request, a release) still needs the
+operator's approval. Residual risk: the issue author steers what the agents build, which
+is the feature; the operator reviews the merge request as for any run.
+
+**Text from the merge request (DESIGN 5.22).** `read_merge_request` brings a request's
+description and review threads to the model; a reviewer on the provider can write
+instructions into a thread. Mitigation: the whole answer is one untrusted block with the
+closing tag escaped, the tool is read-only, and the push onto the request's branch is
+refused when the branch moved since the run cloned it (D-050), so a commit someone else
+pushed is never replaced by the checkout's tree.
+
 **Runaway agents.** Loops, unbounded tool use, cost blow-ups. Mitigation: per-run step,
 time, cost, tool-call, node-iteration and loop-visit limits enforced on every event and
 on a tick (5.2), cancellation from the UI, a run can only ever wait on a human for
@@ -169,7 +188,12 @@ derived gateway image adds only the static Docker CLI.
   closes a record even when it is the token that lost access.
 - A later `open_merge_request` in the same run (a review loop, a retry) replaces the
   request branch's tree with the run's checkout, so a commit someone pushed to that
-  branch in between is reverted by it; iterating on a request from its branch is wave 9.
+  branch in between is reverted by it. A run that names an existing request (DESIGN
+  5.22) clones its branch and refuses the push when the branch moved since (D-050), so
+  the limitation is the same-run path only.
+- Issue intake polls the provider every two minutes and drives the issue's labels; the
+  comments it posts are best effort (a crash between the label swap and the comment can
+  repeat the comment once), and an issue's text is the run's task (above).
 - The scheduler is a single process; two api instances would both be safe (row locks)
   but only one is run.
 - No OpenTelemetry export; spans live in Postgres and the UI.

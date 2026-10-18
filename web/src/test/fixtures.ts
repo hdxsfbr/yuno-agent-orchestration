@@ -1,4 +1,4 @@
-import type { MergeRequest, Project, ProjectFact, Run } from "@/lib/api";
+import type { MergeRequest, Project, ProjectFact, ProjectIntake, ProjectSettings, Run, Workflow } from "@/lib/api";
 
 /** A project as the API lists it; tokens in tests look like glpat-not-a-real-token-00. */
 export const project = (over: Partial<Project> = {}): Project => ({
@@ -66,5 +66,36 @@ export const projectFact = (over: Partial<ProjectFact> = {}): ProjectFact => ({
   source_run_id: "r1",
   created_at: "2026-10-15T10:03:00Z",
   updated_at: "2026-10-15T10:03:00Z",
+  ...over,
+});
+
+/** The snapshot of a project a run keeps: what the project's settings were when the run was queued. */
+export const projectSettings = (over: Partial<ProjectSettings> = {}): ProjectSettings => ({
+  name: "yuno-playground",
+  repo_url: "https://gitlab.com/andrebatista/yuno-playground.git",
+  provider: "gitlab",
+  default_branch: "main",
+  sandbox_network: false,
+  ...over,
+});
+
+/** A project's issue intake: on, with the default label and a workflow, never polled. */
+export const intake = (over: Partial<ProjectIntake> = {}): ProjectIntake => ({
+  enabled: true,
+  label: "yuno",
+  workflow_id: "w1",
+  workflow_name: "Dev pipeline (ours)",
+  ...over,
+});
+
+/** An operator's workflow that works on a project and takes a task. */
+export const workflow = (over: Partial<Workflow> = {}): Workflow => ({
+  id: "w1",
+  name: "Dev pipeline (ours)",
+  description: "",
+  version: 1,
+  definition: { nodes: [], edges: [], project: true, input_schema: { type: "object", properties: { task: { type: "string" } }, required: ["task"] } },
+  created_at: "2026-10-15T09:00:00Z",
+  updated_at: "2026-10-15T09:00:00Z",
   ...over,
 });

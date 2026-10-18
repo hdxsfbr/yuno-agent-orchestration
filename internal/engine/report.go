@@ -301,6 +301,15 @@ func (e *Engine) runReportText(ctx context.Context, run *store.Run) string {
 	}
 	text := fmt.Sprintf("[platform] Run %s %s after %s, cost $%s: %s %s", run.ID, status, reportDuration(end.Sub(start)),
 		reportCost(run.CostUSDMicros), sentence(outcome), tools.RunURL(e.deps.Cfg.PublicBaseURL, run.ID))
+	if run.MergeRequestID != nil {
+		// DESIGN 5.22 rule 9: a run that names a request ends with its link when it pushed
+		// onto it, and says nothing of the request otherwise. The run has no record of its
+		// own (rule 4), so the opened-request sentence below does not apply.
+		if provider, url := e.updatedMergeRequest(ctx, run.ID); url != "" {
+			text += " Updated " + strings.ToLower(requestLabel(provider)) + ": " + url
+		}
+		return text
+	}
 	// DESIGN 5.17 rule 10: the request the run opened, when it did before this report
 	// (its record since 5.20 rule 6).
 	if mr, err := store.MergeRequestByRun(ctx, e.deps.Pool, run.ID); err != nil {
@@ -309,6 +318,37 @@ func (e *Engine) runReportText(ctx context.Context, run *store.Run) string {
 		text += " " + requestLabel(mr.Provider) + ": " + mr.URL
 	}
 	return text
+}
+
+// updatedMergeRequest reads the run's trace for the push of DESIGN 5.22 rule 9: the newest
+// executed open_merge_request call whose output has updated: true. It returns the
+// provider and the URL of that call's answer ("" when the run pushed nothing, or the
+// trace cannot be read, which is logged).
+func (e *Engine) updatedMergeRequest(ctx context.Context, runID string) (provider, url string) {
+	calls, err := store.ListToolCalls(ctx, e.deps.Pool, runID)
+	if err != nil {
+		e.log.Warn("read the run's tool calls for the report failed", "run_id", runID, "error", err)
+		return "", ""
+	}
+	for i := len(calls) - 1; i >= 0; i-- {
+		c := calls[i]
+		if (c.ToolName != "open_merge_request" && c.ToolName != "yuno__open_merge_request") || c.Status != store.ToolExecuted || c.IsError {
+			continue
+		}
+		var out struct {
+			URL      string `json:"url"`
+			Provider string `json:"provider"`
+			Updated  bool   `json:"updated"`
+		}
+		if json.Unmarshal(c.Output, &out) != nil || !out.Updated || out.URL == "" {
+			continue
+		}
+		if out.Provider == "" && strings.Contains(out.URL, "/pull/") {
+			out.Provider = "github" // the answer names it; the URL is the fallback
+		}
+		return out.Provider, out.URL
+	}
+	return "", ""
 }
 
 // requestLabel is what the provider calls the thing open_merge_request opened.
@@ -326,6 +366,7 @@ func (e *Engine) reportLateMergeRequest(ctx context.Context, runID, toolCallID s
 	var out struct {
 		URL      string `json:"url"`
 		Provider string `json:"provider"`
+		Updated  bool   `json:"updated"`
 	}
 	if json.Unmarshal(output, &out) != nil || out.URL == "" {
 		return
@@ -335,7 +376,13 @@ func (e *Engine) reportLateMergeRequest(ctx context.Context, runID, toolCallID s
 		return // the run's own report, still to come, carries the URL
 	}
 	convID, _ := store.ConversationOfRun(run)
-	text := fmt.Sprintf("[platform] Run %s: %s opened after the run ended: %s", run.ID, strings.ToLower(requestLabel(out.Provider)), out.URL)
+	// A late push onto the request the run updates (DESIGN 5.22 rule 4) is "updated",
+	// a late first request "opened".
+	verb := "opened"
+	if out.Updated && run.MergeRequestID != nil {
+		verb = "updated"
+	}
+	text := fmt.Sprintf("[platform] Run %s: %s %s after the run ended: %s", run.ID, strings.ToLower(requestLabel(out.Provider)), verb, out.URL)
 	e.sendReport(ctx, run.ID, convID, "effect-"+toolCallID, text)
 }
 

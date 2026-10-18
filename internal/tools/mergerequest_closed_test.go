@@ -10,9 +10,9 @@ import (
 	"yuno/internal/store"
 )
 
-// DESIGN 5.20 edge cases: a later open_merge_request call in a run whose request was
-// merged or closed is refused before anything is pushed, with the provider's own
-// wording for the request.
+// DESIGN 5.20 edge cases, 5.22 rule 3: a later open_merge_request call in a run whose
+// request was merged or closed (its own or the one it names) is refused before anything
+// is pushed, with the provider's own wording for the request.
 func TestUpdateRecordedRefusesAMergedOrClosedRequest(t *testing.T) {
 	m := &mergeRequest{}
 	for _, tc := range []struct{ provider, state, want string }{
@@ -20,7 +20,7 @@ func TestUpdateRecordedRefusesAMergedOrClosedRequest(t *testing.T) {
 		{"github", store.MergeRequestClosed, "the run's pull request #12 is closed; nothing more can be pushed to it"},
 	} {
 		rec := &store.MergeRequest{Number: 12, Provider: tc.provider, State: tc.state, SourceBranch: "yuno/abc"}
-		_, err := m.updateRecorded(context.Background(), &project.Config{Provider: project.Provider(tc.provider)}, rec, mergeRequestInput{Title: "t"}, t.TempDir())
+		_, err := m.updateRecorded(context.Background(), Call{}, &project.Config{Provider: project.Provider(tc.provider)}, rec, mergeRequestInput{Title: "t"}, t.TempDir(), nil)
 		var me *ModelError
 		if !errors.As(err, &me) || me.Message != tc.want {
 			t.Fatalf("%s %s: err = %v, want model error %q", tc.provider, tc.state, err, tc.want)

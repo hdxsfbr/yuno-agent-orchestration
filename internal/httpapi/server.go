@@ -21,6 +21,7 @@ import (
 	"yuno/internal/deploytarget"
 	"yuno/internal/engine"
 	"yuno/internal/events"
+	"yuno/internal/intake"
 	"yuno/internal/memory"
 	"yuno/internal/mergereq"
 	"yuno/internal/model"
@@ -183,6 +184,10 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		log.Info("merge requests backfilled from the trace", "count", n)
 	}
 	go mr.Run(ctx)
+	// Issue intake (DESIGN 5.23 rule 2): projects with intake enabled are polled for
+	// labelled issues and their finished issue runs are posted back on the issue.
+	go (&intake.Loop{Pool: pool, Projects: s.projects, Client: s.checkClient, Engine: eng,
+		Interval: cfg.IntakePollInterval, Log: log, PublicBaseURL: cfg.PublicBaseURL}).Run(ctx)
 
 	if err := s.LoadTemplates(ctx); err != nil {
 		log.Warn("workflow templates not loaded", "error", err)
@@ -569,6 +574,7 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 	// open_merge_request takes the project from the calling run (DESIGN 5.17 rule 6).
 	if d.Pool != nil {
 		pd.Projects = s.projects
+		pd.ProviderClient = s.checkClient
 	}
 	return pd
 }

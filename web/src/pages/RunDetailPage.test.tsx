@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
 import type { MergeRequest, ModelCall, Run, RunNode, ToolCall, Trace } from "@/lib/api";
-import { mergeRequest } from "@/test/fixtures";
+import { mergeRequest, projectSettings } from "@/test/fixtures";
 import RunDetailPage from "./RunDetailPage";
 
 // A fake API: GET /api/runs/r1/trace returns `trace`, GET /api/runs/r1/events is an event
@@ -368,6 +368,22 @@ describe("RunDetailPage project runs", () => {
     const card = within(await screen.findByRole("region", { name: "Merge request" }));
     fireEvent.click(card.getByRole("button", { name: "Sync" }));
     await waitFor(() => expect(card.getByText("Merged")).not.toBeNull());
+  });
+
+  it("shows what a run that updates a request says: the header line, the card line, and a sync that reaches the card", async () => {
+    const named = mergeRequest({ id: "mr1", run_id: "r0", synced_at: new Date().toISOString() });
+    trace = { ...trace, run: run({ project_id: "p1", project: projectSettings(), merge_request_id: "mr1", merge_request: named }) };
+    synced = { ...named, state: "merged", closed_at: "2026-10-15T11:00:00Z" };
+    renderPage();
+    const h = await header();
+    expect(h.getByRole("link", { name: "Updates merge request !12" }).getAttribute("href")).toBe(named.url);
+    const card = within(await screen.findByRole("region", { name: "Merge request" }));
+    expect(card.getByText(/This run updates it; opened by run/)).not.toBeNull();
+    expect(card.getByRole("link", { name: "r0" }).getAttribute("href")).toBe("/runs/r0");
+    // the record belongs to another run's id, and the sync still lands on this run's card
+    fireEvent.click(card.getByRole("button", { name: "Sync" }));
+    await waitFor(() => expect(card.getByText("Merged")).not.toBeNull());
+    expect(card.getByText(/This run updates it/)).not.toBeNull();
   });
 
   it("names the project the run works on, linking to its page", async () => {

@@ -6,7 +6,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import type { MergeRequest, Project, ProjectCheck, ProjectFact, Run } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { apiError, installFakeApi } from "@/test/fakeApi";
-import { mergeRequest, project, projectFact, run } from "@/test/fixtures";
+import { intake, mergeRequest, project, projectFact, run, workflow } from "@/test/fixtures";
 import ProjectPage from "./ProjectPage";
 
 let projects: Project[];
@@ -25,6 +25,7 @@ beforeEach(() => {
   api = installFakeApi();
   api.on("GET", "/api/projects", () => projects);
   api.on("GET", "/api/projects/p1/facts", () => facts);
+  api.on("GET", "/api/workflows", () => [workflow()]);
   api.on("GET", /^\/api\/merge-requests\?/, () => requests);
   // Like the real list: newest first, narrowed to the project when the query names one, and cut at `limit`.
   api.on("GET", /^\/api\/runs\?/, ({ url }) => {
@@ -371,7 +372,7 @@ describe("the Merge requests table", () => {
     renderPage();
     const section = await card("Merge requests");
     const headers = (await section.findAllByRole("columnheader")).map((h) => h.textContent);
-    expect(headers).toEqual(["Request", "Title", "Run", "State", "CI", "Unresolved threads", "Updated"]);
+    expect(headers).toEqual(["Request", "Title", "Runs", "State", "CI", "Unresolved threads", "Updated"]);
     const rows = section.getAllByRole("row").slice(1);
     expect(rows).toHaveLength(3);
 
@@ -417,6 +418,129 @@ describe("the Merge requests table", () => {
   });
 });
 
+describe("the Runs column of the Merge requests table", () => {
+  const runsCell = async (number: string) => {
+    const section = await card("Merge requests");
+    const row = (await section.findByRole("link", { name: number })).closest("tr") as HTMLElement;
+    return within(row.querySelectorAll("td")[2]);
+  };
+
+  it("links the run that opened the request and counts the runs that updated it, linking to the runs list filtered by the request", async () => {
+    requests = [
+      mergeRequest({ id: "mr1", number: 12, run_id: "runa" }),
+      mergeRequest({ id: "mr2", number: 13, run_id: "runb" }),
+      mergeRequest({ id: "mr3", number: 14, run_id: "runc" }),
+    ];
+    runs = [
+      run({ id: "u3", project_id: "p1", merge_request_id: "mr1" }),
+      run({ id: "u2", project_id: "p1", merge_request_id: "mr1" }),
+      run({ id: "u1", project_id: "p1", merge_request_id: "mr2" }),
+      run({ id: "runa", project_id: "p1" }),
+      run({ id: "unrelated", project_id: "p1", merge_request_id: "gone" }),
+    ];
+    renderPage();
+    const first = await runsCell("!12");
+    expect(first.getByRole("link", { name: "runa" }).getAttribute("href")).toBe("/runs/runa");
+    const updates = await first.findByRole("link", { name: "+2 updates" });
+    expect(updates.getAttribute("href")).toBe("/runs?merge_request_id=mr1");
+
+    const second = await runsCell("!13");
+    expect(second.getByRole("link", { name: "runb" })).not.toBeNull();
+    expect(await second.findByRole("link", { name: "+1 update" })).not.toBeNull();
+    expect(second.getByRole("link", { name: "+1 update" }).getAttribute("href")).toBe("/runs?merge_request_id=mr2");
+
+    const third = await runsCell("!14");
+    expect(third.getByRole("link", { name: "runc" })).not.toBeNull();
+    expect(third.queryByRole("link", { name: /update/ })).toBeNull();
+  });
+
+  it("does not count the run that opened the request, and encodes the record's id in the link", async () => {
+    requests = [mergeRequest({ id: "a/b", number: 12, run_id: "runa" })];
+    runs = [run({ id: "runa", project_id: "p1", merge_request_id: "a/b" }), run({ id: "u1", project_id: "p1", merge_request_id: "a/b" })];
+    renderPage();
+    const cell = await runsCell("!12");
+    expect((await cell.findByRole("link", { name: "+1 update" })).getAttribute("href")).toBe("/runs?merge_request_id=a%2Fb");
+  });
+
+  it("shows the opening run alone while the runs load or when they cannot be read", async () => {
+    requests = [mergeRequest({ id: "mr1", number: 12, run_id: "runa" })];
+    api.on("GET", /^\/api\/runs\?/, () => apiError(500, "internal", "boom"));
+    renderPage();
+    const cell = await runsCell("!12");
+    expect(cell.getByRole("link", { name: "runa" })).not.toBeNull();
+    expect(cell.queryByRole("link", { name: /update/ })).toBeNull();
+    expect((await (await card("Recent runs")).findByRole("alert")).textContent).toContain("Could not load the runs: boom");
+  });
+});
+
+describe("the Issue intake card", () => {
+  const polledAt = () => new Date(Date.now() - 5 * 60_000).toISOString();
+
+  it("sits beside the Budget card", async () => {
+    renderPage();
+    const budget = (await screen.findByRole("heading", { name: "Budget" })).closest("section") as HTMLElement;
+    const intakeCard = (await screen.findByRole("heading", { name: "Issue intake" })).closest("section") as HTMLElement;
+    expect(intakeCard.parentElement).toBe(budget.parentElement);
+  });
+
+  it("says Off with a disabled Poll now when the project's intake is off", async () => {
+    projects = [project({ spend: SPEND, intake: intake({ enabled: false, workflow_id: null, workflow_name: null }) })];
+    renderPage();
+    const section = await card("Issue intake");
+    expect(section.getByText("Off")).not.toBeNull();
+    expect(section.getByText("Not polled yet")).not.toBeNull();
+    expect((section.getByRole("button", { name: "Poll now" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("says On with the label and the workflow's name, when it last polled, and offers Poll now", async () => {
+    projects = [project({ spend: SPEND, intake: intake({ label: "robot", workflow_name: "Dev pipeline (ours)", polled_at: polledAt() }) })];
+    renderPage();
+    const section = await card("Issue intake");
+    expect(section.getByText("On: label robot, workflow Dev pipeline (ours)")).not.toBeNull();
+    expect(section.getByText("Last poll 5 min ago")).not.toBeNull();
+    expect((section.getByRole("button", { name: "Poll now" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("polls, shows what the pass did and reads the project and its runs again", async () => {
+    projects = [project({ spend: SPEND, intake: intake({ polled_at: polledAt() }) })];
+    runs = [run({ id: "run1", project_id: "p1", status: "running" })];
+    api.on("POST", "/api/projects/p1/intake/poll", () => {
+      projects = [project({ spend: SPEND, intake: intake({ polled_at: new Date().toISOString(), last_error: "intake: could not add the label" }) })];
+      runs = [run({ id: "run2", project_id: "p1", status: "queued", trigger: "issue" }), ...runs];
+      return { taken: 2, closed: 1 };
+    });
+    renderPage();
+    const section = await card("Issue intake");
+    await section.findByText("Last poll 5 min ago");
+    const projectReads = api.made("GET", "/api/projects").length;
+    const runReads = api.made("GET", /^\/api\/runs\?/).length;
+    fireEvent.click(section.getByRole("button", { name: "Poll now" }));
+    expect((await section.findByRole("status")).textContent).toBe("Took 2, closed 1");
+    expect(api.made("POST", "/api/projects/p1/intake/poll")).toHaveLength(1);
+    expect(api.made("POST", "/api/projects/p1/intake/poll")[0].body).toBeUndefined();
+    expect(await section.findByText("Last poll just now")).not.toBeNull();
+    expect(section.getByText("intake: could not add the label")).not.toBeNull();
+    expect(api.made("GET", "/api/projects").length).toBeGreaterThan(projectReads);
+    await waitFor(() => expect(api.made("GET", /^\/api\/runs\?/).length).toBeGreaterThan(runReads));
+    expect(await (await card("Recent runs")).findByRole("link", { name: "run2" })).not.toBeNull();
+  });
+
+  it("shows the server's message when the intake turns out to be off, and reads the project again", async () => {
+    projects = [project({ spend: SPEND, intake: intake() })];
+    api.on("POST", "/api/projects/p1/intake/poll", () => {
+      projects = [project({ spend: SPEND, intake: intake({ enabled: false }) })];
+      return apiError(409, "intake_disabled", "issue intake is off for this project");
+    });
+    renderPage();
+    const section = await card("Issue intake");
+    await section.findByText(/^On: label/);
+    fireEvent.click(section.getByRole("button", { name: "Poll now" }));
+    expect((await section.findByRole("alert")).textContent).toBe("issue intake is off for this project");
+    expect(await section.findByText("Off")).not.toBeNull();
+    expect(section.queryByRole("status")).toBeNull();
+  });
+});
+
 describe("the Recent runs card", () => {
   it("lists the project's runs, newest first, with status, time and a link", async () => {
     runs = [
@@ -436,14 +560,16 @@ describe("the Recent runs card", () => {
     expect(within(rows[1]).getByText("succeeded")).not.toBeNull();
   });
 
-  it("asks the server for the project's ten newest runs, and shows them", async () => {
+  it("reads the project's 200 newest runs once, and shows the ten newest", async () => {
     runs = Array.from({ length: 15 }, (_, i) => run({ id: `run${String(i).padStart(2, "0")}`, project_id: "p1", status: "succeeded" }));
     renderPage();
     const section = await card("Recent runs");
     expect((await section.findAllByRole("row")).slice(1)).toHaveLength(10);
     expect(section.getByRole("link", { name: "run09" })).not.toBeNull();
     expect(section.queryByRole("link", { name: "run10" })).toBeNull();
-    expect(api.made("GET", /^\/api\/runs/).map((c) => c.url)).toEqual(["/api/runs?project_id=p1&limit=10"]);
+    // the Merge requests table counts from the same read
+    await waitFor(() => expect(api.made("GET", /^\/api\/merge-requests/)).toHaveLength(1));
+    expect(api.made("GET", /^\/api\/runs/).map((c) => c.url)).toEqual(["/api/runs?project_id=p1&limit=200"]);
   });
 
   it("finds the project's runs however many newer runs other projects have", async () => {

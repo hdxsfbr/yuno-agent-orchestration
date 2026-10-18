@@ -130,7 +130,9 @@ Projects section, `MCP_TOOL_WAIT_SECONDS` (how long a gated tool call waits for 
 human before the agent continues with `pending_approval`, default 540), `TOOL_OUTPUT_MAX_BYTES`,
 `BUDGET_TICK` (how often project spend is checked for budget alerts, default 60 s) and
 `MERGE_REQUEST_SYNC_INTERVAL` (how often open merge requests are refreshed from their
-provider, default 120 s). The memory tools need the agent's `memory_policy.enabled`.
+provider, default 120 s) and `INTAKE_POLL_INTERVAL` (how often projects with issue intake
+enabled are polled for labelled issues, default 120 s). The memory tools need the agent's
+`memory_policy.enabled`.
 Secrets never go in the repository; the log handler redacts anything shaped like a
 provider key (Anthropic or OpenRouter), a bot token, a run token or a bearer token, in
 logs and in stored transcripts (see `internal/obs/redact.go`). Postgres is published on
@@ -297,6 +299,32 @@ run, so a run that died on one is retried by raising that cap in the dialog the 
 opens; the time limit restarts; a run is retried at most five times, and a retry of a
 channel run reports its new outcome into the chat once more. The merge request of a
 retried run is updated, never duplicated.
+
+A run can work on an open merge request instead of opening a new one (DESIGN 5.22): the
+Run dialog, the quick-run dialog, the schedule form and a run request name one of the
+project's open requests (`merge_request_id`), and the Chief of Staff takes "fix the review
+comments on !4" (`merge_request` on `delegate_task`, a number or the request's link). The
+engine then clones that request's branch, the agents read its description, unresolved
+review threads and pipeline status with `read_merge_request` (the Coder and the Reviewer
+have it; the Chief too, for "what is !4 about?"), and the Deployer's `open_merge_request`
+pushes the working tree onto the branch as a new commit, answering `replayed` and
+`updated`. One run at a time may update a request, the request must be open when the run
+is queued, and the push is refused when someone else pushed to the branch since the run
+cloned it, so nothing is silently overwritten; the run header says which request it
+updates and the project page counts the runs that updated each one.
+
+A project can take work from its own issue tracker (DESIGN 5.23): with intake enabled
+on the project (a label, `yuno` by default, and the workflow to run; a budget cap is
+required first), every two minutes the platform lists the open issues carrying the label,
+creates a run per issue with the issue's title and body as the task (as untrusted
+content), moves the label to `yuno:running` and comments the run's link on the issue;
+when the run ends the label becomes `yuno:done` with the merge request's link (the
+request's description carries `Closes #<n>`, so merging closes the issue) or
+`yuno:failed` with the reason, and re-adding `yuno` is the explicit retry. The project
+page shows the last poll and a Poll now button; the runs list filters by trigger and
+links issue runs to their issue. No webhook and no inbound endpoint: the platform polls
+with the project's token, and anyone who may label issues on the repository can start
+runs on the project, bounded by its budget (`docs/threat-model.md`).
 
 `PROJECT_REPO_URL`, `PROJECT_GIT_TOKEN`, `PROJECT_DEFAULT_BRANCH`, `PROJECT_PROVIDER`
 and `PROJECT_SANDBOX_NETWORK` remain only as a bootstrap: at the api's start, when they
