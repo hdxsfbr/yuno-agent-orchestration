@@ -122,12 +122,18 @@ platform tool and `PlatformDeps`), `internal/httpapi/chief.go` (`delegator.Deleg
 
 ## Rules of the house
 
-- Everything runs in Docker through compose from the main checkout, or in a throwaway
-  container from a worktree: package tests with
-  `docker compose --profile tools run --rm go go test ./internal/tools/ ./internal/httpapi/ ./internal/seed/ ./internal/openclaw/ -count=1`,
-  vet with `docker compose --profile tools run --rm --no-deps go go vet ./...`. Never run
-  `make run`, `make down`, `make clean` or anything that restarts the running stack;
-  never run the whole suite: the coordinator does.
+- Everything runs in Docker, from this worktree in a throwaway container on the stack's
+  network with your own test database (the compose `go` service cannot be used here:
+  no `.env`, and compose would join the live stack). Package tests:
+
+  ```
+  docker run --rm --network yuno_default -v "$PWD:/src" -v yuno_gomod:/go/pkg/mod -v yuno_gocache:/root/.cache/go-build -w /src -e GOFLAGS=-buildvcs=false -e CGO_ENABLED=0 -e DATABASE_URL='postgres://yuno:yuno@postgres:5432/yuno_test_a2?sslmode=disable' yuno-go-tools:1.26 sh -c 'go test ./internal/tools/ ./internal/httpapi/ ./internal/seed/ ./internal/openclaw/ -count=1 2>&1 | tail -60'
+  ```
+
+  vet with `go vet ./...` and `gofmt -l .` in the same container. Write long outputs to a
+  file under `/tmp` and read the file. Never run `make run`, `make down`, `make clean`,
+  `make test-*`, `make lint` or `docker compose ...` from this directory: a stack is
+  running and must not be restarted; never run the whole suite: the coordinator does.
 - Files you own: `internal/tools/{mergerequest.go,providers.go,readmergerequest.go,chief.go,platform.go}`
   and their tests and fakes; `internal/httpapi/chief.go` and tests; `internal/seed/seed.go`
   and tests; `templates/dev_pipeline.json`; `internal/openclaw/materialize.go` and tests.

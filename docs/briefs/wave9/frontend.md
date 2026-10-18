@@ -90,11 +90,18 @@ trigger cell), `web/src/lib/useProjects.ts`, `web/src/test/{fakeApi.ts,fixtures.
 
 ## Rules of the house
 
-- Everything runs in Docker through the Makefile from the main checkout (`make
-  test-web`, `make lint`; a single file with `docker compose --profile tools run --rm
-  node pnpm vitest run src/components/project/IntakeCard.test.tsx`) or in a throwaway
-  node container from a worktree. Nothing installed on the host. Never run `make run`,
-  `make down` or `make clean`: a stack is running and must not be restarted.
+- Everything runs in Docker, from this worktree in a throwaway node container (the
+  Makefile and compose cannot be used here: a stack is running and compose would join it).
+  `web/node_modules` is already in place (copied from the main checkout, same lockfile):
+
+  ```
+  docker run --rm -u "$(id -u):$(id -g)" -v "$PWD/web:/app" -w /app -e HOME=/tmp -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 -e COREPACK_HOME=/tmp/corepack -e npm_config_cache=/tmp/npm-cache node:24-slim sh -c 'mkdir -p /tmp/corepack-bin /tmp/corepack && corepack enable --install-directory /tmp/corepack-bin && export PATH=/tmp/corepack-bin:$PATH && pnpm test && pnpm lint'
+  ```
+
+  (a single file: `pnpm vitest run src/components/project/IntakeCard.test.tsx` in place of
+  `pnpm test && pnpm lint`). Nothing installed on the host. Never run `make run`, `make
+  down`, `make clean`, `make test-*`, `make lint` or `docker compose ...` from this
+  directory: a stack is running and must not be restarted.
 - Touch only `web/`. Do not edit `internal/`, `api/`, `docs/`, the Makefile or compose.
 - No developer commentary in product copy: labels and hints are for the end user, never
   mention design rules, waves, stubs or the backend. Times as the rest of the UI shows
