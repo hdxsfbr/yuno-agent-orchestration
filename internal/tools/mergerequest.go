@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"yuno/internal/project"
+	"yuno/internal/store"
 )
 
 // OpenMergeRequestName proposes a run's project checkout as a merge request (DESIGN
@@ -52,33 +53,24 @@ type mergeRequestInput struct {
 	Description string `json:"description"`
 }
 
-// mergeRequestOutput is the tool's result: {number, url, branch, provider, replayed?}.
+// mergeRequestOutput is the tool's result: {number, url, branch, provider, replayed?,
+// updated?}. A run has one request (DESIGN 5.20 rule 2): a later successful call answers
+// it with replayed, and with updated when it pushed a commit onto its branch.
 type mergeRequestOutput struct {
 	Number   int64  `json:"number"`
 	URL      string `json:"url"`
 	Branch   string `json:"branch"`
 	Provider string `json:"provider"`
 	Replayed bool   `json:"replayed,omitempty"`
-}
-
-// requestRef is an open merge or pull request as the provider reports it.
-type requestRef struct {
-	Number int64
-	URL    string
-}
-
-// requestProvider is the slice of a provider's API the tool uses (DESIGN 5.16 rule
-// 11). A non-2xx answer is an *errAPIStatus carrying the result for the model.
-type requestProvider interface {
-	branchExists(ctx context.Context, branch string) (bool, error)
-	findOpen(ctx context.Context, branch string) (*requestRef, error)
-	create(ctx context.Context, branch, base, title, description string) (*requestRef, error)
+	Updated  bool   `json:"updated,omitempty"`
 }
 
 // NewOpenMergeRequest builds open_merge_request: commit the run's checkout on the key's
 // branch and push it from the api, then open the request against the default branch
-// of the run's project (DESIGN 5.17 rule 6). A second call with the same key finds the
-// branch (no second push) and the open request (no second one) and reports replayed.
+// of the run's project (DESIGN 5.17 rule 6) and record it (5.20 rule 2). A second call
+// with the same key finds the branch (no second push) and the open request (no second
+// one) and reports replayed; a later call of the same run with another key pushes onto
+// the recorded request's branch instead of opening a second one.
 func NewOpenMergeRequest(cfg MergeRequestConfig) *Tool {
 	if cfg.Client == nil {
 		cfg.Client = ProviderClient(nil)
@@ -90,7 +82,9 @@ func NewOpenMergeRequest(cfg MergeRequestConfig) *Tool {
 			"or pull request (GitHub) against the project's default branch: the platform commits the working " +
 			"tree, pushes a branch and opens the request with your title and description. The title is a short " +
 			"summary of the change, like a commit subject (at most 72 characters), never the task text; put " +
-			"what changed and why and how it was tested in the description. Needs a human approval unless " +
+			"what changed and why and how it was tested in the description. A run has one request: calling " +
+			"this again in the same run adds the working tree to that request as a new commit (the answer then " +
+			"has replayed and updated true) and never opens a second one. Needs a human approval unless " +
 			"the operator allowed it to run automatically. Returns the request's number and URL; if a human " +
 			"has not decided yet it returns status pending_approval, and if they refused it returns status " +
 			"rejected with a reason.",
@@ -112,7 +106,7 @@ type mergeRequest struct {
 }
 
 // providerFor builds the provider client of one project (DESIGN 5.16 rule 11).
-func (m *mergeRequest) providerFor(pc *project.Config) requestProvider {
+func (m *mergeRequest) providerFor(pc *project.Config) RequestProvider {
 	base, path := m.cfg.APIBase, m.cfg.RepoPath
 	if base == "" {
 		base = pc.APIBase()
@@ -120,12 +114,7 @@ func (m *mergeRequest) providerFor(pc *project.Config) requestProvider {
 	if path == "" {
 		path = pc.Path()
 	}
-	switch pc.Provider {
-	case project.ProviderGitHub:
-		return &githubProvider{api: &apiClient{what: "github", client: m.cfg.Client, authorize: bearerAuth(pc.Token)}, base: base, owner: ownerOf(path)}
-	default:
-		return &gitlabProvider{api: &apiClient{what: "gitlab", client: m.cfg.Client, authorize: privateTokenAuth(pc.Token)}, base: base}
-	}
+	return newRequestProvider(pc, m.cfg.Client, base, path)
 }
 
 func (m *mergeRequest) exec(ctx context.Context, call Call) (Result, error) {
@@ -153,7 +142,7 @@ func (m *mergeRequest) exec(ctx context.Context, call Call) (Result, error) {
 		return Result{}, err
 	}
 	branch := GitLabBranch(call.IdempotencyKey)
-	res, err := m.run(ctx, pc, m.providerFor(pc), in, checkout, branch)
+	res, err := m.run(ctx, call, pc, m.providerFor(pc), in, checkout, branch)
 	var se *errAPIStatus
 	if errors.As(err, &se) {
 		return se.res, nil
@@ -161,8 +150,28 @@ func (m *mergeRequest) exec(ctx context.Context, call Call) (Result, error) {
 	return res, err
 }
 
-func (m *mergeRequest) run(ctx context.Context, pc *project.Config, provider requestProvider, in mergeRequestInput, checkout, branch string) (Result, error) {
-	exists, err := provider.branchExists(ctx, branch)
+// run is open_merge_request after the checks (DESIGN 5.16 rule 10, 5.20 rule 2). A run
+// that has a request already pushes onto its branch and opens no second one; otherwise
+// the branch is pushed, the request found or opened, and the record written in the
+// side effect's transaction right after the provider answered, so a failed insert rolls
+// the result back and releases the key. Without a transaction (the tool called on its
+// own, as the unit tests of the provider flow do) no record is read or written.
+func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, provider RequestProvider, in mergeRequestInput, checkout, branch string) (Result, error) {
+	if call.Tx != nil {
+		// Two calls of one run with different keys must not both find no record and open
+		// two requests: the second waits for the first's transaction, then finds the record.
+		if err := store.LockRunMergeRequest(ctx, call.Tx, call.RunID); err != nil {
+			return Result{}, err
+		}
+		rec, err := store.MergeRequestByRun(ctx, call.Tx, call.RunID)
+		if err != nil {
+			return Result{}, err
+		}
+		if rec != nil {
+			return m.updateRecorded(ctx, pc, rec, in, checkout)
+		}
+	}
+	exists, err := provider.BranchExists(ctx, branch)
 	if err != nil {
 		return Result{}, err
 	}
@@ -177,18 +186,73 @@ func (m *mergeRequest) run(ctx context.Context, pc *project.Config, provider req
 			return Result{IsError: true, Text: "propose the changes: " + err.Error()}, nil
 		}
 	}
-	open, err := provider.findOpen(ctx, branch)
+	out := mergeRequestOutput{Branch: branch, Provider: string(pc.Provider)}
+	open, err := provider.FindOpen(ctx, branch)
 	if err != nil {
 		return Result{}, err
 	}
 	if open != nil {
-		return JSONResult(mergeRequestOutput{Number: open.Number, URL: open.URL, Branch: branch, Provider: string(pc.Provider), Replayed: true}), nil
+		out.Number, out.URL, out.Replayed = open.Number, open.URL, true
+	} else {
+		ref, err := provider.Create(ctx, branch, pc.DefaultBranch, in.Title, in.Description)
+		if err != nil {
+			return Result{}, err
+		}
+		out.Number, out.URL = ref.Number, ref.URL
 	}
-	ref, err := provider.create(ctx, branch, pc.DefaultBranch, in.Title, in.Description)
+	if call.Tx != nil {
+		if err := m.record(ctx, call, pc, out, in.Title); err != nil {
+			return Result{}, err
+		}
+	}
+	return JSONResult(out), nil
+}
+
+// updateRecorded answers a later call of a run that has its request (DESIGN 5.20 rule
+// 2): the working tree goes onto the record's source branch as a new commit with the
+// title as its message, and the answer is the record's, replayed, with updated set when
+// a commit was pushed. A tree equal to the branch pushes nothing. The request's title
+// and description stay as they were.
+func (m *mergeRequest) updateRecorded(ctx context.Context, pc *project.Config, rec *store.MergeRequest, in mergeRequestInput, checkout string) (Result, error) {
+	if rec.State != store.MergeRequestOpen {
+		// DESIGN 5.20 edge cases: nothing more can be pushed to a request that was
+		// merged or closed; the model is told instead of git failing on the branch.
+		return Result{}, &ModelError{Message: fmt.Sprintf("the run's %s %s%d is %s; nothing more can be pushed to it",
+			requestNoun(rec.Provider), requestSigil(rec.Provider), rec.Number, rec.State)}
+	}
+	out := mergeRequestOutput{Number: rec.Number, URL: rec.URL, Branch: rec.SourceBranch, Provider: rec.Provider, Replayed: true}
+	_, err := pc.ProposeOnto(ctx, checkout, rec.SourceBranch, in.Title)
+	switch {
+	case err == nil:
+		out.Updated = true
+	case errors.Is(err, project.ErrNoChanges):
+	default:
+		return Result{IsError: true, Text: "propose the changes: " + err.Error()}, nil
+	}
+	return JSONResult(out), nil
+}
+
+// record writes the run's merge request record in the call's transaction (DESIGN 5.20
+// rule 2): state open, ci_status none, never synced.
+func (m *mergeRequest) record(ctx context.Context, call Call, pc *project.Config, out mergeRequestOutput, title string) error {
+	run, err := store.GetRun(ctx, call.Tx, call.RunID)
 	if err != nil {
-		return Result{}, err
+		return fmt.Errorf("record the merge request: %w", err)
 	}
-	return JSONResult(mergeRequestOutput{Number: ref.Number, URL: ref.URL, Branch: branch, Provider: string(pc.Provider)}), nil
+	if run.ProjectID == nil {
+		return errors.New("record the merge request: the run names no project")
+	}
+	inserted, err := store.InsertMergeRequest(ctx, call.Tx, &store.MergeRequest{
+		ProjectID: *run.ProjectID, RunID: call.RunID, Provider: string(pc.Provider), Number: out.Number, URL: out.URL,
+		SourceBranch: out.Branch, TargetBranch: pc.DefaultBranch, Title: title,
+	})
+	if err != nil {
+		return fmt.Errorf("record the merge request: %w", err)
+	}
+	if !inserted {
+		return fmt.Errorf("record the merge request: %d is already recorded for the project", out.Number)
+	}
+	return nil
 }
 
 // checkoutDir is <workspace>/runs/<run id>/repo, reached through an os.Root of the
@@ -220,4 +284,20 @@ func checkoutDir(workspace, runID string) (string, error) {
 		return "", &ModelError{Message: "this run has no project checkout at " + rel + "/: no .git directory"}
 	}
 	return filepath.Join(workspace, rel), nil
+}
+
+// requestNoun and requestSigil are what the provider calls a request and how it numbers
+// it: "merge request !12" on GitLab, "pull request #12" on GitHub.
+func requestNoun(provider string) string {
+	if provider == "github" {
+		return "pull request"
+	}
+	return "merge request"
+}
+
+func requestSigil(provider string) string {
+	if provider == "github" {
+		return "#"
+	}
+	return "!"
 }

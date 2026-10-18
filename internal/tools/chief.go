@@ -445,14 +445,17 @@ func projectForDelegation(ctx context.Context, pool *pgxpool.Pool, name *string,
 }
 
 // NewListProjects builds list_projects (DESIGN 5.17 rule 8): every live project with
-// its last run, so the Chief can match the person's words to a name.
+// its last run, so the Chief can match the person's words to a name. A project with a
+// budget cap also shows its spend against it (DESIGN 5.19 rule 8), so the Chief can say
+// why a delegation was refused.
 func NewListProjects(pool *pgxpool.Pool) *Tool {
 	return &Tool{
 		Name: ListProjectsName,
 		Description: "List the projects (git repositories) the platform can work on: name, repository, provider, " +
-			"default branch, whether the sandbox has network access, and the last run on each. Call it to find " +
-			"the project a person names, then pass its name as project to delegate_task; a workflow that works " +
-			"on a project repository needs one.",
+			"default branch, whether the sandbox has network access, and the last run on each; a project with a " +
+			"budget cap also shows the cap and what it has spent today and this month, since new runs on it are " +
+			"refused once a cap is reached. Call it to find the project a person names, then pass its name as " +
+			"project to delegate_task; a workflow that works on a project repository needs one.",
 		InputSchema: listAgentsSchema,
 		Risk:        RiskReadOnly,
 		Hits:        HitsPostgres,
@@ -470,6 +473,11 @@ func NewListProjects(pool *pgxpool.Pool) *Tool {
 			if err != nil {
 				return Result{}, err
 			}
+			if slices.ContainsFunc(projects, hasBudgetCap) {
+				if err := store.FillProjectSpend(ctx, pool, projects, time.Now().UTC()); err != nil {
+					return Result{}, err
+				}
+			}
 			type lastRun struct {
 				RunID      string  `json:"run_id"`
 				Status     string  `json:"status"`
@@ -477,16 +485,18 @@ func NewListProjects(pool *pgxpool.Pool) *Tool {
 				FinishedAt *string `json:"finished_at,omitempty"`
 			}
 			type projectView struct {
-				Name           string   `json:"name"`
-				Repository     string   `json:"repository"`
-				Provider       string   `json:"provider"`
-				DefaultBranch  string   `json:"default_branch"`
-				SandboxNetwork bool     `json:"sandbox_network"`
-				LastRun        *lastRun `json:"last_run"`
+				Name           string      `json:"name"`
+				Repository     string      `json:"repository"`
+				Provider       string      `json:"provider"`
+				DefaultBranch  string      `json:"default_branch"`
+				SandboxNetwork bool        `json:"sandbox_network"`
+				LastRun        *lastRun    `json:"last_run"`
+				Budget         *budgetView `json:"budget,omitempty"`
 			}
 			out := []projectView{}
 			for _, p := range projects {
-				v := projectView{Name: p.Name, Repository: p.RepoURL, Provider: p.Provider, DefaultBranch: p.DefaultBranch, SandboxNetwork: p.SandboxNetwork}
+				v := projectView{Name: p.Name, Repository: p.RepoURL, Provider: p.Provider, DefaultBranch: p.DefaultBranch, SandboxNetwork: p.SandboxNetwork,
+					Budget: budgetOf(&p)}
 				if r, ok := latest[p.ID]; ok {
 					v.LastRun = &lastRun{RunID: r.ID, Status: r.Status, Toolchain: r.Toolchain}
 					if r.FinishedAt != nil {
@@ -499,6 +509,38 @@ func NewListProjects(pool *pgxpool.Pool) *Tool {
 			return JSONResult(map[string]any{"projects": out}), nil
 		},
 	}
+}
+
+// budgetView is list_projects' budget of a project with a cap (DESIGN 5.19 rule 8):
+// the cap and what the project has spent in the current UTC window, in USD, for each
+// window that has a cap.
+type budgetView struct {
+	Day   *budgetWindowView `json:"day,omitempty"`
+	Month *budgetWindowView `json:"month,omitempty"`
+}
+
+type budgetWindowView struct {
+	MaxUSD   float64 `json:"max_usd"`
+	SpentUSD float64 `json:"spent_usd"`
+}
+
+func hasBudgetCap(p store.Project) bool {
+	return p.BudgetDayUSDMicros != nil || p.BudgetMonthUSDMicros != nil
+}
+
+// budgetOf is the project's budget view, nil without a cap. Spend must be filled in.
+func budgetOf(p *store.Project) *budgetView {
+	if !hasBudgetCap(*p) || p.Spend == nil {
+		return nil
+	}
+	b := &budgetView{}
+	if p.BudgetDayUSDMicros != nil {
+		b.Day = &budgetWindowView{MaxUSD: p.BudgetDayUSDMicros.USD(), SpentUSD: p.Spend.DayUSDMicros.USD()}
+	}
+	if p.BudgetMonthUSDMicros != nil {
+		b.Month = &budgetWindowView{MaxUSD: p.BudgetMonthUSDMicros.USD(), SpentUSD: p.Spend.MonthUSDMicros.USD()}
+	}
+	return b
 }
 
 // agentByName finds the live agent with exactly this name, ignoring case; the oldest
@@ -586,11 +628,15 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
 			if run.Project != nil {
 				out["project"] = run.Project.Name
 			}
-			if mr, err := store.MergeRequestOfRun(ctx, pool, run.ID); err != nil {
+			// DESIGN 5.20 rule 6: the run's merge request record; 5.21 rule 7: its retries.
+			if mr, err := store.MergeRequestByRun(ctx, pool, run.ID); err != nil {
 				return Result{}, err
 			} else if mr != nil {
 				out["merge_request_url"] = mr.URL
+				out["merge_request"] = map[string]any{"number": mr.Number, "url": mr.URL, "state": mr.State,
+					"ci_status": mr.CIStatus, "unresolved_threads": mr.UnresolvedThreads}
 			}
+			out["retries"] = run.Retries
 			if run.Status == store.RunWaitingApproval {
 				pending, err := store.ListPendingApprovals(ctx, pool, run.ID)
 				if err != nil {

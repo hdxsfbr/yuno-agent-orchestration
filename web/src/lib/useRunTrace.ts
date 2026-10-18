@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { getTrace, isTerminalStatus, subscribe, type Approval, type Run, type SSEEvent } from "./api";
+import { getTrace, isTerminalStatus, subscribe, type Approval, type MergeRequest, type Run, type SSEEvent } from "./api";
 import type { Connection } from "./useEventStream";
 import { applyEvent, applyEvents, toRunView, type RunView } from "./trace";
 
@@ -20,6 +20,8 @@ export type RunTraceState = {
   applyRun: (run: Run) => void;
   /** Applies an approval returned by the API after a decision, ahead of the stream's event. */
   applyApproval: (approval: Approval) => void;
+  /** Puts a merge request record the API returned (a sync, a merge, a lookup) on the run. */
+  applyMergeRequest: (mr: MergeRequest) => void;
 };
 
 /**
@@ -29,7 +31,8 @@ export type RunTraceState = {
  * happens between the two is lost; events that arrive while the trace loads are buffered
  * and applied on top of it. The trace is loaded again after every reconnect and when the
  * run reaches a final status, which re-baselines anything the stream missed. Log lines
- * exist only on the stream, so the stream is opened with a replay from the start.
+ * exist only on the stream, so the stream is opened with a replay from the start; so do the
+ * marks of a retry (`run.retry`).
  */
 export function useRunTrace(runId: string): RunTraceState {
   const [view, setView] = useState<RunView | null>(null);
@@ -64,7 +67,11 @@ export function useRunTrace(runId: string): RunTraceState {
         const queued = buffer;
         buffer = [];
         setError(null);
-        setView((prev) => applyEvents(toRunView(trace, prev?.logs ?? []), queued));
+        setView((prev) => {
+          // A record never goes away, so one the view already holds survives a trace that does not carry it.
+          const loaded = !trace.run.merge_request && prev?.run.merge_request ? { ...trace, run: { ...trace.run, merge_request: prev.run.merge_request } } : trace;
+          return applyEvents(toRunView(loaded, prev?.logs ?? [], prev?.retries ?? []), queued);
+        });
         loaded = true;
       } catch (e) {
         if (!cancelled && !loaded) setError(e instanceof Error ? e : new Error(String(e)));
@@ -138,5 +145,9 @@ export function useRunTrace(runId: string): RunTraceState {
     setView((v) => (v && v.run.id === approval.run_id ? applyEvent(v, { event: "approval.decided", data: { approval } }) : v));
   }, []);
 
-  return { view, error, connection, retry, applyRun, applyApproval };
+  const applyMergeRequest = useCallback((mr: MergeRequest) => {
+    setView((v) => (v && v.run.id === mr.run_id ? { ...v, run: { ...v.run, merge_request: mr } } : v));
+  }, []);
+
+  return { view, error, connection, retry, applyRun, applyApproval, applyMergeRequest };
 }

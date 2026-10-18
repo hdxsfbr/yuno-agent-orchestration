@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
-import type { ModelCall, Run, RunNode, ToolCall, Trace } from "@/lib/api";
+import type { MergeRequest, ModelCall, Run, RunNode, ToolCall, Trace } from "@/lib/api";
+import { mergeRequest } from "@/test/fixtures";
 import RunDetailPage from "./RunDetailPage";
 
 // A fake API: GET /api/runs/r1/trace returns `trace`, GET /api/runs/r1/events is an event
@@ -63,6 +64,9 @@ const toolCall: ToolCall = {
 };
 
 let trace: Trace;
+/** What GET /api/merge-requests?run_id=r1 answers, and what a sync of the record returns. */
+let requestsForRun: MergeRequest[];
+let synced: MergeRequest | undefined;
 let streamController: ReadableStreamDefaultController<Uint8Array>;
 let calls: { url: string; init?: RequestInit }[];
 const encoder = new TextEncoder();
@@ -77,6 +81,8 @@ function json(body: unknown, status = 200) {
 
 beforeEach(() => {
   calls = [];
+  requestsForRun = [];
+  synced = undefined;
   trace = { run: run(), nodes: [node], model_calls: [modelCall], tool_calls: [], spans: [], agent_messages: [], approvals: [] };
   vi.stubGlobal(
     "fetch",
@@ -100,6 +106,8 @@ beforeEach(() => {
         return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
       }
       if (url === `/api/runs/${RUN}/cancel` && init?.method === "POST") return json(run({ cancel_requested: true }), 202);
+      if (url.startsWith("/api/merge-requests?")) return json(requestsForRun);
+      if (/^\/api\/merge-requests\/[^/]+\/sync$/.test(url) && init?.method === "POST") return json(synced ?? requestsForRun[0] ?? trace.run.merge_request);
       return json({ error: { code: "not_found", message: "not found" } }, 404);
     }),
   );
@@ -278,30 +286,73 @@ describe("RunDetailPage project runs", () => {
     ...over,
   });
 
-  it("shows the toolchain badge and the merge request link from the tool's output", async () => {
-    trace = { ...trace, run: run({ toolchain: "go" }), tool_calls: [mrCall()] };
+  it("shows the toolchain badge in the header and the merge request in a card of its own", async () => {
+    trace = { ...trace, run: run({ toolchain: "go", merge_request: mergeRequest({ run_id: RUN }) }), tool_calls: [mrCall()] };
     renderPage();
     const h = await header();
     expect(h.getByText("Toolchain: Go")).not.toBeNull();
-    const link = h.getByRole("link", { name: "Merge request !12" });
-    expect(link.getAttribute("href")).toBe("https://gitlab.test/g/p/-/merge_requests/12");
+    expect(h.queryByRole("link", { name: /Merge request/ })).toBeNull();
+    const card = within(await screen.findByRole("region", { name: "Merge request" }));
+    const link = card.getByRole("link", { name: "Merge request !12" });
+    expect(link.getAttribute("href")).toBe("https://gitlab.com/andrebatista/yuno-playground/-/merge_requests/12");
     expect(link.getAttribute("target")).toBe("_blank");
+    expect(card.getByText("Open")).not.toBeNull();
+    // the card sits right under the summary
+    expect(screen.getByRole("region", { name: "Run summary" }).nextElementSibling).toBe(screen.getByRole("region", { name: "Merge request" }));
   });
 
   it("calls a GitHub request a pull request", async () => {
-    trace = { ...trace, run: run({ toolchain: "node" }), tool_calls: [mrCall({ output: { number: 3, url: "https://github.test/o/r/pull/3", provider: "github" } })] };
+    trace = {
+      ...trace,
+      run: run({ toolchain: "node", merge_request: mergeRequest({ run_id: RUN, provider: "github", number: 3, url: "https://github.test/o/r/pull/3" }) }),
+    };
     renderPage();
     const h = await header();
     expect(h.getByText("Toolchain: Node")).not.toBeNull();
-    expect(h.getByRole("link", { name: "Pull request #3" }).getAttribute("href")).toBe("https://github.test/o/r/pull/3");
+    const card = within(await screen.findByRole("region", { name: "Pull request" }));
+    expect(card.getByRole("link", { name: "Pull request #3" }).getAttribute("href")).toBe("https://github.test/o/r/pull/3");
   });
 
-  it("shows neither without a checkout, and no link while the call waits or failed", async () => {
+  it("shows neither a toolchain nor a card without a checkout, and looks nothing up while the call waits or failed", async () => {
     trace = { ...trace, tool_calls: [mrCall({ status: "awaiting_approval", output: undefined }), mrCall({ id: "t-mr2", status: "failed", is_error: true, output: { error: "boom" } })] };
     renderPage();
     const h = await header();
+    await screen.findByText("Live");
     expect(h.queryByText(/Toolchain/)).toBeNull();
-    expect(h.queryByRole("link", { name: /request/ })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Merge request" })).toBeNull();
+    expect(calls.some((c) => c.url.startsWith("/api/merge-requests"))).toBe(false);
+  });
+
+  it("picks up the record when the tool call that opened the request arrives on the stream", async () => {
+    trace = { ...trace, run: run({ toolchain: "python" }) };
+    requestsForRun = [mergeRequest({ run_id: RUN, number: 7, title: "Fix the build" })];
+    renderPage();
+    const h = await header();
+    expect(h.getByText("Toolchain: Python")).not.toBeNull();
+    await screen.findByText("Live");
+    expect(screen.queryByRole("region", { name: "Merge request" })).toBeNull();
+    send(7, "tool_call", { tool_call: mrCall() });
+    expect(await screen.findByRole("link", { name: "Merge request !7" })).not.toBeNull();
+    expect(calls.some((c) => c.url === `/api/merge-requests?run_id=${RUN}&limit=1`)).toBe(true);
+  });
+
+  it("keeps the card when a later run.status event carries the run without its record", async () => {
+    trace = { ...trace, run: run({ merge_request: mergeRequest({ run_id: RUN }) }) };
+    renderPage();
+    await screen.findByRole("region", { name: "Merge request" });
+    await screen.findByText("Live");
+    send(7, "run.status", { run: run({ step_count: 4 }) });
+    await waitFor(() => expect(within(screen.getByRole("region", { name: "Run summary" })).getByText("4")).not.toBeNull());
+    expect(screen.getByRole("region", { name: "Merge request" })).not.toBeNull();
+  });
+
+  it("replaces the record with the one a sync returns", async () => {
+    trace = { ...trace, run: run({ merge_request: mergeRequest({ run_id: RUN, synced_at: new Date().toISOString() }) }) };
+    synced = mergeRequest({ run_id: RUN, state: "merged", closed_at: "2026-10-15T11:00:00Z" });
+    renderPage();
+    const card = within(await screen.findByRole("region", { name: "Merge request" }));
+    fireEvent.click(card.getByRole("button", { name: "Sync" }));
+    await waitFor(() => expect(card.getByText("Merged")).not.toBeNull());
   });
 
   it("names the project the run works on, linking to its page", async () => {
@@ -323,15 +374,5 @@ describe("RunDetailPage project runs", () => {
     const h = await header();
     expect(h.getByText("Trigger")).not.toBeNull();
     expect(h.queryByText("Project")).toBeNull();
-  });
-
-  it("picks up the link when the tool call arrives on the stream", async () => {
-    trace = { ...trace, run: run({ toolchain: "python" }) };
-    renderPage();
-    const h = await header();
-    expect(h.getByText("Toolchain: Python")).not.toBeNull();
-    expect(h.queryByRole("link", { name: /Merge request/ })).toBeNull();
-    send(7, "tool_call", { tool_call: mrCall() });
-    expect(await screen.findByRole("link", { name: "Merge request !12" })).not.toBeNull();
   });
 });

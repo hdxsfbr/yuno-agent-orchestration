@@ -57,8 +57,11 @@ describe("navigation", () => {
     expect(await screen.findByRole("heading", { name: "Workflows" })).not.toBeNull();
   });
 
-  it("serves the Projects page at /projects and opens a project's form at /projects/<id>", async () => {
+  it("serves the Projects page at /projects, a project's page at /projects/<id> and its form at /projects/<id>/edit", async () => {
     api.on("GET", "/api/projects", () => [project({})]);
+    api.on("GET", "/api/projects/p1/facts", () => []);
+    api.on("GET", /^\/api\/merge-requests\?/, () => []);
+    api.on("GET", /^\/api\/runs\?/, () => []);
     renderApp("/projects");
     expect(await screen.findByRole("heading", { name: "Projects" })).not.toBeNull();
     expect(await screen.findByRole("link", { name: "yuno-playground" })).not.toBeNull();
@@ -66,6 +69,14 @@ describe("navigation", () => {
     cleanup();
 
     renderApp("/projects/p1");
+    expect(await screen.findByRole("heading", { name: "yuno-playground" })).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Budget" })).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Instructions" })).not.toBeNull();
+    expect(await screen.findByText(/No notes yet/)).not.toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    cleanup();
+
+    renderApp("/projects/p1/edit");
     expect((await screen.findByRole("dialog", { name: "Edit yuno-playground" })).textContent).toContain("A token is set. Enter a new one to replace it.");
   });
 

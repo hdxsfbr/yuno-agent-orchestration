@@ -129,6 +129,9 @@ func TestOpenAPIConformance(t *testing.T) {
 	}
 	steps = append(steps, workflowConformanceSteps(t, run.ID)...)
 	steps = append(steps, projectConformanceSteps(t)...)
+	steps = append(steps, projectWave8ConformanceSteps(t)...)
+	steps = append(steps, mergeRequestConformanceSteps(t)...)
+	steps = append(steps, retryConformanceSteps(t)...)
 	var agentID string
 	for _, st := range steps {
 		code, body := checkConformance(t, router, ts.URL, st.method, st.path, st.body, st.want < 300)

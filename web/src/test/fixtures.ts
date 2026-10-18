@@ -1,4 +1,4 @@
-import type { Project } from "@/lib/api";
+import type { MergeRequest, Project, ProjectFact, Run } from "@/lib/api";
 
 /** A project as the API lists it; tokens in tests look like glpat-not-a-real-token-00. */
 export const project = (over: Partial<Project> = {}): Project => ({
@@ -12,5 +12,59 @@ export const project = (over: Partial<Project> = {}): Project => ({
   token_set: true,
   created_at: "2026-10-15T09:00:00Z",
   updated_at: "2026-10-15T09:00:00Z",
+  ...over,
+});
+
+/** A run as the API returns it; a failed one by default, which is what the retry tests start from. */
+export const run = (over: Partial<Run> = {}): Run => ({
+  id: "r1",
+  workflow_id: "wf",
+  workflow_version: 1,
+  trigger: "manual",
+  status: "failed",
+  input: {},
+  state: {},
+  limits: {},
+  current_node: "coder",
+  step_count: 3,
+  tool_call_count: 5,
+  cost_usd_micros: 120_000,
+  created_at: "2026-10-15T10:00:00Z",
+  started_at: "2026-10-15T10:00:01Z",
+  finished_at: "2026-10-15T10:05:00Z",
+  ...over,
+});
+
+/** A merge request record: open, with its pipeline passed, on GitLab. */
+export const mergeRequest = (over: Partial<MergeRequest> = {}): MergeRequest => ({
+  id: "mr1",
+  project_id: "p1",
+  run_id: "r1",
+  provider: "gitlab",
+  number: 12,
+  url: "https://gitlab.com/andrebatista/yuno-playground/-/merge_requests/12",
+  source_branch: "yuno/0123456789ab",
+  target_branch: "main",
+  title: "Add the health endpoint",
+  state: "open",
+  ci_status: "passed",
+  unresolved_threads: 0,
+  synced_at: new Date().toISOString(),
+  created_at: "2026-10-15T10:01:00Z",
+  updated_at: "2026-10-15T10:02:00Z",
+  ...over,
+});
+
+/** A note an agent saved for a project. */
+export const projectFact = (over: Partial<ProjectFact> = {}): ProjectFact => ({
+  id: "f1",
+  project_id: "p1",
+  key: "test-command",
+  value: "go test ./...",
+  agent_id: "a1",
+  agent_name: "Coder",
+  source_run_id: "r1",
+  created_at: "2026-10-15T10:03:00Z",
+  updated_at: "2026-10-15T10:03:00Z",
   ...over,
 });

@@ -48,7 +48,8 @@ function renderPage(path = "/projects") {
         <Where />
         <Routes>
           <Route path="/projects" element={<ProjectsPage />} />
-          <Route path="/projects/:id" element={<ProjectsPage />} />
+          <Route path="/projects/:id" element={<p>project page</p>} />
+          <Route path="/projects/:id/edit" element={<ProjectsPage />} />
           <Route path="/runs/:id" element={<p>run page</p>} />
         </Routes>
       </MemoryRouter>
@@ -69,7 +70,7 @@ describe("ProjectsPage list", () => {
   it("shows each project's name, repository, provider, branch, last run and network", async () => {
     renderPage();
     const headers = (await screen.findAllByRole("columnheader")).map((h) => h.textContent);
-    expect(headers).toEqual(["Name", "Repository", "Provider", "Default branch", "Last run", "Sandbox network", "Actions"]);
+    expect(headers).toEqual(["Name", "Repository", "Provider", "Default branch", "Last run", "Spend", "Sandbox network", "Actions"]);
 
     const first = within(await rowOf("yuno-playground"));
     const cells = first.getAllByRole("cell");
@@ -150,6 +151,9 @@ describe("creating a project", () => {
       provider: "",
       sandbox_network: true,
       description: "The public API",
+      instructions: "",
+      max_cost_usd_per_day: null,
+      max_cost_usd_per_month: null,
       token: TOKEN,
     });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -245,6 +249,9 @@ describe("editing a project", () => {
       default_branch: "main",
       sandbox_network: false,
       description: "Playground repository",
+      instructions: "",
+      max_cost_usd_per_day: null,
+      max_cost_usd_per_month: null,
     });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(where()).toBe("/projects");
@@ -271,12 +278,14 @@ describe("editing a project", () => {
     expect(api.made("PUT", /./)).toHaveLength(0);
   });
 
-  it("opens from the project's name and closes back to the list", async () => {
+  it("opens from Edit and closes back to the list", async () => {
     renderPage();
-    fireEvent.click(await screen.findByRole("link", { name: "docs-site" }));
+    const link = await screen.findByRole("link", { name: "Edit docs-site" });
+    expect(link.getAttribute("href")).toBe("/projects/p2/edit");
+    fireEvent.click(link);
     const d = await dialog();
     expect(d.getByRole("heading", { name: "Edit docs-site" })).not.toBeNull();
-    expect(where()).toBe("/projects/p2");
+    expect(where()).toBe("/projects/p2/edit");
     fireEvent.click(d.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(where()).toBe("/projects");
@@ -284,8 +293,8 @@ describe("editing a project", () => {
 });
 
 describe("routes", () => {
-  it("opens the form of the project /projects/<id> names", async () => {
-    renderPage("/projects/p2");
+  it("opens the form of the project /projects/<id>/edit names", async () => {
+    renderPage("/projects/p2/edit");
     const d = await dialog();
     expect(d.getByRole("heading", { name: "Edit docs-site" })).not.toBeNull();
     expect((d.getByLabelText(/^Repository URL/) as HTMLInputElement).value).toBe("https://github.com/acme/docs");
@@ -293,17 +302,17 @@ describe("routes", () => {
   });
 
   it("falls back to the list when the id names no project", async () => {
-    renderPage("/projects/gone");
+    renderPage("/projects/gone/edit");
     expect(await screen.findByRole("link", { name: "yuno-playground" })).not.toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(where()).toBe("/projects");
   });
 
   it("waits for the list before deciding the id is unknown", async () => {
-    renderPage("/projects/p1");
-    expect(where()).toBe("/projects/p1");
+    renderPage("/projects/p1/edit");
+    expect(where()).toBe("/projects/p1/edit");
     expect((await dialog()).getByRole("heading", { name: "Edit yuno-playground" })).not.toBeNull();
-    expect(where()).toBe("/projects/p1");
+    expect(where()).toBe("/projects/p1/edit");
   });
 });
 
@@ -424,5 +433,204 @@ describe("deleting a project", () => {
     const d = await dialog();
     fireEvent.click(d.getByRole("button", { name: "Delete project" }));
     expect((await d.findByRole("alert")).textContent).toContain("project not found");
+  });
+});
+
+describe("the name link", () => {
+  it("opens the project's page", async () => {
+    renderPage();
+    const link = await screen.findByRole("link", { name: "docs-site" });
+    expect(link.getAttribute("href")).toBe("/projects/p2");
+    fireEvent.click(link);
+    expect(await screen.findByText("project page")).not.toBeNull();
+    expect(where()).toBe("/projects/p2");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("encodes an id that needs it", async () => {
+    projects = [project({ id: "a/b", name: "odd" })];
+    renderPage();
+    expect((await screen.findByRole("link", { name: "odd" })).getAttribute("href")).toBe("/projects/a%2Fb");
+  });
+});
+
+describe("the Spend column", () => {
+  const spend = (day: number, month: number) => ({ day_usd: day, month_usd: month, day_until: "2026-10-18T00:00:00Z", month_until: "2026-11-01T00:00:00Z" });
+  const lines = async (name: string) => {
+    const cell = (await rowOf(name)).querySelectorAll("td")[5];
+    return Array.from(cell.querySelectorAll("p")) as HTMLElement[];
+  };
+
+  it("shows today's and this month's spend over the caps, with two decimals", async () => {
+    projects = [project({ max_cost_usd_per_day: 5, max_cost_usd_per_month: 100.5, spend: spend(1.2, 12) })];
+    renderPage();
+    expect((await lines("yuno-playground")).map((l) => l.textContent)).toEqual(["$1.20 / $5.00 today", "$12.00 / $100.50 this month"]);
+  });
+
+  it("shows the amounts alone, muted, when there is no cap", async () => {
+    projects = [project({ spend: spend(0.5, 1234.5) })];
+    renderPage();
+    const [day, month] = await lines("yuno-playground");
+    expect(day.textContent).toBe("$0.50 today");
+    expect(month.textContent).toBe("$1,234.50 this month");
+    expect(day.className).toContain("zinc-500");
+    expect(month.className).toContain("zinc-500");
+  });
+
+  it("keeps the normal tone below 80 %, warns from 80 % and flags the cap as reached at 100 %", async () => {
+    projects = [
+      project({ id: "low", name: "low", max_cost_usd_per_day: 10, max_cost_usd_per_month: 10, spend: spend(7.99, 0) }),
+      project({ id: "warn", name: "warn", max_cost_usd_per_day: 10, max_cost_usd_per_month: 10, spend: spend(8, 9.99) }),
+      project({ id: "full", name: "full", max_cost_usd_per_day: 10, max_cost_usd_per_month: 10, spend: spend(10, 12) }),
+    ];
+    renderPage();
+    const [lowDay, lowMonth] = await lines("low");
+    for (const l of [lowDay, lowMonth]) {
+      expect(l.className).not.toContain("amber");
+      expect(l.className).not.toContain("red");
+      expect(l.className).not.toContain("zinc-500");
+    }
+    const [warnDay, warnMonth] = await lines("warn");
+    expect(warnDay.className).toContain("amber");
+    expect(warnMonth.className).toContain("amber");
+    const [fullDay, fullMonth] = await lines("full");
+    expect(fullDay.className).toContain("red");
+    expect(fullDay.getAttribute("title")).toContain("cap is reached");
+    expect(fullMonth.className).toContain("red");
+    expect(fullMonth.textContent).toBe("$12.00 / $10.00 this month");
+  });
+
+  it("tones each window by its own cap", async () => {
+    projects = [project({ max_cost_usd_per_day: 1, spend: spend(1, 50) })];
+    renderPage();
+    const [day, month] = await lines("yuno-playground");
+    expect(day.className).toContain("red");
+    expect(month.className).toContain("zinc-500");
+  });
+
+  it("shows a dash for a project the API sent no spend for", async () => {
+    renderPage();
+    expect((await rowOf("yuno-playground")).querySelectorAll("td")[5].textContent).toBe("—");
+  });
+});
+
+describe("the project form: instructions and budget", () => {
+  const edit = async (name = "yuno-playground") => {
+    fireEvent.click(await screen.findByRole("link", { name: `Edit ${name}` }));
+    return dialog();
+  };
+  const save = (d: ReturnType<typeof within>) => fireEvent.click(d.getByRole("button", { name: "Save changes" }));
+  const sent = () => api.made("PUT", "/api/projects/p1")[0].body as ProjectInput;
+
+  beforeEach(() => {
+    api.on("PUT", /^\/api\/projects\/([^/]+)$/, () => project({}));
+  });
+
+  it("explains the Instructions field and starts it empty on a new project", async () => {
+    renderPage();
+    const d = await openNew();
+    const field = d.getByLabelText("Instructions") as HTMLTextAreaElement;
+    expect(field.tagName).toBe("TEXTAREA");
+    expect(field.value).toBe("");
+    expect(d.getByText("Standing instructions for every run on this project: conventions, how to build and test, what to leave alone.")).not.toBeNull();
+  });
+
+  it("groups the two caps under one Budget label with the hint", async () => {
+    renderPage();
+    const d = await openNew();
+    const group = d.getByRole("group", { name: "Budget" });
+    expect(within(group).getByLabelText("Per day (USD)")).not.toBeNull();
+    expect(within(group).getByLabelText("Per month (USD)")).not.toBeNull();
+    expect(within(group).getByText("Leave empty for no cap. New runs are refused once the cap is reached; running runs finish.")).not.toBeNull();
+    expect((within(group).getByLabelText("Per day (USD)") as HTMLInputElement).value).toBe("");
+  });
+
+  it("opens on the saved instructions and caps and sends them back", async () => {
+    projects = [project({ instructions: "Run `make test` before you push.\nLeave vendor/ alone.", max_cost_usd_per_day: 5, max_cost_usd_per_month: 12.5 })];
+    renderPage();
+    const d = await edit();
+    expect((d.getByLabelText("Instructions") as HTMLTextAreaElement).value).toBe("Run `make test` before you push.\nLeave vendor/ alone.");
+    expect((d.getByLabelText("Per day (USD)") as HTMLInputElement).value).toBe("5");
+    expect((d.getByLabelText("Per month (USD)") as HTMLInputElement).value).toBe("12.5");
+    save(d);
+    await waitFor(() => expect(api.made("PUT", "/api/projects/p1")).toHaveLength(1));
+    expect(sent()).toMatchObject({ instructions: "Run `make test` before you push.\nLeave vendor/ alone.", max_cost_usd_per_day: 5, max_cost_usd_per_month: 12.5 });
+  });
+
+  it("sends what was typed, the instructions trimmed and the caps as numbers", async () => {
+    renderPage();
+    const d = await edit();
+    fill(d, "Instructions", "  Use pnpm.  \n");
+    fill(d, "Per day (USD)", " 2.50 ");
+    fill(d, "Per month (USD)", "40");
+    save(d);
+    await waitFor(() => expect(api.made("PUT", "/api/projects/p1")).toHaveLength(1));
+    expect(sent()).toMatchObject({ instructions: "Use pnpm.", max_cost_usd_per_day: 2.5, max_cost_usd_per_month: 40 });
+  });
+
+  it("sends null for a cap that is emptied, which clears it", async () => {
+    projects = [project({ max_cost_usd_per_day: 5, max_cost_usd_per_month: 12.5 })];
+    renderPage();
+    const d = await edit();
+    fill(d, "Per day (USD)", "");
+    fill(d, "Per month (USD)", "   ");
+    save(d);
+    await waitFor(() => expect(api.made("PUT", "/api/projects/p1")).toHaveLength(1));
+    const body = sent() as Record<string, unknown>;
+    expect(body.max_cost_usd_per_day).toBeNull();
+    expect(body.max_cost_usd_per_month).toBeNull();
+    expect("max_cost_usd_per_day" in body).toBe(true);
+  });
+
+  it.each([
+    ["not a number", "abc", "Enter an amount in dollars"],
+    ["a dollar sign", "$5", "Enter an amount in dollars"],
+    ["zero", "0", "Must be greater than 0"],
+    ["a negative number", "-3", "Must be greater than 0"],
+  ])("refuses %s as a cap before sending", async (_, text, message) => {
+    renderPage();
+    const d = await edit();
+    fill(d, "Per day (USD)", text);
+    fill(d, "Per month (USD)", text);
+    save(d);
+    await waitFor(() => expect(d.getByLabelText("Per day (USD)").getAttribute("aria-invalid")).toBe("true"));
+    expect(d.getByLabelText("Per day (USD)").parentElement?.textContent).toContain(message);
+    expect(d.getByLabelText("Per month (USD)").getAttribute("aria-invalid")).toBe("true");
+    expect(api.made("PUT", /./)).toHaveLength(0);
+  });
+
+  it("accepts instructions of exactly 8192 characters and refuses one more", async () => {
+    renderPage();
+    const d = await edit();
+    fill(d, "Instructions", "x".repeat(8193));
+    save(d);
+    await waitFor(() => expect(d.getByLabelText("Instructions").getAttribute("aria-invalid")).toBe("true"));
+    expect(d.getByLabelText("Instructions").parentElement?.textContent).toContain("Instructions must be at most 8192 characters");
+    expect(api.made("PUT", /./)).toHaveLength(0);
+
+    fill(d, "Instructions", "x".repeat(8192));
+    save(d);
+    await waitFor(() => expect(api.made("PUT", "/api/projects/p1")).toHaveLength(1));
+    expect(sent().instructions).toHaveLength(8192);
+  });
+
+  it("puts the API's 422 next to the field it names", async () => {
+    api.on("PUT", /^\/api\/projects\/([^/]+)$/, () =>
+      apiError(422, "validation_failed", "validation failed", [
+        { path: "instructions", message: "at most 8192 bytes" },
+        { path: "max_cost_usd_per_day", message: "at most 1000000" },
+        { path: "max_cost_usd_per_month", message: "must be greater than 0" },
+      ]),
+    );
+    renderPage();
+    const d = await edit();
+    fill(d, "Instructions", "é".repeat(5000));
+    fill(d, "Per day (USD)", "2000000");
+    fill(d, "Per month (USD)", "1");
+    save(d);
+    await waitFor(() => expect(d.getByLabelText("Instructions").parentElement?.textContent).toContain("at most 8192 bytes"));
+    expect(d.getByLabelText("Per day (USD)").parentElement?.textContent).toContain("at most 1000000");
+    expect(d.getByLabelText("Per month (USD)").parentElement?.textContent).toContain("must be greater than 0");
+    expect(screen.getByRole("dialog")).not.toBeNull();
   });
 });

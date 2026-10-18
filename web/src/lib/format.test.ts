@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { elapsedMs, formatCount, formatDuration, formatMicros, humanize, shortId } from "./format";
+import { elapsedMs, formatAgo, formatCount, formatDuration, formatMicros, formatUsd, humanize, shortId } from "./format";
 
 describe("formatMicros", () => {
   it("shows micro-dollars as dollars with four decimals", () => {
@@ -97,5 +97,48 @@ describe("small helpers", () => {
     expect(formatCount(1234567)).toBe("1,234,567");
     expect(formatCount(undefined)).toBe("0");
     expect(humanize("waiting_approval")).toBe("waiting approval");
+  });
+});
+
+describe("formatUsd", () => {
+  it("shows dollars with two decimals and a thousands separator", () => {
+    expect(formatUsd(0)).toBe("$0.00");
+    expect(formatUsd(5)).toBe("$5.00");
+    expect(formatUsd(12.5)).toBe("$12.50");
+    expect(formatUsd(1234.5)).toBe("$1,234.50");
+    expect(formatUsd(1_000_000)).toBe("$1,000,000.00");
+  });
+
+  it("rounds to the cent and tolerates a missing amount", () => {
+    expect(formatUsd(0.004)).toBe("$0.00");
+    expect(formatUsd(0.126)).toBe("$0.13");
+    expect(formatUsd(-2)).toBe("-$2.00");
+    expect(formatUsd(undefined)).toBe("$0.00");
+    expect(formatUsd(Number.NaN)).toBe("$0.00");
+  });
+});
+
+describe("formatAgo", () => {
+  const now = Date.parse("2026-10-17T12:00:00Z");
+  const ago = (ms: number) => formatAgo(new Date(now - ms).toISOString(), now);
+
+  it("reads seconds, minutes, hours and days", () => {
+    expect(ago(0)).toBe("just now");
+    expect(ago(9_000)).toBe("just now");
+    expect(ago(10_000)).toBe("10s ago");
+    expect(ago(59_000)).toBe("59s ago");
+    expect(ago(60_000)).toBe("1 min ago");
+    expect(ago(59 * 60_000)).toBe("59 min ago");
+    expect(ago(60 * 60_000)).toBe("1 h ago");
+    expect(ago(23 * 3_600_000)).toBe("23 h ago");
+    expect(ago(24 * 3_600_000)).toBe("1 d ago");
+    expect(ago(3 * 86_400_000 + 5_000)).toBe("3 d ago");
+  });
+
+  it("reads a time in the future as just now and a missing or unreadable one as a dash", () => {
+    expect(formatAgo("2026-10-17T12:05:00Z", now)).toBe("just now");
+    expect(formatAgo(undefined, now)).toBe("—");
+    expect(formatAgo(null, now)).toBe("—");
+    expect(formatAgo("soon", now)).toBe("—");
   });
 });

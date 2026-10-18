@@ -22,6 +22,7 @@ import (
 	"yuno/internal/engine"
 	"yuno/internal/events"
 	"yuno/internal/memory"
+	"yuno/internal/mergereq"
 	"yuno/internal/model"
 	"yuno/internal/openclaw"
 	"yuno/internal/project"
@@ -172,6 +173,16 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 			return store.DeleteExpiredConversationMessages(ctx, pool, now)
 		},
 	}}).Run(ctx)
+	// Project budget alerts (DESIGN 5.19 rule 5) and merge request records refreshed
+	// from their provider (DESIGN 5.20 rule 3), the backfill of rule 7 first so the
+	// first pass settles the records of runs that predate the table.
+	go (&project.Watcher{Pool: pool, Tick: cfg.BudgetTick, Log: log, Reporter: eng}).Run(ctx)
+	mr := &mergereq.Sync{Pool: pool, Projects: s.projects, Client: s.checkClient, Reporter: eng,
+		Interval: cfg.MergeRequestSyncInterval, Log: log}
+	if n, err := mr.Backfill(ctx); err == nil && n > 0 {
+		log.Info("merge requests backfilled from the trace", "count", n)
+	}
+	go mr.Run(ctx)
 
 	if err := s.LoadTemplates(ctx); err != nil {
 		log.Warn("workflow templates not loaded", "error", err)

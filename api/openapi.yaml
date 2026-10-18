@@ -76,6 +76,8 @@ paths:
         `data`. Send `Last-Event-ID` to replay missed events. A comment line is sent every
         15 seconds as a heartbeat. Event types: run.status, node.status, model_call,
         tool_call, approval.requested, approval.decided, agent_message, log,
+        run.retry (`{retries, from_node, by, limits, at}`: an operator retried the run from
+        the step it stopped at),
         schedule.fired (`{schedule, run}`, filed under the run it created),
         conversation.message (`{conversation, message}`: a Conversation and a
         ConversationMessage, platform-wide, no run), and conversation.tool_call
@@ -237,9 +239,8 @@ paths:
     post:
       tags: [runs]
       summary: Retry a failed, timed-out or cancelled run from the step it stopped at
-      x-planned: wave 8
       description: |
-        Planned for wave 8 (DESIGN 5.21). Re-queues the run from its current node, keeping its
+        DESIGN 5.21. Re-queues the run from its current node, keeping its
         state, counters and checkout; `retries` counts it. The optional `limits` replace the run's
         limits first, which is how a run that died on a cap is retried.
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -648,8 +649,6 @@ paths:
     get:
       tags: [projects]
       summary: The project's live notes, newest first
-      x-planned: wave 8
-      description: Planned for wave 8 (DESIGN 5.18 rule 6).
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       responses:
         "200": { description: notes, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ProjectFact" } } } } }
@@ -658,8 +657,6 @@ paths:
     delete:
       tags: [projects]
       summary: Delete a project note
-      x-planned: wave 8
-      description: Planned for wave 8 (DESIGN 5.18 rule 6).
       parameters:
         - { $ref: "#/components/parameters/Id" }
         - { name: factId, in: path, required: true, schema: { type: string } }
@@ -670,8 +667,6 @@ paths:
     get:
       tags: [merge-requests]
       summary: Merge requests the platform opened, newest first
-      x-planned: wave 8
-      description: Planned for wave 8 (DESIGN 5.20 rule 6).
       parameters:
         - { name: project_id, in: query, schema: { type: string } }
         - { name: run_id, in: query, schema: { type: string } }
@@ -679,12 +674,11 @@ paths:
         - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
       responses:
         "200": { description: list, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/MergeRequest" } } } } }
+        "422": { $ref: "#/components/responses/Error" }
   /api/merge-requests/{id}:
     get:
       tags: [merge-requests]
       summary: One merge request record
-      x-planned: wave 8
-      description: Planned for wave 8 (DESIGN 5.20 rule 6).
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       responses:
         "200": { description: record, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequest" } } } }
@@ -693,8 +687,7 @@ paths:
     post:
       tags: [merge-requests]
       summary: Refresh the record from the provider now
-      x-planned: wave 8
-      description: Planned for wave 8 (DESIGN 5.20 rule 3). Provider errors are recorded on the record (`last_sync_error`), not HTTP errors.
+      description: DESIGN 5.20 rule 3. Provider errors are recorded on the record (`last_sync_error`), not HTTP errors.
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       responses:
         "200": { description: refreshed record, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequest" } } } }
@@ -703,9 +696,8 @@ paths:
     post:
       tags: [merge-requests]
       summary: Merge the request on the provider
-      x-planned: wave 8
       description: |
-        Planned for wave 8 (DESIGN 5.20 rule 5). Needs state `open` and a pipeline that passed or
+        DESIGN 5.20 rule 5. Needs state `open` and a pipeline that passed or
         does not exist. A provider refusal (conflicts, a protected branch, a required approval)
         answers 409 `merge_request_not_mergeable` with the provider's message.
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -713,7 +705,7 @@ paths:
         "200": { description: merged record, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequest" } } } }
         "404": { $ref: "#/components/responses/Error" }
         "409": { description: "merge_request_not_open, merge_request_ci_not_passed or merge_request_not_mergeable", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
-        "502": { description: "provider_unavailable: the provider did not answer; the record was re-synced", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "502": { description: "provider_unavailable (the provider did not answer; the record was re-synced and is still open) or provider_error (the provider refused with another status)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
 components:
   securitySchemes:
@@ -910,9 +902,9 @@ components:
             created_at: { type: string, format: date-time }
             updated_at: { type: string, format: date-time }
             last_run: { $ref: "#/components/schemas/ProjectLastRun" }
-            instructions: { type: string, description: "planned, wave 8 (DESIGN 5.18): the operator's standing instructions rendered into every visit's task on the project; empty when none" }
-            max_cost_usd_per_day: { type: number, description: "planned, wave 8 (DESIGN 5.19): the project's UTC-day cap in USD; absent when none" }
-            max_cost_usd_per_month: { type: number, description: "planned, wave 8 (DESIGN 5.19): the project's UTC-month cap in USD; absent when none" }
+            instructions: { type: string, description: "DESIGN 5.18: the operator's standing instructions rendered into every visit's task on the project; empty when none" }
+            max_cost_usd_per_day: { type: number, description: "DESIGN 5.19: the project's UTC-day cap in USD; absent when none" }
+            max_cost_usd_per_month: { type: number, description: "DESIGN 5.19: the project's UTC-month cap in USD; absent when none" }
             spend: { $ref: "#/components/schemas/ProjectSpend" }
     ProjectInput:
       type: object
@@ -926,9 +918,9 @@ components:
         sandbox_network: { type: boolean, default: false }
         description: { type: string, maxLength: 1024 }
         token: { type: string, description: "write-only: required on create; on update, absent or empty keeps the stored token" }
-        instructions: { type: string, maxLength: 8192, description: "planned, wave 8 (DESIGN 5.18 rule 1): at most 8192 bytes, no control characters other than newline and tab; absent on update clears it" }
-        max_cost_usd_per_day: { type: [number, "null"], exclusiveMinimum: 0, maximum: 1000000, description: "planned, wave 8 (DESIGN 5.19 rule 1); absent or null clears the cap" }
-        max_cost_usd_per_month: { type: [number, "null"], exclusiveMinimum: 0, maximum: 1000000, description: "planned, wave 8 (DESIGN 5.19 rule 1); absent or null clears the cap" }
+        instructions: { type: string, maxLength: 8192, description: "DESIGN 5.18 rule 1: at most 8192 bytes, no control characters other than newline and tab; absent on update clears it" }
+        max_cost_usd_per_day: { type: [number, "null"], exclusiveMinimum: 0, maximum: 1000000, description: "DESIGN 5.19 rule 1; absent or null clears the cap" }
+        max_cost_usd_per_month: { type: [number, "null"], exclusiveMinimum: 0, maximum: 1000000, description: "DESIGN 5.19 rule 1; absent or null clears the cap" }
         spend: {}
         id: {}
         token_set: {}
@@ -937,7 +929,7 @@ components:
         last_run: {}
     ProjectSpend:
       type: object
-      description: "Planned, wave 8 (DESIGN 5.19 rule 7): what the project's runs spent in the current UTC day and month, in USD, whatever their status."
+      description: "DESIGN 5.19 rule 7: what the project's runs spent in the current UTC day and month, in USD, whatever their status."
       required: [day_usd, month_usd]
       properties:
         day_usd: { type: number }
@@ -946,7 +938,7 @@ components:
         month_until: { type: string, format: date-time, description: "when the month window ends" }
     ProjectFact:
       type: object
-      description: "Planned, wave 8 (DESIGN 5.18 rule 2): a note an agent saved for the project; any agent of a run on the project reads and writes them."
+      description: "DESIGN 5.18 rule 2: a note an agent saved for the project; any agent of a run on the project reads and writes them."
       required: [id, project_id, key, value, created_at, updated_at]
       properties:
         id: { type: string }
@@ -961,7 +953,7 @@ components:
         expires_at: { type: string, format: date-time }
     MergeRequest:
       type: object
-      description: "Planned, wave 8 (DESIGN 5.20 rule 1): a merge request (GitLab) or pull request (GitHub) the platform opened for a run; one per run."
+      description: "DESIGN 5.20 rule 1: a merge request (GitLab) or pull request (GitHub) the platform opened for a run; one per run."
       required: [id, project_id, run_id, provider, number, url, source_branch, target_branch, title, state, ci_status, created_at, updated_at]
       properties:
         id: { type: string }
@@ -986,7 +978,7 @@ components:
         closed_at: { type: string, format: date-time, description: "when it was merged or closed" }
     RunRetry:
       type: object
-      description: "Planned, wave 8 (DESIGN 5.21 rule 1): the body of a retry; limits, when given, replace the run's limits before the exhausted-limit check."
+      description: "DESIGN 5.21 rule 1: the body of a retry; limits, when given, replace the run's limits before the exhausted-limit check."
       properties:
         limits: { $ref: "#/components/schemas/Limits" }
     ProjectCheck:
@@ -1164,10 +1156,10 @@ components:
         project:
           allOf: [ { $ref: "#/components/schemas/ProjectSettings" } ]
           description: "the run's snapshot of its project's settings, taken when it was queued; never the token"
-        retries: { type: integer, description: "planned, wave 8 (DESIGN 5.21): how many times the operator retried the run from the step it stopped at" }
+        retries: { type: integer, description: "DESIGN 5.21: how many times the operator retried the run from the step it stopped at" }
         merge_request:
           allOf: [ { $ref: "#/components/schemas/MergeRequest" } ]
-          description: "planned, wave 8 (DESIGN 5.20 rule 6): the request the run opened; absent when none"
+          description: "DESIGN 5.20 rule 6: the request the run opened; absent when none"
     RunNode:
       type: object
       required: [id, run_id, node_id, visit, iteration, status]

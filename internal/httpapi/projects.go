@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,6 +28,10 @@ const (
 	maxProjectNameLen     = 64
 	maxProjectDescription = 1024
 	maxProjectTokenLen    = 4096
+	// maxProjectInstructions is the byte cap of the operator's instructions after
+	// trimming (DESIGN 5.18 rule 1); maxProjectBudgetUSD is the largest cap (5.19 rule 1).
+	maxProjectInstructions = 8192
+	maxProjectBudgetUSD    = 1000000
 )
 
 // projectInput is ProjectInput; the read-only Project fields are accepted and ignored
@@ -39,11 +44,13 @@ type projectInput struct {
 	SandboxNetwork bool   `json:"sandbox_network"`
 	Description    string `json:"description"`
 	Token          string `json:"token"`
-	// Instructions and the two caps are carried through as given; their validation
-	// (DESIGN 5.18 rule 1, 5.19 rule 1) is wave 8 agent A's.
-	Instructions       string           `json:"instructions"`
-	MaxCostUSDPerDay   *store.USDMicros `json:"max_cost_usd_per_day"`
-	MaxCostUSDPerMonth *store.USDMicros `json:"max_cost_usd_per_month"`
+	// Instructions and the two caps (USD) replace the stored ones on an update: absent
+	// clears them (DESIGN 5.18 rule 1, 5.19 rule 1). The caps are read as numbers and
+	// converted to micro-USD once checked, so a value too large for the micro-USD
+	// integer is still answered with the rule's text.
+	Instructions       string   `json:"instructions"`
+	MaxCostUSDPerDay   *float64 `json:"max_cost_usd_per_day"`
+	MaxCostUSDPerMonth *float64 `json:"max_cost_usd_per_month"`
 
 	ID        json.RawMessage `json:"id"`
 	TokenSet  json.RawMessage `json:"token_set"`
@@ -58,8 +65,7 @@ type projectInput struct {
 // none). A create needs a token; an update without one keeps the stored token.
 func (in *projectInput) validate(create bool) (*store.Project, string, fieldErrors) {
 	var fe fieldErrors
-	p := &store.Project{Name: strings.TrimSpace(in.Name), SandboxNetwork: in.SandboxNetwork, Description: in.Description,
-		Instructions: in.Instructions, BudgetDayUSDMicros: in.MaxCostUSDPerDay, BudgetMonthUSDMicros: in.MaxCostUSDPerMonth}
+	p := &store.Project{Name: strings.TrimSpace(in.Name), SandboxNetwork: in.SandboxNetwork, Description: in.Description}
 	switch n := utf8.RuneCountInString(p.Name); {
 	case n == 0:
 		fe.add("name", "is required")
@@ -99,6 +105,17 @@ func (in *projectInput) validate(create bool) (*store.Project, string, fieldErro
 	} else if strings.ContainsFunc(in.Description, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) {
 		fe.add("description", "must not contain control characters")
 	}
+	// DESIGN 5.18 rule 1: trimmed, at most 8192 bytes after trimming, no control
+	// character but newline and tab; whitespace only is empty.
+	p.Instructions = strings.TrimSpace(in.Instructions)
+	if len(p.Instructions) > maxProjectInstructions {
+		fe.add("instructions", "at most %d bytes", maxProjectInstructions)
+	}
+	if strings.ContainsFunc(p.Instructions, func(r rune) bool { return unicode.IsControl(r) && r != '\n' && r != '\t' }) {
+		fe.add("instructions", "contains control characters")
+	}
+	p.BudgetDayUSDMicros = budgetCap(&fe, "max_cost_usd_per_day", in.MaxCostUSDPerDay)
+	p.BudgetMonthUSDMicros = budgetCap(&fe, "max_cost_usd_per_month", in.MaxCostUSDPerMonth)
 	token := strings.TrimSpace(in.Token)
 	switch {
 	case token == "" && create:
@@ -109,6 +126,40 @@ func (in *projectInput) validate(create bool) (*store.Project, string, fieldErro
 		fe.add("token", "must not contain spaces or line breaks")
 	}
 	return p, token, fe
+}
+
+// budgetCap checks one budget cap (DESIGN 5.19 rule 1): absent or null clears it, a set
+// one is above 0 and at most 1000000 USD. It returns the cap in micro-USD, rounded to
+// the micro as the API boundary does elsewhere; a cap too small to be one micro is not
+// above 0.
+func budgetCap(fe *fieldErrors, field string, usd *float64) *store.USDMicros {
+	if usd == nil {
+		return nil
+	}
+	// The bound comes first: a number beyond the range of micro-USD must not be converted.
+	if *usd > maxProjectBudgetUSD {
+		fe.add(field, "at most %d", maxProjectBudgetUSD)
+		return nil
+	}
+	micros := store.USDMicros(math.Round(*usd * 1e6))
+	if *usd <= 0 || micros <= 0 {
+		fe.add(field, "must be greater than 0")
+		return nil
+	}
+	return &micros
+}
+
+// budgetRefusal answers a trigger refused by a project's budget (DESIGN 5.19 rule 3):
+// 429 project_budget_reached with the refusal's text and the window's numbers in USD.
+// engineError maps *project.BudgetError to it.
+func budgetRefusal(w http.ResponseWriter, be *project.BudgetError) {
+	writeError(w, http.StatusTooManyRequests, "project_budget_reached", be.Error(), map[string]any{
+		"project_id":   be.ProjectID,
+		"window":       be.Window,
+		"max_cost_usd": store.USDMicros(be.CapMicros).USD(),
+		"spent_usd":    store.USDMicros(be.SpendMicros).USD(),
+		"until":        be.WindowEnd.UTC().Format(time.RFC3339),
+	})
 }
 
 // hasControl reports a control character (a NUL would fail in Postgres with a 500).
@@ -137,6 +188,9 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		err = store.FillProjectLastRuns(ctx, s.pool, list)
 	}
+	if err == nil {
+		err = store.FillProjectSpend(ctx, s.pool, list, time.Now().UTC())
+	}
 	if err != nil {
 		s.internalError(w, r, "list projects", err)
 		return
@@ -153,7 +207,8 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p)
 }
 
-// projectView is a live project with its last run (DESIGN 5.17 rule 3).
+// projectView is a live project with its last run (DESIGN 5.17 rule 3) and its spend in
+// the current UTC day and month (DESIGN 5.19 rule 7).
 func (s *Server) projectView(ctx context.Context, id string) (*store.Project, error) {
 	p, err := store.GetProject(ctx, s.pool, id)
 	if err != nil {
@@ -161,6 +216,9 @@ func (s *Server) projectView(ctx context.Context, id string) (*store.Project, er
 	}
 	one := []store.Project{*p}
 	if err := store.FillProjectLastRuns(ctx, s.pool, one); err != nil {
+		return nil, err
+	}
+	if err := store.FillProjectSpend(ctx, s.pool, one, time.Now().UTC()); err != nil {
 		return nil, err
 	}
 	return &one[0], nil

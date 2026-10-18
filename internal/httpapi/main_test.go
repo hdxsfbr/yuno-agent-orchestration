@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -201,8 +200,8 @@ func (f *fakeEngine) MaterializeAgent(ctx context.Context, agentID string) (*eng
 }
 
 // Retry is wave 8 agent C's (DESIGN 5.21); the fake refuses until then.
-func (f *fakeEngine) Retry(context.Context, string, string, *store.Limits) (*store.Run, error) {
-	return nil, errors.New("retry: not implemented")
+func (f *fakeEngine) Retry(ctx context.Context, runID, by string, limits *store.Limits) (*store.Run, error) {
+	return conformanceRetry(ctx, f.pool, runID, limits)
 }
 
 // RemoveAgent records the agent taken out of OpenClaw.

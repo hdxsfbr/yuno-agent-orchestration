@@ -8,6 +8,7 @@ import (
 
 	"yuno/internal/engine"
 	"yuno/internal/guardrails"
+	"yuno/internal/project"
 	"yuno/internal/store"
 	"yuno/internal/tools"
 )
@@ -31,11 +32,15 @@ func (d delegator) Delegate(ctx context.Context, req tools.Delegation) (*store.R
 	})
 	var ve *engine.ValidationError
 	var rl *guardrails.RateLimitError
+	var be *project.BudgetError
 	switch {
 	case errors.As(err, &ve):
 		return nil, &tools.ModelError{Message: "the run was not started: " + strings.Join(ve.Messages, "; ")}
 	case errors.As(err, &rl):
 		return nil, &tools.ModelError{Message: "the run was not started: " + rl.Error()}
+	case errors.As(err, &be):
+		// DESIGN 5.19 rule 3: the project's budget text, so the Chief can tell the person.
+		return nil, &tools.ModelError{Message: "the run was not started: " + be.Error()}
 	case errors.Is(err, store.ErrNotFound):
 		return nil, &tools.ModelError{Message: "the run was not started: the agent or workflow no longer exists"}
 	case err != nil:

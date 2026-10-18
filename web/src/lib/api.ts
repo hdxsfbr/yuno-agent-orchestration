@@ -166,7 +166,7 @@ export function subscribe(
 }
 
 // ---------------------------------------------------------------------------------------
-// Types derived from api/openapi.yaml (version 0.2.0) and the endpoint functions that use
+// Types derived from api/openapi.yaml (version 0.5.0) and the endpoint functions that use
 // them. Optional fields are the ones the API may omit.
 // ---------------------------------------------------------------------------------------
 
@@ -349,6 +349,10 @@ export type Run = {
   project_id?: string;
   /** The project's settings as they were when the run was queued; never the token. */
   project?: ProjectSettings;
+  /** How many times the operator retried the run from the step it stopped at (DESIGN 5.21). */
+  retries?: number;
+  /** The merge or pull request the run opened; absent when it opened none (DESIGN 5.20). */
+  merge_request?: MergeRequest;
   created_at: string;
   started_at?: string;
   finished_at?: string;
@@ -392,6 +396,16 @@ export type ProjectLastRun = {
   finished_at?: string;
 };
 
+/** What a project's runs spent in the current UTC day and month, in USD, whatever their status (DESIGN 5.19). */
+export type ProjectSpend = {
+  day_usd: number;
+  month_usd: number;
+  /** When the day window ends. */
+  day_until?: string;
+  /** When the month window ends. */
+  month_until?: string;
+};
+
 export type Project = ProjectSettings & {
   id: string;
   description: string;
@@ -400,6 +414,13 @@ export type Project = ProjectSettings & {
   created_at: string;
   updated_at: string;
   last_run?: ProjectLastRun;
+  /** The operator's standing instructions for every run on the project (DESIGN 5.18); empty when none. */
+  instructions?: string;
+  /** The UTC-day cap in USD; absent when there is none (DESIGN 5.19). */
+  max_cost_usd_per_day?: number;
+  /** The UTC-month cap in USD; absent when there is none. */
+  max_cost_usd_per_month?: number;
+  spend?: ProjectSpend;
 };
 
 export type ProjectInput = {
@@ -412,6 +433,57 @@ export type ProjectInput = {
   description?: string;
   /** Required on create; on update, absent or empty keeps the stored token. */
   token?: string;
+  /** At most 8192 bytes; an update without it clears the instructions. */
+  instructions?: string;
+  /** The UTC-day cap in USD; null or absent clears it. */
+  max_cost_usd_per_day?: number | null;
+  /** The UTC-month cap in USD; null or absent clears it. */
+  max_cost_usd_per_month?: number | null;
+};
+
+/** A note an agent saved for the project; any agent of a run on the project reads and writes them (DESIGN 5.18). */
+export type ProjectFact = {
+  id: string;
+  project_id: string;
+  key: string;
+  value: string;
+  /** The agent that saved it; absent once that agent is deleted. */
+  agent_id?: string | null;
+  agent_name?: string | null;
+  source_run_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  expires_at?: string | null;
+};
+
+export type MergeRequestState = "open" | "merged" | "closed";
+export type CIStatus = "none" | "pending" | "passed" | "failed";
+
+/** A merge request (GitLab) or pull request (GitHub) the platform opened for a run; one per run (DESIGN 5.20). */
+export type MergeRequest = {
+  id: string;
+  project_id: string;
+  run_id: string;
+  provider: ProjectProvider;
+  /** The GitLab iid or the GitHub pull number. */
+  number: number;
+  url: string;
+  source_branch: string;
+  target_branch: string;
+  title: string;
+  state: MergeRequestState;
+  ci_status: CIStatus;
+  head_sha?: string;
+  /** Null when the provider could not tell. */
+  unresolved_threads?: number | null;
+  last_sync_error?: string;
+  synced_at?: string | null;
+  reported_state?: "merged" | "closed";
+  merged_by?: string;
+  created_at: string;
+  updated_at: string;
+  /** When it was merged or closed. */
+  closed_at?: string;
 };
 
 /** What a check of the stored token found; provider refusals come back as `ok: false`, not as errors. */
@@ -423,30 +495,6 @@ export type ProjectCheck = {
   can_push?: boolean;
   checked_at: string;
 };
-
-/** The merge or pull request an executed open_merge_request call opened or found. */
-export type MergeRequestRef = { url: string; number?: number; provider?: "gitlab" | "github"; replayed?: boolean };
-
-const isRecordValue = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-
-/**
- * The merge request of a run, from the newest executed open_merge_request call whose
- * output carries a URL; undefined when none did (DESIGN 5.16 rule 12).
- */
-export function mergeRequestOf(toolCalls: readonly ToolCall[]): MergeRequestRef | undefined {
-  for (let i = toolCalls.length - 1; i >= 0; i--) {
-    const call = toolCalls[i];
-    if (call.tool_name.replace(/^yuno__/, "") !== "open_merge_request" || call.status !== "executed" || call.is_error) continue;
-    const out = call.output;
-    if (!isRecordValue(out) || typeof out.url !== "string" || out.url === "") continue;
-    const ref: MergeRequestRef = { url: out.url };
-    if (typeof out.number === "number") ref.number = out.number;
-    if (out.provider === "gitlab" || out.provider === "github") ref.provider = out.provider;
-    if (out.replayed === true) ref.replayed = true;
-    return ref;
-  }
-  return undefined;
-}
 
 export type NodeStatus = "pending" | "running" | "waiting_approval" | "succeeded" | "failed" | "skipped";
 
@@ -695,6 +743,12 @@ export async function listRuns(opts: { status?: RunStatus; limit?: number } = {}
 }
 export const createRun = (body: RunCreate) => api<Run>("/api/runs", withBody("POST", body));
 export const cancelRun = (id: string) => api<Run>(`/api/runs/${seg(id)}/cancel`, withBody("POST"));
+/**
+ * Re-queues a failed, timed-out or cancelled run from the step it stopped at (DESIGN 5.21). `limits`, when given,
+ * replace the run's limits first, which is how a run that used up a cap is retried. A 409 carries `run_not_retryable`,
+ * `retry_limit` or `limits_exhausted` (its details name each exhausted limit).
+ */
+export const retryRun = (id: string, limits?: Limits) => api<Run>(`/api/runs/${seg(id)}/retry`, withBody("POST", limits ? { limits } : undefined));
 export const getTrace = async (id: string) => normalizeTrace(await api<Trace>(`/api/runs/${seg(id)}/trace`));
 
 export const isTerminalStatus = (s: RunStatus) => s === "succeeded" || s === "failed" || s === "cancelled" || s === "timed_out";
@@ -852,3 +906,27 @@ export const createProject = (input: ProjectInput) => api<Project>("/api/project
 export const updateProject = (id: string, input: ProjectInput) => api<Project>(`/api/projects/${seg(id)}`, withBody("PUT", input));
 export const deleteProject = (id: string) => api<void>(`/api/projects/${seg(id)}`, withBody("DELETE"));
 export const checkProject = (id: string) => api<ProjectCheck>(`/api/projects/${seg(id)}/check`, withBody("POST"));
+
+/** The project's live notes, newest first. */
+export const listProjectFacts = async (projectId: string) => (await api<ProjectFact[] | null>(`/api/projects/${seg(projectId)}/facts`)) ?? [];
+export const deleteProjectFact = (projectId: string, factId: string) =>
+  api<void>(`/api/projects/${seg(projectId)}/facts/${seg(factId)}`, withBody("DELETE"));
+
+// ---------------------------------------------------------------------------------------
+// Merge requests the platform opened (DESIGN 5.20).
+// ---------------------------------------------------------------------------------------
+
+/** Newest first; the API answers 50 by default and 200 at most. */
+export async function listMergeRequests(opts: { project_id?: string; run_id?: string; state?: MergeRequestState; limit?: number } = {}) {
+  const q = new URLSearchParams();
+  if (opts.project_id) q.set("project_id", opts.project_id);
+  if (opts.run_id) q.set("run_id", opts.run_id);
+  if (opts.state) q.set("state", opts.state);
+  if (opts.limit) q.set("limit", String(opts.limit));
+  const qs = q.toString();
+  return (await api<MergeRequest[] | null>(`/api/merge-requests${qs ? `?${qs}` : ""}`)) ?? [];
+}
+/** Refreshes the record from the provider now; provider errors come back on the record as `last_sync_error`. */
+export const syncMergeRequest = (id: string) => api<MergeRequest>(`/api/merge-requests/${seg(id)}/sync`, withBody("POST"));
+/** Merges the request on the provider; a 409 carries the reason (`merge_request_not_open`, `merge_request_ci_not_passed`, `merge_request_not_mergeable`). */
+export const mergeMergeRequest = (id: string) => api<MergeRequest>(`/api/merge-requests/${seg(id)}/merge`, withBody("POST"));

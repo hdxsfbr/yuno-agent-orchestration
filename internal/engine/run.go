@@ -52,6 +52,11 @@ func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 	wctx := context.WithoutCancel(ctx)
 	now := e.clock.Now()
 	resumed := run.CurrentNode != nil && *run.CurrentNode != ""
+	// The time limit counts from started_at. A run claimed the first time is stamped here
+	// from the injected clock; a retried run (DESIGN 5.21 rule 2) arrives with started_at
+	// cleared, because its claim leaves it empty, and is stamped by the same line, with
+	// paused_total_ms already back at 0. A resumed claim later on (an approval, a crash
+	// re-queue) finds it set and keeps it.
 	if run.StartedAt == nil || (run.Attempt <= 1 && !resumed) {
 		if err := store.SetRunStartedAt(wctx, e.deps.Pool, run.ID, now); err != nil {
 			e.log.Warn("set started_at failed", "run_id", run.ID, "error", err)
@@ -72,7 +77,14 @@ func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 		rootSpan, _ = store.OpenRootSpan(wctx, e.deps.Pool, run.ID)
 	}
 	if rootSpan == "" {
-		rootSpan = e.startSpan(ctx, run.ID, nil, "run", "run", now, nil, map[string]any{"attempt": run.Attempt, "trigger": run.Trigger})
+		attrs := map[string]any{"attempt": run.Attempt, "trigger": run.Trigger}
+		if run.Retries > 0 {
+			// A retried claim opens a root span of its own (the earlier attempts' spans
+			// stay in the trace with their own starts), marked with the retry's number
+			// (DESIGN 5.21 rule 4).
+			attrs["retry"] = run.Retries
+		}
+		rootSpan = e.startSpan(ctx, run.ID, nil, "run", "run", now, nil, attrs)
 	}
 	if fresh, err := store.GetRun(wctx, e.deps.Pool, run.ID); err == nil {
 		run = fresh

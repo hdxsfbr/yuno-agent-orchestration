@@ -7,13 +7,17 @@ import type { AgentMessage, Approval, ModelCall, Run, RunNode, SSEEvent, ToolCal
 
 export type LogLine = { id?: string; level: string; message: string; at?: string };
 
-export type RunView = Trace & { logs: LogLine[] };
+/** One retry of the run from the step it stopped at (the `run.retry` event, DESIGN 5.21); `retries` is its number, counted from 1. */
+export type RetryMark = { retries: number; from_node: string; by?: string; at?: string };
+
+export type RunView = Trace & { logs: LogLine[]; retries: RetryMark[] };
 
 /** Log lines kept in memory; older lines are dropped from the front. */
 export const MAX_LOG_LINES = 500;
 
-export function toRunView(trace: Trace, logs: LogLine[] = []): RunView {
-  return { ...trace, logs };
+/** Log lines and retry marks exist only on the event stream, so a reloaded trace brings them over from the view it replaces. */
+export function toRunView(trace: Trace, logs: LogLine[] = [], retries: RetryMark[] = []): RunView {
+  return { ...trace, logs, retries };
 }
 
 type EventLike = Pick<SSEEvent, "event" | "data"> & { id?: string };
@@ -76,7 +80,24 @@ export function applyEvent(view: RunView, ev: EventLike): RunView {
     case "run.status": {
       const run = pick<Run>(ev.data, "run");
       if (!run || run.id !== runId) return view;
-      return { ...view, run };
+      // The merge request is joined onto the run when it is read; the event carries the run row alone, and a record never goes away.
+      const kept = run.merge_request === undefined && view.run.merge_request ? { ...run, merge_request: view.run.merge_request } : run;
+      return { ...view, run: kept };
+    }
+    case "run.retry": {
+      const d = ev.data;
+      if (!isRecord(d) || typeof d.from_node !== "string") return view;
+      if (typeof d.run_id === "string" && d.run_id !== runId) return view;
+      if (typeof d.retries !== "number" || !Number.isInteger(d.retries) || d.retries < 1) return view;
+      const mark: RetryMark = {
+        retries: d.retries,
+        from_node: d.from_node,
+        by: typeof d.by === "string" && d.by !== "" ? d.by : undefined,
+        at: typeof d.at === "string" ? d.at : undefined,
+      };
+      // Replayed events carry the same number: the later one replaces the earlier.
+      const others = view.retries.filter((r) => r.retries !== mark.retries);
+      return { ...view, retries: [...others, mark].sort((a, b) => a.retries - b.retries) };
     }
     case "node.status": {
       const node = pick<RunNode>(ev.data, "node");
@@ -181,5 +202,30 @@ export function buildTimeline(view: Pick<RunView, "nodes" | "model_calls" | "too
   const orphans: TimelineItem[] = [];
   for (const [nodeId, list] of items) if (!known.has(nodeId)) orphans.push(...list);
   if (orphans.length > 0) out.push({ node: null, items: orphans.sort(byTime) });
+  return out;
+}
+
+/** What the timeline lists: a node visit with its calls, or the boundary of a retry between two of them. */
+export type TimelineEntry = { kind: "node"; group: TimelineNode } | { kind: "retry"; mark: RetryMark };
+
+/**
+ * The timeline groups with a marker for each retry placed before the first visit that started
+ * at or after it, so the visit that failed ends above the marker and the new visit starts
+ * below it. A retry with no readable time goes after the visits that started.
+ */
+export function buildTimelineEntries(view: Pick<RunView, "nodes" | "model_calls" | "tool_calls" | "approvals" | "retries">): TimelineEntry[] {
+  const marks = [...view.retries].sort((a, b) => a.retries - b.retries);
+  const timeOf = (iso?: string) => {
+    const t = iso ? Date.parse(iso) : NaN;
+    return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
+  };
+  const out: TimelineEntry[] = [];
+  let next = 0;
+  for (const group of buildTimeline(view)) {
+    const started = group.node?.started_at ? timeOf(group.node.started_at) : Number.POSITIVE_INFINITY;
+    while (next < marks.length && timeOf(marks[next].at) <= started) out.push({ kind: "retry", mark: marks[next++] });
+    out.push({ kind: "node", group });
+  }
+  while (next < marks.length) out.push({ kind: "retry", mark: marks[next++] });
   return out;
 }

@@ -1626,6 +1626,16 @@ Rules:
    section names the `project` scope. `make seed-reset` applies the new prompt text to
    an existing install (5.16 rule 14).
 
+As built (wave 8): the notes' SQL lives in `internal/memory/project.go` beside the agent
+facts; `agent_name` is omitted, not null, once the saving agent is gone. The memory
+policy gate runs before the project-run check; project notes default to 90 days
+whatever the agent's `fact_ttl_days`, and a project save answers `scope: "project"` in
+its result. `AGENTS.md` carries a one-sentence `## Memory` section only for agents whose
+allowlist holds a memory tool. The shipped Coder and Reviewer carry `memory_save` and
+`memory_recall` with memory enabled on a fresh seed; on an existing install
+`seed --reset-shipped` restores their allowlist and the operator enables memory on
+their agent pages (memory is one of the settings the reset keeps).
+
 Edge cases: the same key saved by two agents of one run: the later write wins. An
 instructions text of only whitespace is empty. A quick run on a project gets the blocks
 too. The Chief of Staff cannot read project notes in a conversation (no run); the
@@ -1725,6 +1735,16 @@ Rules:
    running runs finish."); the project page shows the same with the window end.
 8. `list_projects` (5.17 rule 8) adds `budget: {day: {max_usd, spent_usd}, month: {...}}`
    for a project with a cap, so the Chief can say why a delegation was refused.
+
+As built (wave 8): the ledger's column is `window_kind` (`window` is reserved in
+PostgreSQL); the alert key is `budget-<project id>-<day|month>-<window start, RFC
+3339 UTC>-<level>`; money prints with two decimals, four under a cent, and window ends
+as RFC 3339 UTC in both texts; when spend crosses 80 % and the cap between two ticks
+both alerts go out, the warning first, and a deferred warning holds the reached alert
+back to the next tick. The destination is `store.LatestConversationForAgent`, the
+conversation lookup of 5.15 rule 3. The caps are parsed as floats and bounded before
+the conversion to micro-USD, so a huge value gets the "at most" text rather than
+overflowing.
 
 Edge cases: spend exactly at the cap refuses. A cap lowered below the current spend
 refuses at once and alerts at the next tick. A project with both caps alerts per window.
@@ -1855,6 +1875,18 @@ Rules:
    the link, Sync, and Merge with a confirmation ("Merge !<n> into <target branch>?");
    once final it shows Merged or Closed with the time.
 
+As built (wave 8): the record is written through the side effect runner's transaction
+(`RunSideEffectTx` hands the tool the transaction as `Call.Tx`; a failing tool rolls the
+key back instead of deleting it, which is the same outcome). Two calls in one run take
+a per-run advisory lock before the lookup, so the second sees the first's record. A
+later call on a request that was merged or closed is refused before anything is
+pushed: `the run's <merge request !n|pull request #n> is <state>; nothing more can be
+pushed to it`. A failed refresh writes only `last_sync_error` and `synced_at`, so one
+failing record cannot starve the pass; an unknown pipeline status maps to pending. The
+backfill dates a record from its tool call's `finished_at`. The merge answers 502
+`provider_error` for a provider refusal that is not a mergeability one (a 403), and
+409 `merge_request_not_mergeable` when the project's token cannot be read.
+
 Edge cases: a run that opened a request and then failed keeps its record. A request
 merged on the provider before the first sync is recorded merged by that sync and
 reported. A source branch deleted on the provider while the request is open changes
@@ -1961,6 +1993,16 @@ Rules:
 8. The Chief of Staff gets no retry tool: a retry is the operator's decision on the run
    page; `run_status` tells it the run was retried and from where.
 
+As built (wave 8): the engine's transition table is untouched and `ValidTransition`
+still refuses `failed → queued`; the retry's own status list is the only path that
+re-queues an ended run. The retry clears `started_at`, and the claim leaves it empty
+for a run with retries so `runRun` stamps it from the injected clock (later claims of
+the same retry keep it). The body's limits are resolved over the run's current limits
+(a later retry does not undo an earlier raise) and the participating agents' per-run
+cost caps still apply (5.11 rule 1). The event is SSE `run.retry` with `{retries,
+from_node, by, limits, at}`; the loser of two concurrent retries reads `run is
+queued`.
+
 Edge cases: a run cancelled while `waiting_approval` has the approval node as
 `current_node` and retries by asking again. A run that failed before any node
 (`workflow snapshot: ...`) has no `current_node` and is not retryable. A run whose
@@ -2048,7 +2090,8 @@ projects list on Status, and the ended-run note on tool approval cards. Then (5.
 6) the same project selector in the schedule form when the chosen workflow opts in,
 and a Project column on Schedules linking to the project's page.
 
-Wave 8 planned (5.18 to 5.21): the project page at `/projects/{id}` (settings, budget and spend, instructions, notes, merge requests, newest runs), the Instructions and budget fields on the project form, spent over cap on the Projects list, the Merge request card on the run page (state, CI, threads, Sync, Merge with confirmation), and Retry on the run header with the exhausted-limits dialog and the Timeline mark.
+Wave 8 as built (5.18 to 5.21): the project page at `/projects/{id}` (the edit form moved to
+`/projects/{id}/edit`),  (settings, budget and spend, instructions, notes, merge requests, newest runs), the Instructions and budget fields on the project form, spent over cap on the Projects list, the Merge request card on the run page (state, CI, threads, Sync, Merge with confirmation), and Retry on the run header with the exhausted-limits dialog and the Timeline mark.
 
 ## 8. Docker and Makefile
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AgentMessage, Approval, ModelCall, Run, RunNode, ToolCall, Trace } from "./api";
-import { MAX_LOG_LINES, applyEvent, applyEvents, buildTimeline, toRunView } from "./trace";
+import type { AgentMessage, Approval, MergeRequest, ModelCall, Run, RunNode, ToolCall, Trace } from "./api";
+import { MAX_LOG_LINES, applyEvent, applyEvents, buildTimeline, buildTimelineEntries, toRunView } from "./trace";
 
 const RUN = "run-1";
 
@@ -170,6 +170,43 @@ describe("applyEvent", () => {
     expect(v.logs.at(-1)?.message).toBe(`line ${MAX_LOG_LINES + 4}`);
   });
 
+  it("records a retry from run.retry", () => {
+    const v = applyEvent(base(), ev("run.retry", { retries: 1, from_node: "coder", by: "operator", at: "2026-10-15T10:06:00Z" }, "20"));
+    expect(v.retries).toEqual([{ retries: 1, from_node: "coder", by: "operator", at: "2026-10-15T10:06:00Z" }]);
+    expect(base().retries).toEqual([]);
+  });
+
+  it("keeps one mark per retry number, the later event replacing the earlier, in number order", () => {
+    let v = applyEvent(base(), ev("run.retry", { retries: 2, from_node: "reviewer", at: "2026-10-15T10:20:00Z" }));
+    v = applyEvent(v, ev("run.retry", { retries: 1, from_node: "coder", at: "2026-10-15T10:06:00Z" }));
+    v = applyEvent(v, ev("run.retry", { retries: 1, from_node: "coder", by: "operator", at: "2026-10-15T10:06:00Z" }));
+    expect(v.retries.map((r) => [r.retries, r.from_node, r.by])).toEqual([
+      [1, "coder", "operator"],
+      [2, "reviewer", undefined],
+    ]);
+    expect(applyEvents(v, [ev("run.retry", { retries: 1, from_node: "coder", by: "operator", at: "2026-10-15T10:06:00Z" })]).retries).toEqual(v.retries);
+  });
+
+  it("ignores a retry event for another run or without a number or a node", () => {
+    const v = base();
+    expect(applyEvent(v, ev("run.retry", { run_id: "other", retries: 1, from_node: "coder" }))).toBe(v);
+    expect(applyEvent(v, ev("run.retry", { retries: 0, from_node: "coder" }))).toBe(v);
+    expect(applyEvent(v, ev("run.retry", { retries: 1.5, from_node: "coder" }))).toBe(v);
+    expect(applyEvent(v, ev("run.retry", { retries: "1", from_node: "coder" }))).toBe(v);
+    expect(applyEvent(v, ev("run.retry", { retries: 1 }))).toBe(v);
+    expect(applyEvent(v, ev("run.retry", "nope"))).toBe(v);
+    expect(applyEvent(base(), ev("run.retry", { run_id: RUN, retries: 1, from_node: "coder" })).retries).toHaveLength(1);
+  });
+
+  it("keeps the merge request the view has when a run.status event carries the run without one", () => {
+    const record = { id: "mr1", run_id: RUN, number: 12 } as MergeRequest;
+    const loaded = toRunView(emptyTrace(run({ merge_request: record })));
+    expect(applyEvent(loaded, ev("run.status", { run: run({ status: "running" }) })).run.merge_request).toBe(record);
+    const newer = { ...record, number: 13 } as MergeRequest;
+    expect(applyEvent(loaded, ev("run.status", { run: run({ merge_request: newer }) })).run.merge_request).toBe(newer);
+    expect(applyEvent(base(), ev("run.status", { run: run() })).run.merge_request).toBeUndefined();
+  });
+
   it("ignores events for another run, unknown events and malformed payloads", () => {
     const v = base();
     expect(applyEvent(v, ev("run.status", { run: run({ id: "other", status: "failed" }) }))).toBe(v);
@@ -242,5 +279,61 @@ describe("buildTimeline", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].node).toBeNull();
     expect(groups[0].items).toHaveLength(1);
+  });
+});
+
+describe("toRunView", () => {
+  it("brings the logs and the retry marks of the view it replaces", () => {
+    const marks = [{ retries: 1, from_node: "coder", at: "2026-10-15T10:06:00Z" }];
+    const v = toRunView(emptyTrace(), [{ level: "info", message: "hi" }], marks);
+    expect(v.logs).toHaveLength(1);
+    expect(v.retries).toBe(marks);
+    expect(toRunView(emptyTrace()).retries).toEqual([]);
+  });
+});
+
+describe("buildTimelineEntries", () => {
+  const failedThenRetried = {
+    nodes: [
+      node({ id: "n1", node_id: "coder", visit: 1, status: "failed", started_at: "2026-10-15T10:00:01Z" }),
+      node({ id: "n2", node_id: "coder", visit: 2, status: "running", started_at: "2026-10-15T10:07:00Z" }),
+    ],
+    model_calls: [],
+    tool_calls: [],
+    approvals: [],
+  };
+  const kinds = (entries: ReturnType<typeof buildTimelineEntries>) =>
+    entries.map((e) => (e.kind === "retry" ? `retry ${e.mark.retries}` : (e.group.node?.id ?? "other")));
+
+  it("is the plain timeline when nothing was retried", () => {
+    expect(kinds(buildTimelineEntries({ ...failedThenRetried, retries: [] }))).toEqual(["n1", "n2"]);
+  });
+
+  it("puts the marker between the failed visit and the visit that started after it", () => {
+    const entries = buildTimelineEntries({ ...failedThenRetried, retries: [{ retries: 1, from_node: "coder", at: "2026-10-15T10:06:00Z" }] });
+    expect(kinds(entries)).toEqual(["n1", "retry 1", "n2"]);
+  });
+
+  it("puts the marker before a visit that has not started yet, and last when no visit followed", () => {
+    const waiting = { ...failedThenRetried, nodes: [failedThenRetried.nodes[0], node({ id: "n3", node_id: "coder", visit: 2 })] };
+    expect(kinds(buildTimelineEntries({ ...waiting, retries: [{ retries: 1, from_node: "coder", at: "2026-10-15T10:06:00Z" }] }))).toEqual(["n1", "retry 1", "n3"]);
+    const only = { nodes: [failedThenRetried.nodes[0]], model_calls: [], tool_calls: [], approvals: [] };
+    expect(kinds(buildTimelineEntries({ ...only, retries: [{ retries: 1, from_node: "coder", at: "2026-10-15T10:06:00Z" }] }))).toEqual(["n1", "retry 1"]);
+  });
+
+  it("orders several retries by number around the visits and puts one without a readable time last", () => {
+    const three = {
+      ...failedThenRetried,
+      nodes: [...failedThenRetried.nodes, node({ id: "n3", node_id: "coder", visit: 3, started_at: "2026-10-15T10:30:00Z" })],
+    };
+    const entries = buildTimelineEntries({
+      ...three,
+      retries: [
+        { retries: 2, from_node: "coder", at: "2026-10-15T10:20:00Z" },
+        { retries: 1, from_node: "coder", at: "2026-10-15T10:06:00Z" },
+        { retries: 3, from_node: "coder" },
+      ],
+    });
+    expect(kinds(entries)).toEqual(["n1", "retry 1", "n2", "retry 2", "n3", "retry 3"]);
   });
 });

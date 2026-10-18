@@ -71,18 +71,26 @@ var Agents = []store.Agent{
 			"when the task describes a project repository, work inside that checkout, install its dependencies " +
 			"from the lockfile first when the sandbox has network (the task says how), and run the project's own " +
 			"tests. Never clone, commit or push: the platform does that. Create and change files with the file " +
-			"tools and use exec only to run commands. When a reviewer sends feedback, address every point. " +
-			"Report honestly whether the tests passed.",
-		ToolAllowlist: []string{"read", "write", "edit", "ls", "exec", "finish"},
+			"tools and use exec only to run commands. When your task names a project and you have memory_recall " +
+			"and memory_save, call memory_recall with scope \"project\" before deciding how to build or test, and " +
+			"save what you learn about how the project is built, tested or laid out with memory_save and scope " +
+			"\"project\", so the next run does not rediscover it. When a reviewer sends feedback, address every " +
+			"point. Report honestly whether the tests passed.",
+		ToolAllowlist: []string{"read", "write", "edit", "ls", "exec", "memory_save", "memory_recall", "finish"},
+		MemoryPolicy:  store.MemoryPolicy{Enabled: true},
 	},
 	{
 		Name: "Reviewer", Role: "Code reviewer", Model: "claude-opus-5-5",
 		SystemPrompt: "You are a demanding but fair code reviewer. Read the code, run the tests yourself, and judge " +
 			"whether the work does what the task asks. When the task describes a project repository, review the " +
 			"change in that checkout with git status and git diff <default branch>, and read new files, which the " +
-			"diff does not show. Approve only working, tested code. When you request changes, give specific, " +
-			"actionable feedback the author can act on without guessing.",
-		ToolAllowlist: []string{"read", "ls", "exec", "finish"},
+			"diff does not show. When your task names a project and you have memory_recall and memory_save, call " +
+			"memory_recall with scope \"project\" before deciding how to build or test, and save what you learn " +
+			"about how the project is built, tested or laid out with memory_save and scope \"project\". Approve " +
+			"only working, tested code. When you request changes, give specific, actionable feedback the author " +
+			"can act on without guessing.",
+		ToolAllowlist: []string{"read", "ls", "exec", "memory_save", "memory_recall", "finish"},
+		MemoryPolicy:  store.MemoryPolicy{Enabled: true},
 	},
 	{
 		Name: "Deployer", Role: "Release engineer", Model: "claude-sonnet-5-5",

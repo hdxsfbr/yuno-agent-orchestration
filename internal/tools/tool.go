@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"yuno/internal/obs"
@@ -61,6 +62,12 @@ type Call struct {
 	// ("" when it has none).
 	Chat           bool
 	ConversationID string
+	// Tx is the transaction a side-effecting tool runs in, set by the executor
+	// (store.RunSideEffectTx): rows the tool writes through it commit together with the
+	// effect's stored result and disappear with the key when the call fails (open_merge_request
+	// writes its merge request record this way, DESIGN 5.20 rule 2). Nil for every other
+	// call; the tool does not commit or roll it back.
+	Tx pgx.Tx
 }
 
 // Result is what goes back to the model. Output is JSON; Text is a convenience for

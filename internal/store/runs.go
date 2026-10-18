@@ -85,6 +85,48 @@ func GetRun(ctx context.Context, q Querier, id string) (*Run, error) {
 	return r, err
 }
 
+// GetRunForUpdate reads a run and locks its row until the transaction ends (SELECT ...
+// FOR UPDATE), so a check on the run and the update that follows it are one step
+// (DESIGN 5.21, Consistency). q must be a transaction; ErrNotFound when there is no run.
+func GetRunForUpdate(ctx context.Context, q Querier, id string) (*Run, error) {
+	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE id=$1 FOR UPDATE`, id)
+	if err != nil {
+		return nil, err
+	}
+	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
+}
+
+// RetryRun re-queues a failed, timed-out or cancelled run for a retry from the step it
+// stopped at (DESIGN 5.21 rule 3): one conditional update, WHERE the status is still one
+// of the three, that returns the row. ErrNotFound means the run is gone or no longer in
+// one of them (a concurrent retry won). The run keeps its state, its current_node and
+// its counters; what ended it is cleared: failure_reason, finished_at, the cancel flag
+// and who set it, resume_node_visit_id (an approval node reached again asks again, 5.6
+// rule 8) and reported_at (the report of the new outcome is sent once more, rule 6).
+// retries goes up by one and attempt back to 1, so the crash re-queue of 5.1 counts per
+// retry. started_at and the pause bookkeeping are cleared too: the time limit restarts
+// when the run is next claimed (rule 2, ClaimQueuedRun). limits, when not nil, replace
+// the run's limits. now stamps updated_at.
+func RetryRun(ctx context.Context, q Querier, id string, limits *Limits, now time.Time) (*Run, error) {
+	rows, err := q.Query(ctx, `UPDATE runs SET status=$2, retries=retries+1, attempt=1, failure_reason=NULL,
+		finished_at=NULL, cancel_requested=false, cancel_by=NULL, resume_node_visit_id=NULL, reported_at=NULL,
+		started_at=NULL, paused_at=NULL, paused_total_ms=0, limits=COALESCE($3::jsonb, limits), updated_at=$4
+		WHERE id=$1 AND status IN ($5, $6, $7) RETURNING `+runColumns,
+		id, RunQueued, limits, now.UTC(), RunFailed, RunTimedOut, RunCancelled)
+	if err != nil {
+		return nil, err
+	}
+	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
+}
+
 // ListRuns returns the newest runs first, optionally filtered by status.
 func ListRuns(ctx context.Context, q Querier, status string, limit int) ([]Run, error) {
 	if limit <= 0 || limit > 500 {
@@ -103,8 +145,14 @@ func ListRuns(ctx context.Context, q Querier, status string, limit int) ([]Run, 
 
 // ClaimQueuedRun atomically moves the oldest queued run to running for this worker
 // (DESIGN 5.1 rule 4, T5.1.8). Returns ErrNotFound when nothing is queued.
+//
+// A first claim stamps started_at when it is empty. A retried run (retries > 0, DESIGN
+// 5.21 rule 2) comes back with started_at cleared and keeps it empty here: the engine
+// stamps it from its injected clock as the run starts (runRun), so the time limit
+// restarts from that instant exactly as it does for a run claimed the first time.
 func ClaimQueuedRun(ctx context.Context, pool *pgxpool.Pool) (*Run, error) {
-	rows, err := pool.Query(ctx, `UPDATE runs SET status=$1, started_at=COALESCE(started_at, now()), updated_at=now()
+	rows, err := pool.Query(ctx, `UPDATE runs SET status=$1,
+		started_at=CASE WHEN retries = 0 THEN COALESCE(started_at, now()) ELSE started_at END, updated_at=now()
 		WHERE id = (SELECT id FROM runs WHERE status=$2 ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
 		RETURNING `+runColumns, RunRunning, RunQueued)
 	if err != nil {

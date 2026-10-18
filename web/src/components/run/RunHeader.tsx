@@ -1,9 +1,10 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, mergeRequestOf, type Run, type ToolCall } from "@/lib/api";
+import { ApiError, cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, retryRun, type Run, type ToolCall } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, shortId } from "@/lib/format";
 import { toolchainLabel } from "@/lib/project";
+import { canRetry, repeatsSideEffects } from "@/lib/runRetry";
 import type { Connection } from "@/lib/useEventStream";
 import Button from "../Button";
 import { Card } from "../Card";
@@ -11,6 +12,7 @@ import ConnectionIndicator from "../ConnectionIndicator";
 import { Badge, RunStatusBadge } from "../Badge";
 import ProjectLink, { hasProject } from "../project/ProjectLink";
 import { InlineError, errorText } from "../QueryState";
+import RetryDialog from "./RetryDialog";
 
 function Item({ label, children, title }: { label: string; children: ReactNode; title?: string }) {
   return (
@@ -45,19 +47,28 @@ type Props = {
   run: Run;
   connection: Connection;
   now: number;
-  /** The run's tool calls so far: the merge request link comes from them. */
+  /** The run's tool calls so far: the retry dialog says when a retry would repeat what some of them did. */
   toolCalls?: readonly ToolCall[];
-  /** Called with the run the API returns after a cancel request. */
+  /** Called with the run the API returns after a cancel or a retry. */
   onRunChange: (run: Run) => void;
 };
 
 export default function RunHeader({ run, connection, now, toolCalls = [], onRunChange }: Props) {
   const cancel = useMutation({ mutationFn: () => cancelRun(run.id), onSuccess: onRunChange });
+  // A refusal for a run that used up a limit opens the dialog; any other refusal is told inline.
+  const [limitsRefusal, setLimitsRefusal] = useState<ApiError | null>(null);
+  const retry = useMutation({
+    mutationFn: () => retryRun(run.id),
+    onSuccess: (queued) => onRunChange(queued),
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 409 && err.code === "limits_exhausted") setLimitsRefusal(err);
+    },
+  });
   const terminal = isTerminalStatus(run.status);
   const requested = cancel.isSuccess || !!run.cancel_requested;
   const duration = elapsedMs(run.started_at, run.finished_at, now);
-  const mergeRequest = mergeRequestOf(toolCalls);
-  const requestLabel = mergeRequest?.provider === "github" ? "Pull request" : "Merge request";
+  const retries = run.retries ?? 0;
+  const retryError = retry.error && !limitsRefusal ? retry.error : null;
 
   return (
     <section aria-label="Run summary">
@@ -75,18 +86,23 @@ export default function RunHeader({ run, connection, now, toolCalls = [], onRunC
                   Toolchain: {toolchainLabel(run.toolchain)}
                 </Badge>
               ) : null}
-              {mergeRequest ? (
-                <a href={mergeRequest.url} target="_blank" rel="noreferrer" className="text-sm font-medium underline">
-                  {requestLabel}
-                  {mergeRequest.number !== undefined ? ` ${mergeRequest.provider === "github" ? "#" : "!"}${mergeRequest.number}` : ""}
-                </a>
+              {retries > 0 ? (
+                <Badge tone="zinc" title="How many times the run was retried from the step it stopped at">
+                  Retried {retries}×
+                </Badge>
               ) : null}
             </div>
             <p className="mt-1 break-all font-mono text-xs text-zinc-500">{run.id}</p>
           </div>
           <div className="flex items-center gap-3">
             <ConnectionIndicator state={connection} />
-            {terminal ? null : (
+            {terminal ? (
+              canRetry(run) ? (
+                <Button variant="primary" onClick={() => retry.mutate()} disabled={retry.isPending} title="Run again from the step it stopped at">
+                  {retry.isPending ? "Retrying…" : "Retry"}
+                </Button>
+              ) : null
+            ) : (
               <Button variant="danger" onClick={() => cancel.mutate()} disabled={requested || cancel.isPending}>
                 {cancel.isPending ? "Cancelling…" : requested ? "Cancel requested" : "Cancel run"}
               </Button>
@@ -97,6 +113,11 @@ export default function RunHeader({ run, connection, now, toolCalls = [], onRunC
         {cancel.error ? (
           <div className="mt-3">
             <InlineError>Could not cancel the run: {errorText(cancel.error)}</InlineError>
+          </div>
+        ) : null}
+        {retryError ? (
+          <div className="mt-3">
+            <InlineError>Could not retry the run: {errorText(retryError)}</InlineError>
           </div>
         ) : null}
         {run.failure_reason ? (
@@ -135,6 +156,18 @@ export default function RunHeader({ run, connection, now, toolCalls = [], onRunC
           <Item label="Cost">{formatMicros(run.cost_usd_micros)}</Item>
         </dl>
       </Card>
+      {limitsRefusal ? (
+        <RetryDialog
+          run={run}
+          refusal={limitsRefusal}
+          repeatsSideEffects={repeatsSideEffects(toolCalls)}
+          onClose={() => {
+            retry.reset();
+            setLimitsRefusal(null);
+          }}
+          onRetried={onRunChange}
+        />
+      ) : null}
     </section>
   );
 }

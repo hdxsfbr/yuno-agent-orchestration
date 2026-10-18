@@ -28,6 +28,16 @@ const recordTimeout = 5 * time.Second
 // deleted and fn's error is returned, so a retry can try again.
 func RunSideEffect(ctx context.Context, pool *pgxpool.Pool, key, toolName, runID, toolCallID string,
 	fn func(ctx context.Context) (json.RawMessage, error)) (result json.RawMessage, replayed bool, err error) {
+	return RunSideEffectTx(ctx, pool, key, toolName, runID, toolCallID,
+		func(ctx context.Context, _ pgx.Tx) (json.RawMessage, error) { return fn(ctx) })
+}
+
+// RunSideEffectTx is RunSideEffect with fn handed the transaction it runs in, so a tool
+// can write its own rows (the merge request record of DESIGN 5.20 rule 2) in the same
+// transaction as the result: they commit together with it and disappear together with
+// the key when fn fails. fn must not commit or roll the transaction back.
+func RunSideEffectTx(ctx context.Context, pool *pgxpool.Pool, key, toolName, runID, toolCallID string,
+	fn func(ctx context.Context, tx pgx.Tx) (json.RawMessage, error)) (result json.RawMessage, replayed bool, err error) {
 	if key == "" {
 		return nil, false, errors.New("side effect: empty idempotency key")
 	}
@@ -53,13 +63,14 @@ func RunSideEffect(ctx context.Context, pool *pgxpool.Pool, key, toolName, runID
 		return stored, true, nil
 	}
 
-	res, fnErr := fn(ctx)
+	res, fnErr := fn(ctx, tx)
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	if fnErr != nil {
-		if _, err := tx.Exec(wctx, `DELETE FROM side_effects WHERE idempotency_key = $1`, key); err == nil {
-			_ = tx.Commit(wctx)
-		}
+		// The transaction ends in a rollback, not a commit: the key row it inserted
+		// goes away with whatever fn wrote beside it (a failed call leaves no row, DESIGN
+		// 5.20 rule 2).
+		_ = tx.Rollback(wctx)
 		return nil, false, fnErr
 	}
 	if len(res) == 0 {

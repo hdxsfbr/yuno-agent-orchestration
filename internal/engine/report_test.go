@@ -435,19 +435,18 @@ func TestReportBackCarriesMergeRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// What the MCP gate records once the Deployer's call executed, as a row of the run.
-	now := time.Now().UTC()
+	// What open_merge_request records once the Deployer's call executed (DESIGN 5.20
+	// rule 2): the run's merge request record, on a project of its own.
 	must := func(err error) {
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	must(store.InsertToolCall(ctx, env.pool, &store.ToolCall{RunID: run.ID, ToolUseID: "mcp-1", ToolName: "open_merge_request",
-		Input: json.RawMessage(`{"title":"Add it"}`), Output: json.RawMessage(`{"number":5,"url":"https://gitlab.test/g/p/-/merge_requests/5","provider":"gitlab"}`),
-		Status: store.ToolExecuted, StartedAt: &now, FinishedAt: &now}))
-	must(store.InsertToolCall(ctx, env.pool, &store.ToolCall{RunID: run.ID, ToolUseID: "mcp-0", ToolName: "open_merge_request",
-		Input: json.RawMessage(`{"title":"Failed first"}`), Output: json.RawMessage(`{"text":"propose the changes: git push: refused"}`),
-		Status: store.ToolFailed, IsError: true, StartedAt: &now, FinishedAt: &now}))
+	proj := &store.Project{Name: "report-" + store.NewID()[:8], RepoURL: "https://gitlab.test/g/p.git", Provider: "gitlab", DefaultBranch: "main"}
+	must(store.CreateProject(ctx, env.pool, proj, nil))
+	_, err = store.InsertMergeRequest(ctx, env.pool, &store.MergeRequest{ProjectID: proj.ID, RunID: run.ID, Provider: "gitlab", Number: 5,
+		URL: "https://gitlab.test/g/p/-/merge_requests/5", SourceBranch: "yuno/abc123", TargetBranch: "main", Title: "Add it"})
+	must(err)
 	if r := env.resume(env.e, run.ID); r.Status != store.RunSucceeded {
 		t.Fatalf("run = %s %v", r.Status, r.FailureReason)
 	}
