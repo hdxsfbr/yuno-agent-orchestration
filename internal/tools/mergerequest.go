@@ -221,7 +221,9 @@ func (m *mergeRequest) updateRecorded(ctx context.Context, pc *project.Config, r
 			requestNoun(rec.Provider), requestSigil(rec.Provider), rec.Number, rec.State)}
 	}
 	out := mergeRequestOutput{Number: rec.Number, URL: rec.URL, Branch: rec.SourceBranch, Provider: rec.Provider, Replayed: true}
-	_, err := pc.ProposeOnto(ctx, checkout, rec.SourceBranch, in.Title)
+	// No branch guard here yet: "" is the same-run path of DESIGN 5.20 rule 2 (5.22 rule 4
+	// passes the run's checkout_sha for a run that cloned the branch it pushes to).
+	_, err := pc.ProposeOnto(ctx, checkout, rec.SourceBranch, "", in.Title)
 	switch {
 	case err == nil:
 		out.Updated = true

@@ -91,7 +91,8 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, "invalid query", fe)
 		return
 	}
-	runs, err := store.ListRuns(r.Context(), s.pool, status, strings.TrimSpace(q.Get("project_id")), limit)
+	runs, err := store.ListRuns(r.Context(), s.pool, store.RunFilter{Status: status,
+		ProjectID: strings.TrimSpace(q.Get("project_id")), Limit: limit})
 	if err != nil {
 		s.internalError(w, r, "list runs", err)
 		return

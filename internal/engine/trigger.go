@@ -51,7 +51,7 @@ func (e *Engine) triggerWorkflow(ctx context.Context, req TriggerRequest) (*stor
 	if t := bytes.TrimSpace(input); len(t) == 0 || string(t) == "null" {
 		input = json.RawMessage(`{}`)
 	}
-	msgs = append(msgs, validateInput(def.InputSchema, input)...)
+	msgs = append(msgs, ValidateInput(def.InputSchema, input)...)
 	if len(msgs) == 0 {
 		// Templates render against the actual input and an empty state; only a
 		// definition that is otherwise sound gets this far.
@@ -112,9 +112,9 @@ func (e *Engine) checkAgentNodes(ctx context.Context, def *workflow.Definition) 
 	return msgs, nil
 }
 
-// validateInput checks the run input against the workflow's input_schema (DESIGN 5.6
+// ValidateInput checks the run input against the workflow's input_schema (DESIGN 5.6
 // rule 11): one path-qualified message per violated leaf, e.g. "input.task: ...".
-func validateInput(schema, input json.RawMessage) []string {
+func ValidateInput(schema, input json.RawMessage) []string {
 	if t := bytes.TrimSpace(schema); len(t) == 0 || string(t) == "null" {
 		return nil
 	}

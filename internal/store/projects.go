@@ -42,10 +42,43 @@ type Project struct {
 	CreatedAt            time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
 	DeletedAt            *time.Time `db:"deleted_at" json:"deleted_at,omitempty"`
-	// LastRun and Spend are not columns; FillProjectLastRuns and FillProjectSpend set
-	// them for the API's views.
+	// The intake settings and the poll's bookkeeping (DESIGN 5.23 rule 1, migration
+	// 0013). The columns never reach the API as such: Intake is their view, filled by
+	// fillIntake after every scan. IntakeWorkflowName is joined from the workflow and
+	// kept when the workflow was soft-deleted; the poll columns are written by the
+	// intake loop's own queries, not by CreateProject or UpdateProject.
+	IntakeEnabled      bool       `db:"intake_enabled" json:"-"`
+	IntakeLabel        string     `db:"intake_label" json:"-"`
+	IntakeWorkflowID   *string    `db:"intake_workflow_id" json:"-"`
+	IntakePolledAt     *time.Time `db:"intake_polled_at" json:"-"`
+	IntakeLastError    *string    `db:"intake_last_error" json:"-"`
+	IntakeWorkflowName *string    `db:"intake_workflow_name" json:"-"`
+	// LastRun, Spend and Intake are not columns; FillProjectLastRuns and
+	// FillProjectSpend set the first two for the API's views, fillIntake the third.
 	LastRun *ProjectLastRun `db:"-" json:"last_run,omitempty"`
 	Spend   *ProjectSpend   `db:"-" json:"spend,omitempty"`
+	Intake  *ProjectIntake  `db:"-" json:"intake,omitempty"`
+}
+
+// DefaultIntakeLabel is the label intake watches until the operator chooses another
+// (DESIGN 5.23 rule 1: projects.intake_label defaults to it).
+const DefaultIntakeLabel = "yuno"
+
+// ProjectIntake is the intake view of a project as the API serves it (DESIGN 5.23 rule
+// 1): the operator's settings, the workflow's name and the poll's last time and error.
+type ProjectIntake struct {
+	Enabled      bool       `json:"enabled"`
+	Label        string     `json:"label"`
+	WorkflowID   *string    `json:"workflow_id,omitempty"`
+	WorkflowName *string    `json:"workflow_name,omitempty"`
+	PolledAt     *time.Time `json:"polled_at,omitempty"`
+	LastError    *string    `json:"last_error,omitempty"`
+}
+
+// fillIntake sets Intake from the intake columns just scanned.
+func (p *Project) fillIntake() {
+	p.Intake = &ProjectIntake{Enabled: p.IntakeEnabled, Label: p.IntakeLabel, WorkflowID: p.IntakeWorkflowID,
+		WorkflowName: p.IntakeWorkflowName, PolledAt: p.IntakePolledAt, LastError: p.IntakeLastError}
 }
 
 // ProjectSpend is what a project's runs spent in the current UTC day and month,
@@ -88,10 +121,21 @@ type ProjectLastRun struct {
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
-// projectColumns reads a project for scanning; token_set stands in for the blob.
-const projectColumns = `id, name, repo_url, provider, default_branch, sandbox_network, description,
-	instructions, budget_day_usd_micros, budget_month_usd_micros,
-	(token_enc IS NOT NULL) AS token_set, created_at, updated_at, deleted_at`
+// projectColumns reads a project for scanning; token_set stands in for the blob, and the
+// intake workflow's name comes from the join of projectJoins. The columns are qualified
+// with the alias p, so a query that uses them selects FROM projectFrom and names p.id,
+// p.name and the rest in its conditions (workflows has columns of the same names).
+const projectColumns = `p.id, p.name, p.repo_url, p.provider, p.default_branch, p.sandbox_network, p.description,
+	p.instructions, p.budget_day_usd_micros, p.budget_month_usd_micros,
+	(p.token_enc IS NOT NULL) AS token_set, p.created_at, p.updated_at, p.deleted_at,
+	p.intake_enabled, p.intake_label, p.intake_workflow_id, p.intake_polled_at, p.intake_last_error,
+	w.name AS intake_workflow_name`
+
+// projectFrom is the table projectColumns reads: the project and its intake workflow.
+const projectFrom = ` FROM projects p LEFT JOIN workflows w ON w.id = p.intake_workflow_id`
+
+// projectSelect is the statement every single-project read starts from; append a WHERE.
+const projectSelect = `SELECT ` + projectColumns + projectFrom
 
 // CreateProject stores a project with its sealed token (nil stores none).
 func CreateProject(ctx context.Context, q Querier, p *Project, tokenEnc []byte) error {
@@ -101,25 +145,35 @@ func CreateProject(ctx context.Context, q Querier, p *Project, tokenEnc []byte) 
 	now := time.Now().UTC()
 	p.CreatedAt, p.UpdatedAt = now, now
 	p.TokenSet = len(tokenEnc) > 0
+	if p.IntakeLabel == "" {
+		p.IntakeLabel = DefaultIntakeLabel
+	}
 	_, err := q.Exec(ctx, `INSERT INTO projects (id, name, repo_url, provider, default_branch, sandbox_network, description,
-		token_enc, created_at, updated_at, instructions, budget_day_usd_micros, budget_month_usd_micros)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		token_enc, created_at, updated_at, instructions, budget_day_usd_micros, budget_month_usd_micros,
+		intake_enabled, intake_label, intake_workflow_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		p.ID, p.Name, p.RepoURL, p.Provider, p.DefaultBranch, p.SandboxNetwork, p.Description, tokenEnc, p.CreatedAt, p.UpdatedAt,
-		p.Instructions, p.BudgetDayUSDMicros, p.BudgetMonthUSDMicros)
+		p.Instructions, p.BudgetDayUSDMicros, p.BudgetMonthUSDMicros,
+		p.IntakeEnabled, p.IntakeLabel, p.IntakeWorkflowID)
 	return err
 }
 
+// scanProject reads the one project a query returned and fills its Intake view.
 func scanProject(rows pgx.Rows) (*Project, error) {
 	p, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Project])
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return p, err
+	if err != nil {
+		return nil, err
+	}
+	p.fillIntake()
+	return p, nil
 }
 
 // GetProject returns a live project; ErrNotFound for an unknown or deleted id.
 func GetProject(ctx context.Context, q Querier, id string) (*Project, error) {
-	rows, err := q.Query(ctx, `SELECT `+projectColumns+` FROM projects WHERE id=$1 AND deleted_at IS NULL`, id)
+	rows, err := q.Query(ctx, projectSelect+` WHERE p.id=$1 AND p.deleted_at IS NULL`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -129,8 +183,8 @@ func GetProject(ctx context.Context, q Querier, id string) (*Project, error) {
 // GetProjectByName finds the live project with this name, ignoring case and surrounding
 // spaces (DESIGN 5.17 rule 8); the unique index keeps that to one row.
 func GetProjectByName(ctx context.Context, q Querier, name string) (*Project, error) {
-	rows, err := q.Query(ctx, `SELECT `+projectColumns+` FROM projects WHERE lower(name)=lower($1) AND deleted_at IS NULL
-		ORDER BY created_at LIMIT 1`, strings.TrimSpace(name))
+	rows, err := q.Query(ctx, projectSelect+` WHERE lower(p.name)=lower($1) AND p.deleted_at IS NULL
+		ORDER BY p.created_at LIMIT 1`, strings.TrimSpace(name))
 	if err != nil {
 		return nil, err
 	}
@@ -139,8 +193,8 @@ func GetProjectByName(ctx context.Context, q Querier, name string) (*Project, er
 
 // GetProjectByRepoURL finds the oldest live project with this clone URL.
 func GetProjectByRepoURL(ctx context.Context, q Querier, repoURL string) (*Project, error) {
-	rows, err := q.Query(ctx, `SELECT `+projectColumns+` FROM projects WHERE repo_url=$1 AND deleted_at IS NULL
-		ORDER BY created_at LIMIT 1`, strings.TrimSpace(repoURL))
+	rows, err := q.Query(ctx, projectSelect+` WHERE p.repo_url=$1 AND p.deleted_at IS NULL
+		ORDER BY p.created_at LIMIT 1`, strings.TrimSpace(repoURL))
 	if err != nil {
 		return nil, err
 	}
@@ -151,8 +205,8 @@ func GetProjectByRepoURL(ctx context.Context, q Querier, repoURL string) (*Proje
 // bootstrap's idempotency check (DESIGN 5.17 rule 9), which must not recreate a project
 // the operator deleted.
 func FindProjectByRepoURL(ctx context.Context, q Querier, repoURL string) (*Project, error) {
-	rows, err := q.Query(ctx, `SELECT `+projectColumns+` FROM projects WHERE repo_url=$1
-		ORDER BY (deleted_at IS NOT NULL), created_at LIMIT 1`, strings.TrimSpace(repoURL))
+	rows, err := q.Query(ctx, projectSelect+` WHERE p.repo_url=$1
+		ORDER BY (p.deleted_at IS NOT NULL), p.created_at LIMIT 1`, strings.TrimSpace(repoURL))
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +215,7 @@ func FindProjectByRepoURL(ctx context.Context, q Querier, repoURL string) (*Proj
 
 // ListProjects returns the live projects by name.
 func ListProjects(ctx context.Context, q Querier) ([]Project, error) {
-	rows, err := q.Query(ctx, `SELECT `+projectColumns+` FROM projects WHERE deleted_at IS NULL ORDER BY lower(name), created_at`)
+	rows, err := q.Query(ctx, projectSelect+` WHERE p.deleted_at IS NULL ORDER BY lower(p.name), p.created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -169,18 +223,25 @@ func ListProjects(ctx context.Context, q Querier) ([]Project, error) {
 	if out == nil {
 		out = []Project{}
 	}
+	for i := range out {
+		out[i].fillIntake()
+	}
 	return out, err
 }
 
-// UpdateProject replaces a live project's settings and description; the token is
-// changed with SetProjectToken.
+// UpdateProject replaces a live project's settings and description, the intake settings
+// among them (enabled, label, workflow: DESIGN 5.23 rule 1); the token is changed with
+// SetProjectToken and the poll's bookkeeping (intake_polled_at, intake_last_error) is
+// left alone. An empty IntakeLabel keeps the stored one: no valid label is empty.
 func UpdateProject(ctx context.Context, q Querier, p *Project) error {
 	p.UpdatedAt = time.Now().UTC()
 	tag, err := q.Exec(ctx, `UPDATE projects SET name=$2, repo_url=$3, provider=$4, default_branch=$5, sandbox_network=$6,
-		description=$7, updated_at=$8, instructions=$9, budget_day_usd_micros=$10, budget_month_usd_micros=$11
+		description=$7, updated_at=$8, instructions=$9, budget_day_usd_micros=$10, budget_month_usd_micros=$11,
+		intake_enabled=$12, intake_label=COALESCE(NULLIF($13, ''), intake_label), intake_workflow_id=$14
 		WHERE id=$1 AND deleted_at IS NULL`,
 		p.ID, p.Name, p.RepoURL, p.Provider, p.DefaultBranch, p.SandboxNetwork, p.Description, p.UpdatedAt,
-		p.Instructions, p.BudgetDayUSDMicros, p.BudgetMonthUSDMicros)
+		p.Instructions, p.BudgetDayUSDMicros, p.BudgetMonthUSDMicros,
+		p.IntakeEnabled, p.IntakeLabel, p.IntakeWorkflowID)
 	if err != nil {
 		return err
 	}

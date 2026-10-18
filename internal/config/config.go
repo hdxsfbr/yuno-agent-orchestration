@@ -73,9 +73,11 @@ type Config struct {
 	SchedulerTick    time.Duration
 	// BudgetTick is how often project spend is checked for alerts (DESIGN 5.19 rule 5);
 	// MergeRequestSyncInterval how often open merge requests are refreshed from their
-	// provider (DESIGN 5.20 rule 3).
+	// provider (DESIGN 5.20 rule 3); IntakePollInterval how often the projects with
+	// intake enabled are polled for labelled issues (DESIGN 5.23 rule 2).
 	BudgetTick               time.Duration
 	MergeRequestSyncInterval time.Duration
+	IntakePollInterval       time.Duration
 	HTTPFetchAllowlist       []string
 	ToolOutputMaxBytes       int
 	LogLevel                 string
@@ -145,6 +147,7 @@ func FromEnv() Config {
 		SchedulerTick:            envDuration("SCHEDULER_TICK", 10*time.Second),
 		BudgetTick:               envDuration("BUDGET_TICK", 60*time.Second),
 		MergeRequestSyncInterval: envDuration("MERGE_REQUEST_SYNC_INTERVAL", 120*time.Second),
+		IntakePollInterval:       envDuration("INTAKE_POLL_INTERVAL", 120*time.Second),
 		HTTPFetchAllowlist:       envList("HTTP_FETCH_ALLOWLIST", "docs.python.org,pypi.org,raw.githubusercontent.com"),
 		ToolOutputMaxBytes:       envInt("TOOL_OUTPUT_MAX_BYTES", 32768),
 		LogLevel:                 env("LOG_LEVEL", "info"),

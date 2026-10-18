@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -92,12 +93,13 @@ func tail(s string, n int) string {
 // Clone clones the default branch at depth 1 into dest (rule 3), which must not exist,
 // and writes the local exclude file. dest's parent must exist.
 func (c Config) Clone(ctx context.Context, dest string) error {
-	return c.cloneBranch(ctx, dest, c.DefaultBranch)
+	return c.CloneBranch(ctx, dest, c.DefaultBranch)
 }
 
-// cloneBranch is Clone for any branch of the repository: still one branch at depth 1
-// (--single-branch), with the token handled as in rule 4.
-func (c Config) cloneBranch(ctx context.Context, dest, branch string) error {
+// CloneBranch is Clone for any branch of the repository: still one branch at depth 1
+// (--single-branch), with the token handled as in rule 4. A run that updates a merge
+// request clones the request's source branch with it (DESIGN 5.22 rule 2).
+func (c Config) CloneBranch(ctx context.Context, dest, branch string) error {
 	if _, err := c.git(ctx, filepath.Dir(dest), "clone", "--quiet", "--depth", "1", "--single-branch",
 		"--branch", branch, "--", c.RepoURL, filepath.Base(dest)); err != nil {
 		return err
@@ -121,6 +123,41 @@ func WriteExclude(repo string) error {
 	return err
 }
 
+// commitIDPattern is a full git commit id in SHA-1 form, 40 lowercase hex digits.
+var commitIDPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// HeadSHA is the commit id HEAD names in the repository at repo (git rev-parse HEAD),
+// trimmed. It is an error for anything but 40 hex digits: a run records the answer as
+// its checkout_sha (DESIGN 5.22 rule 2), the base the branch guard compares against, and
+// a short or empty id must never be recorded as one.
+func (c Config) HeadSHA(ctx context.Context, repo string) (string, error) {
+	out, err := c.git(ctx, repo, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	sha := strings.TrimSpace(string(out))
+	if !commitIDPattern.MatchString(sha) {
+		return "", fmt.Errorf("git rev-parse HEAD: %q is not a full commit id", tail(sha, 80))
+	}
+	return sha, nil
+}
+
+// ErrBranchMoved is ProposeOnto's answer when the branch it would push to is no longer at
+// the commit the run's checkout was cloned from (DESIGN 5.22 rule 4, D-050): someone
+// pushed to the branch since. Head is the commit the branch is at now, Base the one the
+// run expected. Nothing was copied or pushed; the operator starts a new run, which
+// clones the branch as it is.
+type ErrBranchMoved struct {
+	Branch string
+	Head   string
+	Base   string
+}
+
+func (e *ErrBranchMoved) Error() string {
+	return "the branch " + e.Branch + " has new commits since this run cloned it; nothing was pushed. " +
+		"Finish and report it; a new run on the request starts from the branch as it is now"
+}
+
 // Proposal is what a merge request's branch holds once Propose has pushed it.
 type Proposal struct {
 	Branch string
@@ -139,7 +176,7 @@ var ErrNoChanges = errors.New("the checkout has no changes to propose")
 // out), commits what differs as Yuno with message, and pushes HEAD to the branch with
 // the token. ErrNoChanges when nothing differs.
 func (c Config) Propose(ctx context.Context, checkout, branch, message string) (Proposal, error) {
-	return c.propose(ctx, checkout, c.DefaultBranch, branch, message)
+	return c.propose(ctx, checkout, c.DefaultBranch, branch, "", message)
 }
 
 // ProposeOnto is Propose for a run that has a request already (DESIGN 5.20 rule 2): it
@@ -147,21 +184,38 @@ func (c Config) Propose(ctx context.Context, checkout, branch, message string) (
 // checkout's working tree over it the same way, and commits what differs as one commit
 // on top of that branch with message, pushing HEAD back to it. ErrNoChanges when the
 // tree equals the branch: nothing is committed or pushed.
-func (c Config) ProposeOnto(ctx context.Context, checkout, branch, message string) (Proposal, error) {
-	return c.propose(ctx, checkout, branch, branch, message)
+//
+// base is the commit id the checkout was cloned from (the run's checkout_sha, DESIGN 5.22
+// rule 4), the branch guard: when it is not empty and the private clone's HEAD is another
+// commit, someone pushed to the branch since, and ProposeOnto returns *ErrBranchMoved
+// without copying or pushing anything (it refuses; it never merges or rebases, D-050).
+// An empty base skips the guard: the same-run path of DESIGN 5.20 rule 2 (a run that
+// opened its own request) and runs cloned before checkout_sha existed.
+func (c Config) ProposeOnto(ctx context.Context, checkout, branch, base, message string) (Proposal, error) {
+	return c.propose(ctx, checkout, branch, branch, base, message)
 }
 
-// propose clones base into a private directory, replaces its working tree with the
-// checkout's, commits the difference and pushes HEAD to branch.
-func (c Config) propose(ctx context.Context, checkout, base, branch, message string) (Proposal, error) {
+// propose clones the branch from into a private directory, replaces its working tree
+// with the checkout's, commits the difference and pushes HEAD to branch. A base that is
+// not empty must be the commit the clone is at (ErrBranchMoved otherwise).
+func (c Config) propose(ctx context.Context, checkout, from, branch, base, message string) (Proposal, error) {
 	private, err := os.MkdirTemp("", "yuno-propose-")
 	if err != nil {
 		return Proposal{}, err
 	}
 	defer os.RemoveAll(private)
 	dest := filepath.Join(private, "repo")
-	if err := c.cloneBranch(ctx, dest, base); err != nil {
+	if err := c.CloneBranch(ctx, dest, from); err != nil {
 		return Proposal{}, err
+	}
+	if base != "" {
+		head, err := c.HeadSHA(ctx, dest)
+		if err != nil {
+			return Proposal{}, err
+		}
+		if head != base {
+			return Proposal{}, &ErrBranchMoved{Branch: branch, Head: head, Base: base}
+		}
 	}
 	if err := clearWorkingTree(dest); err != nil {
 		return Proposal{}, err

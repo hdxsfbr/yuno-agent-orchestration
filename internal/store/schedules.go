@@ -19,7 +19,10 @@ const (
 // Schedule fires runs of a workflow on a cron cadence or once at run_at (DESIGN 5.9).
 // NextRunAt is nil while the schedule is disabled. ProjectID is the project its runs
 // work on (rule 6), nil for a workflow without one; ProjectName is joined for the list
-// and survives the project's deletion like WorkflowName.
+// and survives the project's deletion like WorkflowName. MergeRequestID is the merge
+// request record its runs update (DESIGN 5.22 rule 7), nil for none; the column is set
+// null when the record is deleted. MergeRequestNumber is the record's provider number,
+// joined for the list: nil when the schedule names none or the record is gone.
 type Schedule struct {
 	ID           string          `db:"id" json:"id"`
 	WorkflowID   string          `db:"workflow_id" json:"workflow_id"`
@@ -38,6 +41,9 @@ type Schedule struct {
 	Input        json.RawMessage `db:"input" json:"input"`
 	CreatedAt    time.Time       `db:"created_at" json:"created_at"`
 	UpdatedAt    time.Time       `db:"updated_at" json:"updated_at"`
+	// MergeRequestID and MergeRequestNumber: see the type's comment.
+	MergeRequestID     *string `db:"merge_request_id" json:"merge_request_id,omitempty"`
+	MergeRequestNumber *int64  `db:"merge_request_number" json:"merge_request_number,omitempty"`
 }
 
 // DueSchedule is a schedule the tick locked, with whether its workflow is gone.
@@ -58,12 +64,16 @@ type ScheduleOutcome struct {
 }
 
 // The workflow and project names are joined for the list and the form; a soft-deleted
-// workflow or project keeps its name so the schedule still says what it ran.
+// workflow or project keeps its name so the schedule still says what it ran. The merge
+// request's number is joined the same way: ON DELETE SET NULL empties merge_request_id
+// when the record goes, so the join then finds nothing and both members are null.
 const scheduleColumns = `s.id, s.workflow_id, COALESCE(w.name, '') AS workflow_name, s.project_id, p.name AS project_name,
+	s.merge_request_id, m.number AS merge_request_number,
 	s.kind, s.cron_expr, s.tz, s.run_at, s.enabled, s.next_run_at, s.last_run_at, s.last_run_id, s.last_error, s.input,
 	s.created_at, s.updated_at`
 
-const scheduleJoins = ` FROM schedules s LEFT JOIN workflows w ON w.id = s.workflow_id LEFT JOIN projects p ON p.id = s.project_id`
+const scheduleJoins = ` FROM schedules s LEFT JOIN workflows w ON w.id = s.workflow_id LEFT JOIN projects p ON p.id = s.project_id
+	LEFT JOIN merge_requests m ON m.id = s.merge_request_id`
 
 const scheduleSelect = `SELECT ` + scheduleColumns + scheduleJoins
 
@@ -77,10 +87,10 @@ func CreateSchedule(ctx context.Context, q Querier, s *Schedule) error {
 	now := time.Now().UTC()
 	s.CreatedAt, s.UpdatedAt = now, now
 	_, err := q.Exec(ctx, `INSERT INTO schedules (id, workflow_id, project_id, kind, cron_expr, tz, run_at, enabled, next_run_at,
-		last_run_at, last_run_id, last_error, input, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)`,
+		last_run_at, last_run_id, last_error, input, created_at, updated_at, merge_request_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15)`,
 		s.ID, s.WorkflowID, s.ProjectID, s.Kind, s.CronExpr, s.TZ, s.RunAt, s.Enabled, s.NextRunAt,
-		s.LastRunAt, s.LastRunID, s.LastError, s.Input, now)
+		s.LastRunAt, s.LastRunID, s.LastError, s.Input, now, s.MergeRequestID)
 	return err
 }
 
@@ -113,8 +123,9 @@ func ListSchedules(ctx context.Context, q Querier) ([]Schedule, error) {
 func UpdateSchedule(ctx context.Context, q Querier, s *Schedule) error {
 	s.UpdatedAt = time.Now().UTC()
 	tag, err := q.Exec(ctx, `UPDATE schedules SET workflow_id=$2, kind=$3, cron_expr=$4, tz=$5, run_at=$6, enabled=$7,
-		next_run_at=$8, last_error=$9, input=$10, updated_at=$11, project_id=$12 WHERE id=$1`,
-		s.ID, s.WorkflowID, s.Kind, s.CronExpr, s.TZ, s.RunAt, s.Enabled, s.NextRunAt, s.LastError, s.Input, s.UpdatedAt, s.ProjectID)
+		next_run_at=$8, last_error=$9, input=$10, updated_at=$11, project_id=$12, merge_request_id=$13 WHERE id=$1`,
+		s.ID, s.WorkflowID, s.Kind, s.CronExpr, s.TZ, s.RunAt, s.Enabled, s.NextRunAt, s.LastError, s.Input, s.UpdatedAt, s.ProjectID,
+		s.MergeRequestID)
 	if err != nil {
 		return err
 	}

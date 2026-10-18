@@ -19,12 +19,42 @@ var ErrDuplicateTrigger = errors.New("a run for this trigger already exists")
 const runColumns = `id, workflow_id, workflow_version, workflow_snapshot, trigger, trigger_ref, status, input, state,
 	limits, current_node, resume_node_visit_id, step_count, tool_call_count, attempt, cancel_requested, cancel_by,
 	failure_reason, cost_usd_micros, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, paused_at,
-	paused_total_ms, created_at, started_at, finished_at, updated_at, reported_at, toolchain, project_id, project_snapshot, retries`
+	paused_total_ms, created_at, started_at, finished_at, updated_at, reported_at, toolchain, project_id, project_snapshot, retries,
+	merge_request_id, checkout_sha`
+
+// Constraint names of the partial unique indexes that refuse a second live run for the
+// same merge request (DESIGN 5.22 rule 1) or the same issue (5.23 rule 3).
+const (
+	mergeRequestLiveIndex = "runs_merge_request_live_idx"
+	issueLiveIndex        = "runs_issue_live_idx"
+)
 
 // SetRunToolchain records the toolchain of the run's project checkout (DESIGN 5.16
 // rule 3).
 func SetRunToolchain(ctx context.Context, q Querier, id, toolchain string) error {
 	_, err := q.Exec(ctx, `UPDATE runs SET toolchain=$2, updated_at=now() WHERE id=$1`, id, toolchain)
+	return err
+}
+
+// SetRunCheckoutSHA records the commit the run's project checkout is at (DESIGN 5.22
+// rules 2 and 4): written after the clone and after each push of open_merge_request.
+func SetRunCheckoutSHA(ctx context.Context, q Querier, id, sha string) error {
+	_, err := q.Exec(ctx, `UPDATE runs SET checkout_sha=$2, updated_at=now() WHERE id=$1`, id, sha)
+	return err
+}
+
+// liveIndexError maps a unique violation of one of the two live-run indexes to its
+// sentinel and returns every other error as it came (DESIGN 5.22 rule 1, 5.23 rule 3).
+func liveIndexError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		switch pgErr.ConstraintName {
+		case mergeRequestLiveIndex:
+			return ErrMergeRequestBusy
+		case issueLiveIndex:
+			return ErrIssueBusy
+		}
+	}
 	return err
 }
 
@@ -47,15 +77,17 @@ func CreateRun(ctx context.Context, q Querier, r *Run) error {
 	now := time.Now().UTC()
 	r.CreatedAt, r.UpdatedAt = now, now
 	_, err := q.Exec(ctx, `INSERT INTO runs (id, workflow_id, workflow_version, workflow_snapshot, trigger, trigger_ref,
-		status, input, state, limits, attempt, created_at, updated_at, project_id, project_snapshot)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		status, input, state, limits, attempt, created_at, updated_at, project_id, project_snapshot,
+		merge_request_id, checkout_sha)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		r.ID, r.WorkflowID, r.WorkflowVersion, r.WorkflowSnapshot, r.Trigger, r.TriggerRef,
-		r.Status, r.Input, r.State, r.Limits, r.Attempt, r.CreatedAt, r.UpdatedAt, r.ProjectID, r.Project)
+		r.Status, r.Input, r.State, r.Limits, r.Attempt, r.CreatedAt, r.UpdatedAt, r.ProjectID, r.Project,
+		r.MergeRequestID, r.CheckoutSHA)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "runs_schedule_occurrence_idx" {
 		return ErrDuplicateTrigger
 	}
-	return err
+	return liveIndexError(err)
 }
 
 // GetRunByTrigger returns the run created by a trigger reference, e.g. a schedule
@@ -110,7 +142,10 @@ func GetRunForUpdate(ctx context.Context, q Querier, id string) (*Run, error) {
 // retries goes up by one and attempt back to 1, so the crash re-queue of 5.1 counts per
 // retry. started_at and the pause bookkeeping are cleared too: the time limit restarts
 // when the run is next claimed (rule 2, ClaimQueuedRun). limits, when not nil, replace
-// the run's limits. now stamps updated_at.
+// the run's limits. now stamps updated_at. A retry re-enters the two live-run indexes
+// (DESIGN 5.22 rule 1, 5.23 rule 3): ErrMergeRequestBusy when another live run names the
+// same merge request, ErrIssueBusy when another live run exists for the same issue; the
+// run stays as it was.
 func RetryRun(ctx context.Context, q Querier, id string, limits *Limits, now time.Time) (*Run, error) {
 	rows, err := q.Query(ctx, `UPDATE runs SET status=$2, retries=retries+1, attempt=1, failure_reason=NULL,
 		finished_at=NULL, cancel_requested=false, cancel_by=NULL, resume_node_visit_id=NULL, reported_at=NULL,
@@ -124,18 +159,35 @@ func RetryRun(ctx context.Context, q Querier, id string, limits *Limits, now tim
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	return r, err
+	if err != nil {
+		return nil, liveIndexError(err)
+	}
+	return r, nil
 }
 
-// ListRuns returns the newest runs first, optionally filtered by status and by the
-// project the run works on (runs.project_id, which a deleted project's runs keep); an
-// empty filter matches every run.
-func ListRuns(ctx context.Context, q Querier, status, projectID string, limit int) ([]Run, error) {
+// RunFilter narrows ListRuns; an empty member does not filter. Trigger matches runs.trigger
+// (manual, schedule, channel, eval, issue) and MergeRequestID the merge request record a
+// run names (runs.merge_request_id, DESIGN 5.22 rule 1), not the record a run opened.
+// A Limit outside 1..500 is 100.
+type RunFilter struct {
+	Status         string
+	ProjectID      string
+	Trigger        string
+	MergeRequestID string
+	Limit          int
+}
+
+// ListRuns returns the newest runs first, optionally filtered by status, by the project
+// the run works on (runs.project_id, which a deleted project's runs keep), by trigger
+// and by the merge request the run names; an empty filter matches every run.
+func ListRuns(ctx context.Context, q Querier, f RunFilter) ([]Run, error) {
+	limit := f.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE ($1 = '' OR status = $1) AND ($2 = '' OR project_id = $2)
-		ORDER BY created_at DESC LIMIT $3`, status, projectID, limit)
+		AND ($3 = '' OR trigger = $3) AND ($4 = '' OR merge_request_id = $4)
+		ORDER BY created_at DESC LIMIT $5`, f.Status, f.ProjectID, f.Trigger, f.MergeRequestID, limit)
 	if err != nil {
 		return nil, err
 	}

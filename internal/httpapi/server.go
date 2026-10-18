@@ -358,6 +358,7 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("PUT /api/projects/{id}", s.updateProject)
 	mux.HandleFunc("DELETE /api/projects/{id}", s.deleteProject)
 	mux.HandleFunc("POST /api/projects/{id}/check", s.checkProject)
+	mux.HandleFunc("POST /api/projects/{id}/intake/poll", s.pollIntake)
 	// Project notes (DESIGN 5.18 rule 6) and merge requests (DESIGN 5.20 rule 6).
 	mux.HandleFunc("GET /api/projects/{id}/facts", s.listProjectFacts)
 	mux.HandleFunc("DELETE /api/projects/{id}/facts/{factId}", s.deleteProjectFact)

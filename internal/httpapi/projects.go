@@ -52,6 +52,11 @@ type projectInput struct {
 	MaxCostUSDPerDay   *float64 `json:"max_cost_usd_per_day"`
 	MaxCostUSDPerMonth *float64 `json:"max_cost_usd_per_month"`
 
+	// Intake (DESIGN 5.23 rule 1) is accepted and not applied yet, so a client can PUT back
+	// the project it fetched, whose view now carries it; the intake settings check and
+	// the write replace this member.
+	Intake json.RawMessage `json:"intake"`
+
 	ID        json.RawMessage `json:"id"`
 	TokenSet  json.RawMessage `json:"token_set"`
 	CreatedAt json.RawMessage `json:"created_at"`

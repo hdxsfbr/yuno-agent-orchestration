@@ -2,6 +2,8 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"time"
 )
@@ -44,7 +46,19 @@ const (
 	TriggerSchedule = "schedule"
 	TriggerChannel  = "channel"
 	TriggerEval     = "eval"
+	// TriggerIssue marks a run the intake loop created for a labelled issue; its
+	// trigger_ref is "<project id>#<n>" (DESIGN 5.23 units).
+	TriggerIssue = "issue"
 )
+
+// ErrMergeRequestBusy is CreateRun's and RetryRun's answer when another live run already
+// names the same merge request record (runs_merge_request_live_idx, DESIGN 5.22 rule 1):
+// one run at a time pushes onto a request's branch.
+var ErrMergeRequestBusy = errors.New("another live run is updating this merge request")
+
+// ErrIssueBusy is CreateRun's and RetryRun's answer when a live run already exists for
+// the same issue (runs_issue_live_idx, DESIGN 5.23 rule 3): one live run per issue.
+var ErrIssueBusy = errors.New("this issue already has a live run")
 
 // IsTerminal reports whether a run status is final.
 func IsTerminal(status string) bool {
@@ -229,6 +243,15 @@ type Run struct {
 	// not a column: FillRunMergeRequests sets it for the API's views, nil when none.
 	Retries      int           `db:"retries" json:"retries"`
 	MergeRequest *MergeRequest `db:"-" json:"merge_request,omitempty"`
+	// MergeRequestID is the merge request record the run names and updates (DESIGN 5.22
+	// rule 1), checked and written when the run is queued; nil for a run that works from
+	// the default branch. The record a run opened is merge_requests.run_id, not this.
+	MergeRequestID *string `db:"merge_request_id" json:"merge_request_id,omitempty"`
+	// CheckoutSHA is the commit the project checkout was at: HEAD right after the clone,
+	// and the pushed commit after open_merge_request pushed (DESIGN 5.22 rules 2 and 4),
+	// the base the branch guard compares against. A full 40-hex id, nil before the clone
+	// and for a run cloned before migration 0013.
+	CheckoutSHA *string `db:"checkout_sha" json:"checkout_sha,omitempty"`
 	// AgentNames and Models are not columns; FillRunParticipants sets them for list views.
 	AgentNames []string `db:"-" json:"agent_names,omitempty"`
 	Models     []string `db:"-" json:"models,omitempty"`
@@ -407,4 +430,14 @@ type MergeRequest struct {
 	CreatedAt         time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt         time.Time  `db:"updated_at" json:"updated_at"`
 	ClosedAt          *time.Time `db:"closed_at" json:"closed_at,omitempty"`
+}
+
+// Label is how the provider names this request in the texts the platform writes (every
+// refusal of DESIGN 5.22 and 5.23): "merge request !12" on GitLab, "pull request #12"
+// on GitHub.
+func (m *MergeRequest) Label() string {
+	if m.Provider == "github" {
+		return fmt.Sprintf("pull request #%d", m.Number)
+	}
+	return fmt.Sprintf("merge request !%d", m.Number)
 }

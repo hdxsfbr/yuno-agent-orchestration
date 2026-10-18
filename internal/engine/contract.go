@@ -25,7 +25,7 @@ type TriggerRequest struct {
 	AgentID    string
 	Task       string
 	Limits     store.Limits
-	Trigger    string // store.TriggerManual | TriggerSchedule | TriggerChannel | TriggerEval
+	Trigger    string // store.TriggerManual | TriggerSchedule | TriggerChannel | TriggerEval | TriggerIssue
 	TriggerRef string
 	// Model, when set, overrides the agent's model for this run as an OpenClaw model
 	// ref, e.g. "scripted/scripted-1" (DESIGN 5.14 rule 9). The engine applies it to
@@ -38,6 +38,11 @@ type TriggerRequest struct {
 	// workflow whose definition has `project: true`, refused for one without it, and
 	// optional for a quick run, whose one-node definition then opts in.
 	ProjectID string
+	// MergeRequestID names the merge request record the run updates, from its source
+	// branch instead of the default one (DESIGN 5.22 rule 1): the store's id of the
+	// record, never the provider's number, "" for a run that names none. The engine
+	// ignores it until the queue-time checks and the clone of that rule are built.
+	MergeRequestID string
 }
 
 // RunContext is what a run token resolves to (DESIGN 5.7 rule 3).
