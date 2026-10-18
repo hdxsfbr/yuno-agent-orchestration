@@ -6,6 +6,25 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-18
 
+**D-059 A declined question continues the step; the run does not fail.** (Andre,
+2026-10-18, the recommended answer of DESIGN 5.24's second open line) When the operator
+declines to answer, the agent reads `The operator declined to answer<: <reason>>.
+Proceed without the answer and state what you assumed.` in the tool result or in the
+continuation visit's task, and goes on. Why: a factory should not stop on a "no"; the
+agent can decide and say what it assumed, and the operator sees the assumption in the
+result. Alternative: failing the run with `question declined` (an operator who wants
+that cancels the run). Design: DESIGN 5.24 rules 4 and 7.
+
+**D-058 A question from a run without a conversation goes to the Telegram-bound agent's
+most recent conversation, like a budget alert.** (Andre, 2026-10-18, the recommended
+answer of DESIGN 5.24's first open line) A run started from the UI, a schedule or the
+intake has no conversation to report to; its question is announced through the route of
+5.19 rule 6 (`SendPlatformMessage`, idempotency key `question-<id>`) so the operator
+hears it where they are; without a binding or a conversation the inbox and the run page
+are the surfaces. Why: a question is time-critical and the route exists; the Chief
+relays the answer with `answer_question`. Alternative: the inbox only. Design: DESIGN
+5.24 rule 6.
+
 **D-057 Run artifacts are one row per run and path, replaced when the file changes; the
 checkout diff comes from a private clone at the end of every agent visit; the store is a
 named volume on the api.** (coordinator, 2026-10-18, writing DESIGN 5.25) `run_artifacts`

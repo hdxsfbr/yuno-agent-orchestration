@@ -3032,18 +3032,12 @@ may keep the session), a `/answer` command on Telegram (D-046: the Chief's tool)
 question that gates a side effect (that is an approval, 5.3), answering through the
 gateway's own approval surfaces.
 
-Open lines for Andre (the rules above carry the recommended answers; D-058 and D-059
-record the answers):
-
-1. A question from a run that has no conversation (started from the UI, a schedule or
-   the intake): send it to the Telegram-bound agent's most recent conversation like a
-   budget alert (recommended: the operator of a factory is on Telegram, and the route
-   exists; rule 6 (b)), or keep it to the inbox and the run page? If the inbox only,
-   rule 6 (b) and T5.24.10's second case go.
-2. When the operator declines a question: the step continues with the decline text and
-   states what it assumed (recommended, rule 7: a factory should not stop on a "no"), or
-   the run fails with `question declined`? If it fails, rule 7's decline line goes and
-   rule 8 gains the failure.
+Settled 2026-10-18 (D-058 and D-059, the recommended answers): a question from a run
+that has no conversation is sent to the Telegram-bound agent's most recent conversation
+through the budget alerts' route (rule 6 (b) stands); a declined question continues the
+step with the decline text and the agent states what it assumed (rule 7 stands, the run
+does not fail). Anyone who may message the Chief can answer a run's question; the
+answer reaches the model as the operator's text.
 
 ### 5.25 Run artifacts: the files a run delivers
 

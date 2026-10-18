@@ -4,9 +4,8 @@ Spec: `docs/DESIGN.md` 5.24 and 5.25 (decisions D-046, D-047, D-056 and D-057), 
 roadmap `docs/ROADMAP.md`, and the contract `api/openapi.yaml` 0.7.0 (the wave 10
 paths, schemas and fields carry `x-planned: wave 10` or "Planned for wave 10" in their
 descriptions; the coordinator removes the markers at integration, once each is served).
-The two open lines at the end of 5.24 are Andre's; the wave does not start until they
-are answered and recorded (D-058, D-059). The rules carry the recommended answers, so a
-"yes" to both changes nothing below.
+Andre answered the two lines at the end of 5.24 with the recommended answers on
+2026-10-18 (D-058, D-059) and approved these briefs; the rules stand as written.
 
 ## Agents
 
