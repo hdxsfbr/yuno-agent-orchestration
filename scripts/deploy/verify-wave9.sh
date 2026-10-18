@@ -7,6 +7,7 @@
 #   ssh yuno@$IP 'bash -s -- --version' < scripts/deploy/verify-wave9.sh
 #   ssh yuno@$IP 'bash -s -- --iterate 4 --task "address the review thread on the gcd tests"' < ...
 #   ssh yuno@$IP 'bash -s -- --run <run id>' < ...
+#   ssh yuno@$IP 'bash -s -- --approve-run <run id>' < ...                 (approve the run's pending gate or tool approvals)
 #   ssh yuno@$IP 'bash -s -- --intake-enable "Dev pipeline"' < ...     (label yuno, the project's caps must be set)
 #   ssh yuno@$IP 'bash -s -- --poll' < ...                              (POST .../intake/poll)
 #   ssh yuno@$IP 'bash -s -- --issue-runs' < ...                        (GET /api/runs?trigger=issue)
@@ -54,6 +55,7 @@ main() {
       --intake-disable) action=intake_disable ;;
       --poll) action=poll ;;
       --issue-runs) action=issue_runs ;;
+      --approve-run) action=approve_run; run=$2; shift ;;
       *) echo "unknown flag $1" >&2; exit 2 ;;
     esac
     shift
@@ -92,9 +94,16 @@ main() {
       pid=$(project_id)
       api POST "/api/projects/$pid/intake/poll" | jq_ "print(json.dumps(d))"
       api GET "/api/projects/$pid" | jq_ "print('intake:', json.dumps(d.get('intake')))" ;;
+    approve_run)
+      local ids
+      ids=$(api GET "/api/approvals?status=pending&run_id=$run" | jq_ "[print(a['id']) for a in d if a.get('run_id')=='$run']")
+      [ -n "$ids" ] || { echo "no pending approval for run $run"; exit 0; }
+      for id in $ids; do
+        api POST "/api/approvals/$id/approve" '{}' | jq_ "print(json.dumps({k: d.get(k) for k in ('id','kind','status','message')} if 'id' in d else d))"
+      done ;;
     issue_runs)
       api GET "/api/runs?trigger=issue&limit=20" | jq_ "[print(json.dumps({k: r.get(k) for k in ('id','status','trigger_ref','reported_at','step_count')})) for r in d]" ;;
-    *) echo "give one of --version, --iterate N, --run ID, --intake-enable NAME, --intake-disable, --poll, --issue-runs" >&2; exit 2 ;;
+    *) echo "give one of --version, --iterate N, --run ID, --approve-run ID, --intake-enable NAME, --intake-disable, --poll, --issue-runs" >&2; exit 2 ;;
   esac
 }
 
