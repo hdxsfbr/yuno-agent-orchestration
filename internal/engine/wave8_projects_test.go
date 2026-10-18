@@ -92,12 +92,13 @@ func visitMessage(t *testing.T, env *testEnv, req TriggerRequest, beforeRun func
 	return msg, r
 }
 
-// blocksOf is what the task holds between the sandbox network line and the finish
-// instruction: the two blocks of DESIGN 5.18 rule 4, when there are any.
+// blocksOf is what the task holds between the sandbox network line and the deliverables
+// line (DESIGN 5.25 rule 1) that precedes the finish instruction: the two blocks of
+// DESIGN 5.18 rule 4, when there are any.
 func blocksOf(t *testing.T, msg string) string {
 	t.Helper()
 	i := strings.Index(msg, "Sandbox network: ")
-	j := strings.Index(msg, "When finished, call the tool")
+	j := strings.Index(msg, "Deliverables: put files")
 	if i < 0 || j < i {
 		t.Fatalf("not a project task:\n%s", msg)
 	}

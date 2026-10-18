@@ -220,6 +220,7 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 		}
 	}
 	v.finish(wctx, res)
+	e.collectArtifacts(wctx, v)
 	if v.sessionCreated {
 		w.sessions = append(w.sessions, v.key)
 	}

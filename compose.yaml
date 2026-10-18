@@ -58,6 +58,8 @@ x-api-env: &api-env
   DEPLOYTARGET_MAX_MB: ${DEPLOYTARGET_MAX_MB:-100}
   ENGINE_STALE_AFTER: ${ENGINE_STALE_AFTER:-300s}
   TOOL_OUTPUT_MAX_BYTES: ${TOOL_OUTPUT_MAX_BYTES:-32768}
+  ARTIFACT_DIR: ${ARTIFACT_DIR:-/data/artifacts}
+  ARTIFACT_TTL_DAYS: ${ARTIFACT_TTL_DAYS:-30}
   MAX_STEPS: ${MAX_STEPS:-200}
   MAX_DURATION_SECONDS: ${MAX_DURATION_SECONDS:-3600}
   MAX_NODE_ITERATIONS: ${MAX_NODE_ITERATIONS:-50}
@@ -162,6 +164,10 @@ services:
       <<: *api-env
     volumes:
       - ./data/openclaw:/home/node/.openclaw
+      # The first named volume the api mounts: the files runs deliver (DESIGN 5.25 rule 4),
+      # kept until ARTIFACT_TTL_DAYS after the run finished. The image creates the directory
+      # owned by app, so the volume inherits it.
+      - artifacts:/data/artifacts
     depends_on:
       postgres:
         condition: service_healthy
@@ -415,6 +421,7 @@ services:
 volumes:
   pgdata: {}
   releases: {}
+  artifacts: {}
   gomod: {}
   gocache: {}
   caddy_data: {}

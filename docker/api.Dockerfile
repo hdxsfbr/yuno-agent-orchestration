@@ -20,12 +20,12 @@ FROM alpine:3.21 AS runtime
 # git: the api clones the project repository for a run and pushes a merge request's
 # branch itself, on the platform side (DESIGN 5.16 rules 3 and 10).
 RUN apk add --no-cache ca-certificates tzdata wget git && adduser -D -u 1000 app \
-    && mkdir -p /data && chown app:app /data
+    && mkdir -p /data /data/artifacts && chown -R app:app /data
 WORKDIR /src
 COPY --from=build /out/yuno /usr/local/bin/yuno
 COPY --from=build /src/templates ./templates
-# /data is the deploytarget release volume; the named volume inherits this ownership
-# when it is first created.
+# /data is the deploytarget release volume and /data/artifacts the api's artifact store
+# (DESIGN 5.25 rule 4); a named volume inherits this ownership when it is first created.
 USER app
 ENTRYPOINT ["yuno"]
 CMD ["api"]

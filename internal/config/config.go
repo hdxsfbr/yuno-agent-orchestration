@@ -81,6 +81,11 @@ type Config struct {
 	HTTPFetchAllowlist       []string
 	ToolOutputMaxBytes       int
 	LogLevel                 string
+	// ArtifactDir is where the api keeps the files runs deliver, the named volume
+	// "artifacts" (DESIGN 5.25 rule 4); ArtifactTTLDays how many days after a run
+	// finished its artifacts are kept, 0 for ever (rule 6).
+	ArtifactDir     string
+	ArtifactTTLDays int
 
 	// Evaluation runner (DESIGN 5.13). The runner is an HTTP client of the api.
 	EvalAPIURL     string
@@ -151,6 +156,8 @@ func FromEnv() Config {
 		HTTPFetchAllowlist:       envList("HTTP_FETCH_ALLOWLIST", "docs.python.org,pypi.org,raw.githubusercontent.com"),
 		ToolOutputMaxBytes:       envInt("TOOL_OUTPUT_MAX_BYTES", 32768),
 		LogLevel:                 env("LOG_LEVEL", "info"),
+		ArtifactDir:              env("ARTIFACT_DIR", "/data/artifacts"),
+		ArtifactTTLDays:          envInt("ARTIFACT_TTL_DAYS", 30),
 
 		EvalAPIURL:     strings.TrimRight(env("EVAL_API_URL", "http://127.0.0.1:8080"), "/"),
 		EvalProvider:   env("EVAL_PROVIDER", "scripted"),

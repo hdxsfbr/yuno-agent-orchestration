@@ -294,7 +294,7 @@ func RequeueStaleRuns(ctx context.Context, q Querier, staleAfter time.Duration) 
 // ---- run nodes --------------------------------------------------------------------
 
 const runNodeColumns = `id, run_id, node_id, agent_id, visit, iteration, status, messages, pending_tool_results, output,
-	failure_reason, session_key, openclaw_run_id, started_at, finished_at`
+	failure_reason, session_key, openclaw_run_id, started_at, finished_at, question_id, parked_at`
 
 func CreateRunNode(ctx context.Context, q Querier, n *RunNode) error {
 	if n.ID == "" {
@@ -315,9 +315,9 @@ func CreateRunNode(ctx context.Context, q Querier, n *RunNode) error {
 	if len(n.Output) == 0 {
 		n.Output = json.RawMessage(`null`)
 	}
-	_, err := q.Exec(ctx, `INSERT INTO run_nodes (`+runNodeColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+	_, err := q.Exec(ctx, `INSERT INTO run_nodes (`+runNodeColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		n.ID, n.RunID, n.NodeID, n.AgentID, n.Visit, n.Iteration, n.Status, n.Messages, n.PendingToolResults, n.Output,
-		n.FailureReason, n.SessionKey, n.OpenClawRunID, n.StartedAt, n.FinishedAt)
+		n.FailureReason, n.SessionKey, n.OpenClawRunID, n.StartedAt, n.FinishedAt, n.QuestionID, n.ParkedAt)
 	return err
 }
 
@@ -522,13 +522,13 @@ func ListAgentMessages(ctx context.Context, q Querier, runID string) ([]AgentMes
 }
 
 const approvalColumns = `id, run_id, run_node_id, tool_call_id, kind, node_id, message, status, external_id, requested_at,
-	decided_at, decided_by, reason, expires_at`
+	decided_at, decided_by, reason, expires_at, options, answer`
 
 // approvalSelect reads an approval for scanning. One raised in a conversation has no
 // run or run node (DESIGN 5.8 rule 5): they read as "", with conversation_id set.
 const approvalSelect = `id, COALESCE(run_id, '') AS run_id, COALESCE(run_node_id, '') AS run_node_id, tool_call_id, kind,
-	node_id, message, status, external_id, requested_at, decided_at, decided_by, reason, expires_at, conversation_id,
-	reported_at`
+	node_id, message, options, status, external_id, requested_at, decided_at, decided_by, reason, answer, expires_at,
+	conversation_id, reported_at`
 
 func InsertApproval(ctx context.Context, q Querier, a *Approval) error {
 	if a.ID == "" {
@@ -540,10 +540,19 @@ func InsertApproval(ctx context.Context, q Querier, a *Approval) error {
 	if a.RequestedAt.IsZero() {
 		a.RequestedAt = time.Now().UTC()
 	}
-	_, err := q.Exec(ctx, `INSERT INTO approvals (`+approvalColumns+`) VALUES ($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+	_, err := q.Exec(ctx, `INSERT INTO approvals (`+approvalColumns+`) VALUES ($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16)`,
 		a.ID, a.RunID, a.RunNodeID, a.ToolCallID, a.Kind, a.NodeID, a.Message, a.Status, a.ExternalID, a.RequestedAt,
-		a.DecidedAt, a.DecidedBy, a.Reason, a.ExpiresAt)
+		a.DecidedAt, a.DecidedBy, a.Reason, a.ExpiresAt, optionsParam(a.Options), a.Answer)
 	return err
+}
+
+// optionsParam is the value of approvals.options: the JSON array of a question's
+// suggested answers, NULL (not an empty document) when it has none.
+func optionsParam(options json.RawMessage) any {
+	if len(options) == 0 {
+		return nil
+	}
+	return []byte(options)
 }
 
 func GetApproval(ctx context.Context, q Querier, id string) (*Approval, error) {

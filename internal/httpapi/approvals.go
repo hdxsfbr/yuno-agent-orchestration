@@ -90,6 +90,12 @@ func (s *Server) rejectApproval(w http.ResponseWriter, r *http.Request) {
 	s.decide(w, r, engine.DecisionReject, in.Reason, false)
 }
 
+// answerApproval is POST /api/approvals/{id}/answer (DESIGN 5.24 rule 3): the route is in
+// the contract ahead of the engine path that serves it, and answers 501 until then.
+func (s *Server) answerApproval(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotImplemented, "not_implemented", "planned for wave 10", nil)
+}
+
 // decide applies a decision through the engine (DESIGN 5.3 rules 3, 5, 8): 404 for an
 // unknown approval, 409 when it is no longer pending.
 func (s *Server) decide(w http.ResponseWriter, r *http.Request, decision, reason string, always bool) {

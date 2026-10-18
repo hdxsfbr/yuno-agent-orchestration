@@ -12,12 +12,12 @@ const Redacted = "[redacted]"
 
 // Values that look like credentials wherever they appear in a string.
 var secretValuePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{10,}`),            // Anthropic API keys
-	regexp.MustCompile(`sk-or-v1-[A-Za-z0-9]{10,}`),            // OpenRouter API keys
-	regexp.MustCompile(`\b\d{6,}:[A-Za-z0-9_-]{30,}`),          // Telegram bot tokens
+	regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{10,}`),              // Anthropic API keys
+	regexp.MustCompile(`sk-or-v1-[A-Za-z0-9]{10,}`),              // OpenRouter API keys
+	regexp.MustCompile(`\b\d{6,}:[A-Za-z0-9_-]{30,}`),            // Telegram bot tokens
 	regexp.MustCompile(`gl(?:pat|dt|oas|rt)-[A-Za-z0-9_-]{15,}`), // GitLab personal, deploy and access tokens
-	regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`),              // GitHub tokens (classic)
-	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`),            // GitHub fine-grained tokens
+	regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`),             // GitHub tokens (classic)
+	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,}`),           // GitHub fine-grained tokens
 	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]{16,}`),   // Authorization headers
 	// Basic credentials (DESIGN 5.16 rule 4 sends the project token this way to git):
 	// "Basic" and a base64 value with at least one digit or symbol, so prose such as

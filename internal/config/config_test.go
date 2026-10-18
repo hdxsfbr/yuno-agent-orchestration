@@ -156,3 +156,23 @@ func TestEnvExampleAndComposeCoverConfig(t *testing.T) {
 		}
 	}
 }
+
+// DESIGN 5.25 rules 4 and 6: the artifact store and how long it keeps a finished run's
+// files. Unset means /data/artifacts and 30 days; 0 is a value (keep for ever); a value
+// that is not a number falls back to the default as every integer setting does.
+func TestArtifactSettings(t *testing.T) {
+	t.Setenv("ARTIFACT_DIR", "")
+	t.Setenv("ARTIFACT_TTL_DAYS", "")
+	if c := FromEnv(); c.ArtifactDir != "/data/artifacts" || c.ArtifactTTLDays != 30 {
+		t.Fatalf("defaults = %q, %d; want /data/artifacts, 30", c.ArtifactDir, c.ArtifactTTLDays)
+	}
+	t.Setenv("ARTIFACT_DIR", "/srv/artifacts")
+	t.Setenv("ARTIFACT_TTL_DAYS", "0")
+	if c := FromEnv(); c.ArtifactDir != "/srv/artifacts" || c.ArtifactTTLDays != 0 {
+		t.Fatalf("set = %q, %d; want /srv/artifacts, 0", c.ArtifactDir, c.ArtifactTTLDays)
+	}
+	t.Setenv("ARTIFACT_TTL_DAYS", "soon")
+	if c := FromEnv(); c.ArtifactTTLDays != 30 {
+		t.Fatalf("a TTL that is not a number = %d, want the default 30", c.ArtifactTTLDays)
+	}
+}

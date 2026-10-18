@@ -3,6 +3,7 @@ package tools
 import (
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -49,6 +50,12 @@ type PlatformDeps struct {
 	PublicBaseURL string
 	// DelegationLimiter is delegate_task's rate limit; nil builds the default one.
 	DelegationLimiter *DelegationLimiter
+	// Asker is the engine's door for ask_operator and answer_question (DESIGN 5.24); nil
+	// leaves both tools unable to run.
+	Asker Asker
+	// MCPToolWait is how long ask_operator blocks for the operator's answer before it
+	// reports the question pending (DESIGN 5.24 rule 4): the api's MCP_TOOL_WAIT.
+	MCPToolWait time.Duration
 }
 
 // NewPlatformRegistry returns the platform tools served over MCP (DESIGN 5.7).

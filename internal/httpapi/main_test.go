@@ -310,6 +310,20 @@ func (f *fakeEngine) RejectFinish(_ context.Context, token, message string) {
 	f.rejections = append(f.rejections, token+" "+message)
 }
 
+// AskOperator, WaitQuestion and AnswerQuestion are the questions of DESIGN 5.24, which this
+// fake does not play: the tests that need them bring their own engine.
+func (f *fakeEngine) AskOperator(context.Context, string, string, []string) (*store.Approval, error) {
+	return nil, engine.ErrNotImplemented
+}
+
+func (f *fakeEngine) WaitQuestion(context.Context, string) (*store.Approval, error) {
+	return nil, engine.ErrNotImplemented
+}
+
+func (f *fakeEngine) AnswerQuestion(context.Context, string, string, string) (*store.Approval, error) {
+	return nil, engine.ErrNotImplemented
+}
+
 var _ engine.Service = (*fakeEngine)(nil)
 
 // createTestRun inserts a one-node workflow and a queued run for it.

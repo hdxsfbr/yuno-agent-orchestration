@@ -11,6 +11,7 @@ import (
 	"yuno/internal/config"
 	"yuno/internal/events"
 	"yuno/internal/openclaw"
+	"yuno/internal/project"
 	"yuno/internal/store"
 )
 
@@ -181,6 +182,22 @@ type Service interface {
 	// Returns ErrNotPending when the approval is not pending (409) and store.ErrNotFound
 	// when it does not exist.
 	DecideApproval(ctx context.Context, approvalID, decision, by, reason string) (*store.Approval, error)
+
+	// AskOperator records a question of the visit that holds the run token (DESIGN 5.24
+	// rule 2) as an approval of kind question, pauses the run and the node on it,
+	// publishes approval.requested and returns the pending row at once;
+	// ErrInvalidRunToken for an unknown or finished token. WaitQuestion then blocks for
+	// the decision. A question is never registered with the gateway.
+	AskOperator(ctx context.Context, token, question string, options []string) (*store.Approval, error)
+	// WaitQuestion blocks until the question is decided or ctx ends, and returns the
+	// decided row or ctx.Err() (rules 2 and 4); a decision while a caller waits goes to
+	// that caller first (rule 5 (a)).
+	WaitQuestion(ctx context.Context, id string) (*store.Approval, error)
+	// AnswerQuestion answers a pending question as the principal by (rule 3: "api" for the
+	// HTTP API, "chat:<agent name>" for answer_question, rule 9) and delivers the decision
+	// as rule 5 says. Returns ErrNotPending when the row is not pending (409) and
+	// store.ErrNotFound when it does not exist.
+	AnswerQuestion(ctx context.Context, id, answer, by string) (*store.Approval, error)
 }
 
 // Deps is everything the engine needs. The HTTP layer builds it in httpapi.Run.
@@ -198,4 +215,25 @@ type Deps struct {
 	// Effects executes approved side effects outside the MCP request that asked for
 	// them (DESIGN 5.3 rule 5). nil disables that fallback.
 	Effects SideEffectExecutor
+	// Artifacts collects the files an agent visit left under runs/<run id>/out/ (DESIGN
+	// 5.25 rule 2) when the visit ends; nil disables collection.
+	Artifacts ArtifactCollector
+}
+
+// ArtifactCollector collects the files a visit left under runs/<run id>/out/ (DESIGN
+// 5.25 rule 2); nil disables collection.
+type ArtifactCollector interface {
+	Collect(ctx context.Context, in ArtifactInput)
+}
+
+// ArtifactInput is one visit's end: the agent's workspace directory, the run and the
+// visit, the project configuration when the run has a checkout (nil otherwise), and
+// the branch the checkout is on (the request's source branch for a 5.22 run, else
+// the default branch).
+type ArtifactInput struct {
+	Workspace string
+	Run       *store.Run
+	Node      *store.RunNode
+	Project   *project.Config
+	Branch    string
 }

@@ -122,8 +122,8 @@ func ClaimApprovalReports(ctx context.Context, q Querier, runID string, at time.
 		WHERE a.run_id = $1 AND r.id = a.run_id AND a.status = $3 AND a.reported_at IS NULL
 		  AND r.trigger = $4 AND r.trigger_ref LIKE $5
 		RETURNING a.id, COALESCE(a.run_id, '') AS run_id, COALESCE(a.run_node_id, '') AS run_node_id, a.tool_call_id,
-		  a.kind, a.node_id, a.message, a.status, a.external_id, a.requested_at, a.decided_at, a.decided_by, a.reason,
-		  a.expires_at, a.conversation_id, a.reported_at`,
+		  a.kind, a.node_id, a.message, a.options, a.status, a.external_id, a.requested_at, a.decided_at, a.decided_by,
+		  a.reason, a.answer, a.expires_at, a.conversation_id, a.reported_at`,
 		runID, at.UTC(), ApprovalPending, TriggerChannel, ConversationRefPrefix+"%")
 	if err != nil {
 		return nil, err

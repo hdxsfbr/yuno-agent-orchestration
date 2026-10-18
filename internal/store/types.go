@@ -161,20 +161,22 @@ type Skill struct {
 }
 
 type Approval struct {
-	ID          string     `db:"id" json:"id"`
-	RunID       string     `db:"run_id" json:"run_id"`
-	RunNodeID   string     `db:"run_node_id" json:"run_node_id"`
-	ToolCallID  *string    `db:"tool_call_id" json:"tool_call_id,omitempty"`
-	Kind        string     `db:"kind" json:"kind"` // exec | tool | node
-	NodeID      string     `db:"node_id" json:"node_id"`
-	Message     string     `db:"message" json:"message"`
-	Status      string     `db:"status" json:"status"` // pending | approved | rejected | expired
-	ExternalID  *string    `db:"external_id" json:"external_id,omitempty"`
-	RequestedAt time.Time  `db:"requested_at" json:"requested_at"`
-	DecidedAt   *time.Time `db:"decided_at" json:"decided_at,omitempty"`
-	DecidedBy   *string    `db:"decided_by" json:"decided_by,omitempty"`
-	Reason      *string    `db:"reason" json:"reason,omitempty"`
-	ExpiresAt   time.Time  `db:"expires_at" json:"expires_at"`
+	ID          string          `db:"id" json:"id"`
+	RunID       string          `db:"run_id" json:"run_id"`
+	RunNodeID   string          `db:"run_node_id" json:"run_node_id"`
+	ToolCallID  *string         `db:"tool_call_id" json:"tool_call_id,omitempty"`
+	Kind        string          `db:"kind" json:"kind"` // exec | tool | node | question
+	NodeID      string          `db:"node_id" json:"node_id"`
+	Message     string          `db:"message" json:"message"`
+	Options     json.RawMessage `db:"options" json:"options,omitempty"` // a question's 2 to 5 suggested answers (DESIGN 5.24 rule 2)
+	Status      string          `db:"status" json:"status"`             // pending | approved | rejected | expired
+	ExternalID  *string         `db:"external_id" json:"external_id,omitempty"`
+	RequestedAt time.Time       `db:"requested_at" json:"requested_at"`
+	DecidedAt   *time.Time      `db:"decided_at" json:"decided_at,omitempty"`
+	DecidedBy   *string         `db:"decided_by" json:"decided_by,omitempty"`
+	Reason      *string         `db:"reason" json:"reason,omitempty"`
+	Answer      *string         `db:"answer" json:"answer,omitempty"` // an answered question's answer (DESIGN 5.24 rule 3)
+	ExpiresAt   time.Time       `db:"expires_at" json:"expires_at"`
 	// ConversationID is set, and RunID empty, for an approval raised in a conversation
 	// (DESIGN 5.8 rule 5).
 	ConversationID *string `db:"conversation_id" json:"conversation_id,omitempty"`
@@ -273,6 +275,12 @@ type RunNode struct {
 	OpenClawRunID      *string         `db:"openclaw_run_id" json:"openclaw_run_id,omitempty"`
 	StartedAt          *time.Time      `db:"started_at" json:"started_at,omitempty"`
 	FinishedAt         *time.Time      `db:"finished_at" json:"finished_at,omitempty"`
+	// QuestionID names the question a continuation visit was created for (DESIGN 5.24
+	// rule 5); nil for every other visit.
+	QuestionID *string `db:"question_id" json:"question_id,omitempty"`
+	// ParkedAt is when the visit parked on its pending question and released its worker
+	// (DESIGN 5.24 rule 5); nil for a visit that never parked. Not part of the contract.
+	ParkedAt *time.Time `db:"parked_at" json:"-"`
 }
 
 type ModelCall struct {
@@ -355,6 +363,8 @@ const (
 	ApprovalKindExec = "exec" // an OpenClaw exec approval, external_id = the gateway's id
 	ApprovalKindTool = "tool" // a platform side-effecting tool call gated over MCP
 	ApprovalKindNode = "node" // a workflow approval node
+	// ApprovalKindQuestion is a question an agent put to the operator (DESIGN 5.24).
+	ApprovalKindQuestion = "question"
 
 	ApprovalPending  = "pending"
 	ApprovalApproved = "approved"
@@ -370,6 +380,24 @@ type SideEffect struct {
 	ToolCallID     string          `db:"tool_call_id" json:"tool_call_id"`
 	Result         json.RawMessage `db:"result" json:"result"`
 	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
+}
+
+// RunArtifact is one file a run delivered (DESIGN 5.25 rule 4): Path is relative to the
+// run's out/ directory, Visit and NodeID name the visit that last collected it, and
+// Generated marks the platform's own diff.patch. The file is stored under ARTIFACT_DIR as
+// <run id>/<id>.
+type RunArtifact struct {
+	ID          string    `db:"id" json:"id"`
+	RunID       string    `db:"run_id" json:"run_id"`
+	NodeID      string    `db:"node_id" json:"node_id"`
+	Visit       int       `db:"visit" json:"visit"`
+	Path        string    `db:"path" json:"path"`
+	Size        int64     `db:"size" json:"size"`
+	SHA256      string    `db:"sha256" json:"sha256"`
+	ContentType string    `db:"content_type" json:"content_type"`
+	Generated   bool      `db:"generated" json:"generated"`
+	CreatedAt   time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
 }
 
 // USDMicros is money stored as micro-USD and shown as USD in JSON (DESIGN 5.19 units):

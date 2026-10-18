@@ -25,7 +25,7 @@ func CopyRunDir(stateDir, fromID, toID, runID string) (int, error) {
 	}
 	defer srcWS.Close()
 	src, err := openRunDir(srcWS, runID)
-	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, errRunDirLink) {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrRunDirLink) {
 		return 0, nil
 	}
 	if err != nil {
@@ -68,8 +68,22 @@ func CopyRunDir(stateDir, fromID, toID, runID string) (int, error) {
 	return n, err
 }
 
-// errRunDirLink is a runs or runs/<run_id> entry that is not a plain directory.
-var errRunDirLink = errors.New("run directory is not a plain directory")
+// ErrRunDirLink is a runs or runs/<run_id> entry that is not a plain directory.
+var ErrRunDirLink = errors.New("run directory is not a plain directory")
+
+// OpenRunDir opens runs/<run_id>/ of an OpenClaw agent's workspace as an os.Root, so that
+// everything read through it stays inside the directory (DESIGN 5.25 rule 2 reads out/
+// this way). A workspace or run directory that does not exist is fs.ErrNotExist, and a
+// runs or runs/<run_id> entry that is a link or any other non-directory is ErrRunDirLink
+// (wrapped; test with errors.Is). The caller closes the root.
+func OpenRunDir(stateDir, openclawID, runID string) (*os.Root, error) {
+	ws, err := os.OpenRoot(WorkspaceDir(stateDir, openclawID))
+	if err != nil {
+		return nil, err
+	}
+	defer ws.Close()
+	return openRunDir(ws, runID)
+}
 
 // openRunDir opens runs/<run_id>/ inside a workspace root, refusing a symlink at either
 // level so the directory is the workspace's own.
@@ -80,7 +94,7 @@ func openRunDir(ws *os.Root, runID string) (*os.Root, error) {
 			return nil, err
 		}
 		if !info.IsDir() {
-			return nil, fmt.Errorf("%s: %w", rel, errRunDirLink)
+			return nil, fmt.Errorf("%s: %w", rel, ErrRunDirLink)
 		}
 	}
 	return ws.OpenRoot(filepath.Join("runs", runID))

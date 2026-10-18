@@ -395,6 +395,13 @@ func sentence(s string) string {
 	return s + "."
 }
 
+// announceQuestion is the notice of DESIGN 5.24 rule 6, sent when AskOperator has recorded
+// a question: to the run's conversation, or else to the Telegram-bound agent's most
+// recent one. It only logs until the notice is written.
+func (e *Engine) announceQuestion(ctx context.Context, run *store.Run, a *store.Approval) {
+	e.log.Debug("question announced", "run_id", a.RunID, "approval_id", a.ID)
+}
+
 // approvalReportText is DESIGN 5.15 rule 10's message: "[platform] Run <id> is waiting for an
 // approval: <kind>, <message>. Decide it at <url>".
 func (e *Engine) approvalReportText(run *store.Run, a *store.Approval) string {

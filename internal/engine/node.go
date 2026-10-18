@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"yuno/internal/project"
 	"yuno/internal/runtoken"
 	"yuno/internal/store"
+	"yuno/internal/tools"
 	"yuno/internal/workflow"
 )
 
@@ -570,6 +572,10 @@ func (v *visit) taskMessageWith(x project.Extras) string {
 			text = first + "\n" + mergeRequestParagraph(v.mergeRequest) + rest
 		}
 		sb.WriteString(text)
+	}
+	sb.WriteString(DeliverablesLine(v.run.ID))
+	if v.agent != nil && slices.Contains(v.agent.ToolAllowlist, tools.AskOperatorName) {
+		sb.WriteString(QuestionsParagraph(v.run.ID))
 	}
 	sb.WriteString(`When finished, call the tool yuno__finish with {"run_token": "` + v.token +
 		`", "result": <object matching this JSON schema>}:` + "\n")

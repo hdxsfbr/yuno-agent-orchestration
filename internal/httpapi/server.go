@@ -326,6 +326,7 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/approvals", s.listApprovals)
 	mux.HandleFunc("POST /api/approvals/{id}/approve", s.approveApproval)
 	mux.HandleFunc("POST /api/approvals/{id}/reject", s.rejectApproval)
+	mux.HandleFunc("POST /api/approvals/{id}/answer", s.answerApproval)
 
 	mux.HandleFunc("GET /api/workflows", s.listWorkflows)
 	mux.HandleFunc("POST /api/workflows", s.createWorkflow)
@@ -342,6 +343,8 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("POST /api/runs/{id}/cancel", s.cancelRun)
 	mux.HandleFunc("POST /api/runs/{id}/retry", s.retryRun)
 	mux.HandleFunc("GET /api/runs/{id}/trace", s.getTrace)
+	mux.HandleFunc("GET /api/runs/{id}/artifacts", s.listArtifacts)
+	mux.HandleFunc("GET /api/runs/{id}/artifacts/{artifactId}", s.downloadArtifact)
 
 	mux.HandleFunc("POST /api/evals/scripts", s.registerScript)
 
@@ -553,6 +556,7 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 		MaxOutputBytes: cfg.ToolOutputMaxBytes,
 		Delegator:      delegator{s},
 		PublicBaseURL:  cfg.PublicBaseURL,
+		MCPToolWait:    cfg.MCPToolWait,
 		Deploy: tools.DeployConfig{
 			TargetURL:       cfg.DeployTargetURL,
 			MaxBytes:        int64(cfg.DeployTargetMaxMB) << 20,
@@ -564,6 +568,11 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 			MaxOutputBytes: cfg.ToolOutputMaxBytes,
 			Transport:      d.FetchTransport,
 		},
+	}
+	// ask_operator and answer_question go through the engine (DESIGN 5.24); without one
+	// they cannot run.
+	if d.Engine != nil {
+		pd.Asker = d.Engine
 	}
 	if cfg.GitLabEnabled() {
 		pd.GitLab = &tools.GitLabConfig{
