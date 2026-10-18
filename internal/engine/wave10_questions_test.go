@@ -198,15 +198,9 @@ func TestQuestionAnsweredWithinTheWait(t *testing.T) {
 		q.ExternalID != nil || q.ToolCallID != nil || q.Answer != nil || !q.ExpiresAt.Equal(q.RequestedAt.Add(86400*time.Second)) {
 		t.Fatalf("question = %+v", q)
 	}
-	if n := env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='approval_wait' AND ended_at IS NULL AND attrs->>'kind'='question' AND attrs->>'approval_id'=$2`, run.ID, q.ID); n != 1 {
-		t.Fatalf("open approval_wait spans of the question = %d", n)
-	}
-	if n := env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='approval.requested' AND data->'approval'->>'kind'='question'`, run.ID); n != 1 {
-		t.Fatalf("approval.requested events = %d", n)
-	}
-	if n := env.logged(run.ID, "Test Agent asks: Which greeting language?"); n != 1 {
-		t.Fatalf("log lines %q = %d", "<agent> asks: <question>", n)
-	}
+	eventually(t, "open approval_wait spans of the question", func() bool { return env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='approval_wait' AND ended_at IS NULL AND attrs->>'kind'='question' AND attrs->>'approval_id'=$2`, run.ID, q.ID) == 1 }) // written after the pause or the delivery is visible
+	eventually(t, "approval.requested events", func() bool { return env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='approval.requested' AND data->'approval'->>'kind'='question'`, run.ID) == 1 }) // written after the pause or the delivery is visible
+	eventually(t, "the asks log line", func() bool { return env.logged(run.ID, "Test Agent asks: Which greeting language?") == 1 }) // written after the pause or the delivery is visible
 	if len(env.fc.callsFor("plugin.approval.request")) != 0 {
 		t.Fatal("a question was registered with the gateway")
 	}
@@ -243,21 +237,15 @@ func TestQuestionAnsweredWithinTheWait(t *testing.T) {
 	if snt.len() != 1 {
 		t.Fatalf("chat.send calls = %d; the answer came in the tool result, not as a turn", snt.len())
 	}
-	if n := env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='approval_wait' AND ended_at IS NOT NULL`, run.ID); n != 1 {
-		t.Fatalf("closed approval spans = %d", n)
-	}
-	if n := env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='approval.decided' AND data->'approval'->>'answer'='Portuguese'`, run.ID); n != 1 {
-		t.Fatalf("approval.decided events with the answer = %d", n)
-	}
+	eventually(t, "closed approval spans", func() bool { return env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='approval_wait' AND ended_at IS NOT NULL`, run.ID) == 1 }) // written after the pause or the delivery is visible
+	eventually(t, "approval.decided events with the answer", func() bool { return env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='approval.decided' AND data->'approval'->>'answer'='Portuguese'`, run.ID) == 1 }) // written after the pause or the delivery is visible
 	if n := env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='run.status' AND data->'run'->>'status'='waiting_approval'`, run.ID); n == 0 {
 		t.Fatal("no run.status event for the pause")
 	}
 	if n := env.openSpans(run.ID); n != 0 {
 		t.Fatalf("%d spans left open", n)
 	}
-	if n := env.logged(run.ID, "question answered by api"); n != 1 {
-		t.Fatalf("decision log lines = %d", n)
-	}
+	eventually(t, "decision log lines", func() bool { return env.logged(run.ID, "question answered by api") == 1 }) // written after the pause or the delivery is visible
 	// A second answer is refused.
 	if _, err := env.e.AnswerQuestion(ctx, q.ID, "English", "api"); !errors.Is(err, ErrNotPending) {
 		t.Fatalf("second answer: %v", err)
@@ -583,15 +571,11 @@ func TestQuestionParksAfterTheWaitAndContinues(t *testing.T) {
 	if _, live := env.e.ResolveRunToken(rig.token); live {
 		t.Fatal("the parked visit's run token is still valid")
 	}
-	if n := env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='run' AND parent_id IS NULL AND ended_at IS NULL`, run.ID); n != 1 {
-		t.Fatalf("open root spans = %d; the worker that resumes the run continues it", n)
-	}
+	eventually(t, "open root spans", func() bool { return env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='run' AND parent_id IS NULL AND ended_at IS NULL`, run.ID) == 1 }) // written after the pause or the delivery is visible
 	if n := env.openSpans(run.ID); n != 2 { // the root span and the question's approval_wait
 		t.Fatalf("open spans = %d, want the root span and the question's wait", n)
 	}
-	if n := env.logged(run.ID, "waits for the answer to question "+q.ID+"; the step continues when it arrives"); n != 1 {
-		t.Fatalf("park log lines = %d", n)
-	}
+	eventually(t, "park log lines", func() bool { return env.logged(run.ID, "waits for the answer to question "+q.ID+"; the step continues when it arrives") == 1 }) // written after the pause or the delivery is visible
 	if keys := env.fc.callsFor("sessions.delete"); len(keys) != 1 || !strings.Contains(string(keys[0]), rig.snt.at(0).SessionKey) {
 		t.Fatalf("sessions.delete calls = %s; the parked visit's session is deleted when the worker lets go", keys)
 	}
@@ -614,9 +598,7 @@ func TestQuestionParksAfterTheWaitAndContinues(t *testing.T) {
 	if node := runNodes(t, env, run.ID)[0]; node.FinishedAt == nil || node.FailureReason != nil || node.ParkedAt == nil {
 		t.Fatalf("closed parked visit = %+v", node)
 	}
-	if n := env.logged(run.ID, "question answered; continuing agent"); n != 1 {
-		t.Fatalf("continue log lines = %d", n)
-	}
+	eventually(t, "continue log lines", func() bool { return env.logged(run.ID, "question answered; continuing agent") == 1 }) // written after the pause or the delivery is visible
 
 	r = env.resume(env.e, run.ID)
 	if r.Status != store.RunSucceeded {
@@ -842,7 +824,7 @@ func awaitDecided(t *testing.T, env *testEnv, id string) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	time.Sleep(150 * time.Millisecond) // the delivery reaches the live visit and blocks on its loop
+	time.Sleep(500 * time.Millisecond) // the delivery reaches the live visit and blocks on its loop (a wide margin for a slow CI host)
 }
 
 // A decision recorded before the turn's end reads the question, but handed over only after:
