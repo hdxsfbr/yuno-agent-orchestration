@@ -55,6 +55,20 @@ asks); the question cap counts every status, so a retried step that asked three 
 cannot ask again; a recovery visit after a restart counts toward the loop limit (it is not
 a continuation).
 
+## Found by CI after the fix pass
+
+The CI host runs the engine package about six times slower than the development
+machine, and three pipelines on `main` failed in it before the wave deployed: a new test
+counted the `approval.requested` event the moment the run showed `waiting_approval`
+(the event row lands a moment later; the counts now wait), a pre-existing test finished
+the turn as soon as a tool approval row existed, before the pause (it now waits for the
+pause), and `TestQuestionCaps` exposed a real race: the waiter clears the visit's
+"one pending question" flag through a message posted to the visit's loop, so a second
+question asked in the same turn right after an answer could be refused with `one
+question at a time` although the first was decided. The ask path now reads the row when
+the flag is set and clears it for a decided question (5.24 rule 2); the wait helper's
+deadline is 20 s.
+
 ## Coverage reported by the reviewers
 
 Rules checked and found correct: 5.24 rules 1 to 12 (validation texts, risk and timeout,

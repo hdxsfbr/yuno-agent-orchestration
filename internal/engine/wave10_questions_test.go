@@ -1261,7 +1261,7 @@ func TestQuestionCaps(t *testing.T) {
 			<-answered
 			for _, q := range []string{"second?", "third?"} {
 				if out := env.askWithToken(r.token, q, nil, 10*time.Second); out.askErr != nil || out.decided == nil {
-					t.Errorf("question %q: %+v", q, out)
+					t.Errorf("question %q: ask error %v, wait error %v, decided %v", q, out.askErr, out.waitErr, out.decided != nil)
 					break
 				}
 			}

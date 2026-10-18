@@ -169,7 +169,8 @@ func (env *testEnv) wait(done <-chan struct{}, runID string) *store.Run {
 // eventually polls cond until it holds or the timeout passes.
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	// 20 s: the CI host runs this package six times slower than a workstation.
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

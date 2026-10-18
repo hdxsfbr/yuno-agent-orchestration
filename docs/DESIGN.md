@@ -2965,7 +2965,9 @@ while the turn is live expires the question `step finished`, a cancel while park
 cancelled`. `approve` on a question is 422 before the pending check (as `always` on a
 non-exec approval), so approving a decided question is 422 and answering it 409. The
 decision delivery re-tries the re-queue once after a failed handoff and skips the
-unattended re-queue when a live visit was found. `ask_operator` matches the text
+unattended re-queue when a live visit was found; the one-pending check reads the row when
+the visit's flag is set, since the waiter clears the flag through the visit's loop and a
+second question in the same turn can arrive first (found by CI). `ask_operator` matches the text
 `invalid run token` (the tools package cannot import the engine), `answer_question` reads
 the row itself before and after the engine call to produce the three texts, refuses a
 blank id with `question_id: must not be empty`, and tells a run call by `Call.Chat`

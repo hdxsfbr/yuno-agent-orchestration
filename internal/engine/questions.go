@@ -126,8 +126,16 @@ func (v *visit) askQuestion(ctx context.Context, question string, options json.R
 	if n >= maxStepQuestions {
 		return nil, nil, &tools.ModelError{Message: fmt.Sprintf("ask fewer questions: this step already asked %d", maxStepQuestions)}
 	}
-	if v.pendingQuestion != "" {
-		return nil, nil, &tools.ModelError{Message: "one question at a time: question " + v.pendingQuestion + " is still pending"}
+	if id := v.pendingQuestion; id != "" {
+		// The waiter clears this flag through a message posted to this loop, so a decision
+		// that already reached the waiting call may not have cleared it yet when the agent
+		// asks again in the same turn: the row is the truth (DESIGN 5.24 rule 2).
+		row, rerr := store.GetApproval(wctx, e.deps.Pool, id)
+		if rerr != nil || row.Status == store.ApprovalPending {
+			return nil, nil, &tools.ModelError{Message: "one question at a time: question " + id + " is still pending"}
+		}
+		v.pendingQuestion = ""
+		delete(v.toolBlocking, id)
 	}
 	now := e.clock.Now()
 	timeout := v.limits.ApprovalTimeoutSeconds

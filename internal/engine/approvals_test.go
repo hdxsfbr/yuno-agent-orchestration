@@ -613,8 +613,11 @@ func TestToolApprovalOutlivesItsVisit(t *testing.T) {
 	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
 		go func() { gates <- env.gatedCall(p, waitCtx) }()
 		go func() {
-			eventually(t, "approval requested", func() bool {
-				return env.count(`SELECT count(*) FROM approvals WHERE status='pending'`) == 1
+			// The row exists before the visit pauses on it; finishing the turn between the two
+			// would end the visit under RequestApproval (then "invalid run token"), so wait for
+			// the pause, which says the request went through.
+			eventually(t, "approval requested and the run paused", func() bool {
+				return env.count(`SELECT count(*) FROM approvals a JOIN runs r ON r.id = a.run_id WHERE a.status='pending' AND r.status='waiting_approval'`) == 1
 			})
 			finishThenFinal(t, env, p, `{"summary":"release requested"}`)
 		}()
