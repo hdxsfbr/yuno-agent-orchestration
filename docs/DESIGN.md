@@ -1850,7 +1850,12 @@ Rules:
    the provider reports `merged` does the record become merged with `closed_at` now and
    `merged_by` `operator`, then rule 4 reports; otherwise the record stays open with
    `last_sync_error` `the provider accepted the merge but reports the request as
-   <state>` and the answer is 200 with the record (the next sync settles it). 405, 406, 409 and 422 from the provider
+   <state>` and the answer is 200 with the record (the next sync settles it). A 401 or
+   403 from the merge call means the project's token may not merge into the target
+   branch (GitLab answers 401 for a Developer-role token on a protected branch): it is
+   409 `merge_request_not_mergeable` with `the project's token is not allowed to merge
+   this request (HTTP <status>); give it a role that may merge into the target
+   branch`, so the operator knows what to change. 405, 406, 409 and 422 from the provider
    answer 409 `merge_request_not_mergeable` with the first line of the provider's
    message; other failures follow 5.5 rule 4 (5xx and timeouts answer 502
    `provider_unavailable` after one re-sync, since the merge may have landed). There

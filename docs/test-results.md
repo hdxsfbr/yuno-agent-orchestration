@@ -11,8 +11,21 @@ deploys the commit.
 | `make lint` (`go vet`, staticcheck 2026.2.2, eslint, `tsc --noEmit`) | clean |
 | review | two Sonnet 5.5 reviewer agents (backend; API, store and UI): no high, four mediums and the kept lows fixed in one pass by two Sonnet fix agents, the rest recorded as limitations; `docs/reviews/wave8-review.md` |
 
-Live verification on the public instance: see the wave 8 section below once the merge
-has deployed.
+Live verification on the public instance, 2026-10-18 01:34 to 01:45 UTC, from the
+coordinator session over ssh with a verification script fed on stdin (the API token
+stayed on the host; nothing printed):
+
+| Step | Result |
+|---|---|
+| deploy | pipeline on `0ff8401`: migration `0012_wave8.sql` applied (the `project_facts`, `project_budget_alerts` and `merge_requests` tables exist), `/api/status` at the merge commit |
+| `make seed-reset` | the Coder and the Reviewer reset (the project-notes prompt lines and the memory tools in their allowlists); memory then enabled on both through the API |
+| instructions | PUT on `yuno-playground` with a 293-byte text: stored and returned, `spend` present, no token in the body |
+| a Dev pipeline run on the playground | "add a gcd(a, b) function computing the greatest common divisor, with tests": the gate and the merge request card approved from the API; succeeded in 10 steps and 10 tool calls at $0.19; `merge_request` on the run: `!4`, open, pipeline none, branch `yuno/5084648102e2`; Sync answered the head sha, 0 unresolved threads, no error |
+| the task | the first visit's task carried the "Project instructions from the operator" block; the Coder saved the note `yuno-playground build/test layout`, and the Reviewer's task carried the "Project notes saved by earlier runs" block with it |
+| budget | the daily cap set to $0.18 against $0.19 spent today: a run request answered `429 project_budget_reached` with the text and the details (`window: day`, `spent_usd`, `until 2026-10-19T00:00:00Z`); within the next watcher tick the warning and the reached alerts were sent into the Chief of Staff's conversation (two `run reported` lines keyed `budget-<project>-day-…`, delivered to Telegram); the caps then set to $5 a day and $30 a month |
+| merge from the API | refused by GitLab with 401: the playground's token has the Developer role and `main` is protected, so it may read the request but not merge it. The first deploy answered `502 provider_error`; the follow-up commit maps a 401 or 403 on the merge call to `409 merge_request_not_mergeable` with "the project's token is not allowed to merge this request (HTTP 401); give it a role that may merge into the target branch". Merging !4 from the page needs the token's role raised on GitLab (operator's call); the merge success path is covered by the unit tests against the fakes |
+| retry | a quick run with `max_steps: 1` failed with `step limit 1 exceeded` on visit 1; the bare retry answered `409 limits_exhausted` with `max_steps: 1 of 1 used`; the retry with `max_steps: 12` answered 202 with `retries: 1`, and the run succeeded on visit 2 in 5 steps at $0.03 |
+
 
 ## Wave 7 (projects as records, DESIGN 5.17), 2026-10-17
 

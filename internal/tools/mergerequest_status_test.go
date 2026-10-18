@@ -368,9 +368,9 @@ func TestMergeRequestMerge(t *testing.T) {
 	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7); err == nil || !TransientError(err) || errors.As(err, &nm) {
 		t.Fatalf("503 = %v", err)
 	}
-	script(&g.scripted, "PUT /merge_requests/7/merge", 403, jm{"message": "403 Forbidden"})
+	script(&g.scripted, "PUT /merge_requests/7/merge", 400, jm{"message": "400 Bad Request"})
 	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7); err == nil || TransientError(err) || errors.As(err, &nm) || errors.Is(err, ErrRequestNotFound) {
-		t.Fatalf("403 = %v", err)
+		t.Fatalf("400 = %v", err)
 	}
 	// The token never travels into an error text.
 	if strings.Contains(statusErr(gitlabStatusProvider(gsrv).Merge(context.Background(), 7)), statusTestToken) {
@@ -383,4 +383,22 @@ func statusErr(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// DESIGN 5.20 rule 5: a token that may read the request but not merge into the target
+// branch (GitLab answers 401, GitHub 403) is a refusal the operator can act on, not a
+// provider error.
+func TestMergeRefusedForLackOfPermission(t *testing.T) {
+	g, gsrv := newFakeGitLab(t)
+	script(&g.scripted, "PUT /merge_requests/7/merge", 401, jm{"message": "401 Unauthorized"})
+	var nm *ErrNotMergeable
+	err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7)
+	if !errors.As(err, &nm) || !strings.Contains(nm.Message, "not allowed to merge this request (HTTP 401)") {
+		t.Fatalf("gitlab 401 = %v", err)
+	}
+	h, hsrv := newFakeGitHub(t, "")
+	script(&h.scripted, "PUT /pulls/5/merge", 403, jm{"message": "Resource not accessible by personal access token"})
+	if err := githubStatusProvider(hsrv).Merge(context.Background(), 5); !errors.As(err, &nm) || !strings.Contains(nm.Message, "(HTTP 403)") {
+		t.Fatalf("github 403 = %v", err)
+	}
 }

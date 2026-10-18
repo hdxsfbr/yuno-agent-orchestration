@@ -218,6 +218,11 @@ func mergeError(err error) error {
 			msg = fmt.Sprintf("the provider refused the merge (HTTP %d)", se.status)
 		}
 		return &ErrNotMergeable{Message: msg}
+	case http.StatusUnauthorized, http.StatusForbidden:
+		// DESIGN 5.20 rule 5: the token may read the request (the sync works) but may
+		// not merge into the target branch (GitLab answers 401 for a Developer-role
+		// token on a protected branch, GitHub 403); the operator changes the role.
+		return &ErrNotMergeable{Message: fmt.Sprintf("the project's token is not allowed to merge this request (HTTP %d); give it a role that may merge into the target branch", se.status)}
 	}
 	return err
 }

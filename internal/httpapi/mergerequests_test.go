@@ -659,19 +659,33 @@ func TestMergeProviderFailures(t *testing.T) {
 		t.Fatalf("404 = %d %s", code, body)
 	}
 
-	// 403: the provider answered and refused for its own reason; nothing to re-sync.
+	// 400: the provider answered and refused for its own reason; nothing to re-sync.
 	_, rec, route = ready(false)
-	e.prov.set(route, 403, map[string]string{"message": "403 Forbidden " + e.token})
+	e.prov.set(route, 400, map[string]string{"message": "400 Bad Request " + e.token})
 	before := len(e.prov.seen())
 	code, body = e.call(http.MethodPost, "/api/merge-requests/"+rec.ID+"/merge", "", true)
 	err := decodeError(t, body)
-	if code != http.StatusBadGateway || err.Error.Code != "provider_error" || !strings.Contains(err.Error.Message, "HTTP 403") {
+	if code != http.StatusBadGateway || err.Error.Code != "provider_error" || !strings.Contains(err.Error.Message, "HTTP 400") {
+		t.Fatalf("400 = %d %s", code, body)
+	}
+	noToken(t, "400 response", body, e.token)
+	if len(e.prov.seen())-before != 1 {
+		t.Fatalf("calls after a 400: %v", e.prov.seen()[before:])
+	}
+	if got := e.get(rec.ID); got.State != store.MergeRequestOpen {
+		t.Fatalf("record = %+v", got)
+	}
+
+	// 403 (401 on GitLab): the token may not merge into the target branch; a refusal
+	// the operator can act on (DESIGN 5.20 rule 5), the record untouched.
+	_, rec, route = ready(false)
+	e.prov.set(route, 403, map[string]string{"message": "403 Forbidden " + e.token})
+	code, body = e.call(http.MethodPost, "/api/merge-requests/"+rec.ID+"/merge", "", true)
+	err = decodeError(t, body)
+	if code != http.StatusConflict || err.Error.Code != "merge_request_not_mergeable" || !strings.Contains(err.Error.Message, "not allowed to merge this request (HTTP 403)") {
 		t.Fatalf("403 = %d %s", code, body)
 	}
 	noToken(t, "403 response", body, e.token)
-	if len(e.prov.seen())-before != 1 {
-		t.Fatalf("calls after a 403: %v", e.prov.seen()[before:])
-	}
 	if got := e.get(rec.ID); got.State != store.MergeRequestOpen {
 		t.Fatalf("record = %+v", got)
 	}
