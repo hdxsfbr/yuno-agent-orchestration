@@ -436,7 +436,11 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
    0.7.0 carries the wave 10 contract marked `x-planned: wave 10`, and the briefs are
    under `docs/briefs/wave10/` (four Sonnet 5.5 agents: questions engine, questions tools
    and prompts, artifacts, frontend; a Sonnet 5.5 agent lands the prerequisites first).
-8. Next: Andre answers the two open lines at the end of 5.24 (recorded as D-058 and
-   D-059) and approves the briefs; then wave 10 is built as wave 9 was, and wave 11
-   (5.26, parallel steps) is designed when it starts. The demo recording with projects
-   is still pending.
+8. Done 2026-10-18: Andre answered both lines (D-058, D-059) and approved the briefs;
+   wave 10 built by four Sonnet 5.5 agents, reviewed (`docs/reviews/wave10-review.md`),
+   fixed, merged to `main` and deployed (`2aad95c`, after the CI host's slowness and a
+   wiring bug found live were fixed). The live verification of the question and
+   artifact paths waits on the model provider's key limit (`docs/test-results.md`).
+9. Next: finish wave 10's live verification once the key is back; then wave 11 (5.26,
+   parallel steps), the last wave, designed when it starts, alone and with the
+   stronger model as planned. The demo recording with projects is still pending.

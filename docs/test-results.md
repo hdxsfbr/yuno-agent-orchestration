@@ -12,7 +12,16 @@ the stack runs); CI runs the same commands on `main` and deploys the commit.
 | `go vet ./...`, staticcheck 2026.2.2, `gofmt -l`, eslint, `tsc --noEmit` (what `make lint` runs) | clean |
 | review | two Sonnet 5.5 reviewer agents (engine, tools, collector and diff; API, store, contract and UI): one high (the generated `diff.patch` deleted after the Deployer's push moved `checkout_sha`), three mediums and the kept lows fixed in one pass by two Sonnet 5.5 fix agents, the rest recorded as limitations; `docs/reviews/wave10-review.md` |
 
-LIVE_ROWS
+Live verification on the public instance, 2026-10-18 22:52 to 23:35 UTC, from the
+coordinator session over ssh with `scripts/deploy/verify-wave10.sh` fed on stdin (the API
+token stays in the host's `.env`; nothing printed):
+
+| Step | Result |
+|---|---|
+| deploy | pipeline on `b48958a` (after three pipelines failed on CI timing and one real race, `docs/reviews/wave10-review.md`): migration `0014_wave10.sql` applied, `/api/status` at `b48958a` at 22:52 UTC; `2aad95c` (the Asker wiring fix below) live at 23:21 UTC |
+| `make seed-reset` | Coder, Researcher, Writer and Chief of Staff reset (the `ask_operator` allowlist entries and the prompt sentences of 5.24 rule 12 and 5.25 rule 8), Dev pipeline and Research pipeline reset; the Telegram binding kept |
+| `ask_operator` wiring (5.24) | first attempt on `b48958a`: two Dev pipeline runs whose task told the Coder to ask the operator which greeting language to use; both Coders called `ask_operator` three times and every call failed with `not configured` (the server builds its tool registry before the engine exists; every test had handed the engine in first); fixed in `2aad95c` with a server adapter and a test that mirrors the production order. The Coders went on without asking; one run reached the gate (rejected by hand), the other died on a provider error |
+| questions and artifacts live | not verified yet: on `2aad95c` all three runs (two Dev pipeline, one Research pipeline) failed at their first model call with `403 Key limit exceeded (weekly limit)` from OpenRouter, the provider the public instance uses (`MODEL_UPSTREAM=openrouter`), which the gateway surfaces as "Couldn't sign in to the AI service". To finish once the key's limit is raised or the key replaced: `verify-wave10.sh --ask-run` (answer within the wait: `--questions`, `--answer <id> Portuguese`, `--run <id>` shows `answered` in the same turn, `--approve-run`, then `--artifacts <id>` shows `diff.patch`), a second `--ask-run` left ten minutes (the park: visit 1 `waiting_approval`, `Asks:` on the header, the answer re-queues a continuation visit with `question_id`), `--ask-run --no-project` (`out/report.md` under Artifacts), and the Telegram relay through the Chief (Andre replies). Covered until then by T5.24.1 to T5.24.15 and T5.25.1 to T5.25.10 |
 
 # Test results, 2026-10-18 (wave 9: iterate on an open merge request, issue intake; DESIGN 5.22 and 5.23)
 
