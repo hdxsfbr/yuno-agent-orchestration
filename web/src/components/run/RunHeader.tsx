@@ -57,9 +57,14 @@ export default function RunHeader({ run, connection, now, toolCalls = [], onRunC
   const cancel = useMutation({ mutationFn: () => cancelRun(run.id), onSuccess: onRunChange });
   // A refusal for a run that used up a limit opens the dialog; any other refusal is told inline.
   const [limitsRefusal, setLimitsRefusal] = useState<ApiError | null>(null);
+  // A retried run starts a new live period: the cancel the last one asked for must not keep Cancel disabled.
+  const retried = (next: Run) => {
+    cancel.reset();
+    onRunChange(next);
+  };
   const retry = useMutation({
     mutationFn: () => retryRun(run.id),
-    onSuccess: (queued) => onRunChange(queued),
+    onSuccess: retried,
     onError: (err) => {
       if (err instanceof ApiError && err.status === 409 && err.code === "limits_exhausted") setLimitsRefusal(err);
     },
@@ -165,7 +170,7 @@ export default function RunHeader({ run, connection, now, toolCalls = [], onRunC
             retry.reset();
             setLimitsRefusal(null);
           }}
-          onRetried={onRunChange}
+          onRetried={retried}
         />
       ) : null}
     </section>

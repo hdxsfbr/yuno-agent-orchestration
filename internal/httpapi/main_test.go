@@ -181,6 +181,9 @@ type fakeEngine struct {
 	waitReason   string
 	decideErr    error
 	decisions    []string
+
+	// retryErrs are the errors Retry answers for the runs they are set for.
+	retryErrs map[string]error
 }
 
 func (f *fakeEngine) MaterializeAgent(ctx context.Context, agentID string) (*engine.RuntimeView, error) {
@@ -199,9 +202,26 @@ func (f *fakeEngine) MaterializeAgent(ctx context.Context, agentID string) (*eng
 	return f.view(agentID), nil
 }
 
-// Retry is wave 8 agent C's (DESIGN 5.21); the fake refuses until then.
+// Retry answers the error set for the run by refuseRetry, else stands in for the
+// engine's (conformanceRetry).
 func (f *fakeEngine) Retry(ctx context.Context, runID, by string, limits *store.Limits) (*store.Run, error) {
+	f.mu.Lock()
+	err := f.retryErrs[runID]
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	return conformanceRetry(ctx, f.pool, runID, limits)
+}
+
+// refuseRetry makes Retry of one run answer err.
+func (f *fakeEngine) refuseRetry(runID string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.retryErrs == nil {
+		f.retryErrs = map[string]error{}
+	}
+	f.retryErrs[runID] = err
 }
 
 // RemoveAgent records the agent taken out of OpenClaw.

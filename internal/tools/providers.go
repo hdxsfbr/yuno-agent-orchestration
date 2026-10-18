@@ -62,10 +62,7 @@ func providerMessage(body []byte) string {
 	if i := strings.IndexByte(text, '\n'); i >= 0 {
 		text = strings.TrimSpace(text[:i])
 	}
-	if len(text) > 300 {
-		text = strings.ToValidUTF8(text[:300], "")
-	}
-	return text
+	return cutText(text, 300)
 }
 
 func privateTokenAuth(token string) func(*http.Request) {

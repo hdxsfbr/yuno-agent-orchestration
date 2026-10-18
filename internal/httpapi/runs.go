@@ -91,7 +91,7 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, "invalid query", fe)
 		return
 	}
-	runs, err := store.ListRuns(r.Context(), s.pool, status, limit)
+	runs, err := store.ListRuns(r.Context(), s.pool, status, strings.TrimSpace(q.Get("project_id")), limit)
 	if err != nil {
 		s.internalError(w, r, "list runs", err)
 		return
@@ -215,6 +215,14 @@ func (s *Server) getTrace(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "list side effects", err)
 		return
 	}
+	// The request the run opened rides on the trace's run as it does on a get (DESIGN 5.20
+	// rule 6), so the page needs no second fetch.
+	one := []store.Run{*t.Run}
+	if err := store.FillRunMergeRequests(r.Context(), s.pool, one); err != nil {
+		s.internalError(w, r, "read the run's merge request", err)
+		return
+	}
+	t.Run.MergeRequest = one[0].MergeRequest
 	writeJSON(w, http.StatusOK, t)
 }
 

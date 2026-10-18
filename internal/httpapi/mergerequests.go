@@ -89,7 +89,8 @@ func (s *Server) syncMergeRequest(w http.ResponseWriter, r *http.Request) {
 
 // mergeMergeRequest merges the request on the provider (rule 5). The record's state is
 // the idempotency: there is no tool call and no side effect row, and a second POST finds
-// the record merged.
+// the record merged. The merge is recorded once the provider reports the request merged
+// (sync.ConfirmMerged), not on its 2xx alone.
 func (s *Server) mergeMergeRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	mr, err := store.GetMergeRequest(ctx, s.pool, r.PathValue("id"))
@@ -130,14 +131,19 @@ func (s *Server) mergeMergeRequest(w http.ResponseWriter, r *http.Request) {
 	var notMergeable *tools.ErrNotMergeable
 	switch {
 	case err == nil:
-		merged, err := sync.MarkMerged(ctx, mr.ID, mergeBy)
+		// A 2xx is not the merge itself: the provider is asked once more, and the record is
+		// marked merged only when it says so. Otherwise the record stays open with the
+		// provider's answer in last_sync_error, and the loop settles it.
+		merged, err := sync.ConfirmMerged(ctx, mr, pc, mergeBy)
 		if err != nil {
 			s.internalError(w, r, "record the merge", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, merged)
 	case errors.As(err, &notMergeable):
-		writeError(w, http.StatusConflict, "merge_request_not_mergeable", notMergeable.Message, nil)
+		// The provider's own words can echo the credential the request carried, as its 502
+		// answer below can: the same redaction applies before they reach the operator.
+		writeError(w, http.StatusConflict, "merge_request_not_mergeable", redactToken(notMergeable.Message, pc.Token), nil)
 	case tools.TransientError(err) || errors.Is(err, tools.ErrRequestNotFound):
 		// A timeout or a 5xx may hide a merge that landed, and a 404 a request that is
 		// gone: look once more (rule 5) and answer what the provider says now.

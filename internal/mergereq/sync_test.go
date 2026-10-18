@@ -13,9 +13,11 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"yuno/internal/obs"
 	"yuno/internal/project"
 	"yuno/internal/store"
 	"yuno/internal/tools"
@@ -478,8 +480,13 @@ func TestPartialStatusRecordsTheError(t *testing.T) {
 		got.CIStatus != store.CIStatusPassed || got.State != store.MergeRequestOpen || got.HeadSHA == nil || *got.HeadSHA != "feedface" {
 		t.Fatalf("after a GraphQL refusal = %+v", got)
 	}
-	if strings.Contains(*got.LastSyncError, "ghp_") {
-		t.Fatal("token in the error")
+	// The fake's GraphQL answer carries the project's own token (testToken, a glpat- value
+	// that is also this project's real one): the stored text must have lost it.
+	if strings.Contains(*got.LastSyncError, testToken) || strings.Contains(*got.LastSyncError, "glpat-") || !strings.Contains(*got.LastSyncError, obs.Redacted) {
+		t.Fatalf("the token reached the error, or was not redacted: %q", *got.LastSyncError)
+	}
+	if strings.Contains(e.logs.String(), testToken) {
+		t.Fatalf("a log line carries the token:\n%s", e.logs)
 	}
 	// The next sync that GraphQL answers clears the error and fills the count.
 	g.graphqlOK = true
@@ -505,7 +512,8 @@ func (g *githubFake) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/api/graphql":
 		if !g.graphqlOK {
-			write(200, map[string]any{"errors": []map[string]string{{"message": "Resource not accessible by personal access token"}}})
+			// The provider echoes the token the request carried, as an upstream proxy might.
+			write(200, map[string]any{"errors": []map[string]string{{"message": "Resource not accessible by personal access token " + testToken}}})
 			return
 		}
 		write(200, map[string]any{"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
@@ -586,6 +594,57 @@ func TestMarkMerged(t *testing.T) {
 	}
 }
 
+// Rule 5: after a 2xx from the merge call the record becomes merged only when the provider
+// reports the request merged; any other answer leaves it open with the text on the record,
+// unreported, for the loop to settle.
+func TestConfirmMerged(t *testing.T) {
+	e := newEnv(t)
+	p := e.project(testToken)
+	ctx := context.Background()
+	confirm := func(run *store.Run, rec *store.MergeRequest) *store.MergeRequest {
+		t.Helper()
+		pc, err := e.sync.Projects.ForRunID(ctx, run.ID)
+		must(t, err)
+		got, err := e.sync.ConfirmMerged(ctx, rec, pc, "operator")
+		must(t, err)
+		return got
+	}
+
+	run := e.run(p, true)
+	rec := e.record(p, run, 1, time.Hour)
+	e.fake.request(1, "merged", "sha", "success", 0)
+	got := confirm(run, rec)
+	if got.State != store.MergeRequestMerged || got.MergedBy == nil || *got.MergedBy != "operator" || got.ClosedAt == nil || !got.ClosedAt.Equal(epoch) ||
+		got.ReportedState == nil || got.LastSyncError != nil || len(e.rep.messages()) != 1 {
+		t.Fatalf("provider says merged = %+v, %d messages", got, len(e.rep.messages()))
+	}
+
+	open := func(number int64, script func(), want string) {
+		t.Helper()
+		run := e.run(p, true)
+		rec := e.record(p, run, number, time.Hour)
+		script()
+		got := confirm(run, rec)
+		if got.State != store.MergeRequestOpen || got.MergedBy != nil || got.ClosedAt != nil || got.ReportedState != nil || got.SyncedAt == nil ||
+			got.LastSyncError == nil || !strings.HasPrefix(*got.LastSyncError, want) || strings.Contains(*got.LastSyncError, testToken) {
+			t.Fatalf("record = %+v (error %v), want open with %q", got, got.LastSyncError, want)
+		}
+		if n := len(e.rep.messages()); n != 1 {
+			t.Fatalf("%d messages: an open record was reported", n)
+		}
+	}
+	open(2, func() { e.fake.request(2, "opened", "sha", "running", 0) },
+		"the provider accepted the merge but reports the request as open")
+	open(3, func() { e.fake.request(3, "closed", "sha", "failed", 0) },
+		"the provider accepted the merge but reports the request as closed")
+	open(4, func() { e.fake.set("GET /merge_requests/4", 404, map[string]string{"message": "404"}) },
+		"the provider accepted the merge but the request could not be read back: not found on the provider")
+	open(5, func() {
+		e.fake.set("GET /merge_requests/5", 502, map[string]string{"message": "bad gateway " + testToken})
+	},
+		"the provider accepted the merge but the request could not be read back: gitlab: HTTP 502")
+}
+
 // A GitHub pull request is "pull request #<n>".
 func TestReportText(t *testing.T) {
 	mr := &store.MergeRequest{RunID: "r1", Provider: "github", Number: 12, State: store.MergeRequestMerged}
@@ -610,6 +669,75 @@ func TestCleanError(t *testing.T) {
 	}
 	if long := cleanError(strings.Repeat("é", 400), ""); len(long) > errorMax || !strings.HasSuffix(long, "é") {
 		t.Fatalf("long error: %d bytes", len(long))
+	}
+}
+
+// The column behind last_sync_error refuses invalid UTF-8 and NUL bytes, and a write that
+// fails ends the pass: cleanError always returns text that can be stored, whatever the
+// provider's body held and wherever the cut falls.
+func TestCleanErrorAlwaysStorable(t *testing.T) {
+	for name, tc := range map[string]struct{ in, want string }{
+		"nul bytes":              {"gitlab: HTTP 500: a\x00b\x00", "gitlab: HTTP 500: ab"},
+		"invalid bytes":          {"gitlab: HTTP 500: bad \xff\xfe gateway", "gitlab: HTTP 500: bad  gateway"},
+		"a rune cut by the host": {"gitlab: HTTP 500: caf\xc3", "gitlab: HTTP 500: caf"},
+		"invalid after a nul":    {"x\xc3\x00\xa9", "x"},
+	} {
+		if got := cleanError(tc.in, ""); got != tc.want || !utf8.ValidString(got) {
+			t.Fatalf("%s: %q, want %q", name, got, tc.want)
+		}
+	}
+	// Every alignment of a character across the cap, for 2, 3 and 4 byte characters, with
+	// the invalid bytes of a body cut elsewhere in front of it.
+	for _, ch := range []string{"é", "€", "😀"} {
+		for pad := errorMax - len(ch) - 1; pad <= errorMax+1; pad++ {
+			in := strings.Repeat("a", pad) + ch + strings.Repeat("z", 20)
+			got := cleanError(in, "")
+			if !utf8.ValidString(got) || len(got) > errorMax || !strings.HasPrefix(in, got) || strings.ContainsRune(got, utf8.RuneError) {
+				t.Fatalf("%q at %d: %d bytes, valid %v", ch, pad, len(got), utf8.ValidString(got))
+			}
+			if want := min(len(in), errorMax); len(got) < want-(len(ch)-1) {
+				t.Fatalf("%q at %d: cut too early, %d of %d bytes", ch, pad, len(got), want)
+			}
+		}
+	}
+	// The redaction sees the cleaned text: a token split by a stray byte is still found.
+	if got := cleanError("boom "+opaqueToken[:6]+"\x00"+opaqueToken[6:], opaqueToken); strings.Contains(got, opaqueToken[:6]) {
+		t.Fatalf("token split by a NUL survived: %q", got)
+	}
+}
+
+// A provider's error body cut at 300 bytes in the middle of a character used to leave
+// invalid UTF-8 that the database refused, so the pass ended at that record and began
+// there again on every tick. The text is written, and the pass goes on to the next record.
+func TestTickOnceWritesAnErrorCutInsideACharacterAndGoesOn(t *testing.T) {
+	e := newEnv(t)
+	p := e.project(testToken)
+	stuck := e.record(p, e.run(p, false), 1, 2*time.Hour) // the longest-waiting record sorts first
+	next := e.record(p, e.run(p, false), 2, time.Hour)
+	// statusFailure cuts the raw body {"message":"..."} at byte 300: put the first byte of
+	// the two-byte é at offset 299 so that the cut leaves half of it behind.
+	const prefix = `{"message":"`
+	e.fake.set("GET /merge_requests/1", 500, map[string]string{"message": strings.Repeat("a", 300-1-len(prefix)) + "é end"})
+	e.fake.request(2, "opened", "sha-next", "running", 1)
+
+	synced, failed := e.sync.TickOnce(context.Background())
+	if synced != 1 || failed != 1 {
+		t.Fatalf("synced %d, failed %d; logs:\n%s", synced, failed, e.logs)
+	}
+	got := e.get(stuck.ID)
+	if got.State != store.MergeRequestOpen || got.LastSyncError == nil || !utf8.ValidString(*got.LastSyncError) ||
+		!strings.Contains(*got.LastSyncError, "HTTP 500") || strings.Contains(*got.LastSyncError, "é") || got.SyncedAt == nil {
+		t.Fatalf("stuck record = %+v", got)
+	}
+	if !strings.HasSuffix(*got.LastSyncError, "a") {
+		t.Fatalf("the text does not end where the character began: %q", (*got.LastSyncError)[max(0, len(*got.LastSyncError)-6):])
+	}
+	// The next record was refreshed in the same pass, and the next pass does not stall.
+	if n := e.get(next.ID); n.SyncedAt == nil || n.HeadSHA == nil || *n.HeadSHA != "sha-next" {
+		t.Fatalf("the pass stopped at the stuck record: %+v\nlogs:\n%s", n, e.logs)
+	}
+	if strings.Contains(e.logs.String(), "sync a merge request failed") {
+		t.Fatalf("a database error ended the pass:\n%s", e.logs)
 	}
 }
 

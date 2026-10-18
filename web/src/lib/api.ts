@@ -735,9 +735,11 @@ export const getAgentRuntime = (id: string) => api<AgentRuntime>(`/api/agents/${
 
 export const listTools = async () => (await api<Tool[] | null>("/api/tools")) ?? [];
 
-export async function listRuns(opts: { status?: RunStatus; limit?: number } = {}) {
+/** The newest runs first; `project_id` keeps the runs of one project (the filter is the server's, so `limit` counts that project's runs). */
+export async function listRuns(opts: { status?: RunStatus; project_id?: string; limit?: number } = {}) {
   const q = new URLSearchParams();
   if (opts.status) q.set("status", opts.status);
+  if (opts.project_id) q.set("project_id", opts.project_id);
   q.set("limit", String(opts.limit ?? 100));
   return (await api<Run[] | null>(`/api/runs?${q}`)) ?? [];
 }

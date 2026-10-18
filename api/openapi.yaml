@@ -194,6 +194,7 @@ paths:
       summary: List runs, newest first
       parameters:
         - { name: status, in: query, schema: { type: string } }
+        - { name: project_id, in: query, description: "only the runs that work on this project (runs.project_id, kept by a deleted project's runs); an unknown id lists none", schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
       responses:
         "200":
@@ -209,7 +210,12 @@ paths:
         participating agent's `guardrails.max_cost_usd_per_run`. When an agent in the
         run already has `guardrails.max_runs_per_hour` runs created in the last hour the
         answer is 429 with code `rate_limited` and the message
-        `rate limit: <n> runs/hour for agent <name>`.
+        `rate limit: <n> runs/hour for agent <name>`. When `project_id` names a project
+        whose spend in the current UTC day or month has reached its cap (DESIGN 5.19) the
+        answer is also 429, with code `project_budget_reached`, the message `project
+        <name> has reached its <daily|monthly> budget ($<cap>); new runs are refused
+        until <time>` and `details` `{project_id, window, max_cost_usd, spent_usd,
+        until}`.
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/RunCreate" } } }
@@ -250,7 +256,7 @@ paths:
       responses:
         "202": { description: re-queued, content: { application/json: { schema: { $ref: "#/components/schemas/Run" } } } }
         "404": { $ref: "#/components/responses/Error" }
-        "409": { description: "run_not_retryable, retry_limit or limits_exhausted (details name each exhausted limit)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: "run_not_retryable, retry_limit or limits_exhausted (details name each exhausted limit: max_steps, max_tool_calls, max_cost_usd, and max_loop_visits for the node the run resumes at)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "422": { $ref: "#/components/responses/Error" }
         "429": { description: "project_budget_reached (DESIGN 5.19)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /api/runs/{id}/trace:

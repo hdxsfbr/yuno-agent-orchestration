@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installFakeApi } from "@/test/fakeApi";
 import { project, projectFact } from "@/test/fixtures";
-import { checkProject, createProject, deleteProject, deleteProjectFact, getProject, listProjectFacts, listProjects, updateProject, type ProjectInput } from "./api";
+import { checkProject, createProject, deleteProject, deleteProjectFact, getProject, listProjectFacts, listProjects, listRuns, updateProject, type ProjectInput } from "./api";
 
 let fake: ReturnType<typeof installFakeApi>;
 
@@ -83,5 +83,19 @@ describe("project notes endpoints", () => {
     fake.on("DELETE", "/api/projects/p1/facts/f%2F1", () => new Response(null, { status: 204 }));
     expect(await deleteProjectFact("p1", "f/1")).toBeUndefined();
     expect(fake.made("DELETE", "/api/projects/p1/facts/f%2F1")).toHaveLength(1);
+  });
+});
+
+describe("listing a project's runs", () => {
+  it("names the project and the limit in the query, and treats null as none", async () => {
+    fake.on("GET", /^\/api\/runs\?/, () => null);
+    expect(await listRuns({ project_id: "p 1", limit: 10 })).toEqual([]);
+    expect(fake.made("GET", /^\/api\/runs\?/).map((c) => c.url)).toEqual(["/api/runs?project_id=p+1&limit=10"]);
+  });
+
+  it("sends no project_id when none is asked for", async () => {
+    fake.on("GET", /^\/api\/runs\?/, () => []);
+    await listRuns({ status: "failed" });
+    expect(fake.made("GET", /^\/api\/runs\?/).map((c) => c.url)).toEqual(["/api/runs?status=failed&limit=100"]);
   });
 });

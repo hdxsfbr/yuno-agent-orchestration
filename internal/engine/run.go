@@ -60,6 +60,11 @@ func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 	if run.StartedAt == nil || (run.Attempt <= 1 && !resumed) {
 		if err := store.SetRunStartedAt(wctx, e.deps.Pool, run.ID, now); err != nil {
 			e.log.Warn("set started_at failed", "run_id", run.ID, "error", err)
+			// The row keeps no start (a retried run: null), and every re-read of it would
+			// show a run with no time limit. Keep the stamp in memory for this attempt
+			// (DESIGN 5.21 rule 2: the time limit restarts at the claim).
+			e.unsavedStarts.Store(run.ID, now)
+			defer e.unsavedStarts.Delete(run.ID)
 		}
 		run.StartedAt = &now
 	}
@@ -86,7 +91,7 @@ func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 		}
 		rootSpan = e.startSpan(ctx, run.ID, nil, "run", "run", now, nil, attrs)
 	}
-	if fresh, err := store.GetRun(wctx, e.deps.Pool, run.ID); err == nil {
+	if fresh, err := e.readRun(wctx, run.ID); err == nil {
 		run = fresh
 	}
 	e.emit(ctx, run.ID, "run.status", map[string]any{"run": run})
@@ -115,6 +120,20 @@ func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 	for _, key := range w.sessions {
 		e.deleteSession(wctx, key)
 	}
+}
+
+// readRun re-reads a run the engine is executing. A started_at stamp whose write failed
+// (runRun) is put back on the row it returns, so the time limit does not vanish with the
+// next re-read.
+func (e *Engine) readRun(ctx context.Context, id string) (*store.Run, error) {
+	run, err := store.GetRun(ctx, e.deps.Pool, id)
+	if err == nil && run.StartedAt == nil {
+		if at, ok := e.unsavedStarts.Load(id); ok {
+			t := at.(time.Time)
+			run.StartedAt = &t
+		}
+	}
+	return run, err
 }
 
 // unfinishedVisits lists a run's node visits that never reached a terminal status.

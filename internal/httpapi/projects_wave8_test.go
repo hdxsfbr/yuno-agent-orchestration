@@ -302,6 +302,23 @@ func TestProjectSpendInGetAndList(t *testing.T) {
 		t.Fatalf("put: %d %s", code, body)
 	}
 	want(decodeProject(t, body), 2.5, 2.5)
+
+	// A create returns the project with its spend too, like a get: a new project has spent
+	// nothing, and says so rather than omitting the member.
+	code, body = do(t, ts, http.MethodPost, "/api/projects", projectBody(uniqueSuffix(), `"max_cost_usd_per_day":1`))
+	if code != http.StatusCreated {
+		t.Fatalf("post: %d %s", code, body)
+	}
+	created := decodeProject(t, body)
+	t.Cleanup(func() { _ = store.DeleteProject(ctx, pool, created.ID) })
+	want(created, 0, 0)
+	if !strings.Contains(string(body), `"day_usd":0`) || !strings.Contains(string(body), `"month_usd":0`) {
+		t.Errorf("a created project has spend zero, not absent: %s", body)
+	}
+	_, got := do(t, ts, http.MethodGet, "/api/projects/"+created.ID, "")
+	if fmt.Sprint(decodeProject(t, got).Spend) != fmt.Sprint(created.Spend) {
+		t.Errorf("the created project's spend differs from a get's:\n%s\n%s", body, got)
+	}
 }
 
 // DESIGN 5.19 rule 3: budgetRefusal is 429 project_budget_reached with the refusal's

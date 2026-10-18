@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"yuno/internal/openclaw"
+	"yuno/internal/project"
 	"yuno/internal/store"
 	"yuno/internal/workflow"
 )
@@ -406,6 +407,181 @@ func TestRetryRule2ExhaustedLimits(t *testing.T) {
 		wantRetryError(t, err, "limits_exhausted", "limits exhausted: max_cost_usd", "max_cost_usd: $2.00 of $1.50 used")
 		if got != nil {
 			t.Fatalf("returned %+v", got)
+		}
+	})
+}
+
+// T5.21.9: a retry is a trigger for the project's budget (DESIGN 5.19 rule 3): a run on a
+// project at its cap is refused with the typed error and left as it was; one micro under
+// the cap passes; a soft-deleted project cannot be over budget, and the run still serves
+// its snapshot.
+func TestRetryRule2ProjectBudgetRefusesTheRetry(t *testing.T) {
+	ctx := context.Background()
+	env := newEnv(t)
+	p := env.project("https://gitlab.test/g/budget.git", false)
+	// The run has cost $1.50 of its own $2.00, so its limits are not what refuses.
+	run := env.endedRun(store.RunFailed, "build", fmt.Sprintf("project_id='%s', cost_usd_micros=1500000", p.ID))
+	caps := func(day, month int64) {
+		t.Helper()
+		setProjectCaps(t, env, p, day, month)
+	}
+
+	caps(1_000_000, 0) // the day cap, below the run's spend
+	_, err := env.e.Retry(ctx, run.ID, "tester", nil)
+	var be *project.BudgetError
+	_, dayEnd := store.DayBounds(env.clock.Now())
+	if !errors.As(err, &be) || be.ProjectID != p.ID || be.ProjectName != p.Name || be.Window != project.WindowDay ||
+		be.CapMicros != 1_000_000 || be.SpendMicros != 1_500_000 || !be.WindowEnd.Equal(dayEnd) {
+		t.Fatalf("retry over the day cap: %v (%+v), want the day's *project.BudgetError", err, be)
+	}
+	var re *RetryError
+	if errors.As(err, &re) {
+		t.Fatalf("the budget refusal is a *RetryError: %+v", re)
+	}
+	unchanged(t, run, env.run(run.ID))
+	if n := len(env.runEvents(run.ID, "run.retry")); n != 0 {
+		t.Fatalf("a refused retry wrote %d retry events", n)
+	}
+
+	caps(1_500_000, 0) // spend exactly at the cap refuses
+	if _, err := env.e.Retry(ctx, run.ID, "tester", nil); !errors.As(err, &be) || be.SpendMicros != 1_500_000 {
+		t.Fatalf("retry at the cap: %v", err)
+	}
+	caps(0, 1_000_000) // the month cap refuses alike
+	if _, err := env.e.Retry(ctx, run.ID, "tester", nil); !errors.As(err, &be) || be.Window != project.WindowMonth {
+		t.Fatalf("retry over the month cap: %v", err)
+	}
+	unchanged(t, run, env.run(run.ID))
+
+	caps(1_500_001, 0) // one micro under passes
+	if got, err := env.e.Retry(ctx, run.ID, "tester", nil); err != nil || got.Status != store.RunQueued || got.Retries != 1 {
+		t.Fatalf("retry one micro under the cap: %+v, %v", got, err)
+	}
+
+	// A deleted project is not checked, though the same spend is over its cap.
+	caps(1_000_000, 0)
+	env.reend(run.ID, store.RunFailed)
+	if _, err := env.e.Retry(ctx, run.ID, "tester", nil); !errors.As(err, &be) {
+		t.Fatalf("retry again over the cap: %v", err)
+	}
+	if err := store.DeleteProject(ctx, env.pool, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := env.e.Retry(ctx, run.ID, "tester", nil); err != nil || got.Status != store.RunQueued || got.Retries != 2 {
+		t.Fatalf("retry on a deleted project: %+v, %v", got, err)
+	}
+}
+
+// visit stores a finished visit of a node on a run, as the walk leaves one.
+func (env *testEnv) visit(runID, node string, n int, status string) {
+	env.t.Helper()
+	now := time.Now()
+	rn := &store.RunNode{RunID: runID, NodeID: node, Visit: n, Status: status, StartedAt: &now, FinishedAt: &now}
+	if err := store.CreateRunNode(context.Background(), env.pool, rn); err != nil {
+		env.t.Fatal(err)
+	}
+}
+
+// T5.21.3 and rule 2: the visits of current_node are compared with max_loop_visits as the
+// node's entry check counts them (>=), under the limits that will apply, and the detail
+// comes last, in the shape of the others.
+func TestRetryRule2LoopVisitsOfTheResumedNode(t *testing.T) {
+	ctx := context.Background()
+	// endedRun's limits plus a loop cap of 3 visits, as a trigger resolves the default.
+	const capped = `limits='{"max_steps":40,"max_tool_calls":60,"max_cost_usd":2,"max_duration_seconds":600,"max_loop_visits":3}'`
+
+	t.Run("the cap is used up, alone and after the other limits", func(t *testing.T) {
+		env := newEnv(t)
+		before := env.endedRun(store.RunFailed, "build", capped)
+		for v := 1; v <= 3; v++ {
+			env.visit(before.ID, "build", v, store.NodeFailed)
+		}
+		_, err := env.e.Retry(ctx, before.ID, "tester", nil)
+		wantRetryError(t, err, "limits_exhausted", "limits exhausted: max_loop_visits", "max_loop_visits: 3 of 3 used")
+		unchanged(t, before, env.run(before.ID))
+
+		if _, err := env.pool.Exec(ctx, `UPDATE runs SET step_count=40, cost_usd_micros=2000000 WHERE id=$1`, before.ID); err != nil {
+			t.Fatal(err)
+		}
+		before = env.run(before.ID)
+		_, err = env.e.Retry(ctx, before.ID, "tester", nil)
+		wantRetryError(t, err, "limits_exhausted", "limits exhausted: max_steps, max_cost_usd, max_loop_visits",
+			"max_steps: 40 of 40 used", "max_cost_usd: $2.00 of $2.00 used", "max_loop_visits: 3 of 3 used")
+		unchanged(t, before, env.run(before.ID))
+	})
+
+	t.Run("under the cap, other nodes' visits, and no cap pass", func(t *testing.T) {
+		env := newEnv(t)
+		two := env.endedRun(store.RunFailed, "build", capped)
+		env.visit(two.ID, "build", 1, store.NodeFailed)
+		env.visit(two.ID, "build", 2, store.NodeFailed)
+		for v := 1; v <= 5; v++ {
+			env.visit(two.ID, "elsewhere", v, store.NodeSucceeded) // another node's visits do not count
+		}
+		if got, err := env.e.Retry(ctx, two.ID, "tester", nil); err != nil || got.Status != store.RunQueued {
+			t.Fatalf("two visits of three: %+v, %v", got, err)
+		}
+		uncapped := env.endedRun(store.RunFailed, "build", "")
+		for v := 1; v <= 4; v++ {
+			env.visit(uncapped.ID, "build", v, store.NodeFailed)
+		}
+		if got, err := env.e.Retry(ctx, uncapped.ID, "tester", nil); err != nil || got.Status != store.RunQueued {
+			t.Fatalf("a run with no loop cap: %+v, %v", got, err)
+		}
+	})
+
+	t.Run("the body's limits are what the visits are compared with", func(t *testing.T) {
+		env := newEnv(t)
+		before := env.endedRun(store.RunFailed, "build", capped)
+		for v := 1; v <= 3; v++ {
+			env.visit(before.ID, "build", v, store.NodeFailed)
+		}
+		_, err := env.e.Retry(ctx, before.ID, "tester", &store.Limits{MaxLoopVisits: 3})
+		wantRetryError(t, err, "limits_exhausted", "limits exhausted: max_loop_visits", "max_loop_visits: 3 of 3 used")
+		_, err = env.e.Retry(ctx, before.ID, "tester", &store.Limits{MaxLoopVisits: 2})
+		wantRetryError(t, err, "limits_exhausted", "limits exhausted: max_loop_visits", "max_loop_visits: 3 of 2 used")
+		unchanged(t, before, env.run(before.ID))
+		got, err := env.e.Retry(ctx, before.ID, "tester", &store.Limits{MaxLoopVisits: 4})
+		if err != nil || got.Limits.MaxLoopVisits != 4 {
+			t.Fatalf("raised to 4: %+v, %v", got, err)
+		}
+	})
+
+	// The run the node's entry check would have failed at once now gets the cap in the
+	// dialog and, raised, a fourth visit.
+	t.Run("a node failed on its third visit, retried with the default cap and raised", func(t *testing.T) {
+		f := newRetryReviewFlow(t, store.Limits{}) // the default cap of 3 visits
+		env := f.env
+		failedRun := env.resume(env.e, f.run.ID)
+		for retry := 1; retry <= 2; retry++ { // visits 2 and 3 of "two" fail as well
+			if _, err := env.e.Retry(ctx, f.run.ID, "tester", nil); err != nil {
+				t.Fatalf("retry %d: %v", retry, err)
+			}
+			failedRun = env.resume(env.e, f.run.ID)
+		}
+		if failedRun.Status != store.RunFailed || deref(failedRun.CurrentNode) != "two" || failedRun.Limits.MaxLoopVisits != 3 {
+			t.Fatalf("run = %s at %q, limits %+v", failedRun.Status, deref(failedRun.CurrentNode), failedRun.Limits)
+		}
+		if got := visitsOf(runNodes(t, env, f.run.ID)); !slices.Equal(got,
+			[]string{"one#1:succeeded", "two#1:failed", "two#2:failed", "two#3:failed"}) {
+			t.Fatalf("visits = %v", got)
+		}
+
+		_, err := env.e.Retry(ctx, f.run.ID, "tester", nil)
+		wantRetryError(t, err, "limits_exhausted", "limits exhausted: max_loop_visits", "max_loop_visits: 3 of 3 used")
+		unchanged(t, failedRun, env.run(f.run.ID))
+
+		f.failTwo.Store(false)
+		if _, err := env.e.Retry(ctx, f.run.ID, "tester", &store.Limits{MaxLoopVisits: 4}); err != nil {
+			t.Fatal(err)
+		}
+		done := env.resume(env.e, f.run.ID)
+		if done.Status != store.RunSucceeded || done.Limits.MaxLoopVisits != 4 {
+			t.Fatalf("retried run = %s %q limits %+v", done.Status, deref(done.FailureReason), done.Limits)
+		}
+		if got := visitsOf(runNodes(t, env, f.run.ID)); !slices.Equal(got,
+			[]string{"one#1:succeeded", "two#1:failed", "two#2:failed", "two#3:failed", "two#4:succeeded", "three#1:succeeded"}) {
+			t.Fatalf("visits after the raise = %v", got)
 		}
 	})
 }
@@ -857,6 +1033,145 @@ func TestRetryRule2TimeLimitRestarts(t *testing.T) {
 	}
 	if len(starts) != 3 || !starts[1].After(starts[0]) || !starts[2].After(starts[1]) {
 		t.Fatalf("root span starts = %v", starts)
+	}
+}
+
+// refuseStartedAt makes the database refuse to stamp started_at on one run, as a failed
+// write does; the retry's own clearing of it (to null) is not refused.
+func refuseStartedAt(t *testing.T, env *testEnv, runID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := env.pool.Exec(ctx, `CREATE OR REPLACE FUNCTION refuse_started_at() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'started_at refused by the test'; END $$`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.pool.Exec(ctx, fmt.Sprintf(`CREATE TRIGGER refuse_started_at BEFORE UPDATE ON runs FOR EACH ROW
+		WHEN (OLD.id = '%s' AND OLD.started_at IS NULL AND NEW.started_at IS NOT NULL) EXECUTE FUNCTION refuse_started_at()`, runID)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = env.pool.Exec(context.Background(), `DROP TRIGGER IF EXISTS refuse_started_at ON runs`)
+		_, _ = env.pool.Exec(context.Background(), `DROP FUNCTION IF EXISTS refuse_started_at()`)
+	})
+}
+
+// Rule 2, Time: when the write of started_at fails on the first claim after a retry (the
+// row keeps null), the attempt still has its time limit, counted from the claim's instant
+// in memory; a run with no start would never time out.
+func TestRetryRule2TimeLimitSurvivesAFailedStartedAtWrite(t *testing.T) {
+	ctx := context.Background()
+	env := newEnv(t)
+	a := env.agent(func(a *store.Agent) { a.Limits.MaxDurationSeconds = 60 })
+	run, done := env.start(TriggerRequest{AgentID: a.ID, Task: "wait"})
+	eventually(t, "first turn", func() bool { return len(env.fc.sendParams()) == 1 })
+	env.clock.Advance(60 * time.Second)
+	if first := env.wait(done, run.ID); first.Status != store.RunTimedOut {
+		t.Fatalf("first attempt = %s %q", first.Status, deref(first.FailureReason))
+	}
+
+	refuseStartedAt(t, env, run.ID)
+	env.clock.Advance(time.Hour)
+	if _, err := env.e.Retry(ctx, run.ID, "tester", nil); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimQueuedRun(ctx, env.pool)
+	if err != nil || claimed.ID != run.ID || claimed.StartedAt != nil {
+		t.Fatalf("claim: %+v, %v", claimed, err)
+	}
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		env.e.runRun(ctx, claimed)
+	}()
+	eventually(t, "second turn", func() bool { return len(env.fc.sendParams()) == 2 })
+	if got := env.run(run.ID); got.StartedAt != nil || got.Status != store.RunRunning {
+		t.Fatalf("the refused write reached the row: %s, started_at %v", got.Status, got.StartedAt)
+	}
+	time.Sleep(150 * time.Millisecond) // several limit ticks: the minute has not passed
+	if got := env.run(run.ID); got.Status != store.RunRunning {
+		t.Fatalf("one minute early: %s %q", got.Status, deref(got.FailureReason))
+	}
+	env.clock.Advance(60 * time.Second)
+	second := env.wait(finished, run.ID)
+	if second.Status != store.RunTimedOut || deref(second.FailureReason) != "time limit 60s exceeded" || second.Retries != 1 {
+		t.Fatalf("second attempt = %s %q retries %d: a run whose start was not written has no time limit",
+			second.Status, deref(second.FailureReason), second.Retries)
+	}
+	if _, ok := env.e.unsavedStarts.Load(run.ID); ok {
+		t.Fatal("the in-memory stamp outlived the attempt")
+	}
+}
+
+// Rule 4: a run the stale-run sweeper failed ("worker lost") still has its root span
+// open; the retry ends it, marked retried, and the claimed retry opens a root span of
+// its own with the retry attribute instead of continuing it.
+func TestRetryRule4EndsTheRootSpanAWorkerLostLeftOpen(t *testing.T) {
+	ctx := context.Background()
+	env := newEnv(t)
+	a := env.agent(nil)
+	run, err := env.e.Trigger(ctx, TriggerRequest{AgentID: a.ID, Task: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimQueuedRun(ctx, env.pool)
+	if err != nil || claimed.ID != run.ID {
+		t.Fatalf("claim: %v", err)
+	}
+	// The worker that held the run was lost on its second attempt, with the visit open.
+	lostSpan := env.e.startSpan(ctx, run.ID, nil, "run", "run", env.clock.Now(), nil, map[string]any{"attempt": 2, "trigger": store.TriggerManual})
+	if _, err := env.pool.Exec(ctx, `UPDATE runs SET attempt=2, current_node='agent' WHERE id=$1`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if requeued, failed, err := store.RequeueStaleRuns(ctx, env.pool, -time.Hour); err != nil || requeued != 0 || failed != 1 {
+		t.Fatalf("sweep: requeued %d, failed %d, %v", requeued, failed, err)
+	}
+	lost := env.run(run.ID)
+	if lost.Status != store.RunFailed || deref(lost.FailureReason) != "worker lost" {
+		t.Fatalf("run = %s %q", lost.Status, deref(lost.FailureReason))
+	}
+	if n := env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND ended_at IS NULL`, run.ID); n != 1 {
+		t.Fatalf("%d spans open after the sweep, want the root span", n)
+	}
+
+	if _, err := env.e.Retry(ctx, run.ID, "tester", nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND ended_at IS NULL`, run.ID); n != 0 {
+		t.Fatalf("%d spans open after the retry", n)
+	}
+	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
+		go finishThenFinal(t, env, p, `{"summary":"recovered"}`)
+		return startedTurn(p)
+	}
+	if done := env.resume(env.e, run.ID); done.Status != store.RunSucceeded {
+		t.Fatalf("retried run = %s %q", done.Status, deref(done.FailureReason))
+	}
+
+	spans, _ := store.ListSpans(ctx, env.pool, run.ID)
+	var roots []store.Span
+	for _, sp := range spans {
+		if sp.Kind == "run" {
+			roots = append(roots, sp)
+		}
+	}
+	if len(roots) != 2 || roots[0].ID != lostSpan || roots[0].EndedAt == nil || roots[1].EndedAt == nil {
+		t.Fatalf("root spans = %+v", roots)
+	}
+	attrs := func(sp store.Span) map[string]any {
+		var m map[string]any
+		if err := json.Unmarshal(sp.Attrs, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	if first := attrs(roots[0]); first["retried"] != true || first["status"] != store.RunFailed || first["retry"] != nil {
+		t.Fatalf("the lost attempt's span = %v", first)
+	}
+	if second := attrs(roots[1]); second["retry"] != float64(1) || second["status"] != store.RunSucceeded || second["retried"] != nil {
+		t.Fatalf("the retry's span = %v: it must carry the retry attribute", second)
+	}
+	if n := env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND ended_at IS NULL`, run.ID); n != 0 {
+		t.Fatalf("%d spans left open", n)
 	}
 }
 

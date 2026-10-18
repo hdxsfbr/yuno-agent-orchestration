@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"yuno/internal/guardrails"
+	"yuno/internal/obs"
 	"yuno/internal/project"
 	"yuno/internal/store"
 )
@@ -87,7 +89,15 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 			}
 			applied, under = &resolved, resolved
 		}
-		if details := exhaustedLimits(run, under); len(details) > 0 {
+		// The visits of the node the walk resumes at count against max_loop_visits as its
+		// entry check counts them (walk.enter, >=), or the run would fail again at once.
+		visits := 0
+		if under.MaxLoopVisits > 0 {
+			if visits, err = store.CountNodeVisits(ctx, tx, runID, *run.CurrentNode); err != nil {
+				return fmt.Errorf("run %s: count visits of %s: %w", runID, *run.CurrentNode, err)
+			}
+		}
+		if details := exhaustedLimits(run, under, visits); len(details) > 0 {
 			names := make([]string, len(details))
 			for i, d := range details {
 				names[i], _, _ = strings.Cut(d, ":")
@@ -117,7 +127,11 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 			return fmt.Errorf("run %s: %w", runID, err)
 		}
 		from = *run.CurrentNode
-		return nil
+		// Rule 4: the retried claim opens a root span of its own. A run the stale-run
+		// sweeper failed ("worker lost") never ended its root span, and the resumed path
+		// would continue it without the retry attribute: end it here, in the same
+		// transaction, so no claim can find it open.
+		return endOpenRootSpan(ctx, tx, runID, run.Status, now)
 	})
 	if err != nil {
 		return nil, err
@@ -130,6 +144,23 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 	e.logEvent(ctx, runID, "info", fmt.Sprintf("retry %d: continuing from %s", retried.Retries, from),
 		"node_id", from, "by", by)
 	return retried, nil
+}
+
+// endOpenRootSpan ends the run's open root span, if it has one, marked as retried with
+// the status the run ended in (DESIGN 5.21 rule 4).
+func endOpenRootSpan(ctx context.Context, q store.Querier, runID, status string, at time.Time) error {
+	span, err := store.OpenRootSpan(ctx, q, runID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("run %s: open root span: %w", runID, err)
+	}
+	attrs, _ := json.Marshal(map[string]any{"status": status, "retried": true})
+	if err := store.EndSpanAt(ctx, q, span, at, obs.RedactJSON(attrs)); err != nil {
+		return fmt.Errorf("run %s: end root span: %w", runID, err)
+	}
+	return nil
 }
 
 // retryLimits resolves the operator's limits as a trigger does (DESIGN 5.2: negative
@@ -153,10 +184,12 @@ func (e *Engine) retryLimits(ctx context.Context, q store.Querier, run *store.Ru
 	return guardrails.EffectiveLimits(l, agents, e.deps.Cfg.MaxCostUSD), nil
 }
 
-// exhaustedLimits lists, in the order max_steps, max_tool_calls, max_cost_usd, every
-// counted limit whose counter has reached its cap (>=, as checkLimits stops the run),
-// as "<limit>: <used> of <cap> used" (DESIGN 5.21 rule 2). A cap of 0 is no cap.
-func exhaustedLimits(run *store.Run, l store.Limits) []string {
+// exhaustedLimits lists, in the order max_steps, max_tool_calls, max_cost_usd,
+// max_loop_visits, every counted limit whose counter has reached its cap (>=, as
+// checkLimits stops the run and walk.enter refuses a visit), as "<limit>: <used> of <cap>
+// used" (DESIGN 5.21 rule 2). visits is the number of visits the run's current node has
+// had. A cap of 0 is no cap.
+func exhaustedLimits(run *store.Run, l store.Limits, visits int) []string {
 	var out []string
 	if l.MaxSteps > 0 && run.StepCount >= l.MaxSteps {
 		out = append(out, fmt.Sprintf("max_steps: %d of %d used", run.StepCount, l.MaxSteps))
@@ -166,6 +199,9 @@ func exhaustedLimits(run *store.Run, l store.Limits) []string {
 	}
 	if l.MaxCostUSD > 0 && run.CostUSDMicros >= int64(l.MaxCostUSD*1e6+0.5) {
 		out = append(out, fmt.Sprintf("max_cost_usd: $%s of $%s used", formatUSD(float64(run.CostUSDMicros)/1e6), formatUSD(l.MaxCostUSD)))
+	}
+	if l.MaxLoopVisits > 0 && visits >= l.MaxLoopVisits {
+		out = append(out, fmt.Sprintf("max_loop_visits: %d of %d used", visits, l.MaxLoopVisits))
 	}
 	return out
 }

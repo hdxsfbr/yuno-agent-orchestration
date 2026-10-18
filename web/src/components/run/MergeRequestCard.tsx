@@ -23,7 +23,8 @@ type Props = {
 /**
  * The merge or pull request the run opened: where it stands (state, pipeline, review threads),
  * a way to refresh it and, while it is open with a pipeline that passed or does not exist,
- * a way to merge it.
+ * a way to merge it. Once it is merged or closed the card shows the state and when it ended,
+ * and neither button is offered.
  */
 export default function MergeRequestCard({ mr, onChange }: Props) {
   const now = useNow(true, 10_000);
@@ -78,14 +79,16 @@ export default function MergeRequestCard({ mr, onChange }: Props) {
               {mr.source_branch} → {mr.target_branch}
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <Button onClick={() => sync.mutate()} disabled={busy}>
-              {sync.isPending ? "Syncing…" : "Sync"}
-            </Button>
-            <Button variant="primary" onClick={() => setConfirming(true)} disabled={busy || blocked !== undefined} title={blocked}>
-              {merge.isPending ? "Merging…" : "Merge"}
-            </Button>
-          </div>
+          {final ? null : (
+            <div className="flex items-center gap-2">
+              <Button onClick={() => sync.mutate()} disabled={busy}>
+                {sync.isPending ? "Syncing…" : "Sync"}
+              </Button>
+              <Button variant="primary" onClick={() => setConfirming(true)} disabled={busy || blocked !== undefined} title={blocked}>
+                {merge.isPending ? "Merging…" : "Merge"}
+              </Button>
+            </div>
+          )}
         </div>
 
         <p className="mt-3 text-sm">{threadsText(mr.unresolved_threads)}</p>
@@ -104,7 +107,7 @@ export default function MergeRequestCard({ mr, onChange }: Props) {
         ) : null}
       </Card>
 
-      {confirming ? (
+      {confirming && !final ? (
         <ConfirmDialog
           title={`Merge ${ref} into ${mr.target_branch}?`}
           message={

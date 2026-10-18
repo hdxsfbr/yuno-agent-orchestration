@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"yuno/internal/engine"
+	"yuno/internal/project"
 	"yuno/internal/store"
 )
 
@@ -88,6 +89,8 @@ func TestCreateRunMapsToTrigger(t *testing.T) {
 }
 
 func TestCreateRunEngineErrors(t *testing.T) {
+	budget := &project.BudgetError{ProjectID: "pr-1", ProjectName: "Playground", Window: project.WindowDay, CapMicros: 5_000_000,
+		SpendMicros: 5_250_000, WindowEnd: time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)}
 	tests := []struct {
 		name string
 		err  error
@@ -95,6 +98,7 @@ func TestCreateRunEngineErrors(t *testing.T) {
 	}{
 		{name: "unknown agent", err: fmt.Errorf("agent ag-1: %w", store.ErrNotFound), want: http.StatusNotFound},
 		{name: "engine validation", err: fmt.Errorf("trigger: %w", &engine.ValidationError{Messages: []string{"limits.max_steps: must not be negative", "bare message"}}), want: http.StatusUnprocessableEntity},
+		{name: "project budget", err: fmt.Errorf("trigger: %w", budget), want: http.StatusTooManyRequests},
 		{name: "other", err: fmt.Errorf("boom"), want: http.StatusInternalServerError},
 	}
 	for _, tc := range tests {
@@ -104,13 +108,92 @@ func TestCreateRunEngineErrors(t *testing.T) {
 			if code != tc.want {
 				t.Fatalf("status %d: %s", code, body)
 			}
-			decodeError(t, body)
+			e := decodeError(t, body).Error
 			if tc.want == http.StatusUnprocessableEntity {
 				if got := detailPaths(t, body); !slices.Equal(got, []string{"limits.max_steps", ""}) {
 					t.Fatalf("paths = %q", got)
 				}
 			}
+			if tc.want == http.StatusTooManyRequests {
+				// DESIGN 5.19 rule 3: the refusal's text and the window's numbers in USD.
+				var details map[string]any
+				mustDo(t, json.Unmarshal(e.Details, &details))
+				wantDetails := map[string]any{"project_id": "pr-1", "window": "day", "max_cost_usd": 5.0, "spent_usd": 5.25, "until": "2026-10-18T00:00:00Z"}
+				if e.Code != "project_budget_reached" || e.Message != budget.Error() || fmt.Sprint(details) != fmt.Sprint(wantDetails) {
+					t.Fatalf("error = %s %q %v, want project_budget_reached %q %v", e.Code, e.Message, details, budget.Error(), wantDetails)
+				}
+			}
 		})
+	}
+}
+
+// GET /api/runs?project_id= lists the runs that work on the project, newest first, with
+// status and limit applying as before; a project nobody ran on, or an unknown one, lists
+// none (the page of a project whose runs are older than the newest hundreds needs this).
+func TestListRunsByProject(t *testing.T) {
+	pool := needDB(t)
+	_, ts := newTestServer(t, pool, &fakeEngine{pool: pool}, nil)
+	sfx := uniqueSuffix()
+	mine := seedProject(t, testCipher(t), "runs-a-"+sfx, acceptedTokenPrefix+sfx)
+	other := seedProject(t, testCipher(t), "runs-b-"+sfx, acceptedTokenPrefix+sfx)
+	idle := seedProject(t, testCipher(t), "runs-c-"+sfx, acceptedTokenPrefix+sfx)
+	first, second, third := projectRun(t, mine), projectRun(t, mine), projectRun(t, mine)
+	elsewhere := projectRun(t, other)
+	for i, r := range []*store.Run{first, second, third} {
+		if _, err := pool.Exec(context.Background(), `UPDATE runs SET created_at = now() - make_interval(secs => $2) WHERE id = $1`, r.ID, float64(100-i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE runs SET status = $2 WHERE id = $1`, second.ID, store.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	// A run with no project, newer than all of them, must not leak in.
+	plain, err := createTestRun(context.Background(), pool, store.TriggerManual, nil, store.Limits{})
+	mustDo(t, err)
+
+	ids := func(query string) []string {
+		t.Helper()
+		code, body := do(t, ts, http.MethodGet, "/api/runs?"+query, "")
+		if code != http.StatusOK {
+			t.Fatalf("%s: %d %s", query, code, body)
+		}
+		var runs []store.Run
+		mustDo(t, json.Unmarshal(body, &runs))
+		out := make([]string, len(runs))
+		for i, r := range runs {
+			out[i] = r.ID
+		}
+		return out
+	}
+	if got, want := ids("project_id="+mine.ID), []string{third.ID, second.ID, first.ID}; !slices.Equal(got, want) {
+		t.Fatalf("project runs = %v, want %v (newest first)", got, want)
+	}
+	if got := ids("project_id=" + other.ID); !slices.Equal(got, []string{elsewhere.ID}) {
+		t.Fatalf("other project = %v", got)
+	}
+	if got := ids("project_id=" + mine.ID + "&limit=2"); !slices.Equal(got, []string{third.ID, second.ID}) {
+		t.Fatalf("limit 2 = %v", got)
+	}
+	if got := ids("project_id=" + mine.ID + "&status=failed"); !slices.Equal(got, []string{second.ID}) {
+		t.Fatalf("status failed = %v", got)
+	}
+	if got := ids("project_id=" + idle.ID); got == nil || len(got) != 0 {
+		t.Fatalf("a project with no runs = %#v", got)
+	}
+	if got := ids("project_id=no-such-project"); got == nil || len(got) != 0 {
+		t.Fatalf("an unknown project = %#v", got)
+	}
+	// Without the filter every run is listed, the project's and the plain one.
+	all := ids("limit=500")
+	for _, id := range []string{first.ID, elsewhere.ID, plain.ID} {
+		if !slices.Contains(all, id) {
+			t.Fatalf("the unfiltered list lacks %s", id)
+		}
+	}
+	// A project that was deleted keeps its runs listed.
+	mustDo(t, store.DeleteProject(context.Background(), pool, mine.ID))
+	if got := ids("project_id=" + mine.ID); len(got) != 3 {
+		t.Fatalf("after deleting the project: %v", got)
 	}
 }
 

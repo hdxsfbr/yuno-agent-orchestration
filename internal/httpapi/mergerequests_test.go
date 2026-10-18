@@ -16,6 +16,7 @@ import (
 	"github.com/getkin/kin-openapi/routers"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"yuno/internal/obs"
 	"yuno/internal/project"
 	"yuno/internal/store"
 )
@@ -309,6 +310,24 @@ func TestRunCarriesItsMergeRequest(t *testing.T) {
 		t.Fatalf("a run without a record carries merge_request: %s", body)
 	}
 
+	// The trace's run carries it too (DESIGN 5.20 rule 6), so the run page needs no second fetch.
+	var trace struct {
+		Run store.Run `json:"run"`
+	}
+	code, body = e.call(http.MethodGet, "/api/runs/"+with.ID+"/trace", "", true)
+	mustDo(t, json.Unmarshal(body, &trace))
+	if code != http.StatusOK || trace.Run.MergeRequest == nil || trace.Run.MergeRequest.ID != rec.ID || trace.Run.MergeRequest.CIStatus != store.CIStatusPassed {
+		t.Fatalf("trace of the run with a record = %d %s", code, body)
+	}
+	var rawTrace struct {
+		Run map[string]json.RawMessage `json:"run"`
+	}
+	_, body = e.call(http.MethodGet, "/api/runs/"+without.ID+"/trace", "", true)
+	mustDo(t, json.Unmarshal(body, &rawTrace))
+	if _, ok := rawTrace.Run["merge_request"]; ok || rawTrace.Run["id"] == nil {
+		t.Fatalf("the trace of a run without a record carries merge_request: %s", body)
+	}
+
 	code, body = e.call(http.MethodGet, "/api/runs?limit=500", "", true)
 	var runs []store.Run
 	mustDo(t, json.Unmarshal(body, &runs))
@@ -422,6 +441,7 @@ func TestMergeSucceeds(t *testing.T) {
 		run, rec := e.record(e.project, true, func(mr *store.MergeRequest) { mr.CIStatus = ci })
 		route := fmt.Sprintf("PUT /merge_requests/%d/merge", rec.Number)
 		e.prov.set(route, 200, map[string]any{"state": "merged"})
+		e.prov.request(rec.Number, "merged", "success", 0) // what the read after the 2xx finds
 		before := time.Now().UTC().Add(-time.Second)
 
 		code, body := e.call(http.MethodPost, "/api/merge-requests/"+rec.ID+"/merge", "", true)
@@ -455,6 +475,132 @@ func TestMergeSucceeds(t *testing.T) {
 	}
 	if len(e.eng.messages()) != 2 {
 		t.Fatalf("messages = %+v", e.eng.messages())
+	}
+}
+
+// Rule 5: a 2xx from the provider's merge call is not the merge. The request is read once
+// more and the record is marked merged only when the provider reports it merged;
+// otherwise it stays open with the provider's answer in last_sync_error, nothing is
+// reported, and the answer is 200 with the record.
+func TestMergeIsRecordedOnlyWhenTheProviderReportsItMerged(t *testing.T) {
+	e := newMREnv(t)
+	ready := func(chat bool) (*store.Run, *store.MergeRequest, string, string) {
+		run, rec := e.record(e.project, chat, func(mr *store.MergeRequest) { mr.CIStatus = store.CIStatusPassed })
+		return run, rec, fmt.Sprintf("PUT /merge_requests/%d/merge", rec.Number), fmt.Sprintf("GET /merge_requests/%d", rec.Number)
+	}
+	merge := func(rec *store.MergeRequest) (int, store.MergeRequest, []byte) {
+		t.Helper()
+		code, body := e.call(http.MethodPost, "/api/merge-requests/"+rec.ID+"/merge", "", true)
+		return code, decodeMR(t, body), body
+	}
+	untouched := func(what string, got store.MergeRequest, wantError string) {
+		t.Helper()
+		if got.State != store.MergeRequestOpen || got.MergedBy != nil || got.ClosedAt != nil || got.ReportedState != nil ||
+			got.LastSyncError == nil || !strings.Contains(*got.LastSyncError, wantError) || got.SyncedAt == nil {
+			t.Fatalf("%s: record = %+v (error %v), want open with %q", what, got, got.LastSyncError, wantError)
+		}
+	}
+
+	// The call is accepted and the provider still reports the request open (GitLab merges
+	// asynchronously, or when the pipeline passes).
+	run, rec, put, get := ready(true)
+	e.prov.set(put, 200, map[string]any{"state": "opened"})
+	e.prov.request(rec.Number, "opened", "success", 0)
+	code, got, body := merge(rec)
+	if code != http.StatusOK || got.ID != rec.ID {
+		t.Fatalf("accepted but open: %d %s", code, body)
+	}
+	untouched("accepted but open", got, "")
+	if *got.LastSyncError != "the provider accepted the merge but reports the request as open" {
+		t.Fatalf("last_sync_error = %q", *got.LastSyncError)
+	}
+	noToken(t, "merge", body, e.token)
+	if stored := e.get(rec.ID); stored.State != store.MergeRequestOpen || stored.MergedBy != nil || len(e.eng.messages()) != 0 {
+		t.Fatalf("stored = %+v, messages %+v", stored, e.eng.messages())
+	}
+	if countCalls(e.prov.seen(), put) != 1 || countCalls(e.prov.seen(), get) != 1 {
+		t.Fatalf("calls = %v: one merge, then one read", e.prov.seen())
+	}
+
+	// The loop (here, the operator's Sync) settles it once the provider's state is final:
+	// merged by the provider's own doing, so merged_by stays empty, and the report goes out.
+	e.prov.request(rec.Number, "merged", "success", 0)
+	code, body = e.call(http.MethodPost, "/api/merge-requests/"+rec.ID+"/sync", "", true)
+	synced := decodeMR(t, body)
+	if code != http.StatusOK || synced.State != store.MergeRequestMerged || synced.LastSyncError != nil || synced.ReportedState == nil {
+		t.Fatalf("sync after the merge landed = %d %s", code, body)
+	}
+	if sent := e.eng.messages(); len(sent) != 1 || sent[0].key != "report-"+run.ID+"-mr-merged" {
+		t.Fatalf("messages = %+v", sent)
+	}
+
+	// Pressing Merge again on a record that stayed open merges and records it.
+	_, rec2, put2, _ := ready(false)
+	e.prov.set(put2, 200, map[string]any{"state": "opened"})
+	e.prov.request(rec2.Number, "opened", "success", 0)
+	if _, got, _ := merge(rec2); got.State != store.MergeRequestOpen {
+		t.Fatalf("first press = %+v", got)
+	}
+	e.prov.request(rec2.Number, "merged", "success", 0)
+	code, got, body = merge(rec2)
+	if code != http.StatusOK || got.State != store.MergeRequestMerged || got.MergedBy == nil || *got.MergedBy != "operator" || got.LastSyncError != nil || got.ClosedAt == nil {
+		t.Fatalf("second press = %d %s", code, body)
+	}
+
+	// Any other state is no merge either; so is a status that cannot be read, which
+	// leaves the provider's text on the record with the token redacted.
+	_, closed, putClosed, _ := ready(false)
+	e.prov.set(putClosed, 200, map[string]any{})
+	e.prov.request(closed.Number, "closed", "success", 0)
+	code, got, body = merge(closed)
+	if code != http.StatusOK {
+		t.Fatalf("accepted but closed: %d %s", code, body)
+	}
+	untouched("accepted but closed", got, "the provider accepted the merge but reports the request as closed")
+
+	_, blind, putBlind, getBlind := ready(false)
+	e.prov.set(putBlind, 202, map[string]any{})
+	e.prov.set(getBlind, 502, map[string]string{"message": "bad gateway " + e.token})
+	code, got, body = merge(blind)
+	if code != http.StatusOK {
+		t.Fatalf("accepted, unreadable: %d %s", code, body)
+	}
+	untouched("accepted, unreadable", got, "the provider accepted the merge but the request could not be read back")
+	if !strings.Contains(*got.LastSyncError, "HTTP 502") {
+		t.Fatalf("last_sync_error = %q", *got.LastSyncError)
+	}
+	noToken(t, "unreadable merge", body, e.token)
+	if len(e.eng.messages()) != 1 { // the sync's report, and no other
+		t.Fatalf("messages = %+v", e.eng.messages())
+	}
+}
+
+// DESIGN 5.20 rule 5: the provider's first line of a refusal reaches the operator in the
+// 409 body, so it passes the same redaction as the 502 body: a token it echoes, the
+// project's own or one shaped like a token, is gone.
+func TestMergeRefusalRedactsTheToken(t *testing.T) {
+	e := newMREnv(t)
+	opaque := "plain-secret-value-" + uniqueSuffix() // no redaction pattern knows this shape
+	hidden := e.newProject(testCipher(t), opaque)
+	for name, tc := range map[string]struct {
+		p     *store.Project
+		token string
+	}{"a token with a known shape": {e.project, e.token}, "an opaque token": {hidden, opaque}} {
+		_, rec := e.record(tc.p, false, func(mr *store.MergeRequest) { mr.CIStatus = store.CIStatusPassed })
+		e.prov.set(fmt.Sprintf("PUT /merge_requests/%d/merge", rec.Number), 405,
+			map[string]string{"message": "Branch cannot be merged for " + tc.token + " (token " + tc.token + ")\nsecond line"})
+		code, body := e.call(http.MethodPost, "/api/merge-requests/"+rec.ID+"/merge", "", true)
+		err := decodeError(t, body)
+		if code != http.StatusConflict || err.Error.Code != "merge_request_not_mergeable" || !strings.HasPrefix(err.Error.Message, "Branch cannot be merged for ") {
+			t.Fatalf("%s: %d %s", name, code, body)
+		}
+		noToken(t, name, body, tc.token)
+		if !strings.Contains(err.Error.Message, obs.Redacted) {
+			t.Fatalf("%s: the message shows no redaction: %q", name, err.Error.Message)
+		}
+		if got := e.get(rec.ID); got.State != store.MergeRequestOpen {
+			t.Fatalf("%s: a refused merge changed the record: %+v", name, got)
+		}
 	}
 }
 
@@ -578,6 +724,7 @@ func mergeRequestConformanceSteps(t *testing.T) []conformanceStep {
 		{http.MethodGet, "/api/merge-requests/" + merged.ID, "", http.StatusOK},
 		{http.MethodGet, "/api/merge-requests/no-such-request", "", http.StatusNotFound},
 		{http.MethodGet, "/api/runs/" + run.ID, "", http.StatusOK},
+		{http.MethodGet, "/api/runs/" + run.ID + "/trace", "", http.StatusOK},
 		{http.MethodPost, "/api/merge-requests/" + syncing.ID + "/sync", "", http.StatusOK},
 		{http.MethodPost, "/api/merge-requests/" + merged.ID + "/sync", "", http.StatusOK},
 		{http.MethodPost, "/api/merge-requests/no-such-request/sync", "", http.StatusNotFound},

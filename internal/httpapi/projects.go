@@ -259,7 +259,13 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "create project", err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, p)
+	// The answer is the project as a get shows it, spend included (DESIGN 5.19 rule 7).
+	created, err := s.projectView(ctx, p.ID)
+	if err != nil {
+		s.internalError(w, r, "read the created project", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
 }
 
 // updateProject replaces a project's settings. An absent or empty token keeps the

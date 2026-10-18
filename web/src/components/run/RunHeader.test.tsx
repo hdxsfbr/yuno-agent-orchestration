@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import type { Run, RunStatus, ToolCall } from "@/lib/api";
@@ -32,6 +33,37 @@ function renderHeader(r: Run = run(), toolCalls: ToolCall[] = []) {
   );
 }
 
+/** Holds the run the way the page does: what the header hands over (or the stream delivers) replaces it. */
+let apply: (r: Run) => void;
+
+function LiveHeader({ initial }: { initial: Run }) {
+  const [current, setCurrent] = useState(initial);
+  apply = (next) => setCurrent(next);
+  return (
+    <RunHeader
+      run={current}
+      connection="open"
+      now={Date.parse("2026-10-15T10:06:00Z")}
+      onRunChange={(next) => {
+        onRunChange(next);
+        setCurrent(next);
+      }}
+    />
+  );
+}
+
+function renderLive(initial: Run) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter>
+        <LiveHeader initial={initial} />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+const cancelButton = () => screen.getByRole("button", { name: /^Cancel (run|requested)$/ }) as HTMLButtonElement;
 const retryButton = () => screen.queryByRole("button", { name: "Retry" }) as HTMLButtonElement | null;
 const header = () => within(screen.getByRole("region", { name: "Run summary" }));
 
@@ -81,6 +113,54 @@ describe("the Retry button", () => {
   });
 });
 
+describe("cancelling a run that is retried afterwards", () => {
+  const cancelled = () => run({ status: "cancelled", cancel_requested: true });
+  const queued = () => run({ status: "queued", retries: 1, cancel_requested: false, finished_at: undefined });
+
+  async function cancelAndEnd() {
+    api.on("POST", "/api/runs/r1/cancel", () => run({ status: "running", cancel_requested: true }));
+    renderLive(run({ status: "running", finished_at: undefined }));
+    fireEvent.click(cancelButton());
+    await waitFor(() => expect(cancelButton().textContent).toBe("Cancel requested"));
+    expect(cancelButton().disabled).toBe(true);
+    act(() => apply(cancelled()));
+    expect(screen.queryByRole("button", { name: /^Cancel/ })).toBeNull();
+  }
+
+  it("offers Cancel again once the cancelled run is retried and queued", async () => {
+    await cancelAndEnd();
+    api.on("POST", "/api/runs/r1/retry", queued);
+    fireEvent.click(retryButton()!);
+    await waitFor(() => expect(onRunChange).toHaveBeenLastCalledWith(expect.objectContaining({ status: "queued", retries: 1 })));
+    expect(cancelButton().textContent).toBe("Cancel run");
+    expect(cancelButton().disabled).toBe(false);
+  });
+
+  it("can cancel the retried run, and the request goes out again", async () => {
+    await cancelAndEnd();
+    api.on("POST", "/api/runs/r1/retry", queued);
+    fireEvent.click(retryButton()!);
+    await waitFor(() => expect(cancelButton().disabled).toBe(false));
+    fireEvent.click(cancelButton());
+    await waitFor(() => expect(api.made("POST", "/api/runs/r1/cancel")).toHaveLength(2));
+  });
+
+  it("offers Cancel again after a retry made from the limits dialog too", async () => {
+    await cancelAndEnd();
+    api.on("POST", "/api/runs/r1/retry", (r) => {
+      if (r.body === undefined) return apiError(409, "limits_exhausted", "used up", [{ path: "max_steps", message: "40 of 40 used" }]);
+      return queued();
+    });
+    fireEvent.click(retryButton()!);
+    const d = within(await screen.findByRole("dialog"));
+    fireEvent.change(d.getByLabelText(/^Max steps/), { target: { value: "80" } });
+    fireEvent.click(d.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(cancelButton().textContent).toBe("Cancel run");
+    expect(cancelButton().disabled).toBe(false);
+  });
+});
+
 describe("a refused retry", () => {
   it.each([
     ["retry_limit", "run was retried 5 times"],
@@ -115,7 +195,7 @@ describe("a refused retry", () => {
     const d = within(await screen.findByRole("dialog"));
     const list = within(d.getByRole("list", { name: "Limits used up" }));
     expect(list.getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Max steps: 40 of 40 used", "Max cost (USD): $2.10 of $2.00 used"]);
-    expect(d.getByText("Raise the limits that are used up to retry from where the run stopped.")).not.toBeNull();
+    expect(d.getByText("Raise the limits that are used up to retry from where the run stopped. A field left empty keeps its current value.")).not.toBeNull();
     // the refusal is not told twice
     expect(screen.queryByText(/Could not retry the run/)).toBeNull();
   });

@@ -50,7 +50,7 @@ describe("what the dialog shows", () => {
     expect(d.getByRole("heading", { name: "Retry run" })).not.toBeNull();
     const items = d.getAllByRole("listitem").map((li) => li.textContent);
     expect(items).toEqual(["Max steps: 40 of 40 used", "Max tool calls: 61 of 60 used"]);
-    expect(d.getByText("Raise the limits that are used up to retry from where the run stopped.")).not.toBeNull();
+    expect(d.getByText("Raise the limits that are used up to retry from where the run stopped. A field left empty keeps its current value.")).not.toBeNull();
   });
 
   it("words each limit once when the API repeats its name in the sentence", () => {
@@ -72,6 +72,34 @@ describe("what the dialog shows", () => {
     expect(field(d, /^Max tool calls/).labels?.[0].textContent).not.toContain("*");
     expect(field(d, /^Max cost/).labels?.[0].textContent).not.toContain("*");
     expect(d.queryByLabelText(/Max duration/)).toBeNull();
+    expect(d.queryByLabelText(/Max loop visits/)).toBeNull();
+  });
+
+  it("says an empty field keeps its current value, in the hint and in the placeholder, not the platform default", () => {
+    const d = renderDialog({ run: run({ limits: {} }) });
+    expect(d.getByText(/A field left empty keeps its current value\./)).not.toBeNull();
+    expect(field(d, /^Max tool calls/).value).toBe("");
+    expect(field(d, /^Max tool calls/).placeholder).toBe("Unchanged");
+    expect(field(d, /^Max cost/).placeholder).toBe("Unchanged");
+    expect(d.queryByText(/platform default/i)).toBeNull();
+  });
+
+  it("shows the loop visits of the step as a fourth field when they are what is used up", () => {
+    const d = renderDialog({
+      run: run({ limits: { max_steps: 40, max_tool_calls: 60, max_cost_usd: 2, max_loop_visits: 3 } }),
+      refusal: exhausted([{ path: "max_loop_visits", message: "max_loop_visits: 3 of 3 used" }]),
+    });
+    expect(d.getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Max loop visits: 3 of 3 used"]);
+    const labels = d.getAllByRole("textbox").map((input) => (input as HTMLInputElement).labels?.[0].textContent);
+    expect(labels).toEqual(["Max steps", "Max cost (USD)", "Max tool calls", "Max loop visits*"]);
+    expect(field(d, /^Max loop visits/).value).toBe("3");
+    expect(field(d, /^Max loop visits/).labels?.[0].textContent).toContain("*");
+    expect(field(d, /^Max steps/).labels?.[0].textContent).not.toContain("*");
+  });
+
+  it("starts the loop visits from the cap of the sentence when the run carries no limit of its own", () => {
+    const d = renderDialog({ run: run({ limits: {} }), refusal: exhausted([{ path: "max_loop_visits", message: "3 of 3 used" }]) });
+    expect(field(d, /^Max loop visits/).value).toBe("3");
   });
 
   it("starts an exhausted limit from the cap the sentence names when the run carries no limits of its own", () => {
@@ -97,6 +125,39 @@ describe("raising the limits", () => {
     expect(sent()[0].body).toEqual({ limits: { max_steps: 80, max_tool_calls: 60, max_cost_usd: 2, max_duration_seconds: 900, max_loop_visits: 3 } });
     await waitFor(() => expect(onRetried).toHaveBeenCalledWith(expect.objectContaining({ status: "queued", retries: 1 })));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("sends the loop visits raised, with the limits the run already had", async () => {
+    api.on("POST", "/api/runs/r1/retry", () => run({ status: "queued", retries: 1 }));
+    const d = renderDialog({
+      run: run({ limits: { max_steps: 40, max_cost_usd: 2, max_loop_visits: 3 } }),
+      refusal: exhausted([{ path: "max_loop_visits", message: "max_loop_visits: 3 of 3 used" }]),
+    });
+    fireEvent.change(field(d, /^Max loop visits/), { target: { value: "5" } });
+    retry(d);
+    await waitFor(() => expect(sent()).toHaveLength(1));
+    expect(sent()[0].body).toEqual({ limits: { max_steps: 40, max_cost_usd: 2, max_loop_visits: 5 } });
+    await waitFor(() => expect(onRetried).toHaveBeenCalledWith(expect.objectContaining({ status: "queued", retries: 1 })));
+  });
+
+  it("will not send loop visits that were left as they were", async () => {
+    const d = renderDialog({
+      run: run({ limits: { max_steps: 40, max_loop_visits: 3 } }),
+      refusal: exhausted([{ path: "max_loop_visits", message: "3 of 3 used" }]),
+    });
+    retry(d);
+    await waitFor(() => expect(field(d, /^Max loop visits/).parentElement?.textContent).toContain("Max loop visits is used up: raise it above 3"));
+    expect(sent()).toHaveLength(0);
+  });
+
+  it("leaves a field that was emptied out of the body, so the run keeps its value for it", async () => {
+    api.on("POST", "/api/runs/r1/retry", () => run({ status: "queued" }));
+    const d = renderDialog({ run: run({ limits: { max_steps: 40, max_tool_calls: 60, max_cost_usd: 2, max_loop_visits: 3 } }) });
+    fireEvent.change(field(d, /^Max steps/), { target: { value: "80" } });
+    fireEvent.change(field(d, /^Max cost/), { target: { value: "" } });
+    retry(d);
+    await waitFor(() => expect(sent()).toHaveLength(1));
+    expect(sent()[0].body).toEqual({ limits: { max_steps: 80, max_tool_calls: 60, max_loop_visits: 3 } });
   });
 
   it("lets a limit that is not used up change too, and a decimal cost", async () => {

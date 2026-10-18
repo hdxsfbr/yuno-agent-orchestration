@@ -26,7 +26,13 @@ beforeEach(() => {
   api.on("GET", "/api/projects", () => projects);
   api.on("GET", "/api/projects/p1/facts", () => facts);
   api.on("GET", /^\/api\/merge-requests\?/, () => requests);
-  api.on("GET", /^\/api\/runs\?/, () => runs);
+  // Like the real list: newest first, narrowed to the project when the query names one, and cut at `limit`.
+  api.on("GET", /^\/api\/runs\?/, ({ url }) => {
+    const query = new URL(url, "http://yuno.test").searchParams;
+    const projectId = query.get("project_id");
+    const limit = Number(query.get("limit") ?? 100);
+    return runs.filter((r) => !projectId || r.project_id === projectId).slice(0, limit);
+  });
 });
 
 afterEach(() => {
@@ -430,14 +436,28 @@ describe("the Recent runs card", () => {
     expect(within(rows[1]).getByText("succeeded")).not.toBeNull();
   });
 
-  it("shows the ten newest of the project's runs among the newest 200 of all", async () => {
+  it("asks the server for the project's ten newest runs, and shows them", async () => {
     runs = Array.from({ length: 15 }, (_, i) => run({ id: `run${String(i).padStart(2, "0")}`, project_id: "p1", status: "succeeded" }));
     renderPage();
     const section = await card("Recent runs");
     expect((await section.findAllByRole("row")).slice(1)).toHaveLength(10);
     expect(section.getByRole("link", { name: "run09" })).not.toBeNull();
     expect(section.queryByRole("link", { name: "run10" })).toBeNull();
-    expect(api.made("GET", /^\/api\/runs/).map((c) => c.url)).toEqual(["/api/runs?limit=200"]);
+    expect(api.made("GET", /^\/api\/runs/).map((c) => c.url)).toEqual(["/api/runs?project_id=p1&limit=10"]);
+  });
+
+  it("finds the project's runs however many newer runs other projects have", async () => {
+    runs = [
+      ...Array.from({ length: 250 }, (_, i) => run({ id: `busy${i}`, project_id: "p2", status: "succeeded" })),
+      run({ id: "old1", project_id: "p1", status: "failed", created_at: "2026-09-01T10:00:00Z" }),
+      run({ id: "old2", project_id: "p1", status: "succeeded", created_at: "2026-08-30T10:00:00Z" }),
+    ];
+    renderPage();
+    const section = await card("Recent runs");
+    expect((await section.findAllByRole("row")).slice(1)).toHaveLength(2);
+    expect(section.getByRole("link", { name: "old1" })).not.toBeNull();
+    expect(section.getByRole("link", { name: "old2" })).not.toBeNull();
+    expect(api.made("GET", /^\/api\/runs/)).toHaveLength(1);
   });
 
   it("says so when the project has no runs", async () => {

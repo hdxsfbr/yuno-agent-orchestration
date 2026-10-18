@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"yuno/internal/engine"
+	"yuno/internal/project"
 	"yuno/internal/store"
 )
 
@@ -107,9 +108,14 @@ func conformanceRetry(ctx context.Context, pool *pgxpool.Pool, runID string, lim
 }
 
 // retryConformanceSteps exercises the retry path against the contract: 202 with and
-// without a body, 409 for a running run and for an exhausted limit, 422, 404.
-func retryConformanceSteps(t *testing.T) []conformanceStep {
+// without a body, 409 for a running run and for an exhausted limit, 422, 404, and 429
+// for a run whose project is at its budget (the fake engine refuses that run with the
+// engine's typed error).
+func retryConformanceSteps(t *testing.T, fe *fakeEngine) []conformanceStep {
 	t.Helper()
+	broke := endedTestRun(t, testPool, store.RunFailed, 3, store.Limits{MaxSteps: 10})
+	fe.refuseRetry(broke.ID, &project.BudgetError{ProjectID: "pr-conf", ProjectName: "Conformance", Window: project.WindowMonth,
+		CapMicros: 20_000_000, SpendMicros: 21_500_000, WindowEnd: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)})
 	failed := endedTestRun(t, testPool, store.RunFailed, 3, store.Limits{MaxSteps: 10})
 	cancelled := endedTestRun(t, testPool, store.RunCancelled, 3, store.Limits{MaxSteps: 10})
 	exhausted := endedTestRun(t, testPool, store.RunTimedOut, 10, store.Limits{MaxSteps: 10})
@@ -118,6 +124,7 @@ func retryConformanceSteps(t *testing.T) []conformanceStep {
 		{http.MethodPost, "/api/runs/" + failed.ID + "/retry", "", http.StatusAccepted},
 		{http.MethodPost, "/api/runs/" + cancelled.ID + "/retry", `{"limits":{"max_steps":50,"max_cost_usd":3}}`, http.StatusAccepted},
 		{http.MethodPost, "/api/runs/" + running.ID + "/retry", "", http.StatusConflict},
+		{http.MethodPost, "/api/runs/" + broke.ID + "/retry", "", http.StatusTooManyRequests},
 		{http.MethodPost, "/api/runs/" + exhausted.ID + "/retry", "", http.StatusConflict},
 		{http.MethodPost, "/api/runs/" + exhausted.ID + "/retry", `{"limits":{"max_steps":-1}}`, http.StatusUnprocessableEntity},
 		{http.MethodPost, "/api/runs/" + exhausted.ID + "/retry", `{"limits":{"max_steps":"many"}}`, http.StatusUnprocessableEntity},
@@ -223,6 +230,8 @@ func TestRetryRunMapsTheEnginesAnswers(t *testing.T) {
 		message  string
 		details  []fieldError
 		noDetail bool
+		// budgetBody is the details object of a project_budget_reached answer.
+		budgetBody map[string]any
 	}{
 		{name: "not retryable", err: &engine.RetryError{Code: "run_not_retryable", Message: "run is running"},
 			status: http.StatusConflict, code: "run_not_retryable", message: "run is running", noDetail: true},
@@ -236,6 +245,11 @@ func TestRetryRunMapsTheEnginesAnswers(t *testing.T) {
 			details: []fieldError{{"max_steps", "max_steps: 40 of 40 used"}, {"max_cost_usd", "max_cost_usd: $2.00 of $2.00 used"}}},
 		{name: "a refusal inside a wrapped error", err: fmt.Errorf("retry: %w", &engine.RetryError{Code: "retry_limit", Message: "run was retried 5 times"}),
 			status: http.StatusConflict, code: "retry_limit", message: "run was retried 5 times", noDetail: true},
+		{name: "a project at its budget", err: fmt.Errorf("retry: %w", &project.BudgetError{ProjectID: "pr-1", ProjectName: "Playground", Window: project.WindowDay,
+			CapMicros: 5_000_000, SpendMicros: 5_250_000, WindowEnd: time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)}),
+			status: http.StatusTooManyRequests, code: "project_budget_reached",
+			message:    "project Playground has reached its daily budget ($5.00); new runs are refused until 2026-10-18T00:00:00Z",
+			budgetBody: map[string]any{"project_id": "pr-1", "window": "day", "max_cost_usd": 5.0, "spent_usd": 5.25, "until": "2026-10-18T00:00:00Z"}},
 		{name: "invalid limits", err: &engine.ValidationError{Messages: []string{"limits.max_steps: must not be negative", "limits.max_cost_usd: must not be negative"}},
 			status: http.StatusUnprocessableEntity, code: "validation_failed", message: "invalid limits",
 			details: []fieldError{{"limits.max_steps", "must not be negative"}, {"limits.max_cost_usd", "must not be negative"}}},
@@ -257,11 +271,17 @@ func TestRetryRunMapsTheEnginesAnswers(t *testing.T) {
 			if e.Code != tc.code || e.Message != tc.message {
 				t.Fatalf("error = %s %q", e.Code, e.Message)
 			}
-			if tc.noDetail {
+			switch {
+			case tc.noDetail:
 				if len(e.Details) != 0 {
 					t.Fatalf("details = %s", e.Details)
 				}
-			} else {
+			case tc.budgetBody != nil:
+				var got map[string]any
+				if err := json.Unmarshal(e.Details, &got); err != nil || fmt.Sprint(got) != fmt.Sprint(tc.budgetBody) {
+					t.Fatalf("details = %s (%v), want %v", e.Details, err, tc.budgetBody)
+				}
+			default:
 				var got []fieldError
 				if err := json.Unmarshal(e.Details, &got); err != nil || !slices.Equal(got, tc.details) {
 					t.Fatalf("details = %s (%v), want %v", e.Details, err, tc.details)

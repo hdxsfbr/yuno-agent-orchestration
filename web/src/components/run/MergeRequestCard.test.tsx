@@ -138,8 +138,6 @@ describe("Merge", () => {
   });
 
   it.each<[string, Partial<MergeRequest>, string]>([
-    ["merged", { state: "merged", closed_at: "2026-10-15T11:00:00Z" }, "The request is already merged."],
-    ["closed", { state: "closed", closed_at: "2026-10-15T11:00:00Z" }, "The request is already closed."],
     ["pending", { ci_status: "pending" }, "The pipeline is still running."],
     ["failed", { ci_status: "failed" }, "The pipeline failed. Merge on GitLab to override."],
     ["failed on GitHub", { ci_status: "failed", provider: "github" }, "The pipeline failed. Merge on GitHub to override."],
@@ -216,6 +214,56 @@ describe("Merge", () => {
     fireEvent.click(merge());
     fireEvent.click((await dialog()).getByRole("button", { name: "Merge" }));
     await waitFor(() => expect(card().queryByRole("alert")).toBeNull());
+  });
+});
+
+describe("a merged or closed request", () => {
+  const closed_at = "2026-10-15T11:00:00Z";
+
+  it.each<[MergeRequestState, string]>([
+    ["merged", "Merged"],
+    ["closed", "Closed"],
+  ])("shows a %s request's state and when it ended, and offers neither Merge nor Sync", (state, label) => {
+    const { card } = renderCard(mergeRequest({ state, closed_at }));
+    expect(card().getByText(label)).not.toBeNull();
+    expect(card().getByText(formatDateTime(closed_at))).not.toBeNull();
+    expect(card().queryByRole("button", { name: "Merge" })).toBeNull();
+    expect(card().queryByRole("button", { name: "Sync" })).toBeNull();
+    expect(card().queryByRole("button")).toBeNull();
+  });
+
+  it("still links the request and names its branches", () => {
+    const { card } = renderCard(mergeRequest({ state: "merged", closed_at }));
+    expect(card().getByRole("link", { name: "Merge request !12" })).not.toBeNull();
+    expect(card().getByText("yuno/0123456789ab → main")).not.toBeNull();
+  });
+
+  it("falls back to the time of the last update when the provider gave no end time", () => {
+    const { card } = renderCard(mergeRequest({ state: "closed", closed_at: undefined, updated_at: "2026-10-15T10:30:00Z" }));
+    expect(card().getByText(formatDateTime("2026-10-15T10:30:00Z"))).not.toBeNull();
+    expect(card().queryByRole("button")).toBeNull();
+  });
+
+  it("loses the buttons when the record it shows turns merged, and an open Merge dialog with them", async () => {
+    const merged = mergeRequest({ state: "merged", closed_at, merged_by: "operator" });
+    const { rerender } = renderCard();
+    fireEvent.click(merge());
+    await dialog();
+    rerender(
+      <QueryClientProvider client={new QueryClient()}>
+        <MergeRequestCard mr={merged} onChange={onChange} />
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Merge" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Sync" })).toBeNull();
+    expect(screen.getByText("Merged")).not.toBeNull();
+  });
+
+  it("keeps Merge and Sync on an open request", () => {
+    const { card } = renderCard(mergeRequest({ state: "open" }));
+    expect(card().getByRole("button", { name: "Merge" })).not.toBeNull();
+    expect(card().getByRole("button", { name: "Sync" })).not.toBeNull();
   });
 });
 

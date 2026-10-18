@@ -9,14 +9,12 @@ import { Loading, QueryError } from "../QueryState";
 
 /** How many runs the card lists. */
 const SHOWN = 10;
-/** The runs list has no project filter, so the newest runs overall are read and the project's picked out of them. */
-const SCANNED = 200;
 
 /** The project's newest runs, newest first. */
 export default function ProjectRuns({ projectId }: { projectId: string }) {
   const q = useQuery({
     queryKey: projectRunsKey(projectId),
-    queryFn: async () => (await listRuns({ limit: SCANNED })).filter((r) => r.project_id === projectId).slice(0, SHOWN),
+    queryFn: () => listRuns({ project_id: projectId, limit: SHOWN }),
   });
   const runs = q.data ?? [];
   return (

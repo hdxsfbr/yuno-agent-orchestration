@@ -301,6 +301,21 @@ describe("RunDetailPage project runs", () => {
     expect(screen.getByRole("region", { name: "Run summary" }).nextElementSibling).toBe(screen.getByRole("region", { name: "Merge request" }));
   });
 
+  it("draws the card from the run in the trace on the first paint, without looking the record up", async () => {
+    trace = { ...trace, run: run({ merge_request: mergeRequest({ run_id: RUN, number: 9, title: "Add src" }) }), tool_calls: [mrCall()] };
+    requestsForRun = [mergeRequest({ run_id: RUN, number: 99 })];
+    renderPage();
+    // the card is there as soon as the run is: no wait for a lookup, and the one a lookup would give is not the one shown
+    expect(await screen.findByRole("link", { name: "Merge request !9" })).not.toBeNull();
+    await screen.findByText("Live");
+    // another executed open_merge_request call arrives; the event after it shows it was handled
+    send(7, "tool_call", { tool_call: mrCall({ id: "t-mr2", tool_use_id: "u2" }) });
+    send(8, "run.status", { run: run({ step_count: 4 }) });
+    await waitFor(() => expect(within(screen.getByRole("region", { name: "Run summary" })).getByText("4")).not.toBeNull());
+    expect(screen.queryByRole("link", { name: "Merge request !99" })).toBeNull();
+    expect(calls.filter((c) => c.url.startsWith("/api/merge-requests?"))).toHaveLength(0);
+  });
+
   it("calls a GitHub request a pull request", async () => {
     trace = {
       ...trace,
@@ -333,7 +348,7 @@ describe("RunDetailPage project runs", () => {
     expect(screen.queryByRole("region", { name: "Merge request" })).toBeNull();
     send(7, "tool_call", { tool_call: mrCall() });
     expect(await screen.findByRole("link", { name: "Merge request !7" })).not.toBeNull();
-    expect(calls.some((c) => c.url === `/api/merge-requests?run_id=${RUN}&limit=1`)).toBe(true);
+    expect(calls.filter((c) => c.url === `/api/merge-requests?run_id=${RUN}&limit=1`)).toHaveLength(1);
   });
 
   it("keeps the card when a later run.status event carries the run without its record", async () => {

@@ -65,6 +65,8 @@ export default function RetryDialog({ run, refusal, repeatsSideEffects = false, 
   const labelOf = (key: string) => RETRY_LIMIT_FIELDS.find((f) => f.key === key)?.label ?? key;
   const errors = (key: string) => [...errorsFor(clientErrors, key), ...errorsFor(serverErrors, key), ...errorsFor(serverErrors, `limits.${key}`)];
   const used = Object.entries(exhausted);
+  // The loop visits of the step the run stopped at have a field only when they are what is used up.
+  const fields = RETRY_LIMIT_FIELDS.filter((spec) => spec.key !== "max_loop_visits" || spec.key in exhausted);
 
   return (
     <Modal title="Retry run" onClose={retry.isPending ? () => undefined : onClose}>
@@ -81,15 +83,15 @@ export default function RetryDialog({ run, refusal, repeatsSideEffects = false, 
             </ul>
           </div>
         ) : null}
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">Raise the limits that are used up to retry from where the run stopped.</p>
-        <div className="grid gap-4 sm:grid-cols-3">
-          {RETRY_LIMIT_FIELDS.map((spec) => (
+        <p className="text-sm text-zinc-600 dark:text-zinc-400">Raise the limits that are used up to retry from where the run stopped. A field left empty keeps its current value.</p>
+        <div className={`grid gap-4 ${fields.length > 3 ? "sm:grid-cols-2" : "sm:grid-cols-3"}`}>
+          {fields.map((spec) => (
             <NumberField
               key={spec.key}
               label={spec.label}
               required={spec.key in exhausted}
               value={draft[spec.key]}
-              placeholder={spec.fallback}
+              placeholder="Unchanged"
               onChange={(v) => setDraft((d) => ({ ...d, [spec.key]: v }))}
               errors={errors(spec.key)}
             />

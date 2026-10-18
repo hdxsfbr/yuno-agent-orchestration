@@ -131,7 +131,7 @@ func TestOpenAPIConformance(t *testing.T) {
 	steps = append(steps, projectConformanceSteps(t)...)
 	steps = append(steps, projectWave8ConformanceSteps(t)...)
 	steps = append(steps, mergeRequestConformanceSteps(t)...)
-	steps = append(steps, retryConformanceSteps(t)...)
+	steps = append(steps, retryConformanceSteps(t, fe)...)
 	var agentID string
 	for _, st := range steps {
 		code, body := checkConformance(t, router, ts.URL, st.method, st.path, st.body, st.want < 300)
@@ -175,6 +175,8 @@ func projectConformanceSteps(t *testing.T) []conformanceStep {
 		{http.MethodGet, "/api/projects/" + p.ID, "", http.StatusOK},
 		{http.MethodGet, "/api/projects/no-such-project", "", http.StatusNotFound},
 		{http.MethodGet, "/api/runs/" + run.ID, "", http.StatusOK},
+		{http.MethodGet, "/api/runs?project_id=" + p.ID + "&limit=5", "", http.StatusOK},
+		{http.MethodGet, "/api/runs?project_id=no-such-project", "", http.StatusOK},
 		{http.MethodPost, "/api/projects", `{"name":"conf-new-` + sfx + `",` + repo + `,"provider":"","default_branch":"main",
 			"sandbox_network":true,"description":"d","token":"` + acceptedTokenPrefix + sfx + `"}`, http.StatusCreated},
 		{http.MethodPost, "/api/projects", `{"name":"",` + repo + `}`, http.StatusUnprocessableEntity},
@@ -196,6 +198,23 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// propsOf are a schema's properties, those of its allOf members included.
+	var propsOf func(*openapi3.SchemaRef) map[string]bool
+	propsOf = func(ref *openapi3.SchemaRef) map[string]bool {
+		out := map[string]bool{}
+		if ref == nil || ref.Value == nil {
+			return out
+		}
+		for name := range ref.Value.Properties {
+			out[name] = true
+		}
+		for _, member := range ref.Value.AllOf {
+			for name := range propsOf(member) {
+				out[name] = true
+			}
+		}
+		return out
+	}
 	for schema, props := range map[string][]string{
 		"Approval":            {"conversation_id", "reported_at"},
 		"Status":              {"scheduler"},
@@ -204,21 +223,33 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 		// DESIGN 5.15 (wave 5).
 		"ToolCall": {"conversation_id"},
 		"Tool":     {"chat"},
-		"Run":      {"reported_at", "toolchain", "project_id", "project"},
+		"Run":      {"reported_at", "toolchain", "project_id", "project", "retries", "merge_request"},
 		"Workflow": {"from_template"},
 		// DESIGN 5.17 (wave 7).
 		"ProjectSettings": {"name", "repo_url", "provider", "default_branch", "sandbox_network"},
 		"ProjectLastRun":  {"id", "status", "toolchain", "created_at", "finished_at"},
-		"ProjectInput":    {"name", "repo_url", "provider", "default_branch", "sandbox_network", "description", "token"},
-		"ProjectCheck":    {"ok", "message", "default_branch", "branch_exists", "can_push", "checked_at"},
+		// DESIGN 5.18 and 5.19 add the instructions and the two caps to the input, and the
+		// spend to what a project returns.
+		"ProjectInput": {"name", "repo_url", "provider", "default_branch", "sandbox_network", "description", "token",
+			"instructions", "max_cost_usd_per_day", "max_cost_usd_per_month", "spend"},
+		"ProjectCheck": {"ok", "message", "default_branch", "branch_exists", "can_push", "checked_at"},
+		// DESIGN 5.18 to 5.21 (wave 8).
+		"Project":      {"instructions", "max_cost_usd_per_day", "max_cost_usd_per_month", "spend"},
+		"ProjectSpend": {"day_usd", "month_usd", "day_until", "month_until"},
+		"ProjectFact":  {"id", "project_id", "key", "value", "agent_id", "agent_name", "source_run_id", "created_at", "updated_at", "expires_at"},
+		"MergeRequest": {"id", "project_id", "run_id", "provider", "number", "url", "source_branch", "target_branch", "title", "state",
+			"ci_status", "head_sha", "unresolved_threads", "last_sync_error", "synced_at", "reported_state", "merged_by", "created_at",
+			"updated_at", "closed_at"},
+		"RunRetry": {"limits"},
 	} {
 		ref := doc.Components.Schemas[schema]
 		if ref == nil || ref.Value == nil {
 			t.Errorf("schema %s is missing", schema)
 			continue
 		}
+		documented := propsOf(ref)
 		for _, p := range props {
-			if ref.Value.Properties[p] == nil {
+			if !documented[p] {
 				t.Errorf("schema %s does not document %s", schema, p)
 			}
 		}
@@ -234,6 +265,9 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 	if events == nil || events.Get == nil || !strings.Contains(events.Get.Description, "conversation.message") ||
 		!strings.Contains(events.Get.Description, "conversation.tool_call") {
 		t.Error("GET /api/events does not document the conversation events")
+	}
+	if events == nil || events.Get == nil || !strings.Contains(events.Get.Description, "run.retry") {
+		t.Error("GET /api/events does not document run.retry")
 	}
 	if p := doc.Paths.Find("/api/conversations/{id}/tool-calls"); p == nil || p.Get == nil {
 		t.Error("GET /api/conversations/{id}/tool-calls is not documented")

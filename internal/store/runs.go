@@ -127,12 +127,15 @@ func RetryRun(ctx context.Context, q Querier, id string, limits *Limits, now tim
 	return r, err
 }
 
-// ListRuns returns the newest runs first, optionally filtered by status.
-func ListRuns(ctx context.Context, q Querier, status string, limit int) ([]Run, error) {
+// ListRuns returns the newest runs first, optionally filtered by status and by the
+// project the run works on (runs.project_id, which a deleted project's runs keep); an
+// empty filter matches every run.
+func ListRuns(ctx context.Context, q Querier, status, projectID string, limit int) ([]Run, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE ($1 = '' OR status = $1) ORDER BY created_at DESC LIMIT $2`, status, limit)
+	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE ($1 = '' OR status = $1) AND ($2 = '' OR project_id = $2)
+		ORDER BY created_at DESC LIMIT $3`, status, projectID, limit)
 	if err != nil {
 		return nil, err
 	}

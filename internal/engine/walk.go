@@ -482,7 +482,7 @@ func (w *walk) setCurrent(ctx context.Context, node string) {
 }
 
 func (w *walk) refresh(ctx context.Context) {
-	if run, err := store.GetRun(ctx, w.e.deps.Pool, w.run.ID); err == nil {
+	if run, err := w.e.readRun(ctx, w.run.ID); err == nil {
 		w.run = run
 	} else if !errors.Is(err, context.Canceled) {
 		w.e.log.Warn("re-read run failed", "run_id", w.run.ID, "error", err)

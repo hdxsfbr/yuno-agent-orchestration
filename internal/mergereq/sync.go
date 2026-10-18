@@ -148,6 +148,36 @@ func (s *Sync) MarkMerged(ctx context.Context, id, by string) (*store.MergeReque
 	return s.reported(ctx, cur)
 }
 
+// ConfirmMerged follows a 2xx from the provider's merge call (rule 5). The request is read
+// once, and the record becomes merged (MarkMerged) only when the provider reports it
+// merged: a provider that accepted the call but still reports the request open (GitLab
+// merges asynchronously, or when the pipeline passes), or in any other state, leaves the
+// record open with last_sync_error saying so, and so does a status that cannot be read;
+// the loop settles the record once the provider's state is final. The record returned is
+// the one in the database afterwards; the error is a database one.
+func (s *Sync) ConfirmMerged(ctx context.Context, rec *store.MergeRequest, pc *project.Config, by string) (*store.MergeRequest, error) {
+	timeout := s.Timeout
+	if timeout <= 0 {
+		timeout = SyncTimeout
+	}
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	st, err := tools.ProviderFor(pc, s.Client).Status(pctx, rec.Number)
+	cancel()
+	var text string
+	switch {
+	case err == nil && st.State == store.MergeRequestMerged:
+		return s.MarkMerged(ctx, rec.ID, by)
+	case err == nil:
+		text = "the provider accepted the merge but reports the request as " + st.State
+	case ctx.Err() != nil:
+		return rec, ctx.Err()
+	default:
+		text = "the provider accepted the merge but the request could not be read back: " + err.Error()
+	}
+	cur, _, err := s.recordFailure(ctx, rec, s.now(), text, pc.Token)
+	return cur, err
+}
+
 // Backfill makes records of the merge requests opened before records existed (rule 7):
 // once per start, idempotent. It logs what it did; the caller may ignore the results.
 func (s *Sync) Backfill(ctx context.Context) (int64, error) {
@@ -310,9 +340,13 @@ func ReportText(rec *store.MergeRequest) string {
 	return fmt.Sprintf("[platform] Run %s: %s %s.", rec.RunID, what, outcome)
 }
 
-// cleanError is a provider's or resolver's text as last_sync_error keeps it: the token
-// and every credential-shaped value redacted, the first line only, capped.
+// cleanError is a provider's or resolver's text as last_sync_error keeps it: valid UTF-8
+// without NUL bytes (the column refuses both, and a write that fails would end every
+// pass at this record), the token and every credential-shaped value redacted, the first
+// line only, capped at errorMax bytes on a rune boundary.
 func cleanError(text, token string) string {
+	text = strings.ToValidUTF8(text, "")
+	text = strings.ReplaceAll(text, "\x00", "")
 	if token != "" {
 		text = strings.ReplaceAll(text, token, obs.Redacted)
 	}
@@ -322,10 +356,11 @@ func cleanError(text, token string) string {
 	}
 	text = strings.TrimSpace(text)
 	if len(text) > errorMax {
-		text = text[:errorMax]
-		for !utf8.ValidString(text) {
-			text = text[:len(text)-1]
+		cut := errorMax
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut--
 		}
+		text = text[:cut]
 	}
 	return text
 }

@@ -607,7 +607,7 @@ func (v *visit) startTurn(ctx context.Context, message string) *outcome {
 
 // preflight re-reads the run and refuses to start a turn past a limit.
 func (v *visit) preflight(ctx context.Context) *outcome {
-	if run, err := store.GetRun(ctx, v.e.deps.Pool, v.run.ID); err == nil {
+	if run, err := v.e.readRun(ctx, v.run.ID); err == nil {
 		v.run = run
 	}
 	if viol := checkLimits(v.limitState()); viol != nil {
@@ -1358,7 +1358,7 @@ func (v *visit) closeAcceptance() (json.RawMessage, bool) {
 }
 
 func (v *visit) refreshRun(ctx context.Context) {
-	if run, err := store.GetRun(ctx, v.e.deps.Pool, v.run.ID); err == nil {
+	if run, err := v.e.readRun(ctx, v.run.ID); err == nil {
 		v.run = run
 	}
 }

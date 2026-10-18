@@ -43,6 +43,11 @@ type Engine struct {
 	bg       sync.WaitGroup // side effects executed after a late approval
 	reports  sync.WaitGroup // report-back sends in flight (report.go)
 
+	// unsavedStarts holds, per run id, the started_at stamp whose write failed in runRun:
+	// the engine's re-reads of the run put it back (readRun), so the attempt still has
+	// the time limit it was claimed with.
+	unsavedStarts sync.Map
+
 	// execute runs one claimed run; tests replace it to observe claims.
 	execute func(ctx context.Context, run *store.Run)
 

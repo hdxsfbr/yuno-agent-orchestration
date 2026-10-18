@@ -9,14 +9,18 @@ const RETRYABLE = new Set<string>(["failed", "timed_out", "cancelled"]);
 /** A run that ended unsuccessfully and knows the step it stopped at. */
 export const canRetry = (run: Pick<Run, "status" | "current_node">): boolean => RETRYABLE.has(run.status) && !!run.current_node;
 
-/** The limits a run is counted against: the only ones a retry can find used up. */
-export const RETRY_LIMIT_KEYS = ["max_steps", "max_tool_calls", "max_cost_usd"] as const;
+/**
+ * The limits a retry can find used up, in the order the dialog lists them: the three the run is
+ * counted against, and the loop visits of the step it stopped at (shown only when that is the one
+ * that is used up).
+ */
+export const RETRY_LIMIT_KEYS = ["max_steps", "max_cost_usd", "max_tool_calls", "max_loop_visits"] as const;
 export type RetryLimitKey = (typeof RETRY_LIMIT_KEYS)[number];
 
 type RetrySpec = Extract<(typeof LIMIT_FIELDS)[number], { key: RetryLimitKey }>;
 
-/** The agent form's definitions of those three limits (label, default, whole number or not), in its order. */
-export const RETRY_LIMIT_FIELDS: readonly RetrySpec[] = LIMIT_FIELDS.filter((f): f is RetrySpec => (RETRY_LIMIT_KEYS as readonly string[]).includes(f.key));
+/** The agent form's definitions of those limits (label, whole number or not), in the dialog's order. */
+export const RETRY_LIMIT_FIELDS: readonly RetrySpec[] = RETRY_LIMIT_KEYS.flatMap((key) => LIMIT_FIELDS.filter((f): f is RetrySpec => f.key === key));
 
 /**
  * What a 409 `limits_exhausted` names: for each exhausted limit the server's sentence
@@ -44,7 +48,7 @@ function capIn(message: string): string {
 
 /** The fields' starting text: the run's own limits, or else the cap the server's sentence names. */
 export function startingDraft(limits: Limits, exhausted: Record<string, string[]>): RetryDraft {
-  const draft = { max_steps: "", max_tool_calls: "", max_cost_usd: "" } as RetryDraft;
+  const draft = { max_steps: "", max_cost_usd: "", max_tool_calls: "", max_loop_visits: "" } as RetryDraft;
   for (const key of RETRY_LIMIT_KEYS) {
     const own = limits[key];
     draft[key] = own ? String(own) : (exhausted[key]?.map(capIn).find(Boolean) ?? "");
@@ -87,8 +91,9 @@ export function validateRetry(draft: RetryDraft, start: RetryDraft, exhausted: R
 }
 
 /**
- * The limits to send. They replace the run's, so everything the run already had stays and the
- * three counted limits take what was typed; one left empty is dropped (the platform default).
+ * The limits to send. Everything the run already had stays and the fields take what was typed;
+ * one left empty is left out, and the server keeps the run's current value for a limit the body
+ * does not name.
  */
 export function retryLimits(limits: Limits, draft: RetryDraft): Limits {
   const out: Limits = { ...limits };

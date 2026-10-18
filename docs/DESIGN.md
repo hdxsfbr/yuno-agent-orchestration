@@ -1846,8 +1846,11 @@ Rules:
    `none` (409 `merge_request_ci_not_passed`: `the pipeline is <ci_status>; merge on
    the provider to override`); it calls GitLab `PUT merge_requests/<iid>/merge` with
    `should_remove_source_branch: true` or GitHub `PUT pulls/<n>/merge` with
-   `merge_method: merge`. On 2xx the record becomes merged with `closed_at` now and
-   `merged_by` `operator`, then rule 4 reports. 405, 406, 409 and 422 from the provider
+   `merge_method: merge`. After a 2xx the request's status is read back once: only when
+   the provider reports `merged` does the record become merged with `closed_at` now and
+   `merged_by` `operator`, then rule 4 reports; otherwise the record stays open with
+   `last_sync_error` `the provider accepted the merge but reports the request as
+   <state>` and the answer is 200 with the record (the next sync settles it). 405, 406, 409 and 422 from the provider
    answer 409 `merge_request_not_mergeable` with the first line of the provider's
    message; other failures follow 5.5 rule 4 (5xx and timeouts answer 502
    `provider_unavailable` after one re-sync, since the merge may have landed). There
@@ -1875,7 +1878,11 @@ Rules:
    the link, Sync, and Merge with a confirmation ("Merge !<n> into <target branch>?");
    once final it shows Merged or Closed with the time.
 
-As built (wave 8): the record is written through the side effect runner's transaction
+As built (wave 8): a later push replaces the branch's tree with the run's checkout
+(5.16 rule 10), so a commit someone else made on that branch in between is reverted by
+it; 5.22 clones the branch instead. A 404 from the provider closes the record even when
+it is the token that lost access, and records older than 14 days are refreshed only by
+Sync on the page. The record is written through the side effect runner's transaction
 (`RunSideEffectTx` hands the tool the transaction as `Call.Tx`; a failing tool rolls the
 key back instead of deleting it, which is the same outcome). Two calls in one run take
 a per-run advisory lock before the lookup, so the second sees the first's record. A
@@ -1954,7 +1961,10 @@ Rules:
    the limits that will apply, and a counter `>=` its cap refuses with 409
    `limits_exhausted` and one detail per exhausted limit (`max_steps: 40 of 40 used`);
    the body's `limits` replaces the run's limits (the snapshot's run overrides) before
-   the check, so raising a cap is how a run that died on it is retried. The time limit
+   the check, so raising a cap is how a run that died on it is retried; the visits of
+   `current_node` are compared with `max_loop_visits` the same way (`max_loop_visits:
+   3 of 3 used`), since the resumed visit would be refused at the node's entry
+   otherwise. The time limit
    restarts: `started_at` is set to now and `paused_total_ms` to 0 when the run is next
    claimed; the trace keeps every attempt's root span with its own start. The project
    budget (5.19 rule 3) is checked as for a trigger.
