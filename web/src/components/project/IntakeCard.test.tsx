@@ -37,12 +37,14 @@ describe("the settings line", () => {
     const { card } = renderCard(project({ intake: intake({ enabled: false }) }));
     expect(card().getByText("Off")).not.toBeNull();
     expect(pollButton().disabled).toBe(true);
+    expect(pollButton().title).toBe("Intake is off");
   });
 
   it("says On with the label and the workflow's name", () => {
     const { card } = renderCard(project({ intake: intake({ label: "robot", workflow_name: "Dev pipeline (ours)" }) }));
     expect(card().getByText("On: label robot, workflow Dev pipeline (ours)")).not.toBeNull();
     expect(pollButton().disabled).toBe(false);
+    expect(pollButton().title).toBe("");
   });
 
   it("says there is no workflow when the one it ran was deleted", () => {
@@ -56,6 +58,7 @@ describe("the settings line", () => {
     expect(card().getByText("Off")).not.toBeNull();
     expect(card().getByText("Not polled yet")).not.toBeNull();
     expect(pollButton().disabled).toBe(true);
+    expect(pollButton().title).toBe("Intake is off");
   });
 });
 
@@ -89,13 +92,33 @@ describe("the last poll", () => {
 });
 
 describe("Poll now", () => {
+  it("has its status region in the page, empty, before any poll", () => {
+    const { card } = renderCard(project({ intake: intake() }));
+    expect(card().getByRole("status").textContent).toBe("");
+  });
+
   it("polls the project with POST and no body, and says how many runs it started and how many finished ones it reported", async () => {
     api.on("POST", "/api/projects/p1/intake/poll", () => ({ taken: 3, closed: 0 }));
     const { card } = renderCard(project({ intake: intake() }));
+    const region = card().getByRole("status");
     fireEvent.click(pollButton());
-    expect((await card().findByRole("status")).textContent).toBe("Took 3, closed 0");
+    await waitFor(() => expect(region.textContent).toBe("Started 3 runs, reported 0 finished"));
+    // The region that was in the page before the answer is the one that holds it.
+    expect(card().getByRole("status")).toBe(region);
     expect(api.made("POST", "/api/projects/p1/intake/poll")).toHaveLength(1);
     expect(api.made("POST", "/api/projects/p1/intake/poll")[0].body).toBeUndefined();
+  });
+
+  it.each([
+    [1, 1, "Started 1 run, reported 1 finished"],
+    [0, 1, "Started 0 runs, reported 1 finished"],
+    [2, 0, "Started 2 runs, reported 0 finished"],
+    [0, 0, "Started 0 runs, reported 0 finished"],
+  ])("tells %i taken and %i closed as %s", async (taken, closed, text) => {
+    api.on("POST", "/api/projects/p1/intake/poll", () => ({ taken, closed }));
+    const { card } = renderCard(project({ intake: intake() }));
+    fireEvent.click(pollButton());
+    await waitFor(() => expect(card().getByRole("status").textContent).toBe(text));
   });
 
   it("is busy while the poll runs", async () => {
@@ -105,6 +128,7 @@ describe("Poll now", () => {
     fireEvent.click(pollButton());
     await waitFor(() => expect(pollButton().textContent).toBe("Polling…"));
     expect(pollButton().disabled).toBe(true);
+    expect(pollButton().title).toBe("");
     release({ taken: 0, closed: 0 });
     await waitFor(() => expect(pollButton().textContent).toBe("Poll now"));
   });
@@ -123,8 +147,9 @@ describe("Poll now", () => {
     const { card } = renderCard(project({ intake: intake() }));
     fireEvent.click(pollButton());
     expect((await card().findByRole("alert")).textContent).toBe("issue intake is off for this project");
-    expect(card().queryByRole("status")).toBeNull();
+    expect(card().getByRole("status").textContent).toBe("");
     expect(pollButton().disabled).toBe(false);
+    expect(pollButton().title).toBe("");
   });
 
   it("says what failed for any other error", async () => {
@@ -141,10 +166,10 @@ describe("Poll now", () => {
     fireEvent.click(pollButton());
     await card().findByRole("alert");
     fireEvent.click(pollButton());
-    expect((await card().findByRole("status")).textContent).toBe("Took 1, closed 2");
+    await waitFor(() => expect(card().getByRole("status").textContent).toBe("Started 1 run, reported 2 finished"));
     expect(card().queryByRole("alert")).toBeNull();
     answers = [() => ({ taken: 0, closed: 0 })];
     fireEvent.click(pollButton());
-    await waitFor(() => expect(card().getByRole("status").textContent).toBe("Took 0, closed 0"));
+    await waitFor(() => expect(card().getByRole("status").textContent).toBe("Started 0 runs, reported 0 finished"));
   });
 });

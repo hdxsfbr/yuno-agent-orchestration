@@ -539,6 +539,31 @@ func TestIterationRule5EveryVisitIsTold(t *testing.T) {
 	}
 }
 
+// DESIGN 5.22 rule 1, review L1: an id with a control character is an unknown id like any
+// other (Postgres refuses a NUL in a parameter, which was a 500): the same text, for a
+// trigger and for the function the schedule handlers call, and nothing is queued.
+func TestIterationRule1ControlCharacterIsAnUnknownID(t *testing.T) {
+	f := newIterFixture(t)
+	env, ctx := f.env, context.Background()
+	before := countRuns(t, env)
+	for _, id := range []string{"a\x00b", "\x00", "a\x07b", "a\nb", "a\x7fb"} {
+		want := "merge_request_id: no merge request with id " + id
+		req := f.request()
+		req.MergeRequestID = id
+		_, err := env.e.Trigger(ctx, req)
+		if msgs := refusal(t, err); len(msgs) != 1 || msgs[0] != want {
+			t.Errorf("trigger with %q: %q, want %q", id, msgs, want)
+		}
+		mr, msgs, err := MergeRequestForRequest(ctx, env.pool, id, f.proj)
+		if err != nil || mr != nil || len(msgs) != 1 || msgs[0] != want {
+			t.Errorf("MergeRequestForRequest(%q) = %v %q %v, want %q", id, mr, msgs, err, want)
+		}
+	}
+	if n := countRuns(t, env); n != before {
+		t.Errorf("%d runs were queued", n-before)
+	}
+}
+
 // T5.22.6, DESIGN 5.22 rule 3 (D-044): a request that turns merged or closed after the
 // run was queued is not checked again at clone time: the clone proceeds from the branch
 // and the agents are told about it as before.
@@ -598,6 +623,50 @@ func TestIterationRetryRefusedWhileAnotherRunUpdatesTheRequest(t *testing.T) {
 		if got, err := env.e.Retry(ctx, failed.ID, "tester", nil); err != nil || got.Status != store.RunQueued || got.Retries != 1 {
 			t.Fatalf("%s: retry once the request is free: %+v %v", provider, got, err)
 		}
+	}
+}
+
+// DESIGN 5.22 rule 1, review L3: the retry of a run that names a request is refused while
+// the run that opened the request is live (it may still push to the branch), with the same
+// text, the run unchanged; it goes through once the opener ends. A run that names a request
+// whose record is gone is not refused.
+func TestIterationRetryOfAnUpdatingRunRefusedWhileTheOpeningRunIsLive(t *testing.T) {
+	for _, provider := range []string{"gitlab", "github"} {
+		f := newIterFixture(t)
+		env, ctx := f.env, context.Background()
+		label := "merge request !4"
+		if provider == "github" {
+			label = "pull request #4"
+			if _, err := env.pool.Exec(ctx, `UPDATE merge_requests SET provider='github' WHERE id=$1`, f.rec.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		failed := f.failedRun("merge_request_id='" + f.rec.ID + "'")
+		for _, status := range []string{store.RunQueued, store.RunRunning, store.RunWaitingApproval} {
+			f.setRunStatus(f.opener.ID, status)
+			_, err := env.e.Retry(ctx, failed.ID, "tester", nil)
+			wantRetryError(t, err, RetryNotRetryable, label+" is being updated by run "+f.opener.ID)
+			unchanged(t, failed, env.run(failed.ID))
+			if n := len(env.runEvents(failed.ID, "run.retry")); n != 0 {
+				t.Fatalf("%s, opener %s: a refused retry wrote %d retry events", provider, status, n)
+			}
+		}
+		f.setRunStatus(f.opener.ID, store.RunFailed)
+		if got, err := env.e.Retry(ctx, failed.ID, "tester", nil); err != nil || got.Status != store.RunQueued || got.Retries != 1 {
+			t.Fatalf("%s: retry once the opener ended: %+v %v", provider, got, err)
+		}
+	}
+
+	// The record is gone (the column is set null with it): the run names nothing to check.
+	f := newIterFixture(t)
+	env, ctx := f.env, context.Background()
+	failed := f.failedRun("merge_request_id='" + f.rec.ID + "'")
+	f.setRunStatus(f.opener.ID, store.RunRunning)
+	if _, err := env.pool.Exec(ctx, `DELETE FROM merge_requests WHERE id=$1`, f.rec.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := env.e.Retry(ctx, failed.ID, "tester", nil); err != nil || got.Status != store.RunQueued {
+		t.Fatalf("retry with the record gone: %+v %v", got, err)
 	}
 }
 

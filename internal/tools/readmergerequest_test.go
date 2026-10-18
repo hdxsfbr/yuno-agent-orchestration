@@ -730,6 +730,41 @@ func TestReadMergeRequestFitsTheOutputCap(t *testing.T) {
 	}
 }
 
+// Review L1: under an output cap smaller than the fixed fields the fit loop used to cut the
+// halved description at a negative length and panic. At a 300-byte cap every description
+// length, the ones that halve through 4 and 2 bytes included, gives an answer whose block
+// is closed, with no thread and no description left when the fixed fields alone fill the
+// cap.
+func TestReadMergeRequestUnderACapSmallerThanTheFixedFields(t *testing.T) {
+	fx := newReadFx(t, project.ProviderGitLab)
+	run := fx.run(nil)
+	t0 := time.Date(2026, 10, 17, 9, 0, 0, 0, time.UTC)
+	threads := []jm{
+		glDiscussion("d1", glNote("fix this", "alice", t0, true, false, jm{"new_path": "a.go", "new_line": 1})),
+		glDiscussion("d2", glNote("and this", "bob", t0.Add(time.Minute), true, false, nil)),
+	}
+	for _, size := range []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 15, 16, 17, 31, 32, 100, 700, 8000} {
+		fx.scriptGitLab(5, glMR(jm{"description": strings.Repeat("d", size)}), threads, []jm{})
+		res := fx.callRun(fx.tool(300), run, `{"run_token":"r","number":"5"}`)
+		if res.IsError || !strings.HasSuffix(res.Text, readBlockClose) {
+			t.Fatalf("description of %d bytes: error %v, ends %q", size, res.IsError, res.Text[max(len(res.Text)-30, 0):])
+		}
+		out := readResult(t, res)
+		if len(*out.Threads) != 0 || out.ThreadsOmitted != 2 || out.UnresolvedCount == nil || *out.UnresolvedCount != 2 {
+			t.Fatalf("description of %d bytes: %d threads, omitted %d", size, len(*out.Threads), out.ThreadsOmitted)
+		}
+		if len(res.Text) > 300 && out.Description != "" {
+			t.Fatalf("description of %d bytes: %d bytes over the cap with a description of %d bytes left", size, len(res.Text), len(out.Description))
+		}
+	}
+	if got := cutWithEllipsis("abcdef", 2); got != readEllipsis {
+		t.Fatalf("a limit below the ellipsis cuts to %q, want the ellipsis alone", got)
+	}
+	if got := cutWithEllipsis("abcdef", -5); got != readEllipsis {
+		t.Fatalf("a negative limit cuts to %q, want the ellipsis alone", got)
+	}
+}
+
 // The provider layer: the typed refusal and the not found, apart from the tool.
 func TestRequestProviderDetailsAndThreads(t *testing.T) {
 	g, srv := newFakeGitLab(t)

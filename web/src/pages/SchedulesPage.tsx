@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { deleteSchedule, listWorkflows, updateSchedule, type Schedule } from "@/lib/api";
+import { ApiError, deleteSchedule, listWorkflows, updateSchedule, type Schedule } from "@/lib/api";
 import { formatDateTime, shortId } from "@/lib/format";
-import { KIND_LABEL, describeWhen, scheduleToInput } from "@/lib/schedule";
+import { KIND_LABEL, describeWhen, firstDetail, scheduleToInput } from "@/lib/schedule";
 import { useProjects } from "@/lib/useProjects";
 import { replaceSchedule, schedulesKey, useScheduleEvents, useSchedules } from "@/lib/useSchedules";
 import { Badge } from "@/components/Badge";
@@ -57,7 +57,7 @@ export default function SchedulesPage() {
 
       {toggle.error ? (
         <div className="mb-3">
-          <InlineError>Could not change the schedule: {errorText(toggle.error)}</InlineError>
+          <InlineError>Could not change the schedule: {(toggle.error instanceof ApiError && firstDetail(toggle.error.details)) || errorText(toggle.error)}</InlineError>
         </div>
       ) : null}
       {q.isLoading ? <Loading label="Loading schedules…" /> : null}

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"time"
@@ -43,9 +44,11 @@ type IssueRun struct {
 
 // ListUnreportedIssueRuns returns the runs with trigger issue that ended (succeeded,
 // failed, cancelled or timed out) and whose outcome was not posted on their issue yet
-// (reported_at is null), oldest first, at most limit (DESIGN 5.23 rule 5: the closer's
-// list; the channel report's queries filter on trigger = channel and never see these).
-// A row whose trigger_ref is not "<project id>#<n>" (written by hand) is left out.
+// (reported_at is null), newest finished_at first, at most limit (DESIGN 5.23 rule 5: the
+// closer's list; the channel report's queries filter on trigger = channel and never see
+// these). Newest first, so runs that can never be posted do not starve the newer ones
+// (review M1). A row whose trigger_ref is not "<project id>#<n>" (written by hand) is left
+// out.
 func ListUnreportedIssueRuns(ctx context.Context, q Querier, limit int) ([]IssueRun, error) {
 	return listUnreportedIssueRuns(ctx, q, "", limit)
 }
@@ -56,6 +59,14 @@ func ListUnreportedIssueRunsOfProject(ctx context.Context, q Querier, projectID 
 	return listUnreportedIssueRuns(ctx, q, projectID, limit)
 }
 
+// unreportedIssueRunsSQL is the closer's list. The trigger is written as a literal, not
+// bound, so the planner can use the partial index runs_issue_unreported_idx (migration
+// 0013), whose predicate it must prove from the query text (review L9); the order is the
+// index's.
+const unreportedIssueRunsSQL = `SELECT ` + runColumns + ` FROM runs WHERE trigger = 'issue' AND reported_at IS NULL
+	AND status IN ($1, $2, $3, $4) AND ($5 = '' OR starts_with(trigger_ref, $5))
+	ORDER BY finished_at DESC NULLS LAST, id LIMIT $6`
+
 func listUnreportedIssueRuns(ctx context.Context, q Querier, projectID string, limit int) ([]IssueRun, error) {
 	if limit <= 0 {
 		limit = 50
@@ -64,10 +75,7 @@ func listUnreportedIssueRuns(ctx context.Context, q Querier, projectID string, l
 	if projectID != "" {
 		prefix = projectID + "#"
 	}
-	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE trigger = $1 AND reported_at IS NULL
-		AND status IN ($2, $3, $4, $5) AND ($6 = '' OR starts_with(trigger_ref, $6))
-		ORDER BY created_at, id LIMIT $7`,
-		TriggerIssue, RunSucceeded, RunFailed, RunCancelled, RunTimedOut, prefix, limit)
+	rows, err := q.Query(ctx, unreportedIssueRunsSQL, RunSucceeded, RunFailed, RunCancelled, RunTimedOut, prefix, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +95,70 @@ func listUnreportedIssueRuns(ctx context.Context, q Querier, projectID string, l
 		out = append(out, IssueRun{Run: r, ProjectID: pid, Number: n})
 	}
 	return out, nil
+}
+
+// liveIssueRunSQL is the live-run lookup of an issue. The trigger is a literal for the
+// reason of unreportedIssueRunsSQL: the partial unique index runs_issue_live_idx has
+// trigger = 'issue' in its predicate, which a bound parameter cannot prove (review L9).
+// The status list is the index's own, word for word.
+const liveIssueRunSQL = `SELECT ` + runColumns + ` FROM runs WHERE trigger = 'issue' AND trigger_ref = $1
+	AND status IN ` + liveRunStatuses + ` LIMIT 1`
+
+// LiveIssueRun returns the live run (queued, running or waiting for an approval) of an
+// issue's trigger reference, "<project id>#<n>": the run runs_issue_live_idx allows at
+// most once per issue (DESIGN 5.23 rule 3), so there is no order to ask for. ErrNotFound
+// when none is live.
+func LiveIssueRun(ctx context.Context, q Querier, ref string) (*Run, error) {
+	rows, err := q.Query(ctx, liveIssueRunSQL, ref)
+	if err != nil {
+		return nil, err
+	}
+	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
+}
+
+// takenIssueRunSQL is the second half of TakenIssueRun: the newest ended run of the
+// reference whose outcome is not posted yet. Literal trigger, as above.
+const takenIssueRunSQL = `SELECT ` + runColumns + ` FROM runs WHERE trigger = 'issue' AND trigger_ref = $1
+	AND reported_at IS NULL AND status IN ($2, $3, $4, $5) ORDER BY finished_at DESC NULLS LAST, id LIMIT 1`
+
+// TakenIssueRun returns the run that has taken an issue (DESIGN 5.23 rule 3): the live
+// run of the reference, else the newest run that ended with reported_at still null, whose
+// outcome the closer owns and has not posted. A reference with neither has not been
+// taken (ErrNotFound): a run whose outcome is posted does not count, which is what lets
+// re-labelling an issue start a new run (rule 6). A finished run that counts as taken
+// stops the taker from creating a second run for an issue whose label swap never
+// succeeded (review H1).
+func TakenIssueRun(ctx context.Context, q Querier, ref string) (*Run, error) {
+	r, err := LiveIssueRun(ctx, q, ref)
+	if !errors.Is(err, ErrNotFound) {
+		return r, err
+	}
+	rows, err := q.Query(ctx, takenIssueRunSQL, ref, RunSucceeded, RunFailed, RunCancelled, RunTimedOut)
+	if err != nil {
+		return nil, err
+	}
+	r, err = pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
+}
+
+// LiveRunCostCeiling is how many live runs (queued, running or waiting for an approval)
+// the project has and the sum of the max_cost_usd limits they carry, in micro-USD: the most
+// those runs may still add to the project's spend, whatever each has spent so far (DESIGN
+// 5.23 rule 2 (a), review M2). runs.limits is the effective limits JSON of the run, with
+// max_cost_usd in USD; a run whose limits name none adds nothing. Runs of any trigger count,
+// whenever they were created.
+func LiveRunCostCeiling(ctx context.Context, q Querier, projectID string) (live int, ceilingMicros int64, err error) {
+	err = q.QueryRow(ctx, `SELECT count(*)::int,
+			COALESCE(sum(round(COALESCE((limits->>'max_cost_usd')::numeric, 0) * 1000000)), 0)::bigint
+		FROM runs WHERE project_id = $1 AND status IN `+liveRunStatuses, projectID).Scan(&live, &ceilingMicros)
+	return live, ceilingMicros, err
 }
 
 // SetRunReportedAt records that an ended run's outcome was posted where the work came

@@ -131,8 +131,11 @@ const projectColumns = `p.id, p.name, p.repo_url, p.provider, p.default_branch, 
 	p.intake_enabled, p.intake_label, p.intake_workflow_id, p.intake_polled_at, p.intake_last_error,
 	w.name AS intake_workflow_name`
 
-// projectFrom is the table projectColumns reads: the project and its intake workflow.
-const projectFrom = ` FROM projects p LEFT JOIN workflows w ON w.id = p.intake_workflow_id`
+// projectFrom is the table projectColumns reads: the project and its intake workflow. The
+// join leaves out a soft-deleted workflow, so a project whose workflow was deleted shows
+// no name for it (intake_workflow_id stays set: the API soft-deletes workflows, so the
+// column's set null never fires, and the loop finds the workflow gone, DESIGN 5.23 rule 2).
+const projectFrom = ` FROM projects p LEFT JOIN workflows w ON w.id = p.intake_workflow_id AND w.deleted_at IS NULL`
 
 // projectSelect is the statement every single-project read starts from; append a WHERE.
 const projectSelect = `SELECT ` + projectColumns + projectFrom

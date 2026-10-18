@@ -91,6 +91,19 @@ export function scheduleErrors(details: unknown): FieldErrors {
   return parseFieldErrors(details);
 }
 
+/**
+ * The message of the first entry of a 422 `details` list ("merge request !4 is merged"), which says more than the
+ * summary above it ("invalid schedule"); undefined when the details name none.
+ */
+export function firstDetail(details: unknown): string | undefined {
+  if (!Array.isArray(details)) return undefined;
+  for (const d of details) {
+    const message = d && typeof d === "object" ? (d as { message?: unknown }).message : undefined;
+    if (typeof message === "string" && message.trim() !== "") return message;
+  }
+  return undefined;
+}
+
 export type BuiltSchedule = { value?: ScheduleInput; errors: FieldErrors };
 
 /**

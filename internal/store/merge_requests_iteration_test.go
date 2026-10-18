@@ -98,9 +98,9 @@ func TestLiveRunForMergeRequest(t *testing.T) {
 	}
 }
 
-// DESIGN 5.23 rule 3 and 5.21 rule 3: LiveRunForTrigger is the lookup of a trigger
-// reference that skips the runs that ended.
-func TestLiveRunForTrigger(t *testing.T) {
+// DESIGN 5.23 rule 3 and 5.21 rule 3: LiveIssueRun is the lookup of an issue's trigger
+// reference that skips the runs that ended and the runs of another trigger.
+func TestLiveIssueRun(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
 	wf := w9Workflow(t, pool)
@@ -109,22 +109,25 @@ func TestLiveRunForTrigger(t *testing.T) {
 
 	for _, status := range liveStatuses {
 		w9SetStatus(t, pool, issue.ID, status)
-		if got, err := LiveRunForTrigger(ctx, pool, TriggerIssue, ref); err != nil || got.ID != issue.ID {
+		if got, err := LiveIssueRun(ctx, pool, ref); err != nil || got.ID != issue.ID {
 			t.Fatalf("%s run: %+v %v", status, got, err)
 		}
-		// Another issue, and the same reference under another trigger, are other runs.
-		if _, err := LiveRunForTrigger(ctx, pool, TriggerIssue, otherRef); !errors.Is(err, ErrNotFound) {
+		// Another issue is another run.
+		if _, err := LiveIssueRun(ctx, pool, otherRef); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("%s run, other issue: %v, want ErrNotFound", status, err)
-		}
-		if _, err := LiveRunForTrigger(ctx, pool, TriggerChannel, ref); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("%s run, other trigger: %v, want ErrNotFound", status, err)
 		}
 	}
 	for _, status := range terminalStatuses {
 		w9SetStatus(t, pool, issue.ID, status)
-		if _, err := LiveRunForTrigger(ctx, pool, TriggerIssue, ref); !errors.Is(err, ErrNotFound) {
+		if _, err := LiveIssueRun(ctx, pool, ref); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("%s run: %v, want ErrNotFound", status, err)
 		}
+	}
+	// The same reference under another trigger is another run.
+	manual := w9MustRun(t, pool, wf, func(r *Run) { r.Trigger, r.TriggerRef = TriggerChannel, &otherRef })
+	w9SetStatus(t, pool, manual.ID, RunRunning)
+	if _, err := LiveIssueRun(ctx, pool, otherRef); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("channel run with an issue reference: %v, want ErrNotFound", err)
 	}
 }
 

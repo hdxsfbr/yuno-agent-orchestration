@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Schedule } from "./api";
-import { browserTimeZone, buildSchedule, describeWhen, fromLocalInput, scheduleErrors, scheduleToInput, timeZones, toLocalInput, type ScheduleFormState } from "./schedule";
+import { browserTimeZone, buildSchedule, describeWhen, firstDetail, fromLocalInput, scheduleErrors, scheduleToInput, timeZones, toLocalInput, type ScheduleFormState } from "./schedule";
 import { inputFields } from "./runInput";
 
 const form = (over: Partial<ScheduleFormState> = {}): ScheduleFormState => ({
@@ -129,6 +129,20 @@ describe("scheduleErrors", () => {
   it("falls back to the agent form's reader for other shapes", () => {
     expect(scheduleErrors({ tz: "unknown zone" })).toEqual({ tz: ["unknown zone"] });
     expect(scheduleErrors(undefined)).toEqual({});
+  });
+});
+
+describe("firstDetail", () => {
+  it("is the message of the first entry of a list of {path, message}", () => {
+    expect(firstDetail([{ path: "merge_request_id", message: "merge request !4 is merged" }, { path: "tz", message: "bad" }])).toBe("merge request !4 is merged");
+  });
+
+  it("skips entries without a message and is undefined when none has one", () => {
+    expect(firstDetail([{ path: "a" }, null, { path: "b", message: " " }, { path: "c", message: "third" }])).toBe("third");
+    expect(firstDetail([{ path: "a" }])).toBeUndefined();
+    expect(firstDetail([])).toBeUndefined();
+    expect(firstDetail(undefined)).toBeUndefined();
+    expect(firstDetail({ tz: "unknown zone" })).toBeUndefined();
   });
 });
 

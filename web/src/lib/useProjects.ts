@@ -17,7 +17,10 @@ export const PROJECT_RUNS_LIMIT = 200;
 
 /**
  * The project's newest runs, newest first, read once for the whole project page: the Recent runs card shows the top of
- * the list and the Merge requests table counts, per request, the runs that updated it.
+ * the list and the Merge requests table counts, per request, the runs that updated it while the list holds them all.
  */
 export const useProjectRuns = (projectId: string) =>
   useQuery({ queryKey: projectRunsKey(projectId), queryFn: () => listRuns({ project_id: projectId, limit: PROJECT_RUNS_LIMIT }) });
+
+/** True when the list is as long as it was asked to be, so older runs may exist that it does not show. */
+export const projectRunsWindowFull = (runs: readonly unknown[] | undefined) => (runs?.length ?? 0) >= PROJECT_RUNS_LIMIT;

@@ -162,9 +162,9 @@ func indexOf(list []string, s string) int {
 	return -1
 }
 
-// T5.23.2 on GitHub: a pull request that carries the label is skipped, the swap is a DELETE
-// of the label and a POST of the new one, the comment is an issue comment, and the closer's
-// link reads "Pull request:".
+// T5.23.2 on GitHub: a pull request that carries the label is skipped, the swap is a POST
+// of the new label and then a DELETE of the old one (review L2), the comment is an issue
+// comment, and the closer's link reads "Pull request:".
 func TestPollOnGitHubSkipsPullRequestsT5232(t *testing.T) {
 	e := newEnv(t, envOpts{github: true, token: "ghp_notarealtoken0123456789abcdefABCD"})
 	e.tr.addPullRequest("A pull request", "yuno") // #1
@@ -184,9 +184,9 @@ func TestPollOnGitHubSkipsPullRequestsT5232(t *testing.T) {
 	sameStrings(t, "labels of #2", e.tr.labelsOf(2), "yuno:running")
 	sameStrings(t, "comments on #2", e.tr.commentsOn(2), started(run))
 	seen := e.tr.seen()
-	d, p := indexOf(seen, "DELETE /issues/2/labels/yuno"), indexOf(seen, "POST /issues/2/labels")
-	if d < 0 || p < d || indexOf(seen, "POST /issues/2/comments") < p {
-		t.Errorf("calls = %q: want the DELETE, the POST of the label, then the comment", seen)
+	p, d := indexOf(seen, "POST /issues/2/labels"), indexOf(seen, "DELETE /issues/2/labels/yuno")
+	if p < 0 || d < p || indexOf(seen, "POST /issues/2/comments") < d {
+		t.Errorf("calls = %q: want the POST of the label, the DELETE, then the comment", seen)
 	}
 	for _, tok := range e.tr.tokensSeen() {
 		if tok != "Bearer ghp_notarealtoken0123456789abcdefABCD" {
@@ -595,9 +595,10 @@ func TestCloserRepeatsAfterAProviderFailureT5236(t *testing.T) {
 	})
 }
 
-// T5.23.6: a run whose project row is gone, or whose token cannot be read, is skipped with
-// a log line and keeps reported_at null; the closer reaches the runs of a project whose
-// intake was switched off since.
+// T5.23.6: a run whose token cannot be read is skipped with a log line and keeps
+// reported_at null; a run whose project row is gone can never be posted and is marked
+// reported (review M1); the closer reaches the runs of a project whose intake was switched
+// off since.
 func TestCloserSkipsWhatItCannotPostT5236(t *testing.T) {
 	ctx := context.Background()
 	t.Run("the project is gone", func(t *testing.T) {
@@ -607,14 +608,30 @@ func TestCloserSkipsWhatItCannotPostT5236(t *testing.T) {
 		run := e.oneRun(1)
 		e.end(&run, store.RunFailed, "boom")
 		must(t, store.DeleteProject(ctx, e.pool, e.project.ID))
+		e.tr.reset()
 		if sum := e.loop.TickOnce(ctx); sum.Closed != 0 {
-			t.Fatalf("summary = %+v", sum)
+			t.Fatalf("summary = %+v, nothing was posted", sum)
 		}
-		if _, ok := e.log.find("finished run skipped: its project no longer exists"); !ok {
-			t.Errorf("log lines = %q", e.log.messages())
+		line := "intake: run " + run.ID + " has nothing to post: its project no longer exists"
+		if _, ok := e.log.find(line); !ok {
+			t.Errorf("log lines = %q, want %q", e.log.messages(), line)
 		}
-		if e.get(run.ID).ReportedAt != nil || len(e.tr.commentsOn(1)) != 1 {
-			t.Error("the run was reported")
+		if e.get(run.ID).ReportedAt == nil || len(e.tr.commentsOn(1)) != 1 || len(e.tr.seen()) != 0 {
+			t.Errorf("the run was not marked reported without a call: reported_at %v, comments %q, calls %q",
+				e.get(run.ID).ReportedAt, e.tr.commentsOn(1), e.tr.seen())
+		}
+		// Marked once: the next pass has nothing to do.
+		if sum := e.loop.TickOnce(ctx); sum.Closed != 0 {
+			t.Fatalf("second tick = %+v", sum)
+		}
+		n := 0
+		for _, m := range e.log.messages() {
+			if strings.Contains(m, "has nothing to post") {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%d log lines about the run, want 1", n)
 		}
 	})
 
@@ -1148,5 +1165,453 @@ func TestCleanErrorAndReason(t *testing.T) {
 	}
 	if got := cutTitle(strings.Repeat("é", 100)); len(got) != 80 || !utf8.ValidString(got) {
 		t.Errorf("cutTitle: %d bytes", len(got))
+	}
+}
+
+// ---- the wave 9 review's fixes ------------------------------------------------------------
+
+// T5.23.5, 5.23 rule 3, review H1: a run that ended before any label swap succeeded (a token
+// that cannot label) counts as taken while its outcome is not posted. The next polls create
+// no second run for the issue, however often the issue is listed; once the token can label,
+// the swap and the start comment come first and the closer reports the finished run.
+func TestPollDoesNotRetakeAnIssueWhoseRunEndedUnreportedT5235(t *testing.T) {
+	for _, github := range []bool{false, true} {
+		name, route := "gitlab", "PUT /issues/1"
+		if github {
+			name, route = "github", "POST /issues/1/labels"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, envOpts{github: github})
+			e.tr.addIssue("a", "b", "yuno")
+			e.tr.failOn(route, 403, "403 Forbidden")
+			if res := e.poll(); res.Taken != 1 || res.Error == "" {
+				t.Fatalf("first poll = %+v", res)
+			}
+			run := e.oneRun(1)
+			e.end(&run, store.RunSucceeded, "")
+
+			// The run is finished, its outcome cannot be posted, the issue is listed again each
+			// poll: no second run, nothing posted, the token's problem shown.
+			for i := 0; i < 3; i++ {
+				res := e.poll()
+				if res.Taken != 0 || res.Closed != 0 || res.Error == "" || len(e.allIssueRuns()) != 1 || len(e.eng.triggered()) != 1 {
+					t.Fatalf("poll %d = %+v, %d runs, %d trigger requests", i+2, res, len(e.allIssueRuns()), len(e.eng.triggered()))
+				}
+			}
+			if e.get(run.ID).ReportedAt != nil || len(e.tr.commentsOn(1)) != 0 {
+				t.Fatal("the outcome was posted without a label swap")
+			}
+
+			// The token is fixed: the label is swapped and the start comment posted for the
+			// run that exists, then the closer reports it in the same pass. Still one run.
+			e.tr.clearFail()
+			res := e.poll()
+			if res.Taken != 0 || res.Closed != 1 || res.Error != "" || len(e.allIssueRuns()) != 1 {
+				t.Fatalf("after the fix = %+v, %d runs", res, len(e.allIssueRuns()))
+			}
+			sameStrings(t, "labels", e.tr.labelsOf(1), "yuno:done")
+			comments := e.tr.commentsOn(1)
+			if len(comments) != 2 || comments[0] != started(run) || !strings.HasPrefix(comments[1], "Yuno finished run "+runURL(run)) {
+				t.Fatalf("comments = %q", comments)
+			}
+			if e.get(run.ID).ReportedAt == nil {
+				t.Error("the run was not reported")
+			}
+
+			// Its outcome is posted now: re-labelling the issue starts a new run (rule 6).
+			e.tr.relabel(1, []string{"yuno:done"}, "yuno")
+			if res = e.poll(); res.Taken != 1 || len(e.allIssueRuns()) != 2 {
+				t.Fatalf("after re-labelling = %+v, %d runs", res, len(e.allIssueRuns()))
+			}
+		})
+	}
+}
+
+// T5.23.6, 5.23 rule 5, review M1: the closer takes the newest finished runs first, so runs
+// that cannot be posted do not starve a newer one. 50 older runs of a project whose token
+// is gone stay pending; a newer run of another project is reported in the same pass.
+func TestCloserListsTheNewestFinishedRunsFirstT5236(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, envOpts{})
+	stuck := e.addProject("stuck", "https://gitlab.test/group/stuck.git", "gitlab", "unused", nil, nil)
+	_, err := e.pool.Exec(ctx, `UPDATE projects SET token_enc = NULL WHERE id = $1`, stuck.ID)
+	must(t, err)
+	// Older to create and older to finish than the run of the project that works.
+	var stuckRuns []store.Run
+	for n := int64(1); n <= CloseLimit; n++ {
+		stuckRuns = append(stuckRuns, e.finishedRun(stuck, n, store.RunFailed, epoch.Add(-time.Duration(n)*time.Minute)))
+	}
+	e.tr.addIssue("a", "b", "yuno")
+	e.poll()
+	run := e.oneRun(1)
+	e.end(&run, store.RunSucceeded, "")
+
+	sum := e.loop.TickOnce(ctx)
+	if sum.Closed != 1 {
+		t.Fatalf("summary = %+v, want the newer run reported", sum)
+	}
+	sameStrings(t, "labels", e.tr.labelsOf(1), "yuno:done")
+	if e.get(run.ID).ReportedAt == nil {
+		t.Error("the newer run was not reported")
+	}
+	for _, r := range stuckRuns {
+		if e.get(r.ID).ReportedAt != nil {
+			t.Fatalf("run %s of the project without a token was reported", r.ID)
+		}
+	}
+	// The stuck project shows why.
+	if got := e.lastErrorOf(stuck.ID); !strings.Contains(got, "no token is stored") {
+		t.Errorf("the stuck project's last error = %q", got)
+	}
+}
+
+// lastErrorOf is a project's intake_last_error, "" for none.
+func (e *env) lastErrorOf(projectID string) string {
+	e.t.Helper()
+	p, err := store.GetProject(context.Background(), e.pool, projectID)
+	must(e.t, err)
+	if p.Intake.LastError != nil {
+		return *p.Intake.LastError
+	}
+	return ""
+}
+
+// T5.23.6, 5.23 rule 5, review M1: a run whose issue answers 404 or 410 on the swap can
+// never be posted: it is marked reported, with the log line, and no comment is attempted.
+// Any other refusal leaves it pending for the next pass.
+func TestCloserMarksARunWhoseIssueIsGoneT5236(t *testing.T) {
+	cases := []struct {
+		name   string
+		github bool
+		setup  func(e *env)
+		gone   bool
+		reason string
+	}{
+		{"gitlab, the issue is deleted (404)", false, func(e *env) {}, true, "the issue is gone (gitlab: HTTP 404"},
+		{"gitlab, 410", false, func(e *env) { e.tr.failOn("PUT /issues/1", 410, "Gone") }, true, "the issue is gone (gitlab: HTTP 410"},
+		{"github, the issue is deleted (404)", true, func(e *env) {}, true, "the issue is gone (github: HTTP 404"},
+		{"github, 410", true, func(e *env) { e.tr.failOn("POST /issues/1/labels", 410, "This issue was deleted") }, true, "the issue is gone (github: HTTP 410"},
+		{"gitlab, forbidden stays pending", false, func(e *env) {
+			e.tr.addIssue("a", "b", "yuno:running")
+			e.tr.failOn("PUT /issues/1", 403, "403 Forbidden")
+		}, false, ""},
+		{"gitlab, server error stays pending", false, func(e *env) { e.tr.addIssue("a", "b", "yuno:running"); e.tr.failOn("PUT /issues/1", 500, "boom") }, false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t, envOpts{github: c.github})
+			c.setup(e)
+			run := e.finishedRun(e.project, 1, store.RunSucceeded, epoch)
+			res := e.poll()
+			got := e.get(run.ID)
+			if !c.gone {
+				if got.ReportedAt != nil || res.Closed != 0 || res.Error == "" {
+					t.Fatalf("result = %+v, reported_at %v: want the run left pending with the error", res, got.ReportedAt)
+				}
+				return
+			}
+			if got.ReportedAt == nil || res.Closed != 0 || res.Error != "" {
+				t.Fatalf("result = %+v, reported_at %v: want the run marked reported, nothing posted", res, got.ReportedAt)
+			}
+			if _, ok := e.log.find("intake: run " + run.ID + " has nothing to post: " + c.reason); !ok {
+				t.Fatalf("log lines = %q", e.log.messages())
+			}
+			if e.tr.count("POST /issues/1/notes") != 0 || e.tr.count("POST /issues/1/comments") != 0 {
+				t.Errorf("a comment was attempted: %q", e.tr.seen())
+			}
+		})
+	}
+}
+
+// T5.23.4, 5.23 rule 2 (a), review M2: the pass stops taking once the cap minus the
+// window's spend minus the max_cost_usd of the project's live runs is at or under zero, for
+// either window, with the log line; it takes again as runs end.
+func TestPollStopsTakingWhenTheRunsInFlightCouldSpendTheCapT5234(t *testing.T) {
+	cases := []struct {
+		name             string
+		capDay, capMonth *store.USDMicros
+	}{
+		{"daily", usd(1), nil},
+		{"monthly", nil, usd(1)},
+		{"either: the month is the tighter", usd(50), usd(1)},
+		{"either: the day is the tighter", usd(1), usd(50)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t, envOpts{capDay: c.capDay, capMonth: c.capMonth})
+			e.eng.limits = store.Limits{MaxCostUSD: 0.25}
+			for i := 1; i <= 6; i++ {
+				e.tr.addIssue(fmt.Sprintf("Issue %d", i), "body", "yuno")
+			}
+			// Nothing has cost anything yet, and the cap still bounds what is started: four
+			// runs of up to $0.25 can spend the whole $1.
+			res := e.poll()
+			if res.Taken != 4 || len(e.allIssueRuns()) != 4 || res.Error != "" {
+				t.Fatalf("first poll = %+v, %d runs, want 4 taken", res, len(e.allIssueRuns()))
+			}
+			for i := int64(5); i <= 6; i++ {
+				if !e.tr.has(i, "yuno") || e.tr.has(i, "yuno:running") {
+					t.Errorf("issue %d should wait: %v", i, e.tr.labelsOf(i))
+				}
+			}
+			want := "intake: project demo at its budget with 4 runs in flight"
+			n := 0
+			for _, m := range e.log.messages() {
+				if m == want {
+					n++
+				}
+			}
+			if n != 1 {
+				t.Fatalf("log lines = %q, want %q once", e.log.messages(), want)
+			}
+			// A second poll with the four still in flight takes nothing more.
+			if res = e.poll(); res.Taken != 0 || len(e.allIssueRuns()) != 4 {
+				t.Fatalf("second poll = %+v", res)
+			}
+
+			// Two runs end having cost $0.10 each: two live runs can still spend $0.50 and
+			// $0.20 is spent, so two more runs fit (the second takes the room that is left).
+			runs := e.allIssueRuns()
+			for _, r := range runs[:2] {
+				e.end(&r, store.RunSucceeded, "")
+				_, err := e.pool.Exec(context.Background(), `UPDATE runs SET cost_usd_micros=100000 WHERE id=$1`, r.ID)
+				must(t, err)
+			}
+			if res = e.poll(); res.Taken != 2 || len(e.allIssueRuns()) != 6 {
+				t.Fatalf("after two runs ended = %+v, %d runs", res, len(e.allIssueRuns()))
+			}
+		})
+	}
+}
+
+// 5.23 rule 2 (a): a project with no cap is never held back by the runs in flight, and a
+// run whose limits name no max_cost_usd adds nothing to the ceiling.
+func TestPollWithoutACapOrWithoutLimitsTakesFreelyT5234(t *testing.T) {
+	e := newEnv(t, envOpts{})
+	e.eng.limits = store.Limits{MaxCostUSD: 100}
+	for i := 1; i <= 5; i++ {
+		e.tr.addIssue(fmt.Sprintf("Issue %d", i), "body", "yuno")
+	}
+	if res := e.poll(); res.Taken != 5 {
+		t.Fatalf("no cap: %+v", res)
+	}
+	e2 := newEnv(t, envOpts{capDay: usd(1)})
+	for i := 1; i <= 5; i++ {
+		e2.tr.addIssue(fmt.Sprintf("Issue %d", i), "body", "yuno")
+	}
+	if res := e2.poll(); res.Taken != 5 {
+		t.Fatalf("runs without a max_cost_usd limit under a cap: %+v", res)
+	}
+}
+
+// 5.23 rule 2 (c), review L5: the listing reads pages of 50 until 10 takeable issues are
+// found or 4 pages were read, so labelled pull requests that stay labelled do not hide the
+// issues behind them.
+func TestPollReadsFurtherPagesOfTheListingT5232(t *testing.T) {
+	t.Run("pull requests in front", func(t *testing.T) {
+		e := newEnv(t, envOpts{github: true})
+		for i := 0; i < 60; i++ {
+			e.tr.addPullRequest(fmt.Sprintf("PR %d", i), "yuno")
+		}
+		e.tr.addIssue("first", "x", "yuno") // #61
+		e.tr.addIssue("second", "x", "yuno")
+		e.tr.addIssue("third", "x", "yuno")
+		res := e.poll()
+		if res.Taken != 3 || res.Error != "" || e.tr.count("GET /issues") != 2 {
+			t.Fatalf("result = %+v, %d listing calls, want 3 taken from the 2nd page", res, e.tr.count("GET /issues"))
+		}
+		for n := int64(61); n <= 63; n++ {
+			if len(e.runs(e.project.ID, n)) != 1 {
+				t.Errorf("issue %d was not taken", n)
+			}
+		}
+	})
+
+	t.Run("at most four pages", func(t *testing.T) {
+		e := newEnv(t, envOpts{github: true})
+		for i := 0; i < 4*ListLimit; i++ {
+			e.tr.addPullRequest(fmt.Sprintf("PR %d", i), "yuno")
+		}
+		e.tr.addIssue("behind the fourth page", "x", "yuno")
+		res := e.poll()
+		if res.Taken != 0 || e.tr.count("GET /issues") != ListPages {
+			t.Fatalf("result = %+v, %d listing calls, want %d and nothing taken", res, e.tr.count("GET /issues"), ListPages)
+		}
+	})
+
+	t.Run("ten takeable issues end the reading", func(t *testing.T) {
+		e := newEnv(t, envOpts{})
+		for i := 0; i < 120; i++ {
+			e.tr.addIssue(fmt.Sprintf("Issue %d", i), "x", "yuno")
+		}
+		res := e.poll()
+		if res.Taken != TakeLimit || e.tr.count("GET /issues") != 1 {
+			t.Fatalf("result = %+v, %d listing calls, want 10 taken from one page", res, e.tr.count("GET /issues"))
+		}
+	})
+
+	t.Run("fewer than ten take another page, a short page ends it", func(t *testing.T) {
+		e := newEnv(t, envOpts{github: true})
+		for i := 0; i < ListLimit-2; i++ { // 48 pull requests and 2 issues fill page 1
+			e.tr.addPullRequest(fmt.Sprintf("PR %d", i), "yuno")
+		}
+		e.tr.addIssue("one", "x", "yuno")
+		e.tr.addIssue("two", "x", "yuno")
+		e.tr.addIssue("three", "x", "yuno") // page 2 holds this one alone
+		res := e.poll()
+		if res.Taken != 3 || e.tr.count("GET /issues") != 2 {
+			t.Fatalf("result = %+v, %d listing calls", res, e.tr.count("GET /issues"))
+		}
+	})
+
+	t.Run("a later page fails: the earlier ones are taken", func(t *testing.T) {
+		e := newEnv(t, envOpts{})
+		for i := 0; i < ListLimit+5; i++ {
+			e.tr.addIssue(fmt.Sprintf("Issue %d", i), "x", "yuno")
+		}
+		e.tr.mu.Lock()
+		e.tr.failIssuesPage = 2
+		e.tr.mu.Unlock()
+		// 50 takeable on page 1 end the reading before page 2 is asked for: no error.
+		if res := e.poll(); res.Taken != TakeLimit || res.Error != "" || e.tr.count("GET /issues") != 1 {
+			t.Fatalf("page 1 enough = %+v, %d listing calls", res, e.tr.count("GET /issues"))
+		}
+
+		e2 := newEnv(t, envOpts{github: true})
+		for i := 0; i < ListLimit; i++ {
+			e2.tr.addPullRequest(fmt.Sprintf("PR %d", i), "yuno")
+		}
+		e2.tr.addIssue("behind", "x", "yuno")
+		e2.tr.mu.Lock()
+		e2.tr.failIssuesPage = 2
+		e2.tr.mu.Unlock()
+		res := e2.poll()
+		if res.Taken != 0 || !strings.Contains(res.Error, "HTTP 500") || e2.tr.count("GET /issues") != 2 {
+			t.Fatalf("page 2 fails = %+v, %d listing calls", res, e2.tr.count("GET /issues"))
+		}
+		// Page 1 held one issue and page 2 fails: the issue of page 1 is still taken.
+		e3 := newEnv(t, envOpts{github: true})
+		for i := 0; i < ListLimit-1; i++ {
+			e3.tr.addPullRequest(fmt.Sprintf("PR %d", i), "yuno")
+		}
+		e3.tr.addIssue("on page one", "x", "yuno")
+		e3.tr.addIssue("on page two", "x", "yuno")
+		e3.tr.mu.Lock()
+		e3.tr.failIssuesPage = 2
+		e3.tr.mu.Unlock()
+		res = e3.poll()
+		if res.Taken != 1 || !strings.Contains(res.Error, "HTTP 500") || len(e3.runs(e3.project.ID, int64(ListLimit))) != 1 {
+			t.Fatalf("page 2 fails after an issue on page 1 = %+v", res)
+		}
+	})
+}
+
+// 5.23 rule 2 (c), review L8: a confidential GitLab issue is not taken, however it is
+// labelled: no run, no label swap, no comment, and it does not count toward the ten.
+func TestPollSkipsConfidentialIssuesT5232(t *testing.T) {
+	e := newEnv(t, envOpts{})
+	e.tr.addConfidentialIssue("security report", "private details", "yuno")
+	e.tr.addIssue("public", "x", "yuno")
+	e.tr.addConfidentialIssue("another", "private", "yuno")
+	res := e.poll()
+	if res.Taken != 1 || res.Error != "" || len(e.allIssueRuns()) != 1 {
+		t.Fatalf("result = %+v, %d runs", res, len(e.allIssueRuns()))
+	}
+	for _, n := range []int64{1, 3} {
+		if len(e.runs(e.project.ID, n)) != 0 || !e.tr.has(n, "yuno") || e.tr.has(n, "yuno:running") || len(e.tr.commentsOn(n)) != 0 {
+			t.Errorf("confidential issue %d was touched: %v %q", n, e.tr.labelsOf(n), e.tr.commentsOn(n))
+		}
+	}
+	if len(e.runs(e.project.ID, 2)) != 1 {
+		t.Error("the public issue was not taken")
+	}
+	for _, r := range e.allIssueRuns() {
+		if strings.Contains(taskOf(t, r), "private") {
+			t.Error("a confidential issue's text reached a task")
+		}
+	}
+}
+
+// 5.23 rule 2, review L6: a provider that does not answer ends the closer's pass at the first
+// timeout instead of costing one timeout per run; the runs stay pending and the next pass
+// reports them.
+func TestCloserStopsAtAProviderTimeoutT5236(t *testing.T) {
+	e := newEnv(t, envOpts{})
+	e.loop.Timeout = 150 * time.Millisecond
+	finishThree(e)
+	for n := 1; n <= 3; n++ {
+		e.tr.slowOn(fmt.Sprintf("PUT /issues/%d", n), 10*time.Second)
+	}
+	e.tr.reset()
+	start := time.Now()
+	res := e.poll()
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("the pass took %v", took)
+	}
+	if res.Closed != 0 || !strings.Contains(res.Error, "timed out") {
+		t.Fatalf("result = %+v, want a timeout", res)
+	}
+	if got := e.tr.count("PUT"); got != 1 {
+		t.Fatalf("%d swaps were attempted, want only the first: %q", got, e.tr.seen())
+	}
+	if _, ok := e.log.find("the provider did not answer in time"); !ok {
+		t.Errorf("log lines = %q", e.log.messages())
+	}
+	for _, r := range e.allIssueRuns() {
+		if r.ReportedAt != nil {
+			t.Errorf("run %s was reported", r.ID)
+		}
+	}
+
+	// The provider answers again: the next pass reports all three.
+	for n := 1; n <= 3; n++ {
+		e.tr.slowOn(fmt.Sprintf("PUT /issues/%d", n), 0)
+	}
+	if res = e.poll(); res.Closed != 3 {
+		t.Fatalf("next pass = %+v", res)
+	}
+}
+
+// 5.23 rule 2, review L6: the closer's whole pass has one deadline (CloseTimeout, 5 minutes
+// by default), however many runs it has: a provider that is slow rather than hung is cut
+// when the deadline comes, and the runs not reached wait for the next pass.
+func TestCloserPassHasOneDeadlineT5236(t *testing.T) {
+	e := newEnv(t, envOpts{})
+	e.loop.CloseTimeout = 600 * time.Millisecond
+	finishThree(e)
+	for n := 1; n <= 3; n++ {
+		e.tr.slowOn(fmt.Sprintf("PUT /issues/%d", n), 350*time.Millisecond)
+	}
+	e.tr.reset()
+	res := e.poll()
+	// The newest run (issue 3) fits in the pass; the second one is cut by the deadline and
+	// ends the pass; the oldest is not tried.
+	if res.Closed != 1 || !strings.Contains(res.Error, "timed out") {
+		t.Fatalf("result = %+v, want one run reported and a timeout", res)
+	}
+	if got := e.tr.count("PUT"); got != 2 || e.tr.count("PUT /issues/1") != 0 {
+		t.Fatalf("swaps = %q, want two, none on the oldest run's issue", e.tr.seen())
+	}
+	if e.get(e.runs(e.project.ID, 3)[0].ID).ReportedAt == nil {
+		t.Error("the newest run was not reported")
+	}
+	if got := DefaultCloseTimeout; got != 5*time.Minute {
+		t.Errorf("DefaultCloseTimeout = %v", got)
+	}
+}
+
+// finishThree takes three issues and ends their runs one hour apart: the run of issue 3
+// finished last.
+func finishThree(e *env) {
+	e.t.Helper()
+	for i := 1; i <= 3; i++ {
+		e.tr.addIssue(fmt.Sprintf("Issue %d", i), "x", "yuno")
+	}
+	e.poll()
+	for n := int64(1); n <= 3; n++ {
+		run := e.oneRun(n)
+		e.end(&run, store.RunSucceeded, "")
+		_, err := e.pool.Exec(context.Background(), `UPDATE runs SET finished_at=$2 WHERE id=$1`, run.ID, epoch.Add(time.Duration(n)*time.Hour))
+		must(e.t, err)
 	}
 }

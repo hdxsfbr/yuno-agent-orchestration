@@ -1,11 +1,14 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ApiError, pollIntake, type Project } from "@/lib/api";
+import { ApiError, pollIntake, type IntakePollResult, type Project } from "@/lib/api";
 import { formatAgo } from "@/lib/format";
 import { projectsKey } from "@/lib/useProjects";
 import { useNow } from "@/lib/useNow";
 import Button from "../Button";
 import { Card } from "../Card";
 import { InlineError, errorText } from "../QueryState";
+
+/** "Started 2 runs, reported 1 finished": the runs the poll started and the finished issue runs it reported. */
+const pollResult = ({ taken, closed }: IntakePollResult) => `Started ${taken} ${taken === 1 ? "run" : "runs"}, reported ${closed} finished`;
 
 /**
  * The project's issue intake: whether it is on, with which label and workflow, when it last polled, what the last poll
@@ -39,14 +42,13 @@ export default function IntakeCard({ project }: { project: Project }) {
         <p className="mt-1 text-sm text-zinc-500">{intake?.polled_at ? `Last poll ${formatAgo(intake.polled_at, now)}` : "Not polled yet"}</p>
         {intake?.last_error ? <p className="mt-1 break-words text-xs text-zinc-500">{intake.last_error}</p> : null}
         <div className="mt-3 flex flex-wrap items-center gap-3">
-          <Button size="sm" onClick={() => poll.mutate()} disabled={!enabled || poll.isPending}>
+          <Button size="sm" onClick={() => poll.mutate()} disabled={!enabled || poll.isPending} title={enabled ? undefined : "Intake is off"}>
             {poll.isPending ? "Polling…" : "Poll now"}
           </Button>
-          {poll.data ? (
-            <span role="status" className="text-sm">
-              Took {poll.data.taken}, closed {poll.data.closed}
-            </span>
-          ) : null}
+          {/* Always in the page, empty until a poll answers, so that a screen reader announces the text when it arrives. */}
+          <span role="status" className="text-sm">
+            {poll.data ? pollResult(poll.data) : null}
+          </span>
         </div>
         {poll.error ? (
           <div className="mt-3">

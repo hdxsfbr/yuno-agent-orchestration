@@ -69,8 +69,8 @@ trigger cell), `web/src/lib/useProjects.ts`, `web/src/test/{fakeApi.ts,fixtures.
 6. **Intake card on the project page** (`web/src/components/project/IntakeCard.tsx`,
    rendered beside the Budget card): "Off" or "On: label <label>, workflow <name>", "Last
    poll <relative time>" or "Not polled yet", the last error as a muted line, and a "Poll
-   now" button (disabled when off) calling `pollIntake`, then showing "Took <n>, closed
-   <n>" and refreshing the project and its runs; a 409 shows the server's message.
+   now" button (disabled when off) calling `pollIntake`, then showing "Started <n> runs, reported
+   <m> finished" (review L6) and refreshing the project and its runs; a 409 shows the server's message.
 7. **Runs list and header** (5.23 rule 9): a Trigger filter next to the status filter
    (all five values, URL-synced like `status`, passed to `listRuns`); for an issue run
    the trigger cell shows `issue #<n>` linking to the issue (from `issueRef`), and the

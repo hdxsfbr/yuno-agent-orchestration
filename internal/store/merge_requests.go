@@ -160,23 +160,6 @@ func LiveRunForMergeRequest(ctx context.Context, q Querier, mrID string) (*Run, 
 	return r, err
 }
 
-// LiveRunForTrigger returns the live run of a trigger reference (GetRunByTrigger for a
-// run that has not ended): the run runs_issue_live_idx allows at most once per issue,
-// trigger "issue" and ref "<project id>#<n>" (DESIGN 5.23 rule 3). ErrNotFound when
-// none is live. The oldest live run answers if the trigger has several.
-func LiveRunForTrigger(ctx context.Context, q Querier, trigger, ref string) (*Run, error) {
-	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE trigger=$1 AND trigger_ref=$2
-		AND status IN `+liveRunStatuses+` ORDER BY created_at LIMIT 1`, trigger, ref)
-	if err != nil {
-		return nil, err
-	}
-	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return r, err
-}
-
 // LockRunMergeRequest takes a transaction-scoped advisory lock on the run's merge
 // request, so two calls of one run that carry different idempotency keys cannot both
 // find no record and open two requests (rule 2: never a second request). q must be a

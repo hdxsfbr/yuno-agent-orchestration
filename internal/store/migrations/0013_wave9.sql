@@ -1,6 +1,6 @@
 -- Wave 9 (DESIGN 5.22, 5.23): a run that updates an open merge request from its own
--- branch, and issue intake. Columns, two partial unique indexes and the intake settings
--- of a project; no data is rewritten.
+-- branch, and issue intake. Columns, two partial unique indexes, a partial index for the
+-- issue closer and the intake settings of a project; no data is rewritten.
 
 -- 5.22 rule 1: the merge request record a run names and updates (set null: the run
 -- outlives the record's deletion). The record the run opened stays merge_requests.run_id.
@@ -17,6 +17,11 @@ CREATE UNIQUE INDEX runs_merge_request_live_idx ON runs (merge_request_id)
 -- by another api process is a 23505 that counts as taken.
 CREATE UNIQUE INDEX runs_issue_live_idx ON runs (trigger_ref)
     WHERE trigger = 'issue' AND status IN ('queued', 'running', 'waiting_approval');
+-- 5.23 rule 5: the closer's list, the issue runs whose outcome is not posted yet, newest
+-- finished first. The queries write the trigger as a literal so the planner can prove the
+-- predicate (a bound parameter cannot); the live-run lookup does the same for the index above.
+CREATE INDEX runs_issue_unreported_idx ON runs (finished_at DESC NULLS LAST, id)
+    WHERE trigger = 'issue' AND reported_at IS NULL;
 
 -- 5.22 rule 7: the request a schedule's runs update; the row survives the record.
 ALTER TABLE schedules ADD COLUMN merge_request_id TEXT REFERENCES merge_requests (id) ON DELETE SET NULL;

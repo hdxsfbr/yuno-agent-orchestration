@@ -164,14 +164,15 @@ func TestIntakeLabels(t *testing.T) {
 	}
 }
 
-// T5.23.2 (listing, GitLab): rule 2 (c)'s call, the issues as the provider answers them.
+// T5.23.2 (listing, GitLab): rule 2 (c)'s call, the issues as the provider answers them;
+// the first page is page 1 and a short page says there is no more.
 func TestGitLabIssuesListLabelled(t *testing.T) {
 	f, p := gitlabIssueFixture(t)
 	f.on("GET /issues", 200, []map[string]any{
 		{"iid": 4, "title": "Add a flag", "description": "Please.", "web_url": "https://gitlab.test/group/demo/-/issues/4"},
 		{"iid": 9, "title": "Title only", "description": nil, "web_url": "https://gitlab.test/group/demo/-/issues/9"},
 	})
-	got, err := p.ListLabelled(context.Background(), "yuno", 50)
+	got, more, err := p.ListLabelled(context.Background(), "yuno", 1, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,8 +183,11 @@ func TestGitLabIssuesListLabelled(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("issues = %+v, want %+v", got, want)
 	}
+	if more {
+		t.Error("two issues on a page of 50 say there is a next page")
+	}
 	c := f.call(t, 0)
-	for k, v := range map[string]string{"labels": "yuno", "state": "opened", "scope": "all", "order_by": "created_at", "sort": "asc", "per_page": "50"} {
+	for k, v := range map[string]string{"labels": "yuno", "state": "opened", "scope": "all", "order_by": "created_at", "sort": "asc", "per_page": "50", "page": "1"} {
 		if c.Query.Get(k) != v {
 			t.Errorf("query %s = %q, want %q (%v)", k, c.Query.Get(k), v, c.Query)
 		}
@@ -193,12 +197,72 @@ func TestGitLabIssuesListLabelled(t *testing.T) {
 	}
 }
 
+// Review L5 and L8 (GitLab): a full page says a next one may follow, counted in the
+// provider's entries whether or not they were left out; the page asked for is the page of
+// the call; a confidential issue is left out.
+func TestGitLabIssuesListLabelledPagesAndConfidential(t *testing.T) {
+	f, p := gitlabIssueFixture(t)
+	f.onFunc("GET /issues", func(c issueCall) issueAnswer {
+		page := c.Query.Get("page")
+		entries := []map[string]any{
+			{"iid": 1, "title": "Open", "description": "x", "web_url": "u1", "confidential": false},
+			{"iid": 2, "title": "Secret", "description": "internal", "web_url": "u2", "confidential": true},
+		}
+		if page == "3" {
+			entries = entries[:1]
+		}
+		return issueAnswer{200, entries}
+	})
+	got, more, err := p.ListLabelled(context.Background(), "yuno", 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Number != 1 {
+		t.Fatalf("issues = %+v, want only #1: the confidential one is left out", got)
+	}
+	if !more {
+		t.Error("a full page (2 entries of 2, one of them left out) must say a next page may follow")
+	}
+	if q := f.call(t, 0).Query; q.Get("page") != "2" || q.Get("per_page") != "2" {
+		t.Errorf("query = %v, want page 2 of 2", q)
+	}
+	got, more, err = p.ListLabelled(context.Background(), "yuno", 3, 2)
+	if err != nil || len(got) != 1 || more {
+		t.Fatalf("page 3 = %+v %v %v, want one issue and no more", got, more, err)
+	}
+	// A page below 1 is page 1.
+	if _, _, err := p.ListLabelled(context.Background(), "yuno", 0, 2); err != nil {
+		t.Fatal(err)
+	}
+	if q := f.call(t, 2).Query; q.Get("page") != "1" {
+		t.Errorf("page 0 asked for page %q", q.Get("page"))
+	}
+}
+
 // The limit is the per_page of the call and stays within what the providers serve.
 func TestIssueListLimit(t *testing.T) {
 	for in, want := range map[int]int{0: 100, -3: 100, 1: 1, 50: 50, 100: 100, 101: 100, 5000: 100} {
 		if got := issueListLimit(in); got != want {
 			t.Errorf("issueListLimit(%d) = %d, want %d", in, got, want)
 		}
+	}
+}
+
+// IssueGone is a 404 or a 410 from the provider, whichever call it came from.
+func TestIssueGone(t *testing.T) {
+	f, p := gitlabIssueFixture(t)
+	f.on("PUT /issues/1", 404, map[string]string{"message": "404 Not found"})
+	f.on("PUT /issues/2", 410, map[string]string{"message": "Gone"})
+	f.on("PUT /issues/3", 403, map[string]string{"message": "403 Forbidden"})
+	f.on("PUT /issues/4", 500, map[string]string{"message": "boom"})
+	for n, want := range map[int64]bool{1: true, 2: true, 3: false, 4: false} {
+		err := p.SwapLabels(context.Background(), n, "yuno:done", "yuno:running")
+		if err == nil || IssueGone(err) != want {
+			t.Errorf("issue %d: err %v, IssueGone = %v, want %v", n, err, IssueGone(err), want)
+		}
+	}
+	if IssueGone(nil) || IssueGone(context.DeadlineExceeded) {
+		t.Error("IssueGone accepted an error that is no provider answer")
 	}
 }
 
@@ -315,7 +379,8 @@ func TestGitLabIssuesComment(t *testing.T) {
 	}
 }
 
-// T5.23.2 (listing, GitHub): the pull requests the issues endpoint also lists are skipped.
+// T5.23.2 (listing, GitHub): the pull requests the issues endpoint also lists are skipped;
+// a full page, counting the pull requests, says a next page may follow (review L5).
 func TestGitHubIssuesListLabelledSkipsPullRequests(t *testing.T) {
 	f, p := githubIssueFixture(t)
 	f.on("GET /issues", 200, []map[string]any{
@@ -323,7 +388,7 @@ func TestGitHubIssuesListLabelledSkipsPullRequests(t *testing.T) {
 		{"number": 5, "title": "An issue", "body": "Do it.", "html_url": "https://github.com/owner/demo/issues/5"},
 		{"number": 6, "title": "No body", "body": nil, "html_url": "https://github.com/owner/demo/issues/6", "pull_request": nil},
 	})
-	got, err := p.ListLabelled(context.Background(), "yuno", 50)
+	got, more, err := p.ListLabelled(context.Background(), "yuno", 1, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,14 +399,26 @@ func TestGitHubIssuesListLabelledSkipsPullRequests(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("issues = %+v, want %+v", got, want)
 	}
+	if more {
+		t.Error("three entries on a page of 50 say there is a next page")
+	}
 	c := f.call(t, 0)
-	for k, v := range map[string]string{"labels": "yuno", "state": "open", "sort": "created", "direction": "asc", "per_page": "50"} {
+	for k, v := range map[string]string{"labels": "yuno", "state": "open", "sort": "created", "direction": "asc", "per_page": "50", "page": "1"} {
 		if c.Query.Get(k) != v {
 			t.Errorf("query %s = %q, want %q (%v)", k, c.Query.Get(k), v, c.Query)
 		}
 	}
 	if c.Auth != "Bearer "+issueTestToken {
 		t.Errorf("Authorization = %q", c.Auth)
+	}
+
+	// Three entries on a page of three: the pull request counts toward the page.
+	got, more, err = p.ListLabelled(context.Background(), "yuno", 2, 3)
+	if err != nil || len(got) != 2 || !more {
+		t.Fatalf("a full page = %+v %v %v, want two issues and more", got, more, err)
+	}
+	if q := f.call(t, 1).Query; q.Get("page") != "2" || q.Get("per_page") != "3" {
+		t.Errorf("query = %v, want page 2 of 3", q)
 	}
 }
 
@@ -389,8 +466,8 @@ func TestGitHubIssuesEnsureLabels(t *testing.T) {
 	wantCalls(t, e, "GET /labels/yuno:running")
 }
 
-// T5.23.2 (swap, GitHub): DELETE the label to remove (a 404 is ignored) and then POST the
-// one to add.
+// T5.23.2 (swap, GitHub): POST the label to add first and then DELETE the ones to remove
+// (a 404 is ignored); a failed add leaves the issue as it was (review L2).
 func TestGitHubIssuesSwapLabels(t *testing.T) {
 	f, p := githubIssueFixture(t)
 	f.on("DELETE /issues/7/labels/yuno", 404, map[string]any{"message": "Label does not exist"})
@@ -398,8 +475,8 @@ func TestGitHubIssuesSwapLabels(t *testing.T) {
 	if err := p.SwapLabels(context.Background(), 7, "yuno:running", "yuno"); err != nil {
 		t.Fatalf("swap with a 404 on the remove: %v", err)
 	}
-	wantCalls(t, f, "DELETE /issues/7/labels/yuno", "POST /issues/7/labels")
-	if b := f.call(t, 1).Body; !reflect.DeepEqual(b, map[string]any{"labels": []any{"yuno:running"}}) {
+	wantCalls(t, f, "POST /issues/7/labels", "DELETE /issues/7/labels/yuno")
+	if b := f.call(t, 0).Body; !reflect.DeepEqual(b, map[string]any{"labels": []any{"yuno:running"}}) {
 		t.Errorf("body = %v", b)
 	}
 
@@ -411,7 +488,7 @@ func TestGitHubIssuesSwapLabels(t *testing.T) {
 	if err := p2.SwapLabels(context.Background(), 7, "yuno:done", "yuno:running,yuno:failed"); err != nil {
 		t.Fatal(err)
 	}
-	wantCalls(t, g, "DELETE /issues/7/labels/yuno:running", "DELETE /issues/7/labels/yuno:failed", "POST /issues/7/labels")
+	wantCalls(t, g, "POST /issues/7/labels", "DELETE /issues/7/labels/yuno:running", "DELETE /issues/7/labels/yuno:failed")
 
 	// Nothing to add: only the deletes. Nothing to remove: only the add.
 	h, p3 := githubIssueFixture(t)
@@ -425,14 +502,26 @@ func TestGitHubIssuesSwapLabels(t *testing.T) {
 	}
 	wantCalls(t, h, "DELETE /issues/7/labels/yuno", "POST /issues/7/labels")
 
-	// A failed delete other than 404 stops the swap before the add.
+	// A failed add stops the swap before any delete: the label that puts the issue in the
+	// listing is still there.
 	e, p4 := githubIssueFixture(t)
-	e.on("DELETE /issues/7/labels/yuno", 403, map[string]any{"message": "Resource not accessible by personal access token"})
+	e.on("POST /issues/7/labels", 403, map[string]any{"message": "Resource not accessible by personal access token"})
+	e.on("DELETE /issues/7/labels/yuno", 200, []map[string]any{})
 	err := p4.SwapLabels(context.Background(), 7, "yuno:running", "yuno")
 	if err == nil || !strings.Contains(err.Error(), "github: HTTP 403") || strings.Contains(err.Error(), issueTestToken) {
+		t.Fatalf("a refused add: %v", err)
+	}
+	wantCalls(t, e, "POST /issues/7/labels")
+
+	// A delete refused other than with a 404 is an error after the add: the issue carries
+	// both labels, and the next pass swaps again.
+	d, p5 := githubIssueFixture(t)
+	d.on("POST /issues/7/labels", 200, []map[string]any{})
+	d.on("DELETE /issues/7/labels/yuno", 403, map[string]any{"message": "Forbidden"})
+	if err := p5.SwapLabels(context.Background(), 7, "yuno:running", "yuno"); err == nil || !strings.Contains(err.Error(), "HTTP 403") {
 		t.Fatalf("a refused delete: %v", err)
 	}
-	wantCalls(t, e, "DELETE /issues/7/labels/yuno")
+	wantCalls(t, d, "POST /issues/7/labels", "DELETE /issues/7/labels/yuno")
 }
 
 func TestGitHubIssuesComment(t *testing.T) {
@@ -455,7 +544,7 @@ func TestIssueProviderTransportFailure(t *testing.T) {
 	srv.Close()
 	pc := &project.Config{RepoURL: "https://gitlab.test/group/demo.git", Token: issueTestToken, Provider: project.ProviderGitLab}
 	p := newIssueProvider(pc, ProviderClient(nil), base, pc.Path())
-	_, err := p.ListLabelled(context.Background(), "yuno", 50)
+	_, _, err := p.ListLabelled(context.Background(), "yuno", 1, 50)
 	if err == nil || !strings.HasPrefix(err.Error(), "gitlab: ") || strings.Contains(err.Error(), issueTestToken) {
 		t.Fatalf("unreachable provider: %v", err)
 	}

@@ -75,6 +75,11 @@ func (in *runCreate) validate() fieldErrors {
 	if in.Trigger != "" && !slices.Contains(apiTriggers, in.Trigger) {
 		fe.add("trigger", "must be one of %s", strings.Join(apiTriggers, ", "))
 	}
+	// An id with a control character is no record's: the unknown-id detail of the engine's
+	// checks (5.22 rule 1), not a 500 from the database (review L1).
+	if id := strings.TrimSpace(in.MergeRequestID); hasControl(id) {
+		fe.add("merge_request_id", "no merge request with id %s", id)
+	}
 	return fe
 }
 
@@ -102,9 +107,16 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, "invalid query", fe)
 		return
 	}
+	// An id with a control character is no merge request's, so no run names it; Postgres
+	// would refuse a NUL in the parameter with a 500 (review L1).
+	mergeRequestID := strings.TrimSpace(q.Get("merge_request_id"))
+	if hasControl(mergeRequestID) {
+		writeJSON(w, http.StatusOK, []store.Run{})
+		return
+	}
 	runs, err := store.ListRuns(r.Context(), s.pool, store.RunFilter{Status: status,
 		ProjectID: strings.TrimSpace(q.Get("project_id")), Trigger: trigger,
-		MergeRequestID: strings.TrimSpace(q.Get("merge_request_id")), Limit: limit})
+		MergeRequestID: mergeRequestID, Limit: limit})
 	if err != nil {
 		s.internalError(w, r, "list runs", err)
 		return

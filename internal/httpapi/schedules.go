@@ -99,6 +99,11 @@ func (s *Server) applySchedule(ctx context.Context, in *scheduleInput, sc *store
 		// belongs to a project's records, so moving the schedule drops it.
 		sc.MergeRequestID = nil
 	}
+	// The request is checked when the body names it or the workflow or the project changed;
+	// a request that is kept as it was is not checked again, so a schedule whose request
+	// has ended can still be disabled or have its input edited (the tick disables it;
+	// DESIGN 5.22 rule 7, review M1).
+	checkRequest := sc.MergeRequestID != nil && (in.MergeRequestID != nil || sc.WorkflowID != prevWorkflow || projectID != prevProject)
 	if in.Kind != nil {
 		sc.Kind = *in.Kind
 	}
@@ -163,6 +168,7 @@ func (s *Server) applySchedule(ctx context.Context, in *scheduleInput, sc *store
 	if wf != nil {
 		def, _ = workflow.Parse(wf.Definition)
 	}
+	projectUnused := false // the workflow uses no project and the request was checked as such
 	if def != nil {
 		// The same check the trigger makes (DESIGN 5.17 rule 4), so a schedule the
 		// engine would refuse at fire time is refused when it is saved (rule 6).
@@ -172,16 +178,19 @@ func (s *Server) applySchedule(ctx context.Context, in *scheduleInput, sc *store
 		}
 		fe = append(fe, validationDetails(msgs)...)
 		// And the request it updates, by the checks of DESIGN 5.22 rule 1, after the
-		// project's: a project that was refused leaves the request unchecked.
-		if sc.MergeRequestID != nil && len(msgs) == 0 && proj != nil {
+		// project's: a project that was refused leaves the request unchecked. A workflow
+		// that uses no project is checked with no project, which answers the engine's text
+		// for it, as the run path does (review L3).
+		if checkRequest && len(msgs) == 0 && (proj != nil || !def.Project) {
 			_, mrMsgs, err := engine.MergeRequestForRequest(ctx, s.pool, *sc.MergeRequestID, proj)
 			if err != nil {
 				return nil, err
 			}
 			fe = append(fe, validationDetails(mrMsgs)...)
+			projectUnused = proj == nil
 		}
 	}
-	if sc.MergeRequestID != nil && sc.ProjectID == nil {
+	if checkRequest && sc.ProjectID == nil && !projectUnused {
 		fe.add("merge_request_id", "needs a project")
 	}
 	var obj map[string]json.RawMessage

@@ -556,12 +556,41 @@ func TestProjectIntakeSettings(t *testing.T) {
 	got, _ = GetProject(ctx, pool, p.ID)
 	check("after clearing the workflow", got, false, "triage", nil)
 
-	// A soft-deleted workflow keeps its name on the view, like a schedule's.
+	// A soft-deleted workflow shows no name on the view (review M2): the reference stays,
+	// since the API only soft-deletes, but the project's card must not name a workflow that
+	// is gone. The same holds for every read of a project and for the intake loop's list.
 	got.IntakeWorkflowID, got.IntakeEnabled = &wf.ID, true
 	mustDo(t, UpdateProject(ctx, pool, got))
 	mustDo(t, DeleteWorkflow(ctx, pool, wf.ID))
-	got, _ = GetProject(ctx, pool, p.ID)
-	check("workflow soft-deleted", got, true, "triage", wf)
+	reads := map[string]func() (*Project, error){
+		"get":         func() (*Project, error) { return GetProject(ctx, pool, p.ID) },
+		"by name":     func() (*Project, error) { return GetProjectByName(ctx, pool, "intake") },
+		"by url":      func() (*Project, error) { return GetProjectByRepoURL(ctx, pool, p.RepoURL) },
+		"find by url": func() (*Project, error) { return FindProjectByRepoURL(ctx, pool, p.RepoURL) },
+	}
+	for name, read := range reads {
+		got, err = read()
+		mustDo(t, err)
+		if in := got.Intake; in == nil || !in.Enabled || in.WorkflowID == nil || *in.WorkflowID != wf.ID || in.WorkflowName != nil {
+			t.Fatalf("workflow soft-deleted, %s: intake = %+v, want the id kept and no name", name, in)
+		}
+	}
+	list, err = ListProjects(ctx, pool)
+	mustDo(t, err)
+	for _, lp := range list {
+		if lp.Name == "Intake" && lp.Intake.WorkflowName != nil {
+			t.Fatalf("workflow soft-deleted, list: name %q", *lp.Intake.WorkflowName)
+		}
+	}
+	listed, err := ListIntakeProjects(ctx, pool)
+	mustDo(t, err)
+	if len(listed) != 1 || listed[0].IntakeWorkflowID == nil || *listed[0].IntakeWorkflowID != wf.ID || listed[0].IntakeWorkflowName != nil {
+		t.Fatalf("workflow soft-deleted, intake list: %+v", listed)
+	}
+	b, _ = json.Marshal(got)
+	if bytes.Contains(b, []byte(`"workflow_name"`)) || !bytes.Contains(b, []byte(`"workflow_id":"`+wf.ID+`"`)) {
+		t.Fatalf("workflow soft-deleted, json = %s", b)
+	}
 	// A workflow row that is gone empties the reference (set null).
 	mustDo(t, execSQL(ctx, pool, `DELETE FROM workflows WHERE id='`+wf.ID+`'`))
 	got, err = GetProject(ctx, pool, p.ID)
@@ -656,6 +685,7 @@ func TestMigration0013Upgrade(t *testing.T) {
 	for name, parts := range map[string][]string{
 		"runs_merge_request_live_idx": {"UNIQUE", "(merge_request_id)", "merge_request_id IS NOT NULL", "queued", "running", "waiting_approval"},
 		"runs_issue_live_idx":         {"UNIQUE", "(trigger_ref)", "issue", "queued", "running", "waiting_approval"},
+		"runs_issue_unreported_idx":   {"(finished_at DESC NULLS LAST, id)", "issue", "reported_at IS NULL"},
 	} {
 		var def string
 		err := pool.QueryRow(ctx, `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexname = $2`, schema, name).Scan(&def)
@@ -668,6 +698,23 @@ func TestMigration0013Upgrade(t *testing.T) {
 			}
 		}
 	}
+	// The issue queries write the trigger as a literal so the planner can prove the partial
+	// indexes' predicates (review L9): with sequential scans off each plan names its index.
+	for name, c := range map[string]struct {
+		sql   string
+		args  []any
+		index string
+	}{
+		"closer's list":              {unreportedIssueRunsSQL, []any{RunSucceeded, RunFailed, RunCancelled, RunTimedOut, "", 50}, "runs_issue_unreported_idx"},
+		"closer's list of a project": {unreportedIssueRunsSQL, []any{RunSucceeded, RunFailed, RunCancelled, RunTimedOut, "p1#", 50}, "runs_issue_unreported_idx"},
+		"live run of an issue":       {liveIssueRunSQL, []any{"p1#7"}, "runs_issue_live_idx"},
+		"unposted run of an issue":   {takenIssueRunSQL, []any{"p1#7", RunSucceeded, RunFailed, RunCancelled, RunTimedOut}, "runs_issue_unreported_idx"},
+	} {
+		if plan := explainNoSeqScan(t, ctx, pool, c.sql, c.args...); !strings.Contains(plan, c.index) {
+			t.Errorf("%s: the plan does not use %s:\n%s", name, c.index, plan)
+		}
+	}
+
 	// The index works on the migrated data: the old run 'r1' opened the request and is
 	// live, a run naming it is accepted, a second is refused, and once the first ended
 	// a third is accepted.
@@ -684,4 +731,26 @@ func TestMigration0013Upgrade(t *testing.T) {
 	if _, err := w9Run(pool, wf, func(r *Run) { r.MergeRequestID = &mrID }); err != nil {
 		t.Fatalf("third naming run after the first ended: %v", err)
 	}
+}
+
+// explainNoSeqScan is the plan of a query with sequential scans off, so a partial index the
+// planner can use is the plan it picks even on a table of a few rows.
+func explainNoSeqScan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) string {
+	t.Helper()
+	tx, err := pool.Begin(ctx)
+	mustDo(t, err)
+	defer tx.Rollback(ctx) //nolint:errcheck
+	_, err = tx.Exec(ctx, `SET LOCAL enable_seqscan = off`)
+	mustDo(t, err)
+	rows, err := tx.Query(ctx, `EXPLAIN `+sql, args...)
+	mustDo(t, err)
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		mustDo(t, rows.Scan(&line))
+		plan.WriteString(line + "\n")
+	}
+	mustDo(t, rows.Err())
+	return plan.String()
 }

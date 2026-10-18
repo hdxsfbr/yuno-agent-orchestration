@@ -199,6 +199,29 @@ describe("enabled toggle", () => {
     expect((await screen.findByText(/Could not change the schedule: run_at is in the past/)).getAttribute("role")).toBe("alert");
     expect((once.getByRole("switch") as HTMLInputElement).checked).toBe(false);
   });
+
+  it("shows the first detail of a 422 instead of its summary, e.g. a merge request that ended", async () => {
+    api.on("PUT", /^\/api\/schedules\/[^/]+$/, () =>
+      apiError(422, "validation_failed", "invalid schedule", [
+        { path: "merge_request_id", message: "merge request !4 is merged" },
+        { path: "tz", message: "unknown time zone" },
+      ]),
+    );
+    renderPage();
+    const once = await row(/Enable Release train/);
+    fireEvent.click(once.getByRole("switch"));
+    const alert = await screen.findByText(/Could not change the schedule:/);
+    expect(alert.getAttribute("role")).toBe("alert");
+    expect(alert.textContent).toBe("Could not change the schedule: merge request !4 is merged");
+  });
+
+  it("falls back to the summary when the details name no message", async () => {
+    api.on("PUT", /^\/api\/schedules\/[^/]+$/, () => apiError(422, "validation_failed", "invalid schedule", []));
+    renderPage();
+    const once = await row(/Enable Release train/);
+    fireEvent.click(once.getByRole("switch"));
+    expect((await screen.findByText(/Could not change the schedule:/)).textContent).toBe("Could not change the schedule: invalid schedule");
+  });
 });
 
 describe("creating a schedule", () => {

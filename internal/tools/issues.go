@@ -62,9 +62,12 @@ func IntakeLabels(label string) []IssueLabel {
 // IssueProvider is a provider's issue API for one project (DESIGN 5.23). Every method
 // returns the provider's refusal or a transport failure as an error; none of them logs.
 type IssueProvider interface {
-	// ListLabelled lists the open issues that carry label, oldest first, at most limit
-	// (rule 2 (c)); a pull request is not an issue and is left out.
-	ListLabelled(ctx context.Context, label string, limit int) ([]Issue, error)
+	// ListLabelled lists one page of the open issues that carry label, oldest first, perPage
+	// to a page counted in the provider's entries, pages from 1 (rule 2 (c)). A pull request
+	// is not an issue and a confidential GitLab issue is not to be taken (its text could
+	// reach a public merge request, review L8): both are left out of the page. more says the
+	// page was full, so a further one may follow (review L5).
+	ListLabelled(ctx context.Context, label string, page, perPage int) (issues []Issue, more bool, err error)
 	// EnsureLabels creates the labels the repository lacks (rule 2 (b)); a label that
 	// exists already, or that appears between the look and the creation, is fine.
 	EnsureLabels(ctx context.Context, labels []IssueLabel) error
@@ -104,6 +107,21 @@ func issueListLimit(limit int) int {
 	return limit
 }
 
+// issuePage is the page parameter of a listing: pages count from 1.
+func issuePage(page int) int {
+	if page < 1 {
+		return 1
+	}
+	return page
+}
+
+// IssueGone reports whether err is a provider's answer that the issue is not there any
+// more: a 404 or a 410 (DESIGN 5.23 rule 5: the closer has nothing left to post on it).
+func IssueGone(err error) bool {
+	var se *errAPIStatus
+	return errors.As(err, &se) && (se.status == http.StatusNotFound || se.status == http.StatusGone)
+}
+
 // ---- GitLab -------------------------------------------------------------------------
 
 // gitlabIssues is GitLab's issue API for one project: base is .../api/v4/projects/<encoded
@@ -114,24 +132,30 @@ type gitlabIssues struct {
 }
 
 // ListLabelled is GET issues?labels=<label>&state=opened&scope=all&order_by=created_at&
-// sort=asc&per_page=<limit> (rule 2 (c)).
-func (g *gitlabIssues) ListLabelled(ctx context.Context, label string, limit int) ([]Issue, error) {
+// sort=asc&per_page=<perPage>&page=<page> (rule 2 (c)); the confidential issues are left
+// out (review L8).
+func (g *gitlabIssues) ListLabelled(ctx context.Context, label string, page, perPage int) ([]Issue, bool, error) {
 	var list []struct {
-		IID         int64  `json:"iid"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
-		WebURL      string `json:"web_url"`
+		IID          int64  `json:"iid"`
+		Title        string `json:"title"`
+		Description  string `json:"description"`
+		WebURL       string `json:"web_url"`
+		Confidential bool   `json:"confidential"`
 	}
+	perPage = issueListLimit(perPage)
 	q := url.Values{"labels": {label}, "state": {"opened"}, "scope": {"all"}, "order_by": {"created_at"}, "sort": {"asc"},
-		"per_page": {strconv.Itoa(issueListLimit(limit))}}
+		"per_page": {strconv.Itoa(perPage)}, "page": {strconv.Itoa(issuePage(page))}}
 	if _, err := g.api.do(ctx, http.MethodGet, g.base+"/issues?"+q.Encode(), nil, &list); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	out := make([]Issue, 0, len(list))
 	for _, i := range list {
+		if i.Confidential {
+			continue
+		}
 		out = append(out, Issue{Number: i.IID, Title: i.Title, Body: i.Description, URL: i.WebURL})
 	}
-	return out, nil
+	return out, len(list) >= perPage, nil
 }
 
 // EnsureLabels is, per label, GET labels?search=<name> and, when no label of exactly that
@@ -164,7 +188,8 @@ func (g *gitlabIssues) EnsureLabels(ctx context.Context, labels []IssueLabel) er
 }
 
 // SwapLabels is PUT issues/<iid> {add_labels, remove_labels} (rule 3 (c)): one call, and
-// GitLab ignores a label to remove that the issue lacks.
+// GitLab ignores a label to remove that the issue lacks. GitLab applies the addition and
+// the removal together, so the issue is never left with neither label (review L2).
 func (g *gitlabIssues) SwapLabels(ctx context.Context, number int64, add, remove string) error {
 	body := map[string]any{}
 	if add != "" {
@@ -195,9 +220,9 @@ type githubIssues struct {
 }
 
 // ListLabelled is GET issues?labels=<label>&state=open&sort=created&direction=asc&
-// per_page=<limit>; the entries that carry pull_request are pull requests, which the
-// issues endpoint also lists, and are skipped (rule 2 (c)).
-func (g *githubIssues) ListLabelled(ctx context.Context, label string, limit int) ([]Issue, error) {
+// per_page=<perPage>&page=<page>; the entries that carry pull_request are pull requests,
+// which the issues endpoint also lists, and are skipped (rule 2 (c)).
+func (g *githubIssues) ListLabelled(ctx context.Context, label string, page, perPage int) ([]Issue, bool, error) {
 	var list []struct {
 		Number      int64     `json:"number"`
 		Title       string    `json:"title"`
@@ -205,10 +230,11 @@ func (g *githubIssues) ListLabelled(ctx context.Context, label string, limit int
 		HTMLURL     string    `json:"html_url"`
 		PullRequest *struct{} `json:"pull_request"`
 	}
+	perPage = issueListLimit(perPage)
 	q := url.Values{"labels": {label}, "state": {"open"}, "sort": {"created"}, "direction": {"asc"},
-		"per_page": {strconv.Itoa(issueListLimit(limit))}}
+		"per_page": {strconv.Itoa(perPage)}, "page": {strconv.Itoa(issuePage(page))}}
 	if _, err := g.api.do(ctx, http.MethodGet, g.base+"/issues?"+q.Encode(), nil, &list); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	out := make([]Issue, 0, len(list))
 	for _, i := range list {
@@ -221,7 +247,7 @@ func (g *githubIssues) ListLabelled(ctx context.Context, label string, limit int
 		}
 		out = append(out, issue)
 	}
-	return out, nil
+	return out, len(list) >= perPage, nil
 }
 
 // EnsureLabels is, per label, GET labels/<name> and, on a 404, POST labels {name, color}
@@ -257,10 +283,17 @@ func labelExists(err error) bool {
 	return strings.Contains(text, "already_exists") || strings.Contains(text, "already exists")
 }
 
-// SwapLabels is DELETE issues/<n>/labels/<label> for each label to remove (a 404, the
-// issue does not carry it, is ignored) and then POST issues/<n>/labels {labels: [add]}
-// (rule 3 (c)).
+// SwapLabels is POST issues/<n>/labels {labels: [add]} and then DELETE
+// issues/<n>/labels/<label> for each label to remove (a 404, the issue does not carry it,
+// is ignored) (rule 3 (c)). The new label goes first: a failure between the two leaves an
+// issue that carries both, which the next pass repairs, never one that carries neither and
+// has dropped out of the listing (review L2).
 func (g *githubIssues) SwapLabels(ctx context.Context, number int64, add, remove string) error {
+	if add != "" {
+		if _, err := g.api.do(ctx, http.MethodPost, fmt.Sprintf("%s/issues/%d/labels", g.base, number), map[string]any{"labels": []string{add}}, nil); err != nil {
+			return err
+		}
+	}
 	for _, name := range strings.Split(remove, ",") {
 		if name = strings.TrimSpace(name); name == "" {
 			continue
@@ -270,11 +303,7 @@ func (g *githubIssues) SwapLabels(ctx context.Context, number int64, add, remove
 			return err
 		}
 	}
-	if add == "" {
-		return nil
-	}
-	_, err := g.api.do(ctx, http.MethodPost, fmt.Sprintf("%s/issues/%d/labels", g.base, number), map[string]any{"labels": []string{add}}, nil)
-	return err
+	return nil
 }
 
 // Comment is POST issues/<n>/comments {body} (rule 3 (d)).

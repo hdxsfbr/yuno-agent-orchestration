@@ -428,12 +428,12 @@ describe("RunsPage runs that update a merge request", () => {
     expect(screen.getByText("!12", { selector: "span" })).not.toBeNull();
   });
 
-  it("goes back to every run with Clear", async () => {
+  it("goes back to every run with the Clear merge request filter button", async () => {
     renderPage("/runs?status=failed&merge_request_id=mr1");
     await screen.findByTitle(UPDATING);
-    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    fireEvent.click(screen.getByRole("button", { name: "Clear merge request filter" }));
     await waitFor(() => expect(where()).toBe("/runs?status=failed"));
-    expect(screen.queryByRole("button", { name: "Clear" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Clear merge request filter" })).toBeNull();
     expect(api.made("GET", /^\/api\/runs\?/).map((c) => c.url).at(-1)).toBe("/api/runs?status=failed&limit=100");
   });
 

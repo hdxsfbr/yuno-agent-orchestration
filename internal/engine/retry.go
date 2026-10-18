@@ -123,6 +123,9 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 		if err := e.checkOpenedRequestIdle(ctx, tx, run); err != nil {
 			return err
 		}
+		if err := e.checkNamedRequestOpenerIdle(ctx, tx, run); err != nil {
+			return err
+		}
 		retried, err = e.retryRow(ctx, tx, run, applied, now)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
@@ -192,7 +195,7 @@ func (e *Engine) retryRow(ctx context.Context, tx pgx.Tx, run *store.Run, limits
 				return nil, lerr
 			}
 		case errors.Is(err, store.ErrIssueBusy) && run.TriggerRef != nil:
-			live, lerr := store.LiveRunForTrigger(ctx, tx, store.TriggerIssue, *run.TriggerRef)
+			live, lerr := store.LiveIssueRun(ctx, tx, *run.TriggerRef)
 			if lerr == nil {
 				msg = "issue #" + (*run.TriggerRef)[strings.LastIndex(*run.TriggerRef, "#")+1:] + " already has a running run " + live.ID
 			} else if !errors.Is(lerr, store.ErrNotFound) {
@@ -231,6 +234,39 @@ func (e *Engine) checkOpenedRequestIdle(ctx context.Context, tx pgx.Tx, run *sto
 		return fmt.Errorf("run %s: %w", run.ID, err)
 	}
 	return &RetryError{Code: RetryNotRetryable, Message: opened.Label() + " is being updated by run " + live.ID}
+}
+
+// checkNamedRequestOpenerIdle is the other side of checkOpenedRequestIdle (DESIGN 5.22
+// rule 1, review L3): the retry of a run that names a merge request refuses while the run
+// that opened the request is live, since the opening run may still push to the branch the
+// retried run would push onto. The live-run index sees only runs that name the record, so
+// the opener is read through the record. A record that is gone, or opened by the run
+// itself, leaves nothing to refuse.
+func (e *Engine) checkNamedRequestOpenerIdle(ctx context.Context, tx pgx.Tx, run *store.Run) error {
+	if run.MergeRequestID == nil {
+		return nil
+	}
+	mr, err := store.GetMergeRequest(ctx, tx, *run.MergeRequestID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("run %s: read its merge request: %w", run.ID, err)
+	}
+	if mr.RunID == run.ID {
+		return nil
+	}
+	opener, err := store.GetRun(ctx, tx, mr.RunID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("run %s: run %s: %w", run.ID, mr.RunID, err)
+	}
+	if store.IsTerminal(opener.Status) {
+		return nil
+	}
+	return &RetryError{Code: RetryNotRetryable, Message: mr.Label() + " is being updated by run " + opener.ID}
 }
 
 // endOpenRootSpan ends the run's open root span, if it has one, marked as retried with

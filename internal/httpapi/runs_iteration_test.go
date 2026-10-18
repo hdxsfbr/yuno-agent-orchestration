@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -258,10 +259,11 @@ func sendSchedule(t *testing.T, ts *httptest.Server, method, path, body string) 
 }
 
 // T5.22.9 (the API half), DESIGN 5.22 rule 7: a schedule names the request its runs
-// update; the rule 1 checks are 422 details on merge_request_id; a schedule without a
-// project says it needs one; left out on update it keeps its value; a change of workflow
-// or of project drops it; an empty string clears it; the representation carries the id
-// and the joined number.
+// update; the rule 1 checks are 422 details on merge_request_id; a schedule on a workflow
+// that uses no project says so with the engine's text, and one on a workflow that wants a
+// project but has none says it needs one; left out on update it keeps its value, and is
+// not checked again; a change of workflow or of project drops it; an empty string clears
+// it; the representation carries the id and the joined number.
 func TestScheduleMergeRequest(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
@@ -271,7 +273,7 @@ func TestScheduleMergeRequest(t *testing.T) {
 	plain, needs, needs2 := scheduleWorkflow(t), projectScheduleWorkflow(t), projectScheduleWorkflow(t)
 	p, p2 := seedProject(t, nil, "Sched MR "+sfx, ""), seedProject(t, nil, "Sched MR two "+sfx, "")
 	opener, rec := iterRecord(t, p, 4)
-	_, rec2 := iterRecord(t, p, 5)
+	opener2, rec2 := iterRecord(t, p, 5)
 	_, foreign := iterRecord(t, p2, 7)
 	call := func(method, path, body string) (int, []byte) { return do(t, ts, method, path, body) }
 	send := func(method, path, body string) (int, store.Schedule, map[string]string) {
@@ -288,7 +290,7 @@ func TestScheduleMergeRequest(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, want string
 	}{
-		{"no project at all", `{"workflow_id":"` + plain.ID + `","merge_request_id":"` + rec.ID + `"` + rest, "needs a project"},
+		{"no project at all", `{"workflow_id":"` + plain.ID + `","merge_request_id":"` + rec.ID + `"` + rest, "the workflow does not use a project"},
 		{"no project on a workflow that wants one", `{"workflow_id":"` + needs.ID + `","merge_request_id":"` + rec.ID + `"` + rest, "needs a project"},
 		{"unknown", `{"workflow_id":"` + needs.ID + `","project_id":"` + p.ID + `","merge_request_id":"nope"` + rest, "no merge request with id nope"},
 		{"another project's", `{"workflow_id":"` + needs.ID + `","project_id":"` + p.ID + `","merge_request_id":"` + foreign.ID + `"` + rest,
@@ -389,17 +391,126 @@ func TestScheduleMergeRequest(t *testing.T) {
 		t.Errorf("a schedule without a request carries merge_request members: %s", body)
 	}
 
-	// A request that ended since refuses the schedule's next update, like a deleted project.
+	// A request that ended since does not stop the schedule from being disabled, enabled
+	// or edited: it is checked only when the body names it or the workflow or project
+	// changes (review M1). The tick disables the schedule when it next fires.
 	if code, _, _ := send(http.MethodPut, "/api/schedules/"+s.ID, `{"merge_request_id":"`+rec2.ID+`"}`); code != http.StatusOK {
 		t.Fatalf("name rec2: %d", code)
 	}
-	setState(rec2.ID, store.MergeRequestMerged)
-	if code, _, got := send(http.MethodPut, "/api/schedules/"+s.ID, `{"enabled":true}`); code != http.StatusUnprocessableEntity ||
-		got["merge_request_id"] != "merge request !5 is merged" {
-		t.Fatalf("toggle on a merged request: %d %v", code, got)
+	cur, err := store.GetSchedule(ctx, pool, s.ID)
+	mustDo(t, err)
+	home, away := cur.WorkflowID, needs.ID // the workflow the schedule is on, and another one
+	if home == needs.ID {
+		away = needs2.ID
 	}
-	if got, err := store.GetSchedule(ctx, pool, s.ID); err != nil || got.MergeRequestNumber == nil || *got.MergeRequestNumber != 5 {
-		t.Fatalf("the stored schedule lost its request: %+v %v", got, err)
+	for _, state := range []string{store.MergeRequestMerged, store.MergeRequestClosed} {
+		setState(rec2.ID, state)
+		want := "merge request !5 is " + state
+		for name, body := range map[string]string{
+			"disable":      `{"enabled":false}`,
+			"enable":       `{"enabled":true}`,
+			"edit input":   `{"input":{"task":"edited under ` + state + `"}}`,
+			"edit cron":    `{"cron_expr":"30 9 * * *"}`,
+			"name project": `{"project_id":"` + p.ID + `"}`, // unchanged: not a change
+		} {
+			code, got, details := send(http.MethodPut, "/api/schedules/"+s.ID, body)
+			if code != http.StatusOK || got.MergeRequestID == nil || *got.MergeRequestID != rec2.ID {
+				t.Fatalf("%s, request %s: %d %+v %v; want 200 with the request kept", name, state, code, got, details)
+			}
+		}
+		// A PUT of what was fetched names the request, so the request is checked.
+		_, fetched := call(http.MethodGet, "/api/schedules/"+s.ID, "")
+		if code, _, got := send(http.MethodPut, "/api/schedules/"+s.ID, string(fetched)); code != http.StatusUnprocessableEntity || got["merge_request_id"] != want {
+			t.Fatalf("put back, request %s: %d %v, want %q", state, code, got, want)
+		}
+		if got, err := store.GetSchedule(ctx, pool, s.ID); err != nil || got.MergeRequestNumber == nil || *got.MergeRequestNumber != 5 ||
+			string(got.Input) == "" || !strings.Contains(string(got.Input), "edited under "+state) {
+			t.Fatalf("the stored schedule after the edits: %+v %v", got, err)
+		}
+		// Naming it in the body, or changing the workflow or project, checks it again.
+		if code, _, got := send(http.MethodPut, "/api/schedules/"+s.ID, `{"merge_request_id":"`+rec2.ID+`"}`); code != http.StatusUnprocessableEntity ||
+			got["merge_request_id"] != want {
+			t.Fatalf("naming a %s request: %d %v, want %q", state, code, got, want)
+		}
+		if code, _, got := send(http.MethodPut, "/api/schedules/"+s.ID, `{"workflow_id":"`+away+`","project_id":"`+p.ID+`","merge_request_id":"`+rec2.ID+`"}`); code != http.StatusUnprocessableEntity ||
+			got["merge_request_id"] != want {
+			t.Fatalf("workflow change naming a %s request: %d %v, want %q", state, code, got, want)
+		}
+		// A change that drops the kept request needs no check: it goes.
+		if code, got, _ := send(http.MethodPut, "/api/schedules/"+s.ID, `{"workflow_id":"`+away+`","project_id":"`+p.ID+`"}`); code != http.StatusOK ||
+			got.MergeRequestID != nil || got.WorkflowID != away {
+			t.Fatalf("workflow change over a %s request: %d %+v", state, code, got)
+		}
+		if code, got, _ := send(http.MethodPut, "/api/schedules/"+s.ID, `{"workflow_id":"`+home+`","project_id":"`+p.ID+`"}`); code != http.StatusOK {
+			t.Fatalf("back to the first workflow: %d %+v", code, got)
+		}
+		setState(rec2.ID, store.MergeRequestOpen)
+		if code, got, _ := send(http.MethodPut, "/api/schedules/"+s.ID, `{"merge_request_id":"`+rec2.ID+`"}`); code != http.StatusOK || got.MergeRequestID == nil {
+			t.Fatalf("name rec2 again: %d %+v", code, got)
+		}
+	}
+	// An open request that a live run is updating is not the schedule's business either
+	// until the body names it: the toggle goes through while the opener runs, naming the
+	// request is refused.
+	setRunStatus(t, opener2.ID, store.RunRunning)
+	if code, got, _ := send(http.MethodPut, "/api/schedules/"+s.ID, `{"enabled":false}`); code != http.StatusOK || got.MergeRequestID == nil {
+		t.Fatalf("toggle while the opener runs: %d %+v", code, got)
+	}
+	if code, _, got := send(http.MethodPut, "/api/schedules/"+s.ID, `{"merge_request_id":"`+rec2.ID+`"}`); code != http.StatusUnprocessableEntity ||
+		got["merge_request_id"] != "merge request !5 is being updated by run "+opener2.ID {
+		t.Fatalf("naming a request its opener is updating: %d %v", code, got)
+	}
+	setRunStatus(t, opener2.ID, store.RunSucceeded)
+}
+
+// Review L1: a merge_request_id with a control character is an unknown id, not a 500 from
+// the database: a 422 detail on the three writes that take one, and an empty list for
+// GET /api/runs. Left out, the stored request is untouched.
+func TestMergeRequestIDWithAControlCharacterIsUnknownL1(t *testing.T) {
+	pool := needDB(t)
+	fe := &fakeEngine{pool: pool}
+	_, ts := newTestServer(t, pool, fe, nil)
+	pinScheduleClock(t, "2099-10-15T08:00:00Z")
+	sfx := uniqueSuffix()
+	needs := projectScheduleWorkflow(t)
+	p := seedProject(t, nil, "Control MR "+sfx, "")
+	_, rec := iterRecord(t, p, 4)
+	rest := `,"kind":"cron","cron_expr":"0 9 * * *","input":{"task":"t"}}`
+
+	for what, id := range map[string]string{"a NUL": "a\u0000b", "a bell": "a\u0007b", "a line break inside": "a\nb", "only a NUL": "\u0000", "a DEL": "a\u007fb"} {
+		// POST /api/runs: refused before the engine is asked.
+		before := len(fe.triggers)
+		code, body := do(t, ts, http.MethodPost, "/api/runs", `{"agent_id":"ag","task":"t","project_id":"`+p.ID+`","merge_request_id":`+jsonText(id)+`}`)
+		fes := fieldMessages(t, body)
+		if code != http.StatusUnprocessableEntity || len(fes) != 1 || fes[0] != "merge_request_id: no merge request with id "+id || len(fe.triggers) != before {
+			t.Errorf("%s, POST /api/runs: %d %s", what, code, body)
+		}
+		// POST /api/schedules.
+		code, _, got := sendSchedule(t, ts, http.MethodPost, "/api/schedules",
+			`{"workflow_id":"`+needs.ID+`","project_id":"`+p.ID+`","merge_request_id":`+jsonText(id)+rest)
+		if code != http.StatusUnprocessableEntity || got["merge_request_id"] != "no merge request with id "+id {
+			t.Errorf("%s, POST /api/schedules: %d %v", what, code, got)
+		}
+		// GET /api/runs: no run names it.
+		code, body = do(t, ts, http.MethodGet, "/api/runs?merge_request_id="+url.QueryEscape(id), "")
+		if code != http.StatusOK || strings.TrimSpace(string(body)) != "[]" {
+			t.Errorf("%s, GET /api/runs: %d %s, want 200 []", what, code, body)
+		}
+	}
+
+	// PUT /api/schedules/{id}: the control character is refused, the request kept.
+	code, s, _ := sendSchedule(t, ts, http.MethodPost, "/api/schedules",
+		`{"workflow_id":"`+needs.ID+`","project_id":"`+p.ID+`","merge_request_id":"`+rec.ID+`"`+rest)
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d", code)
+	}
+	t.Cleanup(func() { _ = store.DeleteSchedule(context.Background(), pool, s.ID) })
+	if code, _, got := sendSchedule(t, ts, http.MethodPut, "/api/schedules/"+s.ID, `{"merge_request_id":"x\u0000y"}`); code != http.StatusUnprocessableEntity ||
+		got["merge_request_id"] != "no merge request with id x\x00y" {
+		t.Errorf("PUT with a NUL: %d %v", code, got)
+	}
+	if stored, err := store.GetSchedule(context.Background(), pool, s.ID); err != nil || stored.MergeRequestID == nil || *stored.MergeRequestID != rec.ID {
+		t.Errorf("a refused PUT changed the schedule: %+v %v", stored, err)
 	}
 }
 
@@ -432,8 +543,8 @@ func iterationConformanceSteps(t *testing.T) []conformanceStep {
 		{http.MethodGet, "/api/runs?merge_request_id=" + rec.ID + "&trigger=manual&status=succeeded&limit=5", "", http.StatusOK},
 		{http.MethodGet, "/api/runs?merge_request_id=no-such-request", "", http.StatusOK},
 		{http.MethodGet, "/api/runs?trigger=issue&limit=5", "", http.StatusOK},
-		// GET /api/runs?trigger=webhook is a 422 the contract does not list yet (the path has a
-		// "200" response only): TestRunsListFiltersOnTriggerAndMergeRequest pins the answer.
+		{http.MethodGet, "/api/runs?trigger=webhook", "", http.StatusUnprocessableEntity},
+		{http.MethodGet, "/api/runs?merge_request_id=a%00b", "", http.StatusOK},
 		{http.MethodGet, "/api/runs/" + named.ID, "", http.StatusOK},
 		{http.MethodGet, "/api/runs/" + named.ID + "/trace", "", http.StatusOK},
 		{http.MethodPost, "/api/runs", `{"agent_id":"ag","task":"fix the review comment","project_id":"` + p.ID + `","merge_request_id":"` + rec.ID + `"}`, http.StatusCreated},

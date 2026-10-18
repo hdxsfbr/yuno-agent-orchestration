@@ -3,17 +3,21 @@ import { Link } from "react-router";
 import { listMergeRequests, type MergeRequest } from "@/lib/api";
 import { formatDateTime, shortId } from "@/lib/format";
 import { requestNoun, requestRef } from "@/lib/mergeRequest";
-import { projectMergeRequestsKey, useProjectRuns } from "@/lib/useProjects";
+import { projectMergeRequestsKey, projectRunsWindowFull, useProjectRuns } from "@/lib/useProjects";
 import { cardClass } from "../Card";
 import { CIStatusBadge, MergeRequestStateBadge } from "../MergeRequestBadges";
 import { Loading, QueryError } from "../QueryState";
 
-/** "+2 updates" linking to the runs that updated the request; nothing when none did. */
-function updatedBy(mr: MergeRequest, count: number) {
-  if (count === 0) return null;
+/**
+ * "+2 updates" linking to the runs that updated the request; nothing when none did. When the runs the page read may
+ * not be all of them, the count could be too small, so the link says "updates" alone and the list it opens tells.
+ */
+function updatedBy(mr: MergeRequest, count: number, windowFull: boolean) {
+  if (!windowFull && count === 0) return null;
+  const label = `Runs that updated ${requestRef(mr)}`;
   return (
-    <Link to={`/runs?merge_request_id=${encodeURIComponent(mr.id)}`} className="text-xs underline" title="Runs that updated this request">
-      +{count} {count === 1 ? "update" : "updates"}
+    <Link to={`/runs?merge_request_id=${encodeURIComponent(mr.id)}`} className="text-xs underline" title={label} aria-label={label}>
+      {windowFull ? "updates" : `+${count} ${count === 1 ? "update" : "updates"}`}
     </Link>
   );
 }
@@ -24,6 +28,7 @@ export default function ProjectMergeRequests({ projectId }: { projectId: string 
   const requests = q.data ?? [];
   // How many runs updated each request, counted from the project's newest runs, which the page reads once for its Recent runs card too.
   const runs = useProjectRuns(projectId);
+  const windowFull = projectRunsWindowFull(runs.data);
   const openedBy = new Map(requests.map((mr) => [mr.id, mr.run_id]));
   const updates = new Map<string, number>();
   for (const r of runs.data ?? []) {
@@ -70,7 +75,7 @@ export default function ProjectMergeRequests({ projectId }: { projectId: string 
                       <Link to={`/runs/${encodeURIComponent(mr.run_id)}`} className="font-mono hover:underline" title={mr.run_id}>
                         {shortId(mr.run_id)}
                       </Link>
-                      {updatedBy(mr, updates.get(mr.id) ?? 0)}
+                      {updatedBy(mr, updates.get(mr.id) ?? 0, windowFull)}
                     </div>
                   </td>
                   <td className="px-4 py-2.5">

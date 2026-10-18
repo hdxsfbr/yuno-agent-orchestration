@@ -159,7 +159,7 @@ describe("the Settings card", () => {
     api.on("POST", "/api/projects/p1/check", () => checked());
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Check" }));
-    const note = await screen.findByRole("status");
+    const note = await (await card("Settings")).findByRole("status");
     expect(note.textContent).toBe("Token accepted: default branch main, push allowed.");
     expect(note.className).toContain("emerald");
     expect(api.made("POST", "/api/projects/p1/check")).toHaveLength(1);
@@ -169,13 +169,13 @@ describe("the Settings card", () => {
     api.on("POST", "/api/projects/p1/check", () => checked({ ok: false, message: "The token was refused (401).", can_push: undefined, branch_exists: undefined }));
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Check" }));
-    expect((await screen.findByRole("status")).className).toContain("red");
+    expect((await (await card("Settings")).findByRole("status")).className).toContain("red");
     cleanup();
 
     api.on("POST", "/api/projects/p1/check", () => apiError(500, "internal", "boom"));
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Check" }));
-    expect((await screen.findByRole("status")).textContent).toBe("Could not check the project: boom");
+    expect((await (await card("Settings")).findByRole("status")).textContent).toBe("Could not check the project: boom");
   });
 
   it("does not show a result that predates the last change to the project", async () => {
@@ -185,7 +185,7 @@ describe("the Settings card", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Check" }));
     await waitFor(() => expect(api.made("POST", "/api/projects/p1/check")).toHaveLength(1));
     await waitFor(() => expect((screen.getByRole("button", { name: "Check" }) as HTMLButtonElement).disabled).toBe(false));
-    expect(screen.queryByRole("status")).toBeNull();
+    expect((await card("Settings")).queryByRole("status")).toBeNull();
   });
 
   it("asks before deleting, then removes the project and returns to the list", async () => {
@@ -441,17 +441,32 @@ describe("the Runs column of the Merge requests table", () => {
     renderPage();
     const first = await runsCell("!12");
     expect(first.getByRole("link", { name: "runa" }).getAttribute("href")).toBe("/runs/runa");
-    const updates = await first.findByRole("link", { name: "+2 updates" });
+    const updates = await first.findByRole("link", { name: "Runs that updated !12" });
+    expect(updates.textContent).toBe("+2 updates");
     expect(updates.getAttribute("href")).toBe("/runs?merge_request_id=mr1");
 
     const second = await runsCell("!13");
     expect(second.getByRole("link", { name: "runb" })).not.toBeNull();
-    expect(await second.findByRole("link", { name: "+1 update" })).not.toBeNull();
-    expect(second.getByRole("link", { name: "+1 update" }).getAttribute("href")).toBe("/runs?merge_request_id=mr2");
+    const one = await second.findByRole("link", { name: "Runs that updated !13" });
+    expect(one.textContent).toBe("+1 update");
+    expect(one.getAttribute("href")).toBe("/runs?merge_request_id=mr2");
 
     const third = await runsCell("!14");
     expect(third.getByRole("link", { name: "runc" })).not.toBeNull();
-    expect(third.queryByRole("link", { name: /update/ })).toBeNull();
+    expect(third.queryByRole("link", { name: /updated/ })).toBeNull();
+  });
+
+  it("names each request's updates link by its number, so the links differ from one another and read !12 or #4 as the table does", async () => {
+    requests = [
+      mergeRequest({ id: "mr1", number: 12, run_id: "runa" }),
+      mergeRequest({ id: "mr2", number: 4, provider: "github", url: "https://github.com/o/r/pull/4", run_id: "runb" }),
+    ];
+    runs = [run({ id: "u1", project_id: "p1", merge_request_id: "mr1" }), run({ id: "u2", project_id: "p1", merge_request_id: "mr2" })];
+    renderPage();
+    const section = await card("Merge requests");
+    expect(await section.findByRole("link", { name: "Runs that updated !12" })).not.toBeNull();
+    expect(section.getByRole("link", { name: "Runs that updated #4" }).getAttribute("href")).toBe("/runs?merge_request_id=mr2");
+    expect(section.getAllByRole("link", { name: /^Runs that updated / })).toHaveLength(2);
   });
 
   it("does not count the run that opened the request, and encodes the record's id in the link", async () => {
@@ -459,7 +474,39 @@ describe("the Runs column of the Merge requests table", () => {
     runs = [run({ id: "runa", project_id: "p1", merge_request_id: "a/b" }), run({ id: "u1", project_id: "p1", merge_request_id: "a/b" })];
     renderPage();
     const cell = await runsCell("!12");
-    expect((await cell.findByRole("link", { name: "+1 update" })).getAttribute("href")).toBe("/runs?merge_request_id=a%2Fb");
+    expect((await cell.findByRole("link", { name: "Runs that updated !12" })).getAttribute("href")).toBe("/runs?merge_request_id=a%2Fb");
+  });
+
+  describe("when the 200 runs the page read are all the room there was", () => {
+    // 200 runs of the project: the newest updated mr1 twice, the rest are plain; mr2 shows one update and mr3 none in the window.
+    const full = () => [
+      run({ id: "u1", project_id: "p1", merge_request_id: "mr1" }),
+      run({ id: "u2", project_id: "p1", merge_request_id: "mr1" }),
+      run({ id: "u3", project_id: "p1", merge_request_id: "mr2" }),
+      ...Array.from({ length: 197 }, (_, i) => run({ id: `plain${i}`, project_id: "p1" })),
+    ];
+    const some = () => [mergeRequest({ id: "mr1", number: 12, run_id: "runa" }), mergeRequest({ id: "mr2", number: 13, run_id: "runb" }), mergeRequest({ id: "mr3", number: 14, run_id: "runc" })];
+
+    it("shows the updates link without a count for every request, since older updates may be out of the window", async () => {
+      requests = some();
+      runs = full();
+      expect(runs).toHaveLength(200);
+      renderPage();
+      for (const [number, id] of [["!12", "mr1"], ["!13", "mr2"], ["!14", "mr3"]] as const) {
+        const link = await (await runsCell(number)).findByRole("link", { name: `Runs that updated ${number}` });
+        expect(link.textContent).toBe("updates");
+        expect(link.getAttribute("href")).toBe(`/runs?merge_request_id=${id}`);
+      }
+    });
+
+    it("keeps the count as soon as the window has room, even for one run less", async () => {
+      requests = some();
+      runs = full().slice(0, 199);
+      renderPage();
+      expect((await (await runsCell("!12")).findByRole("link", { name: "Runs that updated !12" })).textContent).toBe("+2 updates");
+      expect((await runsCell("!13")).getByRole("link", { name: "Runs that updated !13" }).textContent).toBe("+1 update");
+      expect((await runsCell("!14")).queryByRole("link", { name: /updated/ })).toBeNull();
+    });
   });
 
   it("shows the opening run alone while the runs load or when they cannot be read", async () => {
@@ -468,7 +515,7 @@ describe("the Runs column of the Merge requests table", () => {
     renderPage();
     const cell = await runsCell("!12");
     expect(cell.getByRole("link", { name: "runa" })).not.toBeNull();
-    expect(cell.queryByRole("link", { name: /update/ })).toBeNull();
+    expect(cell.queryByRole("link", { name: /updated/ })).toBeNull();
     expect((await (await card("Recent runs")).findByRole("alert")).textContent).toContain("Could not load the runs: boom");
   });
 });
@@ -489,7 +536,9 @@ describe("the Issue intake card", () => {
     const section = await card("Issue intake");
     expect(section.getByText("Off")).not.toBeNull();
     expect(section.getByText("Not polled yet")).not.toBeNull();
-    expect((section.getByRole("button", { name: "Poll now" }) as HTMLButtonElement).disabled).toBe(true);
+    const poll = section.getByRole("button", { name: "Poll now" }) as HTMLButtonElement;
+    expect(poll.disabled).toBe(true);
+    expect(poll.title).toBe("Intake is off");
   });
 
   it("says On with the label and the workflow's name, when it last polled, and offers Poll now", async () => {
@@ -515,7 +564,7 @@ describe("the Issue intake card", () => {
     const projectReads = api.made("GET", "/api/projects").length;
     const runReads = api.made("GET", /^\/api\/runs\?/).length;
     fireEvent.click(section.getByRole("button", { name: "Poll now" }));
-    expect((await section.findByRole("status")).textContent).toBe("Took 2, closed 1");
+    await waitFor(() => expect(section.getByRole("status").textContent).toBe("Started 2 runs, reported 1 finished"));
     expect(api.made("POST", "/api/projects/p1/intake/poll")).toHaveLength(1);
     expect(api.made("POST", "/api/projects/p1/intake/poll")[0].body).toBeUndefined();
     expect(await section.findByText("Last poll just now")).not.toBeNull();
@@ -537,7 +586,7 @@ describe("the Issue intake card", () => {
     fireEvent.click(section.getByRole("button", { name: "Poll now" }));
     expect((await section.findByRole("alert")).textContent).toBe("issue intake is off for this project");
     expect(await section.findByText("Off")).not.toBeNull();
-    expect(section.queryByRole("status")).toBeNull();
+    expect(section.getByRole("status").textContent).toBe("");
   });
 });
 

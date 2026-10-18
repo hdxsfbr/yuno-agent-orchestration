@@ -34,8 +34,16 @@ const (
 	// DefaultTimeout bounds the pass over one project (rule 2) and the closing of one run
 	// (rule 5).
 	DefaultTimeout = 30 * time.Second
-	// ListLimit is how many labelled issues one pass lists (rule 2 (c)).
+	// DefaultCloseTimeout is the one deadline of a closer pass over all its runs (rule 2,
+	// review L6).
+	DefaultCloseTimeout = 5 * time.Minute
+	// ListLimit is the size of one page of the issue listing (rule 2 (c)).
 	ListLimit = 50
+	// ListPages is how many pages one pass reads at most (rule 2 (c), review L5).
+	ListPages = 4
+	// ListTakeable is how many takeable issues end the reading of pages early (rule 2 (c),
+	// review L5): a pull request or a confidential issue is not one.
+	ListTakeable = 10
 	// TakeLimit is how many new runs one pass creates per project; the rest of the issues
 	// wait for the next poll (rule 2 (d), D-053).
 	TakeLimit = 10
@@ -68,8 +76,10 @@ type Triggerer interface {
 // Loop polls the projects with intake enabled. Client should come from
 // tools.ProviderClient, so a token header never follows a redirect to another host; nil is
 // that client over the default transport. Interval is INTAKE_POLL_INTERVAL, Timeout bounds
-// the pass over one project (30 s when zero), Now is the clock (nil: the system's, in
-// UTC) and PublicBaseURL prefixes the run links in the comments (relative without it).
+// the pass over one project and each provider step of the closer (30 s when zero),
+// CloseTimeout the whole closer pass (5 minutes when zero), Now is the clock (nil: the
+// system's, in UTC) and PublicBaseURL prefixes the run links in the comments (relative
+// without it).
 type Loop struct {
 	Pool          *pgxpool.Pool
 	Projects      *project.Resolver
@@ -77,6 +87,7 @@ type Loop struct {
 	Engine        Triggerer
 	Interval      time.Duration
 	Timeout       time.Duration
+	CloseTimeout  time.Duration
 	Log           *slog.Logger
 	Now           func() time.Time
 	PublicBaseURL string
@@ -287,13 +298,17 @@ func (l *Loop) takePass(ctx context.Context, p *store.Project) (takeResult, erro
 		res.fail(msg)
 	}
 
-	// (c) The listing.
-	issues, err := prov.ListLabelled(pctx, p.IntakeLabel, ListLimit)
+	// (c) The listing: pages of 50 until 10 takeable issues are found or 4 pages were read,
+	// so issues that stay labelled do not hide the newer ones (review L5).
+	issues, err := listIssues(pctx, prov, p.IntakeLabel)
 	if err != nil {
 		msg := cleanError(err.Error(), pc.Token)
 		log.Warn("intake: the issues could not be listed", "error", msg)
 		res.fail(msg)
-		return res, nil
+		if len(issues) == 0 {
+			return res, nil
+		}
+		// A later page failed: the issues of the pages before it are taken all the same.
 	}
 
 	// (d) The taker, issue by issue in the provider's order.
@@ -310,14 +325,31 @@ func (l *Loop) takePass(ctx context.Context, p *store.Project) (takeResult, erro
 		}
 		ref := store.IssueTriggerRef(p.ID, issue.Number)
 		ilog := log.With("issue", issue.Number, "title", cutTitle(issue.Title))
-		run, err := store.LiveRunForTrigger(ctx, l.Pool, store.TriggerIssue, ref)
+		// Taken already: a live run, or a finished one whose outcome is not posted (rule 3,
+		// review H1). The swap below repairs the label; no second run is created.
+		run, err := store.TakenIssueRun(ctx, l.Pool, ref)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return res, err
 		}
+		if err == nil && store.IsTerminal(run.Status) {
+			ilog.Info("intake: issue has a finished run whose outcome is not posted; no new run", "run_id", run.ID, "status", run.Status)
+		}
 		if err != nil {
-			// No live run: not taken yet. The cap of rule 2 (d), and a refusal that is the
-			// project's or the workflow's rather than this issue's, leave it for the next poll.
+			// Not taken yet. The cap of rule 2 (d), and a refusal that is the project's or the
+			// workflow's rather than this issue's, leave it for the next poll.
 			if refused || newRuns >= TakeLimit {
+				continue
+			}
+			// The budget with the runs in flight counted at their ceiling (rule 2 (a), review
+			// M2): the project's spend so far says nothing about what a run just started
+			// will cost, so the cap is checked against what the live runs may still spend.
+			full, inFlight, err := l.atBudgetInFlight(ctx, p, res.at)
+			if err != nil {
+				return res, err
+			}
+			if full {
+				log.Info(fmt.Sprintf("intake: project %s at its budget with %d runs in flight", p.Name, inFlight))
+				refused = true
 				continue
 			}
 			var stop bool
@@ -401,6 +433,56 @@ func (l *Loop) trigger(ctx context.Context, p *store.Project, pc *project.Config
 	return nil, stop
 }
 
+// listIssues reads the labelled issues page by page, 50 to a page, until ListTakeable
+// takeable ones are found or ListPages pages were read (rule 2 (c), review L5). What the
+// provider lists is already free of pull requests and confidential issues. After a failure
+// it returns the issues of the pages read before it with the error.
+func listIssues(ctx context.Context, prov tools.IssueProvider, label string) ([]tools.Issue, error) {
+	var all []tools.Issue
+	for page := 1; page <= ListPages; page++ {
+		issues, more, err := prov.ListLabelled(ctx, label, page, ListLimit)
+		if err != nil {
+			return all, err
+		}
+		all = append(all, issues...)
+		if !more || len(all) >= ListTakeable {
+			break
+		}
+	}
+	return all, nil
+}
+
+// atBudgetInFlight reports whether the project may take no new run (rule 2 (a), review M2):
+// for either window with a cap, the cap minus the window's spend minus the max_cost_usd of
+// the project's live runs is at or under zero. inFlight is the number of live runs. A
+// project with no cap is never full, and is not queried.
+func (l *Loop) atBudgetInFlight(ctx context.Context, p *store.Project, now time.Time) (full bool, inFlight int, err error) {
+	if p.BudgetDayUSDMicros == nil && p.BudgetMonthUSDMicros == nil {
+		return false, 0, nil
+	}
+	inFlight, ceiling, err := store.LiveRunCostCeiling(ctx, l.Pool, p.ID)
+	if err != nil {
+		return false, 0, fmt.Errorf("project %s live runs: %w", p.ID, err)
+	}
+	day, month := project.Windows(now)
+	for _, c := range []struct {
+		w   project.Window
+		cap *store.USDMicros
+	}{{day, p.BudgetDayUSDMicros}, {month, p.BudgetMonthUSDMicros}} {
+		if c.cap == nil {
+			continue
+		}
+		spent, err := store.SumProjectSpend(ctx, l.Pool, p.ID, c.w.Start, c.w.End)
+		if err != nil {
+			return false, 0, fmt.Errorf("project %s spend: %w", p.ID, err)
+		}
+		if int64(*c.cap)-spent-ceiling <= 0 {
+			return true, inFlight, nil
+		}
+	}
+	return false, inFlight, nil
+}
+
 // ensureLabels creates the three derived labels of an intake label on the provider the
 // first time it sees the pair in this process (rule 2 (b)); a failure leaves the pair to
 // be tried at the next pass.
@@ -417,11 +499,15 @@ func (l *Loop) ensureLabels(ctx context.Context, projectID, label string, prov t
 }
 
 // closePass is the closer (rule 5) over the finished issue runs whose outcome is not on
-// their issue yet: every project's when projectID is empty, else one project's. It returns
-// how many it reported and, per project, the first error that kept a run from being
-// reported. The error is a database one.
+// their issue yet, newest first: every project's when projectID is empty, else one
+// project's. The whole pass runs under one deadline (CloseTimeout, 5 minutes), and a run
+// whose provider call timed out ends it early (rule 2, review L6): a hanging provider
+// holds the tick for one timeout, not one per run. It returns how many it reported and,
+// per project, the first error that kept a run from being reported. The error is a
+// database one.
 func (l *Loop) closePass(ctx context.Context, projectID string) (closed int, errs map[string]string, err error) {
 	errs = map[string]string{}
+	deadline := time.Now().Add(l.closeTimeout())
 	var runs []store.IssueRun
 	if projectID == "" {
 		runs, err = store.ListUnreportedIssueRuns(ctx, l.Pool, CloseLimit)
@@ -435,54 +521,76 @@ func (l *Loop) closePass(ctx context.Context, projectID string) (closed int, err
 		if ctx.Err() != nil {
 			return closed, errs, nil
 		}
-		ok, msg, err := l.closeRun(ctx, &runs[i])
+		if !time.Now().Before(deadline) {
+			l.log().Warn("intake: the closer ran out of time; the other finished runs wait for the next pass", "waiting", len(runs)-i)
+			break
+		}
+		res, err := l.closeRun(ctx, deadline, &runs[i])
 		if err != nil {
 			return closed, errs, err
 		}
 		switch {
-		case ok:
+		case res.reported:
 			closed++
-		case msg != "" && errs[runs[i].ProjectID] == "":
-			errs[runs[i].ProjectID] = msg
+		case res.msg != "" && errs[runs[i].ProjectID] == "":
+			errs[runs[i].ProjectID] = res.msg
+		}
+		if res.timedOut {
+			l.log().Warn("intake: the provider did not answer in time; the closer stops here and the next pass tries again", "waiting", len(runs)-i-1)
+			break
 		}
 	}
 	return closed, errs, nil
 }
 
+// closeResult is what the closer did with one finished run: reported says its outcome is on
+// the issue (or never can be, see closeRun); msg is the error to show on the project when
+// it is not; timedOut says a provider call ran into its deadline, which ends the pass.
+type closeResult struct {
+	reported bool
+	msg      string
+	timedOut bool
+}
+
 // closeRun posts the outcome of one finished run on its issue (rule 5): the label swap,
 // the comment, then reported_at. A provider failure in the swap or the comment is logged
 // and leaves reported_at null, so the next pass tries again (the swap is idempotent, the
-// comment may repeat once); a run whose project is gone or whose token cannot be read is
-// skipped with a log line the same way. ok says the run was reported; msg is the error to
-// show on the project when it was not; the error is a database one.
-func (l *Loop) closeRun(ctx context.Context, ir *store.IssueRun) (ok bool, msg string, err error) {
+// comment may repeat once); a run whose token cannot be read is skipped the same way. A run
+// whose project row is gone, or whose issue answers 404 or 410 on the swap, can never be
+// posted: it is marked reported with a log line (review M1) and counts as no report. Every
+// provider call ends at the deadline of the pass. The error is a database one.
+func (l *Loop) closeRun(ctx context.Context, deadline time.Time, ir *store.IssueRun) (closeResult, error) {
 	run := &ir.Run
 	log := l.log().With("run_id", run.ID, "project_id", ir.ProjectID, "issue", ir.Number)
 	proj, err := store.GetProject(ctx, l.Pool, ir.ProjectID)
 	if errors.Is(err, store.ErrNotFound) {
-		log.Warn("intake: finished run skipped: its project no longer exists")
-		return false, "", nil
+		return l.nothingToPost(ctx, run, log, "its project no longer exists")
 	}
 	if err != nil {
-		return false, "", err
+		return closeResult{}, err
 	}
 	pc, err := l.Projects.ForRun(ctx, run)
 	if err != nil {
-		msg = cleanError(err.Error(), "")
+		msg := cleanError(err.Error(), "")
 		log.Warn("intake: finished run skipped: its token cannot be read", "error", msg)
-		return false, msg, nil
+		return closeResult{msg: msg}, nil
 	}
 	label := proj.IntakeLabel
 	prov := tools.IssueProviderFor(pc, l.Client)
 	pctx, cancel := context.WithTimeout(ctx, l.timeout())
 	defer cancel()
+	pctx, cancelDeadline := context.WithDeadline(pctx, deadline)
+	defer cancelDeadline()
+	// timedOut says a failed call ran into the step's or the pass's deadline, not the
+	// shutdown's.
+	timedOut := func() bool { return ctx.Err() == nil && pctx.Err() != nil }
 
 	runURL := tools.RunURL(l.PublicBaseURL, run.ID)
 	var add, remove, text string
 	if run.Status == store.RunSucceeded {
 		mr, err := store.MergeRequestByRun(ctx, l.Pool, run.ID)
 		if err != nil {
-			return false, "", err
+			return closeResult{}, err
 		}
 		// A retry that succeeds replaces :failed with :done (edge cases of 5.23), so the
 		// opposite outcome label goes with :running.
@@ -501,20 +609,34 @@ func (l *Loop) closeRun(ctx context.Context, ir *store.IssueRun) (ok bool, msg s
 		log.Warn("intake: the labels could not be created", "error", cleanError(err.Error(), pc.Token))
 	}
 	if err := prov.SwapLabels(pctx, ir.Number, add, remove); err != nil {
-		msg = cleanError(err.Error(), pc.Token)
+		msg := cleanError(err.Error(), pc.Token)
+		if tools.IssueGone(err) {
+			return l.nothingToPost(ctx, run, log, fmt.Sprintf("the issue is gone (%s)", msg))
+		}
 		log.Warn("intake: the outcome label could not be set; the next pass tries again", "error", msg)
-		return false, msg, nil
+		return closeResult{msg: msg, timedOut: timedOut()}, nil
 	}
 	if err := prov.Comment(pctx, ir.Number, text); err != nil {
-		msg = cleanError(err.Error(), pc.Token)
+		msg := cleanError(err.Error(), pc.Token)
 		log.Warn("intake: the outcome comment failed; the next pass tries again", "error", msg)
-		return false, msg, nil
+		return closeResult{msg: msg, timedOut: timedOut()}, nil
 	}
 	if err := store.SetRunReportedAt(ctx, l.Pool, run.ID, l.now()); err != nil {
-		return false, "", err
+		return closeResult{}, err
 	}
 	log.Info("intake: finished run reported", "status", run.Status)
-	return true, "", nil
+	return closeResult{reported: true}, nil
+}
+
+// nothingToPost marks a finished run reported when nothing can ever be posted for it (its
+// project row is gone, its issue is gone), with the log line of rule 5, so it stops
+// heading the closer's list (review M1).
+func (l *Loop) nothingToPost(ctx context.Context, run *store.Run, log *slog.Logger, reason string) (closeResult, error) {
+	log.Info("intake: run " + run.ID + " has nothing to post: " + reason)
+	if err := store.SetRunReportedAt(ctx, l.Pool, run.ID, l.now()); err != nil {
+		return closeResult{}, err
+	}
+	return closeResult{}, nil
 }
 
 // finishedText is the comment of a succeeded run (rule 5 (b)): the request's link when the
@@ -598,6 +720,13 @@ func (l *Loop) timeout() time.Duration {
 		return l.Timeout
 	}
 	return DefaultTimeout
+}
+
+func (l *Loop) closeTimeout() time.Duration {
+	if l.CloseTimeout > 0 {
+		return l.CloseTimeout
+	}
+	return DefaultCloseTimeout
 }
 
 func (l *Loop) now() time.Time {

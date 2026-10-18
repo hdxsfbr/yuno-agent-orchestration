@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -149,6 +150,11 @@ func checkMergeRequest(ctx context.Context, q store.Querier, id string, proj *st
 	}
 	if proj == nil {
 		return nil, []string{"merge_request_id: the workflow does not use a project"}, nil, nil
+	}
+	// An id with a control character is no record's, and Postgres refuses a NUL in a
+	// parameter: it is an unknown id like any other (review L1).
+	if strings.ContainsFunc(id, unicode.IsControl) {
+		return nil, []string{"merge_request_id: no merge request with id " + id}, nil, nil
 	}
 	mr, err := store.GetMergeRequest(ctx, q, id)
 	if errors.Is(err, store.ErrNotFound) {

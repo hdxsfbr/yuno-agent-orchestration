@@ -137,7 +137,7 @@ export default function RunsPage() {
           <span className="flex items-center gap-2 text-sm">
             <span className="text-zinc-500">Merge request</span>
             <span className="font-mono">{filteredRequest ? requestRef(filteredRequest) : shortId(mergeRequestId)}</span>
-            <Button size="sm" variant="ghost" onClick={() => setFilter("merge_request_id", "")}>
+            <Button size="sm" variant="ghost" onClick={() => setFilter("merge_request_id", "")} aria-label="Clear merge request filter">
               Clear
             </Button>
           </span>

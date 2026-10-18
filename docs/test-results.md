@@ -1,3 +1,21 @@
+# Test results, 2026-10-18 (wave 9: iterate on an open merge request, issue intake; DESIGN 5.22 and 5.23)
+
+Run on the development machine from the worktree branch `claude/eloquent-wu-44b501`
+after the fix pass and before its merge to `main`, everything inside throwaway containers
+on the stack's network (the compose tool services cannot be used from a worktree while
+the stack runs); CI runs the same commands on `main` and deploys the commit.
+
+| Command | Result |
+|---|---|
+| `go test ./... -count=1` (against a `yuno_test_coord` database; what `make test-go` runs) | 21 packages ok, 0 failures (new package `internal/intake`; new: the queue-time checks and the live-run indexes, the branch clone and `checkout_sha`, the branch guard, `read_merge_request` and its fakes, the Chief's `merge_request` argument, schedules naming a request, the intake settings, provider issue client, taker and closer, the poll endpoint, `Closes #<n>`, the conformance steps of both features) |
+| `pnpm test` (vitest; what `make test-web` runs) | 43 files, 827 tests passed (new: the merge request selector in three dialogs, the header and card lines, the Runs column, the Intake section and card, the Trigger filter and issue links, the schedule toggle's detail) |
+| `go vet ./...`, staticcheck 2026.2.2, `gofmt -l`, eslint, `tsc --noEmit` (what `make lint` runs) | clean (`internal/obs/redact.go` was unformatted before the wave and is untouched) |
+| review | two Sonnet 5.5 reviewer agents (backend; API, store and UI): one high (a second run for an issue whose label swap never worked), five mediums and the kept lows fixed in one pass by two Sonnet 5.5 fix agents, the rest recorded as limitations; `docs/reviews/wave9-review.md` |
+
+Live verification on the public instance: see the table below this header once the
+deploy of the merge commit is verified.
+
+
 # Test results, 2026-10-17 (wave 8: project instructions and notes, budgets, merge request records, retry; DESIGN 5.18 to 5.21)
 
 Run on the development machine on the `wave8` branch after the fix pass and before its

@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"yuno/internal/engine"
 	"yuno/internal/intake"
 	"yuno/internal/store"
+	"yuno/internal/tools"
 	"yuno/internal/workflow"
 )
 
@@ -20,9 +22,22 @@ import (
 // maxIntakeLabelLen is the longest intake label, in bytes (5.23 rule 1).
 const maxIntakeLabelLen = 50
 
-// intakeTaskSample is the input the intake gives its workflow, as a one-line sample: the
-// workflow's input_schema is checked against it when the settings are saved (5.23 rule 1).
-const intakeTaskSample = `{"task":"x"}`
+// maxIntakeMessageLen caps one schema message in the 422 detail: a pattern violation
+// quotes the whole value it refused, and the sample task is 16 KiB.
+const maxIntakeMessageLen = 300
+
+// intakeTaskSample is the input the intake gives its workflow: the task of 5.23 rule 4
+// (the preamble, the issue's title and a body of the longest size, 16 KiB), so the
+// workflow's input_schema is checked when the settings are saved against what a real
+// issue produces, at its longest: a minLength above the preamble's length and a maxLength
+// every real task would break are both refused (5.23 rule 1, review L5). The repository
+// path and the issue's address are placeholders.
+func intakeTaskSample() json.RawMessage {
+	task := tools.IssueTask("group/project", tools.Issue{Number: 1, Title: "Sample issue", Body: strings.Repeat("x", tools.IssueBodyMax)},
+		"https://example.test/group/project/-/issues/1")
+	sample, _ := json.Marshal(map[string]string{"task": task})
+	return sample
+}
 
 // applyIntake checks the input's intake settings (DESIGN 5.23 rule 1) and puts the
 // settings to save on next. cur is the stored project on an update and nil on a create.
@@ -56,8 +71,13 @@ func (s *Server) applyIntake(ctx context.Context, in *projectInput, next, cur *s
 	if it.Label != nil {
 		label = strings.TrimSpace(*it.Label)
 	}
-	if !validIntakeLabel(label) {
+	switch {
+	case !validIntakeLabel(label):
 		fe.add("intake.label", "1 to %d characters without spaces or commas", maxIntakeLabelLen)
+	case strings.EqualFold(label, "None") || strings.EqualFold(label, "Any"):
+		// GitLab reads labels=None as the unlabelled issues and labels=Any as every labelled
+		// one, so a label of either name would take issues that never carried it (review L7).
+		fe.add("intake.label", "must not be None or Any")
 	}
 
 	wid := strings.TrimSpace(it.WorkflowID)
@@ -131,10 +151,32 @@ func (s *Server) intakeWorkflowProblem(ctx context.Context, id string) (string, 
 	if !def.Project {
 		return "the workflow does not use a project", nil
 	}
-	if msgs := engine.ValidateInput(def.InputSchema, json.RawMessage(intakeTaskSample)); len(msgs) > 0 {
+	if msgs := engine.ValidateInput(def.InputSchema, intakeTaskSample()); len(msgs) > 0 {
+		for i, m := range msgs {
+			msgs[i] = cutIntakeMessage(m)
+		}
 		return `the workflow's input must accept {"task": string}: ` + strings.Join(msgs, "; "), nil
 	}
 	return "", nil
+}
+
+// cutIntakeMessage shortens one schema message to about maxIntakeMessageLen bytes, keeping
+// its head and its tail (a pattern violation is "'<the value>' does not match pattern
+// '<the pattern>'", and the pattern is what the operator needs) with an ellipsis between;
+// both cuts fall on rune boundaries.
+func cutIntakeMessage(m string) string {
+	if len(m) <= maxIntakeMessageLen {
+		return m
+	}
+	head, tail := maxIntakeMessageLen/3, maxIntakeMessageLen*2/3
+	for head > 0 && !utf8.RuneStart(m[head]) {
+		head--
+	}
+	start := len(m) - tail
+	for start < len(m) && !utf8.RuneStart(m[start]) {
+		start++
+	}
+	return m[:head] + "…" + m[start:]
 }
 
 // intakeLoop is the intake the poll-now route runs: the server's project resolver, provider

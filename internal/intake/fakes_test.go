@@ -150,16 +150,21 @@ type tracker struct {
 	notes  []note
 	fail   map[string]failure
 	delay  time.Duration
-	tokens []string
-	srv    *httptest.Server
+	// slow holds a route ("METHOD /path") for a while before it answers.
+	slow map[string]time.Duration
+	// failIssuesPage, when above zero, makes the listing of that page answer 500.
+	failIssuesPage int
+	tokens         []string
+	srv            *httptest.Server
 }
 
 type fakeIssue struct {
-	n      int64
-	title  string
-	body   string
-	labels map[string]bool
-	pr     bool
+	n            int64
+	title        string
+	body         string
+	labels       map[string]bool
+	pr           bool
+	confidential bool
 }
 
 type note struct {
@@ -174,7 +179,8 @@ type failure struct {
 
 func newTracker(t *testing.T, github bool) *tracker {
 	t.Helper()
-	tr := &tracker{github: github, labels: map[string]bool{}, fail: map[string]failure{}, prefix: "/api/v4/projects/group%2Fdemo"}
+	tr := &tracker{github: github, labels: map[string]bool{}, fail: map[string]failure{}, slow: map[string]time.Duration{},
+		prefix: "/api/v4/projects/group%2Fdemo"}
 	if github {
 		tr.prefix = "/repos/owner/demo"
 	}
@@ -203,6 +209,23 @@ func (tr *tracker) addPullRequest(title string, labels ...string) *fakeIssue {
 	i.pr = true
 	tr.mu.Unlock()
 	return i
+}
+
+// addConfidentialIssue opens a confidential issue (GitLab) carrying labels.
+func (tr *tracker) addConfidentialIssue(title, body string, labels ...string) *fakeIssue {
+	i := tr.addIssue(title, body, labels...)
+	tr.mu.Lock()
+	i.confidential = true
+	tr.mu.Unlock()
+	return i
+}
+
+// slowOn makes every call "METHOD /path" wait d before it answers (or until the caller
+// gives up).
+func (tr *tracker) slowOn(route string, d time.Duration) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	tr.slow[route] = d
 }
 
 func (tr *tracker) issue(n int64) *fakeIssue {
@@ -322,9 +345,17 @@ func (tr *tracker) serve(w http.ResponseWriter, r *http.Request) {
 	tr.bodies = append(tr.bodies, body)
 	tr.tokens = append(tr.tokens, r.Header.Get("PRIVATE-TOKEN")+r.Header.Get("Authorization"))
 	f, failing := tr.fail[route]
+	if tr.failIssuesPage > 0 && r.Method == http.MethodGet && p == "/issues" && r.URL.Query().Get("page") == strconv.Itoa(tr.failIssuesPage) {
+		f, failing = failure{http.StatusInternalServerError, "boom"}, true
+	}
 	delay := tr.delay
+	if d, ok := tr.slow[route]; ok {
+		delay = d
+	} else if r.Method != http.MethodGet || p != "/issues" {
+		delay = 0
+	}
 	tr.mu.Unlock()
-	if delay > 0 && r.Method == http.MethodGet && p == "/issues" {
+	if delay > 0 {
 		select {
 		case <-time.After(delay):
 		case <-r.Context().Done():
@@ -344,17 +375,26 @@ func (tr *tracker) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// matching lists the open issues that carry the label, oldest first, at most per_page.
+// matching lists the open issues that carry the label, oldest first, one page of per_page
+// entries (page counts from 1; no per_page lists them all).
 func (tr *tracker) matching(r *http.Request) []*fakeIssue {
 	label := r.URL.Query().Get("labels")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
-	var out []*fakeIssue
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	var all []*fakeIssue
 	for _, i := range tr.issues {
-		if i.labels[label] && (limit == 0 || len(out) < limit) {
-			out = append(out, i)
+		if i.labels[label] {
+			all = append(all, i)
 		}
 	}
-	return out
+	if limit == 0 {
+		return all
+	}
+	if page < 1 {
+		page = 1
+	}
+	from := min((page-1)*limit, len(all))
+	return all[from:min(from+limit, len(all))]
 }
 
 func (tr *tracker) serveGitLab(w http.ResponseWriter, r *http.Request, p string, body map[string]any) {
@@ -378,7 +418,7 @@ func (tr *tracker) serveGitLab(w http.ResponseWriter, r *http.Request, p string,
 	case r.Method == http.MethodGet && p == "/issues":
 		out := []map[string]any{}
 		for _, i := range tr.matching(r) {
-			out = append(out, map[string]any{"iid": i.n, "title": i.title, "description": i.body,
+			out = append(out, map[string]any{"iid": i.n, "title": i.title, "description": i.body, "confidential": i.confidential,
 				"web_url": fmt.Sprintf("https://gitlab.test/group/demo/-/issues/%d", i.n)})
 		}
 		tr.reply(w, 200, out)
@@ -532,6 +572,8 @@ type fakeEngine struct {
 	requests []engine.TriggerRequest
 	refuse   func(engine.TriggerRequest) error
 	before   func(engine.TriggerRequest)
+	// limits are the effective limits the created runs carry (the zero value: none).
+	limits store.Limits
 }
 
 func (f *fakeEngine) Trigger(ctx context.Context, req engine.TriggerRequest) (*store.Run, error) {
@@ -558,7 +600,7 @@ func (f *fakeEngine) Trigger(ctx context.Context, req engine.TriggerRequest) (*s
 	settings := p.Settings()
 	ref := req.TriggerRef
 	run := &store.Run{WorkflowID: wf.ID, WorkflowVersion: wf.Version, WorkflowSnapshot: wf.Definition, Trigger: req.Trigger,
-		TriggerRef: &ref, Input: req.Input, ProjectID: &p.ID, Project: &settings}
+		TriggerRef: &ref, Input: req.Input, ProjectID: &p.ID, Project: &settings, Limits: f.limits}
 	if err := store.CreateRun(ctx, f.pool, run); err != nil {
 		return nil, fmt.Errorf("create run: %w", err)
 	}
@@ -664,6 +706,20 @@ func (e *env) end(run *store.Run, status, reason string) {
 	_, err := e.pool.Exec(context.Background(), `UPDATE runs SET status=$2, failure_reason=$3, finished_at=$4 WHERE id=$1`,
 		run.ID, status, r, epoch)
 	must(e.t, err)
+}
+
+// finishedRun stores an issue run of project p for issue n that ended with status at the
+// given time and was not reported, as the engine would have left it.
+func (e *env) finishedRun(p *store.Project, n int64, status string, finishedAt time.Time) store.Run {
+	e.t.Helper()
+	ref := store.IssueTriggerRef(p.ID, n)
+	settings := p.Settings()
+	run := &store.Run{WorkflowID: e.wf.ID, WorkflowVersion: e.wf.Version, WorkflowSnapshot: e.wf.Definition, Trigger: store.TriggerIssue,
+		TriggerRef: &ref, ProjectID: &p.ID, Project: &settings, Status: status}
+	must(e.t, store.CreateRun(context.Background(), e.pool, run))
+	_, err := e.pool.Exec(context.Background(), `UPDATE runs SET finished_at=$2 WHERE id=$1`, run.ID, finishedAt)
+	must(e.t, err)
+	return *e.get(run.ID)
 }
 
 // get re-reads a run.

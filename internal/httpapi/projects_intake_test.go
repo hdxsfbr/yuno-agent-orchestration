@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"yuno/internal/engine"
 	"yuno/internal/store"
@@ -77,7 +78,7 @@ func TestProjectIntakeSettingsValidationT5231(t *testing.T) {
 		requiredMsg = "intake.workflow_id: required when intake is enabled"
 		budgetText  = "intake.enabled: set a daily or monthly budget before enabling intake"
 	)
-	taskMsgs := engine.ValidateInput(json.RawMessage(repoSchema), json.RawMessage(`{"task":"x"}`))
+	taskMsgs := engine.ValidateInput(json.RawMessage(repoSchema), intakeTaskSample())
 	if len(taskMsgs) < 2 {
 		t.Fatalf("the sample should break two keywords of the schema: %q", taskMsgs)
 	}
@@ -108,6 +109,12 @@ func TestProjectIntakeSettingsValidationT5231(t *testing.T) {
 	} {
 		reject("label with "+what, in(false, label, ""), labelText)
 	}
+	// GitLab reads labels=None as the unlabelled issues and labels=Any as every labelled
+	// one: neither can be the intake label, in any case (review L7).
+	const noneAnyText = "intake.label: must not be None or Any"
+	for _, label := range []string{"None", "none", "NONE", "nOnE", "Any", "any", "ANY", " Any ", "\tnone\n"} {
+		reject("the label "+jsonText(label), in(false, label, ""), noneAnyText)
+	}
 	create := func(what, extra string) store.Project {
 		t.Helper()
 		code, body := do(t, ts, http.MethodPost, "/api/projects", projectBody(uniqueSuffix(), extra))
@@ -126,6 +133,12 @@ func TestProjectIntakeSettingsValidationT5231(t *testing.T) {
 	}
 	if p := create("trimmed", in(false, "  bot  ", "")); p.Intake.Label != "bot" {
 		t.Errorf("trimmed label = %q", p.Intake.Label)
+	}
+	// Only the whole word is refused.
+	for _, label := range []string{"Anything", "none-of-these", "any:thing", "Nonexistent", "n", "a"} {
+		if p := create("the label "+label, in(false, label, "")); p.Intake.Label != label {
+			t.Errorf("label %q saved as %q", label, p.Intake.Label)
+		}
 	}
 	if p := create("label absent", `"intake":{"enabled":false}`); p.Intake.Label != "yuno" {
 		t.Errorf("default label = %q", p.Intake.Label)
@@ -563,5 +576,86 @@ func TestIntakeConformanceSteps(t *testing.T) {
 		if code != st.want {
 			t.Fatalf("%s %s: status %d, want %d: %s", st.method, st.path, code, st.want, body)
 		}
+	}
+}
+
+// T5.23.1, review L5: the workflow's input_schema is checked against the task of 5.23 rule 4
+// at its longest (the preamble, the title and a 16 KiB body), not against `{"task":"x"}`: a
+// minLength above one is fine, a maxLength every real task would break is refused, and a
+// schema message that quotes the whole value is cut.
+func TestIntakeWorkflowInputIsCheckedAgainstARealTaskL5(t *testing.T) {
+	pool := needDB(t)
+	_, ts := newTestServer(t, pool, &fakeEngine{pool: pool}, nil)
+
+	var sample struct {
+		Task string `json:"task"`
+	}
+	mustDo(t, json.Unmarshal(intakeTaskSample(), &sample))
+	if !strings.HasPrefix(sample.Task, "Work on issue #1 of ") || !strings.Contains(sample.Task, "\n<untrusted_content source=\"issue #1\">\nTitle: ") ||
+		!strings.HasSuffix(sample.Task, "\n</untrusted_content>") || !strings.Contains(sample.Task, strings.Repeat("x", 16<<10)) {
+		t.Fatalf("the sample is not the task of rule 4 with a 16 KiB body: %.300s", sample.Task)
+	}
+
+	schema := func(keywords string) string {
+		return `"project":true,"input_schema":{"type":"object","properties":{"task":{"type":"string"` + keywords + `}},"required":["task"]}`
+	}
+	save := func(wf *store.Workflow) (int, []byte) {
+		return do(t, ts, http.MethodPost, "/api/projects", projectBody(uniqueSuffix(),
+			`"max_cost_usd_per_day":5,"intake":{"enabled":true,"label":"yuno","workflow_id":`+jsonText(wf.ID)+`}`))
+	}
+	accept := func(what, keywords string) {
+		t.Helper()
+		wf := intakeWorkflow(t, "intake "+what, schema(keywords), nil)
+		code, body := save(wf)
+		if code != http.StatusCreated {
+			t.Errorf("%s: %d %s, want 201", what, code, body)
+			return
+		}
+		t.Cleanup(func() { _ = store.DeleteProject(context.Background(), pool, decodeProject(t, body).ID) })
+	}
+	refuse := func(what, keywords string) []string {
+		t.Helper()
+		wf := intakeWorkflow(t, "intake "+what, schema(keywords), nil)
+		code, body := save(wf)
+		if code != http.StatusUnprocessableEntity {
+			t.Fatalf("%s: %d %s, want 422", what, code, body)
+		}
+		return fieldMessages(t, body)
+	}
+
+	accept("a minLength above one", `,"minLength":2000`)
+	accept("a maxLength above any real task", `,"maxLength":100000`)
+	accept("no keyword", ``)
+
+	msgs := refuse("a maxLength a real task breaks", `,"maxLength":1000`)
+	const prefix = `intake.workflow_id: the workflow's input must accept {"task": string}: input.task: `
+	if len(msgs) != 1 || !strings.HasPrefix(msgs[0], prefix+"maxLength: got 16,") || !strings.HasSuffix(msgs[0], ", want 1,000") {
+		t.Errorf("maxLength 1000: %q", msgs)
+	}
+	// A minLength no task reaches is refused the same way.
+	if msgs = refuse("a minLength nothing reaches", `,"minLength":100000`); len(msgs) != 1 || !strings.HasPrefix(msgs[0], prefix) {
+		t.Errorf("minLength 100000: %q", msgs)
+	}
+	// A pattern violation quotes the whole task: the detail is cut to a few hundred bytes
+	// and keeps the pattern, which the operator needs.
+	msgs = refuse("a pattern", `,"pattern":"^[a-z]+$"`)
+	if len(msgs) != 1 || len(msgs[0]) > 600 || !strings.Contains(msgs[0], "…") || !strings.HasSuffix(msgs[0], "does not match pattern '^[a-z]+$'") {
+		t.Errorf("pattern: %d bytes: %q", len(msgs[0]), msgs)
+	}
+}
+
+func TestCutIntakeMessage(t *testing.T) {
+	if got := cutIntakeMessage("short"); got != "short" {
+		t.Errorf("short message changed: %q", got)
+	}
+	long := strings.Repeat("é", 400) // 800 bytes, every cut point a rune boundary or not
+	for _, m := range []string{long, "x" + long, strings.Repeat("a", 301), strings.Repeat("a", 5000)} {
+		got := cutIntakeMessage(m)
+		if len(got) > maxIntakeMessageLen+len("…") || !utf8.ValidString(got) || !strings.Contains(got, "…") {
+			t.Errorf("cut of %d bytes = %d bytes, valid %v", len(m), len(got), utf8.ValidString(got))
+		}
+	}
+	if got := cutIntakeMessage(strings.Repeat("a", maxIntakeMessageLen)); len(got) != maxIntakeMessageLen {
+		t.Errorf("a message of exactly the cap was cut: %d", len(got))
 	}
 }

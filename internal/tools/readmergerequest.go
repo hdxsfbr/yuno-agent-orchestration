@@ -367,10 +367,14 @@ func (o readMergeRequestOutput) fit(threads []Thread, maxBytes int) string {
 		text := o.wrapped()
 		if maxBytes <= 0 || len(text) <= maxBytes || keep <= 0 {
 			// Every thread is out and the rest is still too long: shorten the description.
+			// The halving stops at a floor: a half no longer than the ellipsis would leave
+			// nothing worth showing, so the description goes (review L1; the fixed fields
+			// of the answer may be longer than a small cap on their own).
 			for len(text) > maxBytes && maxBytes > 0 && o.Description != "" {
-				o.Description = cutWithEllipsis(o.Description, len(o.Description)/2)
-				if len(o.Description) <= len(readEllipsis) {
+				if half := len(o.Description) / 2; half <= len(readEllipsis) {
 					o.Description = ""
+				} else {
+					o.Description = cutWithEllipsis(o.Description, half)
 				}
 				text = o.wrapped()
 			}
@@ -389,12 +393,13 @@ func (o readMergeRequestOutput) wrapped() string {
 	return WrapUntrustedFrom(ReadMergeRequestName, strings.TrimSuffix(buf.String(), "\n"))
 }
 
-// cutWithEllipsis cuts text to at most max bytes at a rune boundary; a cut ends with the
-// ellipsis, which counts toward the bytes.
-func cutWithEllipsis(text string, max int) string {
+// cutWithEllipsis cuts text to at most limit bytes at a rune boundary; a cut ends with the
+// ellipsis, which counts toward the bytes. A limit below the ellipsis's own length clamps
+// the cut at zero (the result is then the ellipsis alone), never a negative length.
+func cutWithEllipsis(text string, limit int) string {
 	text = strings.ToValidUTF8(text, "")
-	if len(text) <= max {
+	if len(text) <= limit {
 		return text
 	}
-	return cutText(text, max-len(readEllipsis)) + readEllipsis
+	return cutText(text, max(limit-len(readEllipsis), 0)) + readEllipsis
 }
