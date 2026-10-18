@@ -4,6 +4,88 @@ Newest first. Each entry says what was decided, by whom, and why. Design rules t
 refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR under
 `docs/adr/`.
 
+## 2026-10-18
+
+**D-053 Issue intake creates the derived labels itself, swaps the label before it
+comments, takes at most ten issues per project per poll, wraps the issue as untrusted
+content, and adds `Closes #<n>` once.** (coordinator, 2026-10-18, writing DESIGN 5.23
+for Andre's approval) The three derived labels (`<label>:running`, `:done`, `:failed`)
+are created on the repository when missing, once per project per process start, so a
+swap never names a label the provider lacks; the label is the state and goes first, the
+comment is best effort and may repeat once after a crash; a poll creates at most 10 runs
+per project (the rest wait two minutes); the issue's title and body reach the agents as
+the workflow input's `task` inside one `<untrusted_content source="issue #<n>">` block
+with closing tags escaped and the body cut at 16 KiB; `open_merge_request` appends
+`Closes #<n>` to the description when it creates the request of an issue run, never on
+an update. The intake workflow must opt in to a project and accept `{"task": string}`,
+checked when the settings are saved; a workflow that stops validating later puts the
+trigger's message in `intake_last_error` and takes nothing until fixed. Why: the
+provider's own label mechanics differ (GitHub refuses unknown labels on some paths),
+and the issue is a request anyone with label rights can write. Cost: label colours and
+names are the platform's; a repository that already uses `yuno:*` labels for something
+else should pick another intake label. Design: DESIGN 5.23 rules 1 to 5 and 7.
+
+**D-052 The run row is the issue intake's record: `trigger = issue`, `trigger_ref =
+<project id>#<n>`, `reported_at` means "posted on the issue"; one live run per issue is
+a partial unique index.** (coordinator, 2026-10-18, writing DESIGN 5.23) No
+`issue_intakes` table: the issue URL derives from the project's repository URL and the
+number, the state lives in the labels on the provider, and the run's `reported_at`
+(unused by the channel report for a non-channel run; its queries filter on `trigger =
+channel`) records that the outcome was posted on the issue. `runs_issue_live_idx ON runs
+(trigger_ref) WHERE trigger = 'issue' AND status IN (queued, running, waiting_approval)`
+keeps one live run per issue, so a crash between the run's creation and the label swap
+is recovered by the next poll finding the live run, and a retry (5.21) of an issue run
+while another live run has the issue is refused. The roadmap's "unique `trigger_ref`"
+becomes "unique while live", since re-labelling after `:failed` creates a new run with
+the same ref (D-045). Why: one table fewer, and the mechanism is the one 5.22 uses for
+merge requests. Cost: the issue's title is not stored apart from the task text, and the
+Intake card shows the poll, not a list of issues. Design: DESIGN 5.23 rules 3, 5 and 6.
+
+**D-051 `read_merge_request` reads any request of the project from the provider, in a run
+or in a conversation, and answers one untrusted block.** (coordinator, 2026-10-18,
+writing DESIGN 5.22) The tool takes a number (`12`, `!12`, `#12`) or the request's URL,
+defaults to the run's own or named request in a run, needs `project` and `number` in a
+conversation, and reads the provider rather than the record, so a request the platform
+did not open can be read too; the description, the unresolved threads (path, line,
+author, body) and the pipeline status come back as JSON inside one `<untrusted_content
+source="read_merge_request">` block, cut to the output cap by dropping the newest threads
+and counting them. It is chat-capable, so the seeded Chief of Staff carries it, and it
+joins the Coder's and the Reviewer's allowlists. Why: D-044 wants the threads behind a
+tool call; what people wrote on the provider is data to the model (5.7 rule 5), and the
+Chief should be able to say what a request is about. Design: DESIGN 5.22 rule 6.
+
+**D-050 A push onto a merge request's branch is refused when the branch moved since the
+run cloned it; the platform never merges or rebases.** (coordinator, 2026-10-18, writing
+DESIGN 5.22, closing wave 8 review finding L4 for these runs) Every project run records
+the clone's `HEAD` as `runs.checkout_sha`, updated after each push the run makes;
+`open_merge_request` on a run that names a request compares the branch head on the
+provider with it and, when they differ, answers the model that the branch has new
+commits and nothing was pushed, so a commit someone else pushed meanwhile is never
+replaced by the checkout's tree. The operator starts a new run, which clones the branch
+as it is. Why: a flattened replacement silently reverts other people's work; a merge or
+a rebase on the api side would need conflict handling the platform does not have. Cost:
+a long run on a busy branch can end without pushing; the same-run update path of 5.20
+(a run pushing onto the request it opened) keeps L4 as a recorded limitation, since the
+run did not clone that branch. Design: DESIGN 5.22 rules 2 and 4.
+
+**D-049 A run names the merge request it updates by the record's id; one live run per
+request; the request's own run must have ended; a schedule on a final request is
+disabled.** (coordinator, 2026-10-18, writing DESIGN 5.22) `RunCreate`, `ScheduleInput`
+and the trigger request carry `merge_request_id` (the store's id; the Chief's
+`delegate_task` takes a number or a URL and resolves it against the project), checked at
+queue time after the project check: the record must exist, belong to the run's project
+and be open, and no live run may be updating it, including the run that opened it, with
+one 422 text per case; `runs_merge_request_live_idx` (partial unique on
+`merge_request_id` for queued, running and waiting runs) enforces the last one and makes
+a retry while another run updates the request a 409. The updating run gets no record of
+its own (`merge_requests.run_id` stays the opening run), and `Run.merge_request` is
+filled from the named record. A schedule whose request turns merged or closed is disabled
+at the tick with the state in `last_error` (no later occurrence can succeed), while a
+transient "being updated" refusal advances like a rate limit. Why: two runs pushing onto
+one branch would overwrite each other through the tree replacement, and the record's id
+is what the UI and the API already hold. Cost: iterating on a request whose opening run
+is still live waits until it ends. Design: DESIGN 5.22 rules 1, 7 and 8.
+
 ## 2026-10-17
 
 **D-048 Parallel steps are explicit `fork` and `join` nodes; a failed branch fails the

@@ -417,6 +417,16 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
    the `design-first-brief` template, and `api/openapi.yaml` carries the wave 8 contract.
    The sections for waves 9 to 11 are written when their wave starts, since they build
    on what wave 8 lands.
-3. Next: Andre approves the wave 8 briefs (one per agent under `docs/briefs/wave8/`);
-   the wave runs through the loop; the demo, README, threat model and test results are
-   re-derived where the wave changed them; merge to main.
+3. Done 2026-10-18: wave 8 built, reviewed, merged as `0ff8401` and verified live
+   (`docs/test-results.md`).
+4. Done 2026-10-18 for wave 9: `docs/DESIGN.md` 5.22 and 5.23 are written in full, the
+   decisions they settle beyond D-044 and D-045 are D-049 to D-053, `api/openapi.yaml`
+   0.6.0 carries the wave 9 contract marked `x-planned: wave 9`, and the briefs are
+   under `docs/briefs/wave9/` (four Sonnet 5.5 agents: iteration engine, iteration
+   tools, intake, frontend).
+5. Next: Andre answers the two open lines at the end of 5.22 (the merged report's
+   second destination) and 5.23 (a budget cap required before intake is enabled),
+   recorded as D-054 and D-055, and approves the briefs; the coordinator lands the
+   prerequisites of `docs/briefs/wave9/00-plan.md`; the wave runs through the loop;
+   the demo, README, threat model and test results are re-derived where the wave
+   changed them; merge to main.
