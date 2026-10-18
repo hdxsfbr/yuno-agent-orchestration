@@ -429,8 +429,8 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
    intake is enabled) and approved the briefs, every agent on Sonnet 5.5.
 6. Done 2026-10-18: wave 9 built by four Sonnet 5.5 agents, reviewed
    (`docs/reviews/wave9-review.md`), fixed, merged to `main` as `6db1207` and deployed;
-   the iteration on `!4` verified live, the intake enabled on the playground and waiting
-   for a labelled issue (`docs/test-results.md`).
+   the iteration on `!4` and the intake (issue #1 became the run that opened `!5`)
+   verified live (`docs/test-results.md`).
 7. Next: wave 10 (5.24 questions to the operator, 5.25 run artifacts): write the design
    sections and briefs when the wave starts, as wave 9's were; the demo recording with
    projects is still pending.
