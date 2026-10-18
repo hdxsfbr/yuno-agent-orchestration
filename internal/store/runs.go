@@ -19,7 +19,7 @@ var ErrDuplicateTrigger = errors.New("a run for this trigger already exists")
 const runColumns = `id, workflow_id, workflow_version, workflow_snapshot, trigger, trigger_ref, status, input, state,
 	limits, current_node, resume_node_visit_id, step_count, tool_call_count, attempt, cancel_requested, cancel_by,
 	failure_reason, cost_usd_micros, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, paused_at,
-	paused_total_ms, created_at, started_at, finished_at, updated_at, reported_at, toolchain, project_id, project_snapshot`
+	paused_total_ms, created_at, started_at, finished_at, updated_at, reported_at, toolchain, project_id, project_snapshot, retries`
 
 // SetRunToolchain records the toolchain of the run's project checkout (DESIGN 5.16
 // rule 3).

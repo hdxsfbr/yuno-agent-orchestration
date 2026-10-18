@@ -324,6 +324,7 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("POST /api/runs", s.createRun)
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /api/runs/{id}/cancel", s.cancelRun)
+	mux.HandleFunc("POST /api/runs/{id}/retry", s.retryRun)
 	mux.HandleFunc("GET /api/runs/{id}/trace", s.getTrace)
 
 	mux.HandleFunc("POST /api/evals/scripts", s.registerScript)
@@ -346,6 +347,13 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("PUT /api/projects/{id}", s.updateProject)
 	mux.HandleFunc("DELETE /api/projects/{id}", s.deleteProject)
 	mux.HandleFunc("POST /api/projects/{id}/check", s.checkProject)
+	// Project notes (DESIGN 5.18 rule 6) and merge requests (DESIGN 5.20 rule 6).
+	mux.HandleFunc("GET /api/projects/{id}/facts", s.listProjectFacts)
+	mux.HandleFunc("DELETE /api/projects/{id}/facts/{factId}", s.deleteProjectFact)
+	mux.HandleFunc("GET /api/merge-requests", s.listMergeRequests)
+	mux.HandleFunc("GET /api/merge-requests/{id}", s.getMergeRequest)
+	mux.HandleFunc("POST /api/merge-requests/{id}/sync", s.syncMergeRequest)
+	mux.HandleFunc("POST /api/merge-requests/{id}/merge", s.mergeMergeRequest)
 	mux.HandleFunc("GET /api/agents/{id}/memory", s.listAgentMemory)
 	mux.HandleFunc("DELETE /api/agents/{id}/memory/{factId}", s.deleteAgentMemory)
 

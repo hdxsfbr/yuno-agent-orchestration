@@ -145,6 +145,10 @@ type Service interface {
 	Trigger(ctx context.Context, req TriggerRequest) (*store.Run, error)
 	// Cancel flags a run for cancellation (DESIGN 5.2 rule 2).
 	Cancel(ctx context.Context, runID, by string) (*store.Run, error)
+	// Retry re-queues a failed, timed-out or cancelled run from the node it stopped at
+	// (DESIGN 5.21 rules 1 to 3). Refusals are *RetryError (409), bad limits a
+	// *ValidationError (422), an unknown run store.ErrNotFound.
+	Retry(ctx context.Context, runID, by string, limits *store.Limits) (*store.Run, error)
 	// ResolveRunToken maps a token to its run context; ok=false when invalid.
 	ResolveRunToken(token string) (RunContext, bool)
 	// ResolveChatToken maps a chat token to its agent and most recent conversation

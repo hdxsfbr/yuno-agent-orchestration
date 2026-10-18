@@ -39,12 +39,18 @@ type projectInput struct {
 	SandboxNetwork bool   `json:"sandbox_network"`
 	Description    string `json:"description"`
 	Token          string `json:"token"`
+	// Instructions and the two caps are carried through as given; their validation
+	// (DESIGN 5.18 rule 1, 5.19 rule 1) is wave 8 agent A's.
+	Instructions       string           `json:"instructions"`
+	MaxCostUSDPerDay   *store.USDMicros `json:"max_cost_usd_per_day"`
+	MaxCostUSDPerMonth *store.USDMicros `json:"max_cost_usd_per_month"`
 
 	ID        json.RawMessage `json:"id"`
 	TokenSet  json.RawMessage `json:"token_set"`
 	CreatedAt json.RawMessage `json:"created_at"`
 	UpdatedAt json.RawMessage `json:"updated_at"`
 	LastRun   json.RawMessage `json:"last_run"`
+	Spend     json.RawMessage `json:"spend"`
 }
 
 // validate checks the input (DESIGN 5.17 rules 1 to 3) and returns the project it
@@ -52,7 +58,8 @@ type projectInput struct {
 // none). A create needs a token; an update without one keeps the stored token.
 func (in *projectInput) validate(create bool) (*store.Project, string, fieldErrors) {
 	var fe fieldErrors
-	p := &store.Project{Name: strings.TrimSpace(in.Name), SandboxNetwork: in.SandboxNetwork, Description: in.Description}
+	p := &store.Project{Name: strings.TrimSpace(in.Name), SandboxNetwork: in.SandboxNetwork, Description: in.Description,
+		Instructions: in.Instructions, BudgetDayUSDMicros: in.MaxCostUSDPerDay, BudgetMonthUSDMicros: in.MaxCostUSDPerMonth}
 	switch n := utf8.RuneCountInString(p.Name); {
 	case n == 0:
 		fe.add("name", "is required")

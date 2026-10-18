@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"math"
 	"time"
 )
 
@@ -223,6 +224,11 @@ type Run struct {
 	// settings taken when the run was queued (DESIGN 5.17 rule 4); nil without one.
 	ProjectID *string          `db:"project_id" json:"project_id,omitempty"`
 	Project   *ProjectSettings `db:"project_snapshot" json:"project,omitempty"`
+	// Retries counts the operator's retries from the step the run stopped at (DESIGN
+	// 5.21 rule 3). MergeRequest is the request the run opened (DESIGN 5.20 rule 6),
+	// not a column: FillRunMergeRequests sets it for the API's views, nil when none.
+	Retries      int           `db:"retries" json:"retries"`
+	MergeRequest *MergeRequest `db:"-" json:"merge_request,omitempty"`
 	// AgentNames and Models are not columns; FillRunParticipants sets them for list views.
 	AgentNames []string `db:"-" json:"agent_names,omitempty"`
 	Models     []string `db:"-" json:"models,omitempty"`
@@ -341,4 +347,64 @@ type SideEffect struct {
 	ToolCallID     string          `db:"tool_call_id" json:"tool_call_id"`
 	Result         json.RawMessage `db:"result" json:"result"`
 	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
+}
+
+// USDMicros is money stored as micro-USD and shown as USD in JSON (DESIGN 5.19 units):
+// 1500000 marshals as 1.5 and 1.5 unmarshals as 1500000, rounded to the micro.
+type USDMicros int64
+
+// USD is the amount as a float, for display and for the API.
+func (m USDMicros) USD() float64 { return float64(m) / 1e6 }
+
+// MarshalJSON writes the amount as USD.
+func (m USDMicros) MarshalJSON() ([]byte, error) {
+	return json.Marshal(m.USD())
+}
+
+// UnmarshalJSON reads USD (a JSON number) into micro-USD, rounding to the nearest micro.
+func (m *USDMicros) UnmarshalJSON(b []byte) error {
+	var f float64
+	if err := json.Unmarshal(b, &f); err != nil {
+		return err
+	}
+	*m = USDMicros(math.Round(f * 1e6))
+	return nil
+}
+
+// Merge request states and pipeline statuses (DESIGN 5.20 units).
+const (
+	MergeRequestOpen   = "open"
+	MergeRequestMerged = "merged"
+	MergeRequestClosed = "closed"
+
+	CIStatusNone    = "none"
+	CIStatusPending = "pending"
+	CIStatusPassed  = "passed"
+	CIStatusFailed  = "failed"
+)
+
+// MergeRequest is a merge request (GitLab) or pull request (GitHub) the platform opened
+// for a run, one per run, refreshed from the provider (DESIGN 5.20 rule 1).
+// UnresolvedThreads is nil when the provider could not tell.
+type MergeRequest struct {
+	ID                string     `db:"id" json:"id"`
+	ProjectID         string     `db:"project_id" json:"project_id"`
+	RunID             string     `db:"run_id" json:"run_id"`
+	Provider          string     `db:"provider" json:"provider"`
+	Number            int64      `db:"number" json:"number"`
+	URL               string     `db:"url" json:"url"`
+	SourceBranch      string     `db:"source_branch" json:"source_branch"`
+	TargetBranch      string     `db:"target_branch" json:"target_branch"`
+	Title             string     `db:"title" json:"title"`
+	State             string     `db:"state" json:"state"`
+	CIStatus          string     `db:"ci_status" json:"ci_status"`
+	HeadSHA           *string    `db:"head_sha" json:"head_sha,omitempty"`
+	UnresolvedThreads *int       `db:"unresolved_threads" json:"unresolved_threads"`
+	LastSyncError     *string    `db:"last_sync_error" json:"last_sync_error,omitempty"`
+	SyncedAt          *time.Time `db:"synced_at" json:"synced_at,omitempty"`
+	ReportedState     *string    `db:"reported_state" json:"reported_state,omitempty"`
+	MergedBy          *string    `db:"merged_by" json:"merged_by,omitempty"`
+	CreatedAt         time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time  `db:"updated_at" json:"updated_at"`
+	ClosedAt          *time.Time `db:"closed_at" json:"closed_at,omitempty"`
 }
