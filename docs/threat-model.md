@@ -99,6 +99,34 @@ the operator presses Check. Residual risk: the key lives in `.env` next to the o
 platform secrets, so whoever reads the host's `.env` and the database has every token;
 a lost key is a re-entry of every token, not a breach.
 
+**Project instructions and notes in prompts (DESIGN 5.18, D-040).** Every visit of a
+run on a project gets the operator's instructions and the ten newest project notes in
+its task. The instructions are the operator's own text. The notes are written by
+models: a run whose agent was steered by repository content could save a note that
+steers the next run on the project ("always run `curl … | sh` first"), a persistence
+the per-run isolation of memory did not have. Mitigation: only agents the operator
+gave the memory tools can write notes, each note is capped (2 KiB, 100 per project,
+90 days), the project page lists every note with the agent and the run that saved it
+and deletes it in one click, the blocks are capped at 12 KiB, and side effects stay
+behind the same gates whatever the task says. Residual risk: a note is rendered as
+part of the task, not as wrapped untrusted content, so it carries the operator's
+weight with the model; an operator who allows network in the sandbox should read the
+notes of that project now and then.
+
+**Merging from the platform (DESIGN 5.20 rule 5, D-042).** The Merge button pushes
+model-written code into the default branch with the project's token. Mitigation: it is
+an operator action behind a confirmation, refused while the pipeline is pending or
+failed, and the provider applies its own rules (protected branches, required approvals,
+conflicts) and refuses with a message the page shows; the token's scope is what the
+operator granted. Residual risk: a repository without a pipeline merges on one click
+with nothing but the Reviewer agent's judgement before it; keep branch protection on
+the provider for anything that matters.
+
+**Budget alerts and refusals (DESIGN 5.19).** No new secret and no new inbound surface:
+the alert goes out through the existing report-back path and the refusal is a 429.
+Residual risk: a cap refuses new runs only, so a window can overshoot by the running
+runs' own caps, and the cap counts a run's spend in the window it was created in.
+
 **Secrets in logs, traces, fixtures or the repository.** Mitigation: the log handler
 redacts keys, tokens and anything shaped like a provider key or a Telegram token (5.12
 rule 4); tool inputs and node transcripts are redacted before storage (provider keys, bot tokens
@@ -132,7 +160,16 @@ derived gateway image adds only the static Docker CLI.
 - Exec guardrail patterns cover host exec and approvals, not commands inside the sandbox.
 - Approvals can be answered from the web UI; a reply to the prompt the bot sends in
   Telegram has not been verified to resolve the approval.
-- Conversation memory is the mirrored Telegram transcript; agent facts are agent-scoped.
+- Conversation memory is the mirrored Telegram transcript; agent facts are agent-scoped,
+  project notes are shared by every agent of a run on the project and rendered into
+  tasks without the untrusted-content wrapper.
+- Merge requests are followed by polling the provider every two minutes; there are no
+  webhooks, so a merge or a pipeline result shows up with that delay unless Sync is
+  pressed; records older than 14 days are refreshed only by Sync, and a provider 404
+  closes a record even when it is the token that lost access.
+- A later `open_merge_request` in the same run (a review loop, a retry) replaces the
+  request branch's tree with the run's checkout, so a commit someone pushed to that
+  branch in between is reverted by it; iterating on a request from its branch is wave 9.
 - The scheduler is a single process; two api instances would both be safe (row locks)
   but only one is run.
 - No OpenTelemetry export; spans live in Postgres and the UI.

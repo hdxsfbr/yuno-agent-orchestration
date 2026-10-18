@@ -12,6 +12,7 @@ import (
 
 	"yuno/internal/engine"
 	"yuno/internal/guardrails"
+	"yuno/internal/project"
 	"yuno/internal/store"
 )
 
@@ -151,6 +152,7 @@ func (s *Scheduler) fire(ctx context.Context, d *store.DueSchedule, now time.Tim
 	run, err := s.Engine.Trigger(ctx, req)
 	var ve *engine.ValidationError
 	var rl *guardrails.RateLimitError
+	var be *project.BudgetError
 	switch {
 	case err == nil:
 		log.Info("schedule fired", "run_id", run.ID, "trigger_ref", ref)
@@ -170,6 +172,12 @@ func (s *Scheduler) fire(ctx context.Context, d *store.DueSchedule, now time.Tim
 		return s.advance(d, out, now, &msg), nil
 	case errors.As(err, &rl):
 		msg := rl.Error()
+		log.Warn("scheduled run refused", "reason", msg)
+		return s.advance(d, out, now, &msg), nil
+	case errors.As(err, &be):
+		// DESIGN 5.19 rule 3: a project at its budget cap takes no run; the text is the
+		// schedule's last_error and the schedule moves on, as for a rate limit.
+		msg := be.Error()
 		log.Warn("scheduled run refused", "reason", msg)
 		return s.advance(d, out, now, &msg), nil
 	case errors.Is(err, store.ErrNotFound):

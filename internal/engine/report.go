@@ -101,6 +101,17 @@ func (e *Engine) afterApproval(ctx context.Context, run *store.Run) {
 	}()
 }
 
+// runReportKind is the kind of a run's terminal report, the last part of its idempotency
+// key: "end" for a run that was never retried, "terminal-r<n>" once the operator has
+// retried it n times (DESIGN 5.21 rule 6), so the gateway does not dedupe the new
+// outcome's report against the one it sent before.
+func runReportKind(run *store.Run) string {
+	if run.Retries > 0 {
+		return fmt.Sprintf("terminal-r%d", run.Retries)
+	}
+	return "end"
+}
+
 // reportRun claims and sends the report of a terminal channel run (DESIGN 5.15 rule 9).
 func (e *Engine) reportRun(ctx context.Context, runID string) {
 	run, err := store.ClaimRunReport(ctx, e.deps.Pool, runID, e.clock.Now())
@@ -112,7 +123,7 @@ func (e *Engine) reportRun(ctx context.Context, runID string) {
 		return
 	}
 	convID, _ := store.ConversationOfRun(run)
-	if e.sendReport(ctx, run.ID, convID, "end", e.runReportText(ctx, run)) {
+	if e.sendReport(ctx, run.ID, convID, runReportKind(run), e.runReportText(ctx, run)) {
 		// Never sent: the claim is given back so the next sweep sends it.
 		if err := store.UnclaimRunReport(ctx, e.deps.Pool, run.ID); err != nil {
 			e.log.Warn("give back the run report claim failed", "run_id", run.ID, "error", err)
@@ -171,56 +182,97 @@ func (e *Engine) sweepReports(ctx context.Context) {
 	}
 }
 
-// sendReport injects text into the conversation's session with deliver, one attempt,
+// sendReport injects a run's report of the given kind into the conversation's session
+// under the report key (DESIGN 5.15 rule 9); see sendWithKey.
+func (e *Engine) sendReport(ctx context.Context, runID, convID, kind, text string) (deferred bool) {
+	return e.sendWithKey(ctx, runID, convID, reportKey(runID, kind), text)
+}
+
+// RunReportsTo returns the conversation a run reports back to (DESIGN 5.15 rule 9),
+// ok=false for a run that reports to none.
+func RunReportsTo(run *store.Run) (conversationID string, ok bool) {
+	if run == nil {
+		return "", false
+	}
+	return store.ConversationOfRun(run)
+}
+
+// SendPlatformMessage sends text into a conversation's session with deliver, one
+// attempt, under the caller's idempotency key, and reports whether the send was
+// deferred (the gateway or the database unreachable: the caller tries again later).
+// With a run id the log lines are the run's events; without one they go to the api
+// log. The budget alerts of DESIGN 5.19 rule 6 and the merge request reports of 5.20
+// rule 4 use it.
+func (e *Engine) SendPlatformMessage(ctx context.Context, runID, conversationID, key, text string) (deferred bool) {
+	return e.sendWithKey(ctx, runID, conversationID, key, text)
+}
+
+// sendWithKey injects text into the conversation's session with deliver, one attempt,
 // and reports whether the send was deferred: never attempted because the gateway (or
 // the database) could not be reached, in which case the caller gives the claim back for
 // the next sweep. A conversation that no longer exists (retention) or whose session
 // names no agent is skipped; a gateway error on the send is logged at warn and never
 // retried (DESIGN 5.15 rule 9: the UI holds the truth).
-func (e *Engine) sendReport(ctx context.Context, runID, convID, kind, text string) (deferred bool) {
+func (e *Engine) sendWithKey(ctx context.Context, runID, convID, key, text string) (deferred bool) {
 	conv, err := store.GetConversation(ctx, e.deps.Pool, convID)
 	if errors.Is(err, store.ErrNotFound) {
-		e.logEvent(ctx, runID, "info", "run report skipped: the conversation no longer exists", "conversation_id", convID, "kind", kind)
+		e.reportLog(ctx, runID, "info", "run report skipped: the conversation no longer exists", "conversation_id", convID, "key", key)
 		return false
 	}
 	if err != nil {
-		e.logEvent(ctx, runID, "warn", "run report deferred: "+err.Error(), "conversation_id", convID, "kind", kind)
+		e.reportLog(ctx, runID, "warn", "run report deferred: "+err.Error(), "conversation_id", convID, "key", key)
 		return true
 	}
 	// The session key names the agent the gateway requires with it (DESIGN 5.8 rule 3).
 	k, ok := openclaw.ParseChannelSessionKey(conv.SessionKey)
 	if !ok {
-		e.logEvent(ctx, runID, "warn", "run report failed: the conversation's session names no agent", "conversation_id", conv.ID, "kind", kind)
+		e.reportLog(ctx, runID, "warn", "run report failed: the conversation's session names no agent", "conversation_id", conv.ID, "key", key)
 		return false
 	}
 	if e.deps.Gateway == nil {
-		e.logEvent(ctx, runID, "warn", "run report deferred: no gateway connection", "conversation_id", conv.ID, "kind", kind)
+		e.reportLog(ctx, runID, "warn", "run report deferred: no gateway connection", "conversation_id", conv.ID, "key", key)
 		return true
 	}
 	cctx, cancel := context.WithTimeout(ctx, e.sendTimeout)
 	defer cancel()
 	_, err = openclaw.ChatSend(cctx, e.deps.Gateway, openclaw.ChatSendParams{
 		SessionKey: conv.SessionKey, AgentID: k.AgentID, Message: text,
-		IdempotencyKey: reportKey(runID, kind), Deliver: true,
+		IdempotencyKey: key, Deliver: true,
 	})
 	if errors.Is(err, openclaw.ErrDisconnected) {
 		// The client refused the call while it reconnects (a gateway restart), or lost
 		// the connection after writing it; a resend under the same idempotency key is
 		// deduped by the gateway [probed, DESIGN 5.14 rule 6].
-		e.logEvent(ctx, runID, "warn", "run report deferred: "+err.Error(), "conversation_id", conv.ID, "kind", kind)
+		e.reportLog(ctx, runID, "warn", "run report deferred: "+err.Error(), "conversation_id", conv.ID, "key", key)
 		return true
 	}
 	if err != nil {
-		e.logEvent(ctx, runID, "warn", "run report failed: "+err.Error(), "conversation_id", conv.ID, "kind", kind)
+		e.reportLog(ctx, runID, "warn", "run report failed: "+err.Error(), "conversation_id", conv.ID, "key", key)
 		return false
 	}
-	e.logEvent(ctx, runID, "info", "run reported", "conversation_id", conv.ID, "kind", kind)
+	e.reportLog(ctx, runID, "info", "run reported", "conversation_id", conv.ID, "key", key)
 	return false
+}
+
+// reportLog writes a report's log line as a run event when the message belongs to a
+// run, and to the api log otherwise (a budget alert has no run).
+func (e *Engine) reportLog(ctx context.Context, runID, level, msg string, attrs ...any) {
+	if runID != "" {
+		e.logEvent(ctx, runID, level, msg, attrs...)
+		return
+	}
+	if level == "warn" {
+		e.log.Warn(msg, attrs...)
+		return
+	}
+	e.log.Info(msg, attrs...)
 }
 
 // runReportText is DESIGN 5.15 rule 9's message: "[platform] Run <id> <status> after <duration>,
 // cost $<x>: <outcome>. <url>", the outcome being the last node's output (1 KB at
-// most) or the failure reason.
+// most) or the failure reason. After a retry the status is followed by " (retry <n>)"
+// (DESIGN 5.21 rule 6) and the duration is that of the last attempt, since a retry
+// restarts started_at.
 func (e *Engine) runReportText(ctx context.Context, run *store.Run) string {
 	start := run.CreatedAt
 	if run.StartedAt != nil {
@@ -243,10 +295,15 @@ func (e *Engine) runReportText(ctx context.Context, run *store.Run) string {
 		}
 	}
 	outcome = obs.Truncate(obs.Redact(outcome), reportOutcomeMax)
-	text := fmt.Sprintf("[platform] Run %s %s after %s, cost $%s: %s %s", run.ID, run.Status, reportDuration(end.Sub(start)),
+	status := run.Status
+	if run.Retries > 0 {
+		status += fmt.Sprintf(" (retry %d)", run.Retries)
+	}
+	text := fmt.Sprintf("[platform] Run %s %s after %s, cost $%s: %s %s", run.ID, status, reportDuration(end.Sub(start)),
 		reportCost(run.CostUSDMicros), sentence(outcome), tools.RunURL(e.deps.Cfg.PublicBaseURL, run.ID))
-	// DESIGN 5.17 rule 10: the request the run opened, when it did before this report.
-	if mr, err := store.MergeRequestOfRun(ctx, e.deps.Pool, run.ID); err != nil {
+	// DESIGN 5.17 rule 10: the request the run opened, when it did before this report
+	// (its record since 5.20 rule 6).
+	if mr, err := store.MergeRequestByRun(ctx, e.deps.Pool, run.ID); err != nil {
 		e.log.Warn("read the run's merge request for the report failed", "run_id", run.ID, "error", err)
 	} else if mr != nil {
 		text += " " + requestLabel(mr.Provider) + ": " + mr.URL

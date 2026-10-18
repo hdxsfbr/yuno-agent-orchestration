@@ -1,16 +1,18 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ApiError, createProject, updateProject, type Project, type ProjectInput, type ProjectProvider } from "@/lib/api";
-import { errorsFor, parseFieldErrors, type FieldErrors } from "@/lib/agentForm";
+import { addError, errorsFor, parseFieldErrors, type FieldErrors } from "@/lib/agentForm";
+import { capText, parseCap } from "@/lib/project";
 import { projectsKey } from "@/lib/useProjects";
 import Button from "../Button";
 import { Modal } from "../Modal";
 import { InlineError, errorText } from "../QueryState";
-import { CheckboxField, Field, SelectField, TextAreaField, TextField, control } from "../fields";
+import { CheckboxField, Field, NumberField, SelectField, TextAreaField, TextField, control } from "../fields";
 
-const FIELDS = ["name", "repo_url", "provider", "default_branch", "token", "description"];
+const FIELDS = ["name", "repo_url", "provider", "default_branch", "token", "description", "instructions", "max_cost_usd_per_day", "max_cost_usd_per_month"];
 const NAME_MAX = 64;
 const DESCRIPTION_MAX = 1024;
+const INSTRUCTIONS_MAX = 8192;
 
 const PROVIDER_OPTIONS = [
   { value: "", label: "Detect from the URL" },
@@ -33,6 +35,9 @@ export default function ProjectDialog({ project, onClose }: { project?: Project;
   const [token, setToken] = useState("");
   const [network, setNetwork] = useState(project?.sandbox_network ?? false);
   const [description, setDescription] = useState(project?.description ?? "");
+  const [instructions, setInstructions] = useState(project?.instructions ?? "");
+  const [dayCap, setDayCap] = useState(capText(project?.max_cost_usd_per_day));
+  const [monthCap, setMonthCap] = useState(capText(project?.max_cost_usd_per_month));
   const [clientErrors, setClientErrors] = useState<FieldErrors>({});
   const [serverErrors, setServerErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -66,8 +71,15 @@ export default function ProjectDialog({ project, onClose }: { project?: Project;
     if (repoUrl.trim() === "") found.repo_url = ["Repository URL is required"];
     if (!project && token.trim() === "") found.token = ["A token is required"];
     if (description.length > DESCRIPTION_MAX) found.description = [`Description must be at most ${DESCRIPTION_MAX} characters`];
+    const standing = instructions.trim();
+    // The server counts bytes; this first guard counts characters and the server's 422 covers the rest.
+    if (standing.length > INSTRUCTIONS_MAX) found.instructions = [`Instructions must be at most ${INSTRUCTIONS_MAX} characters`];
+    const day = parseCap(dayCap);
+    if (!day.ok) addError(found, "max_cost_usd_per_day", day.message);
+    const month = parseCap(monthCap);
+    if (!month.ok) addError(found, "max_cost_usd_per_month", month.message);
     setClientErrors(found);
-    if (Object.keys(found).length > 0) return;
+    if (Object.keys(found).length > 0 || !day.ok || !month.ok) return;
 
     const input: ProjectInput = {
       name: n,
@@ -75,6 +87,10 @@ export default function ProjectDialog({ project, onClose }: { project?: Project;
       provider,
       sandbox_network: network,
       description: description.trim(),
+      instructions: standing,
+      // An empty cap is sent as null: an update replaces the settings, so it clears a cap that was set.
+      max_cost_usd_per_day: day.value,
+      max_cost_usd_per_month: month.value,
     };
     if (branch.trim() !== "") input.default_branch = branch.trim();
     // A token left empty on an edit keeps the stored one, so it stays out of the body.
@@ -144,6 +160,22 @@ export default function ProjectDialog({ project, onClose }: { project?: Project;
           hint="Lets agents install dependencies while they work. Turn it on only for repositories you trust."
         />
         <TextAreaField label="Description" rows={3} value={description} onChange={setDescription} hint="What the repository is for, in a sentence or two." errors={errors("description")} />
+        <TextAreaField
+          label="Instructions"
+          rows={6}
+          value={instructions}
+          onChange={setInstructions}
+          hint="Standing instructions for every run on this project: conventions, how to build and test, what to leave alone."
+          errors={errors("instructions")}
+        />
+        <fieldset className="space-y-2">
+          <legend className="mb-1 text-sm font-medium">Budget</legend>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <NumberField label="Per day (USD)" value={dayCap} onChange={setDayCap} placeholder="No cap" errors={errors("max_cost_usd_per_day")} />
+            <NumberField label="Per month (USD)" value={monthCap} onChange={setMonthCap} placeholder="No cap" errors={errors("max_cost_usd_per_month")} />
+          </div>
+          <p className="text-xs text-zinc-500">Leave empty for no cap. New runs are refused once the cap is reached; running runs finish.</p>
+        </fieldset>
         {unplaced.map((m, i) => (
           <InlineError key={i}>{m}</InlineError>
         ))}

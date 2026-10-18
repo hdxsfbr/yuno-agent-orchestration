@@ -1,4 +1,20 @@
-# Test results, 2026-10-17 (projects as records, DESIGN 5.17)
+# Test results, 2026-10-17 (wave 8: project instructions and notes, budgets, merge request records, retry; DESIGN 5.18 to 5.21)
+
+Run on the development machine on the `wave8` branch after the fix pass and before its
+merge to `main`, everything inside containers; CI runs the same commands on `main` and
+deploys the commit.
+
+| Command | Result |
+|---|---|
+| `make test-go` (`go test ./... -count=1` against the `yuno_test` database) | 20 packages ok, 0 failures (new package `internal/mergereq`; new: project notes and the two task blocks, the budget windows, refusal and alert ledger, the merge request record in the side effect's transaction, the provider status and merge mappings, the sync loop and its reports, the retry transaction with its exhausted-limits checks, the facts, merge request and retry handlers and their conformance steps) |
+| `make test-web` (vitest) | 40 files, 669 tests passed (new: the project page and its cards, the budget and instructions fields, the spend column, the merge request card, Retry with the exhausted-limits dialog, the timeline mark, `run.retry` in the trace) |
+| `make lint` (`go vet`, staticcheck 2026.2.2, eslint, `tsc --noEmit`) | clean |
+| review | two Sonnet 5.5 reviewer agents (backend; API, store and UI): no high, four mediums and the kept lows fixed in one pass by two Sonnet fix agents, the rest recorded as limitations; `docs/reviews/wave8-review.md` |
+
+Live verification on the public instance: see the wave 8 section below once the merge
+has deployed.
+
+## Wave 7 (projects as records, DESIGN 5.17), 2026-10-17
 
 Run on the development machine on the `projects-as-records` branch before its merge
 as `f08aac5`, everything inside containers; CI ran the same commands on `main` and

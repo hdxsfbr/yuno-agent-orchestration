@@ -85,7 +85,9 @@ carries an `instructions` text rendered into every visit's task on it; the check
 own `AGENTS.md` is not injected (repository text is untrusted; the agent reads it
 itself); `memory_save` and `memory_recall` take `scope: "project"` in a run on a
 project, stored in their own `project_facts` table because `memory_facts` is keyed per
-agent, and any agent with memory enabled reads and writes them. Design: DESIGN 5.18.
+agent, and any agent with memory enabled reads and writes them. As built: the shipped
+Coder and Reviewer carry `memory_save` and `memory_recall` with memory on, so the Dev
+pipeline saves and reads project notes out of the box. Design: DESIGN 5.18.
 
 
 **D-039 A schedule names the project its runs work on.** (Andre, 2026-10-17)

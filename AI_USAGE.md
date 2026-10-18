@@ -330,3 +330,23 @@ request title is capped at 72 characters and described as a commit subject, and 
 approval on a run that has already ended says that approving still executes the call.
 The design was not approved by a human before coding: the session ran autonomously on
 the brief, so the design text is what a reviewer should read first.
+
+**Planning waves 8 to 11 and building wave 8 (2026-10-17).** After wave 7 Andre asked for
+a ranked list of missing features towards "a software factory" and picked nine of the
+ten (not the Slack channel). The coordinator session wrote `docs/ROADMAP.md` (the order,
+the dependencies, the product decisions per feature), Andre settled every decision
+with the recommended answer (D-040 to D-048), and the session wrote DESIGN 5.18 to 5.21
+in full with the design-first template, the wave 8 contract in `api/openapi.yaml`, one
+plan and four briefs under `docs/briefs/wave8/`. At Andre's request every builder was
+Sonnet 5.5: the coordinator landed the shared prerequisites first (migration 0012, the
+store types, the config, the routes behind stubs, the engine interface, the exported
+report-back helpers) and launched four agents on disjoint files: project instructions,
+notes and budgets; merge request records, sync and merge; retry from the failed step;
+the UI for all four. Each reported its tests, the rules it interpreted and the
+integration it left (server wiring, the Chief's `run_status`, the conformance steps,
+the budget check on retry), which the coordinator did together with one design
+question an agent raised (a later `open_merge_request` on a merged or closed request is
+refused) and one it decided (the shipped Coder and Reviewer get the memory tools). The
+"As built" paragraphs of 5.18 to 5.21 record the interpretations. Two Sonnet 5.5
+reviewer agents reviewed the backend and the API, store and UI separately; the
+coordinator ran the full suite, lint and the fix pass.

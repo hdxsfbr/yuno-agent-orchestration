@@ -61,6 +61,25 @@ const ProjectRule = "When your task describes a project repository, its checkout
 const ChatRule = "When you are chatting with a person on a channel and their message carries no run_token, " +
 	"answer the person directly and keep to your role: do not call yuno__finish and do not work in a run directory."
 
+// memorySection is AGENTS.md's "## Memory" section (DESIGN 5.18 rule 8) for an agent that
+// holds a memory tool: one sentence that names the project scope, the notes every agent
+// of a run on a project shares. An agent whose memory is off is offered no memory tool
+// (toolLists), and AGENTS.md does not mention them either. allow is the agent's
+// effective tools.allow; "" when it holds no memory tool.
+func memorySection(allow []string) string {
+	var held []string
+	for _, name := range []string{tools.MemoryRecallName, tools.MemorySaveName} {
+		if slices.Contains(allow, PlatformToolPrefix+name) {
+			held = append(held, PlatformToolPrefix+name)
+		}
+	}
+	if len(held) == 0 {
+		return ""
+	}
+	return "\n## Memory\n\nIn a run on a project, " + strings.Join(held, " and ") + ` also take scope "project", the notes ` +
+		"shared by every agent that works on that project; without a scope they use your own memory.\n"
+}
+
 // chatSection is AGENTS.md's "## Chatting" section (DESIGN 5.15 rule 15) for an agent
 // that may call chat-capable platform tools: how to pass its chat token, which tools
 // work in a conversation, and that the run tools do not. allow is the agent's effective
@@ -271,7 +290,7 @@ func plan(stateDir string, a *store.Agent, skills []store.Skill) desired {
 	allow, _ := toolLists(a)
 	files := map[string]string{
 		"SOUL.md":   soulMD(a),
-		"AGENTS.md": AgentsMD + chatSection(a, allow),
+		"AGENTS.md": AgentsMD + memorySection(allow) + chatSection(a, allow),
 		"MEMORY.md": MemoryMD,
 	}
 	for _, s := range sorted {

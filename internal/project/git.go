@@ -92,8 +92,14 @@ func tail(s string, n int) string {
 // Clone clones the default branch at depth 1 into dest (rule 3), which must not exist,
 // and writes the local exclude file. dest's parent must exist.
 func (c Config) Clone(ctx context.Context, dest string) error {
+	return c.cloneBranch(ctx, dest, c.DefaultBranch)
+}
+
+// cloneBranch is Clone for any branch of the repository: still one branch at depth 1
+// (--single-branch), with the token handled as in rule 4.
+func (c Config) cloneBranch(ctx context.Context, dest, branch string) error {
 	if _, err := c.git(ctx, filepath.Dir(dest), "clone", "--quiet", "--depth", "1", "--single-branch",
-		"--branch", c.DefaultBranch, "--", c.RepoURL, filepath.Base(dest)); err != nil {
+		"--branch", branch, "--", c.RepoURL, filepath.Base(dest)); err != nil {
 		return err
 	}
 	return WriteExclude(dest)
@@ -133,13 +139,28 @@ var ErrNoChanges = errors.New("the checkout has no changes to propose")
 // out), commits what differs as Yuno with message, and pushes HEAD to the branch with
 // the token. ErrNoChanges when nothing differs.
 func (c Config) Propose(ctx context.Context, checkout, branch, message string) (Proposal, error) {
+	return c.propose(ctx, checkout, c.DefaultBranch, branch, message)
+}
+
+// ProposeOnto is Propose for a run that has a request already (DESIGN 5.20 rule 2): it
+// clones the request's own source branch instead of the default one, copies the
+// checkout's working tree over it the same way, and commits what differs as one commit
+// on top of that branch with message, pushing HEAD back to it. ErrNoChanges when the
+// tree equals the branch: nothing is committed or pushed.
+func (c Config) ProposeOnto(ctx context.Context, checkout, branch, message string) (Proposal, error) {
+	return c.propose(ctx, checkout, branch, branch, message)
+}
+
+// propose clones base into a private directory, replaces its working tree with the
+// checkout's, commits the difference and pushes HEAD to branch.
+func (c Config) propose(ctx context.Context, checkout, base, branch, message string) (Proposal, error) {
 	private, err := os.MkdirTemp("", "yuno-propose-")
 	if err != nil {
 		return Proposal{}, err
 	}
 	defer os.RemoveAll(private)
 	dest := filepath.Join(private, "repo")
-	if err := c.Clone(ctx, dest); err != nil {
+	if err := c.cloneBranch(ctx, dest, base); err != nil {
 		return Proposal{}, err
 	}
 	if err := clearWorkingTree(dest); err != nil {

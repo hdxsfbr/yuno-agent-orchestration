@@ -100,32 +100,3 @@ func TestProjectsStore(t *testing.T) {
 	// The name is free again for a new project.
 	mustDo(t, CreateProject(ctx, pool, &Project{Name: "playground 2", RepoURL: "https://x/z.git", Provider: "gitlab", DefaultBranch: "main"}, nil))
 }
-
-// MergeRequestOfRun: the newest executed open_merge_request call with a URL wins; a
-// failed call or a run without one gives nil.
-func TestMergeRequestOfRun(t *testing.T) {
-	pool := needDB(t)
-	ctx := context.Background()
-	wf := &Workflow{Name: "wf", Definition: json.RawMessage(`{"nodes":[],"edges":[]}`)}
-	mustDo(t, CreateWorkflow(ctx, pool, wf))
-	run := &Run{WorkflowID: wf.ID, WorkflowVersion: 1, WorkflowSnapshot: wf.Definition, Trigger: TriggerManual}
-	mustDo(t, CreateRun(ctx, pool, run))
-	if mr, err := MergeRequestOfRun(ctx, pool, run.ID); err != nil || mr != nil {
-		t.Fatalf("none = %+v %v", mr, err)
-	}
-	t1 := mustParse(t, "2026-10-17T10:00:00Z")
-	t2 := mustParse(t, "2026-10-17T10:05:00Z")
-	mustDo(t, InsertToolCall(ctx, pool, &ToolCall{RunID: run.ID, ToolUseID: "a", ToolName: "open_merge_request", Status: ToolFailed, IsError: true,
-		Output: json.RawMessage(`{"text":"refused"}`), StartedAt: &t2, FinishedAt: &t2}))
-	if mr, _ := MergeRequestOfRun(ctx, pool, run.ID); mr != nil {
-		t.Fatalf("a failed call counted: %+v", mr)
-	}
-	mustDo(t, InsertToolCall(ctx, pool, &ToolCall{RunID: run.ID, ToolUseID: "b", ToolName: "open_merge_request", Status: ToolExecuted,
-		Output: json.RawMessage(`{"url":"https://gitlab.test/-/merge_requests/1","provider":"gitlab"}`), StartedAt: &t1, FinishedAt: &t1}))
-	mustDo(t, InsertToolCall(ctx, pool, &ToolCall{RunID: run.ID, ToolUseID: "c", ToolName: "yuno__open_merge_request", Status: ToolExecuted,
-		Output: json.RawMessage(`{"url":"https://github.test/pull/2","provider":"github","replayed":true}`), StartedAt: &t2, FinishedAt: &t2}))
-	mr, err := MergeRequestOfRun(ctx, pool, run.ID)
-	if err != nil || mr == nil || mr.URL != "https://github.test/pull/2" || mr.Provider != "github" {
-		t.Fatalf("newest = %+v %v", mr, err)
-	}
-}

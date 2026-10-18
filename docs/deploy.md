@@ -96,7 +96,11 @@ by the same `make run` the deploy runs, so a project run never pulls an image at
 time; `make smoke` checks that all four sandbox images exist. An install that predates
 projects keeps its seeded agents and workflows; run `make seed-reset` once on the host
 so the Deployer gets `open_merge_request`, the Chief of Staff gets `list_projects` and
-its new prompt, and the Dev pipeline opts into projects.
+its new prompt, the Coder and the Reviewer get the memory tools and the prompt lines
+about project notes (wave 8), and the Dev pipeline opts into projects. The reset keeps
+memory settings, so after it enable memory on the Coder's and the Reviewer's agent
+pages once. `BUDGET_TICK` and `MERGE_REQUEST_SYNC_INTERVAL` (wave 8) have defaults and
+need no entry in `.env`.
 
 ## Deploying from GitLab CI
 

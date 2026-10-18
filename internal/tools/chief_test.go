@@ -496,8 +496,8 @@ func TestDelegateTaskProject(t *testing.T) {
 	}
 }
 
-// DESIGN 5.17 rule 8: run_status carries the run's project and the merge request it
-// opened.
+// DESIGN 5.17 rule 8 and 5.20 rule 6: run_status carries the run's project, the merge
+// request record it opened, and its retries (5.21 rule 7).
 func TestRunStatusProjectAndMergeRequest(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
@@ -513,13 +513,22 @@ func TestRunStatusProjectAndMergeRequest(t *testing.T) {
 	if out["project"] != play.Name || out["merge_request_url"] != nil {
 		t.Fatalf("before the request: %s", res.Output)
 	}
-	now := time.Now().UTC()
-	must(t, store.InsertToolCall(ctx, pool, &store.ToolCall{RunID: f.run.ID, RunNodeID: f.visit.ID, ToolUseID: "mcp-" + uniq(),
-		ToolName: OpenMergeRequestName, Input: json.RawMessage(`{}`), Status: store.ToolExecuted, StartedAt: &now, FinishedAt: &now,
-		Output: json.RawMessage(`{"number":3,"url":"https://gitlab.test/g/p/-/merge_requests/3","provider":"gitlab"}`)}))
+	inserted, err := store.InsertMergeRequest(ctx, pool, &store.MergeRequest{ProjectID: play.ID, RunID: f.run.ID, Provider: "gitlab",
+		Number: 3, URL: "https://gitlab.test/g/p/-/merge_requests/3", SourceBranch: "yuno/abc123", TargetBranch: "main", Title: "Add it"})
+	must(t, err)
+	if !inserted {
+		t.Fatal("the record was not inserted")
+	}
 	res = invoke(t, tool, Call{Input: json.RawMessage(`{"run_id":"` + f.run.ID + `"}`)})
 	must(t, json.Unmarshal(res.Output, &out))
 	if out["merge_request_url"] != "https://gitlab.test/g/p/-/merge_requests/3" {
 		t.Fatalf("after the request: %s", res.Output)
+	}
+	mr, _ := out["merge_request"].(map[string]any)
+	if mr["number"] != float64(3) || mr["state"] != "open" || mr["ci_status"] != "none" || mr["unresolved_threads"] != nil {
+		t.Fatalf("merge_request = %v", out["merge_request"])
+	}
+	if out["retries"] != float64(0) {
+		t.Fatalf("retries = %v", out["retries"])
 	}
 }

@@ -2,11 +2,13 @@ import type { ReactNode } from "react";
 import { Link, useParams } from "react-router";
 import { isTerminalStatus } from "@/lib/api";
 import { useNow } from "@/lib/useNow";
+import { useOpenedMergeRequest } from "@/lib/useOpenedMergeRequest";
 import { useRunTrace } from "@/lib/useRunTrace";
 import { Card } from "@/components/Card";
 import { Loading, QueryError } from "@/components/QueryState";
 import ApprovalsSection from "@/components/run/ApprovalsSection";
 import LogSection from "@/components/run/LogSection";
+import MergeRequestCard from "@/components/run/MergeRequestCard";
 import MessagesSection from "@/components/run/MessagesSection";
 import RunHeader from "@/components/run/RunHeader";
 import StateSection from "@/components/run/StateSection";
@@ -26,7 +28,8 @@ function Section({ title, count, children }: { title: string; count?: number; ch
 
 export default function RunDetailPage() {
   const { id = "" } = useParams();
-  const { view, error, connection, retry, applyRun, applyApproval } = useRunTrace(id);
+  const { view, error, connection, retry, applyRun, applyApproval, applyMergeRequest } = useRunTrace(id);
+  useOpenedMergeRequest(view?.run.id, view?.run.merge_request, view?.tool_calls, applyMergeRequest);
   const active = view ? !isTerminalStatus(view.run.status) : false;
   const now = useNow(active);
 
@@ -49,6 +52,7 @@ export default function RunDetailPage() {
     <div className="max-w-5xl space-y-5">
       {back}
       <RunHeader run={view.run} connection={connection} now={now} toolCalls={view.tool_calls} onRunChange={applyRun} />
+      {view.run.merge_request ? <MergeRequestCard key={view.run.merge_request.id} mr={view.run.merge_request} onChange={applyMergeRequest} /> : null}
 
       {view.approvals.length > 0 || view.run.status === "waiting_approval" ? (
         <Section title="Approvals" count={view.approvals.length}>

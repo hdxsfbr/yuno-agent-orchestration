@@ -11,6 +11,7 @@ import AgentsPage from "./pages/AgentsPage";
 import ApprovalsPage from "./pages/ApprovalsPage";
 import ChannelsPage from "./pages/ChannelsPage";
 import NotFoundPage from "./pages/NotFoundPage";
+import ProjectPage from "./pages/ProjectPage";
 import ProjectsPage from "./pages/ProjectsPage";
 import RunDetailPage from "./pages/RunDetailPage";
 import RunsPage from "./pages/RunsPage";
@@ -105,7 +106,8 @@ export default function App() {
           <Route path="/workflows/new" element={builder} />
           <Route path="/workflows/:id" element={builder} />
           <Route path="/projects" element={<ProjectsPage />} />
-          <Route path="/projects/:id" element={<ProjectsPage />} />
+          <Route path="/projects/:id" element={<ProjectPage />} />
+          <Route path="/projects/:id/edit" element={<ProjectsPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/runs/:id" element={<RunDetailPage />} />
           <Route path="/approvals" element={<ApprovalsPage />} />

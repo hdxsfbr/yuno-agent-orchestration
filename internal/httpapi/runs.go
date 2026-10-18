@@ -11,6 +11,7 @@ import (
 
 	"yuno/internal/engine"
 	"yuno/internal/guardrails"
+	"yuno/internal/project"
 	"yuno/internal/store"
 )
 
@@ -90,13 +91,17 @@ func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, "invalid query", fe)
 		return
 	}
-	runs, err := store.ListRuns(r.Context(), s.pool, status, limit)
+	runs, err := store.ListRuns(r.Context(), s.pool, status, strings.TrimSpace(q.Get("project_id")), limit)
 	if err != nil {
 		s.internalError(w, r, "list runs", err)
 		return
 	}
 	if err := store.FillRunParticipants(r.Context(), s.pool, runs); err != nil {
 		s.internalError(w, r, "list run participants", err)
+		return
+	}
+	if err := store.FillRunMergeRequests(r.Context(), s.pool, runs); err != nil {
+		s.internalError(w, r, "list run merge requests", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, runs)
@@ -149,7 +154,13 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, r, "run", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, run)
+	// The request the run opened rides on it (DESIGN 5.20 rule 6), like the lists' agent names.
+	one := []store.Run{*run}
+	if err := store.FillRunMergeRequests(r.Context(), s.pool, one); err != nil {
+		s.internalError(w, r, "read the run's merge request", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, &one[0])
 }
 
 // cancelRun flags the run for cancellation: 202 with the run, 409 when it has already
@@ -204,6 +215,14 @@ func (s *Server) getTrace(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "list side effects", err)
 		return
 	}
+	// The request the run opened rides on the trace's run as it does on a get (DESIGN 5.20
+	// rule 6), so the page needs no second fetch.
+	one := []store.Run{*t.Run}
+	if err := store.FillRunMergeRequests(r.Context(), s.pool, one); err != nil {
+		s.internalError(w, r, "read the run's merge request", err)
+		return
+	}
+	t.Run.MergeRequest = one[0].MergeRequest
 	writeJSON(w, http.StatusOK, t)
 }
 
@@ -283,6 +302,7 @@ func omitNull(raw json.RawMessage) json.RawMessage {
 func (s *Server) engineError(w http.ResponseWriter, r *http.Request, err error) {
 	var ve *engine.ValidationError
 	var rl *guardrails.RateLimitError
+	var be *project.BudgetError
 	switch {
 	case errors.As(err, &ve):
 		writeValidation(w, "invalid run", validationDetails(ve.Messages))
@@ -290,6 +310,9 @@ func (s *Server) engineError(w http.ResponseWriter, r *http.Request, err error) 
 		writeError(w, http.StatusNotFound, "not_found", err.Error(), nil)
 	case errors.As(err, &rl):
 		writeError(w, http.StatusTooManyRequests, "rate_limited", rl.Error(), map[string]any{"agent_id": rl.AgentID, "limit": rl.Limit})
+	case errors.As(err, &be):
+		// DESIGN 5.19 rule 3: the project is at its daily or monthly cap.
+		budgetRefusal(w, be)
 	default:
 		s.internalError(w, r, "engine", err)
 	}

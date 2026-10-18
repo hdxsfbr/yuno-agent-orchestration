@@ -38,13 +38,15 @@ type ConfirmProps = {
   title: string;
   message: ReactNode;
   confirmLabel: string;
+  /** The confirm button's look: danger (the default) for removals, primary for an action that is not destructive. */
+  confirmVariant?: "danger" | "primary";
   busy?: boolean;
   error?: string | null;
   onConfirm: () => void;
   onCancel: () => void;
 };
 
-export function ConfirmDialog({ title, message, confirmLabel, busy, error, onConfirm, onCancel }: ConfirmProps) {
+export function ConfirmDialog({ title, message, confirmLabel, confirmVariant = "danger", busy, error, onConfirm, onCancel }: ConfirmProps) {
   return (
     <Modal title={title} onClose={busy ? () => undefined : onCancel}>
       <div className="text-sm text-zinc-600 dark:text-zinc-400">{message}</div>
@@ -53,7 +55,7 @@ export function ConfirmDialog({ title, message, confirmLabel, busy, error, onCon
         <Button onClick={onCancel} disabled={busy}>
           Cancel
         </Button>
-        <Button variant="danger" onClick={onConfirm} disabled={busy} autoFocus>
+        <Button variant={confirmVariant} onClick={onConfirm} disabled={busy} autoFocus>
           {busy ? "Working…" : confirmLabel}
         </Button>
       </div>

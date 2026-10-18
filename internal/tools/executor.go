@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"yuno/internal/obs"
@@ -64,9 +65,12 @@ func (s *Service) Execute(ctx context.Context, t *Tool, call Call) (Outcome, err
 		return Outcome{}, fmt.Errorf("tool %s: side effect without an idempotency key", t.Name)
 	}
 	var attempts int
-	stored, replayed, err := store.RunSideEffect(ctx, s.Pool, call.IdempotencyKey, t.Name, call.RunID, call.ToolCallID,
-		func(ctx context.Context) (json.RawMessage, error) {
-			res, n, err := s.attempt(ctx, t, call)
+	stored, replayed, err := store.RunSideEffectTx(ctx, s.Pool, call.IdempotencyKey, t.Name, call.RunID, call.ToolCallID,
+		func(ctx context.Context, tx pgx.Tx) (json.RawMessage, error) {
+			// The tool writes its own rows through the effect's transaction (DESIGN 5.20 rule 2).
+			c := call
+			c.Tx = tx
+			res, n, err := s.attempt(ctx, t, c)
 			attempts = n
 			if err != nil {
 				return nil, err

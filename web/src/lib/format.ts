@@ -13,6 +13,12 @@ export function formatMicros(micros: number | null | undefined): string {
   return `${sign}$${whole.toLocaleString("en-US")}.${frac}`;
 }
 
+/** Dollars with two decimals and a thousands separator: 1234.5 becomes "$1,234.50". */
+export function formatUsd(usd: number | null | undefined): string {
+  const n = Number.isFinite(usd) ? (usd as number) : 0;
+  return `${n < 0 ? "-" : ""}$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 /** Milliseconds as a compact duration: 850ms, 1.2s, 42s, 3m 07s, 1h 05m. */
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";
@@ -75,4 +81,23 @@ export function formatDateTime(iso?: string | null): string {
 /** "waiting_approval" becomes "waiting approval". */
 export function humanize(value: string): string {
   return value.replace(/_/g, " ");
+}
+
+/**
+ * How long ago `iso` was, as the card on a run says it: "just now", "42s ago", "5 min ago",
+ * "3 h ago", "2 d ago". A time in the future (clocks differ) reads "just now"; a missing or
+ * unreadable one is an em dash.
+ */
+export function formatAgo(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return "—";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "—";
+  const seconds = Math.floor(Math.max(0, now - t) / 1000);
+  if (seconds < 10) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.floor(hours / 24)} d ago`;
 }

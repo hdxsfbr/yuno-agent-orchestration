@@ -31,6 +31,11 @@ type fakeGitHub struct {
 	// project check, DESIGN 5.17 rule 5).
 	refuse bool
 	noPush bool
+	// scripted, calls and bodies as the GitLab fake's (DESIGN 5.20): routes are
+	// "METHOD /path" below the repository, and "POST /graphql" for GraphQL.
+	scripted map[string]scriptedAnswer
+	calls    []string
+	bodies   map[string]map[string]any
 }
 
 func newFakeGitHub(t *testing.T, bare string) (*fakeGitHub, *httptest.Server) {
@@ -46,11 +51,20 @@ func newFakeGitHub(t *testing.T, bare string) (*fakeGitHub, *httptest.Server) {
 			writeJSONTest(w, 401, map[string]string{"message": "Bad credentials"})
 			return
 		}
+		if r.URL.EscapedPath() == "/graphql" {
+			if !scriptedRoute(w, r, r.Method+" /graphql", g.scripted, &g.calls, &g.bodies) {
+				writeJSONTest(w, 404, map[string]string{"message": "Not Found"})
+			}
+			return
+		}
 		if r.URL.EscapedPath() != repo && !strings.HasPrefix(r.URL.EscapedPath(), repo+"/") {
 			writeJSONTest(w, 404, map[string]string{"message": "Not Found"})
 			return
 		}
 		p := strings.TrimPrefix(r.URL.EscapedPath(), repo)
+		if scriptedRoute(w, r, r.Method+" "+p, g.scripted, &g.calls, &g.bodies) {
+			return
+		}
 		switch {
 		case r.Method == http.MethodGet && p == "":
 			writeJSONTest(w, 200, map[string]any{"name": "demo", "default_branch": "main",

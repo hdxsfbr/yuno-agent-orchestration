@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { Approval, ModelCall, RunNode, ToolCall } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros } from "@/lib/format";
-import { buildTimeline, type RunView, type TimelineItem } from "@/lib/trace";
+import { buildTimelineEntries, type RetryMark, type RunView, type TimelineItem } from "@/lib/trace";
 import { Badge, StatusBadge } from "../Badge";
 import { EmptyState } from "../QueryState";
 import JsonView from "../JsonView";
@@ -9,7 +9,8 @@ import JsonView from "../JsonView";
 type Props = { view: RunView; active: boolean; now: number };
 
 export default function Timeline({ view, active, now }: Props) {
-  const groups = buildTimeline(view);
+  const entries = buildTimelineEntries(view);
+  const groups = entries.flatMap((e) => (e.kind === "node" ? [e.group] : []));
   // A node that ran more than once (a loop) says which visit each card is.
   const visits = new Map<string, number>();
   for (const g of groups) if (g.node) visits.set(g.node.node_id, (visits.get(g.node.node_id) ?? 0) + 1);
@@ -18,12 +19,35 @@ export default function Timeline({ view, active, now }: Props) {
   }
   return (
     <ol className="space-y-3">
-      {groups.map((g) => (
-        <li key={g.node?.id ?? "other"}>
-          {g.node ? <NodeCard node={g.node} items={g.items} now={now} repeated={(visits.get(g.node.node_id) ?? 0) > 1} /> : <OtherActivity items={g.items} />}
-        </li>
-      ))}
+      {entries.map((entry) =>
+        entry.kind === "retry" ? (
+          <li key={`retry-${entry.mark.retries}`}>
+            <RetryRow mark={entry.mark} />
+          </li>
+        ) : (
+          <li key={entry.group.node?.id ?? "other"}>
+            {entry.group.node ? (
+              <NodeCard node={entry.group.node} items={entry.group.items} now={now} repeated={(visits.get(entry.group.node.node_id) ?? 0) > 1} />
+            ) : (
+              <OtherActivity items={entry.group.items} />
+            )}
+          </li>
+        ),
+      )}
     </ol>
+  );
+}
+
+/** Where the operator retried the run: the failed visit ends above, the new visit of the same step starts below. */
+function RetryRow({ mark }: { mark: RetryMark }) {
+  return (
+    <div className="flex items-center gap-3 text-xs text-zinc-500">
+      <span aria-hidden className="h-px flex-1 bg-zinc-300 dark:bg-zinc-700" />
+      <span className="font-medium">{`Retry ${mark.retries} from ${mark.from_node}`}</span>
+      {mark.at ? <span>{formatDateTime(mark.at)}</span> : null}
+      {mark.by ? <span>by {mark.by}</span> : null}
+      <span aria-hidden className="h-px flex-1 bg-zinc-300 dark:bg-zinc-700" />
+    </div>
   );
 }
 

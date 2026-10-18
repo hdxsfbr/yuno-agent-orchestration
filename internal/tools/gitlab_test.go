@@ -31,6 +31,46 @@ type fakeGitLab struct {
 	// not pushable (the project check, DESIGN 5.17 rule 5).
 	refuse bool
 	noPush bool
+	// scripted answers the status and merge calls of DESIGN 5.20 by "METHOD /path" below
+	// the project (e.g. "GET /merge_requests/7"); calls lists every request seen that way
+	// and bodies keeps the JSON body of the writes.
+	scripted map[string]scriptedAnswer
+	calls    []string
+	bodies   map[string]map[string]any
+}
+
+// scriptedAnswer is what a fake answers a route a test scripted.
+type scriptedAnswer struct {
+	status int
+	body   any
+}
+
+// script sets the answer of one route of a fake provider.
+func script(m *map[string]scriptedAnswer, route string, status int, body any) {
+	if *m == nil {
+		*m = map[string]scriptedAnswer{}
+	}
+	(*m)[route] = scriptedAnswer{status: status, body: body}
+}
+
+// scriptedRoute answers a scripted route and records the call; it reports whether it did.
+func scriptedRoute(w http.ResponseWriter, r *http.Request, route string, scripted map[string]scriptedAnswer, calls *[]string, bodies *map[string]map[string]any) bool {
+	*calls = append(*calls, route)
+	a, ok := scripted[route]
+	if !ok {
+		return false
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		var body map[string]any
+		if json.NewDecoder(r.Body).Decode(&body) == nil {
+			if *bodies == nil {
+				*bodies = map[string]map[string]any{}
+			}
+			(*bodies)[route] = body
+		}
+	}
+	writeJSONTest(w, a.status, a.body)
+	return true
 }
 
 func (g *fakeGitLab) hasBranch(name string) bool {
@@ -58,6 +98,9 @@ func newFakeGitLab(t *testing.T) (*fakeGitLab, *httptest.Server) {
 			return
 		}
 		p = strings.TrimPrefix(p, project)
+		if scriptedRoute(w, r, r.Method+" "+p, g.scripted, &g.calls, &g.bodies) {
+			return
+		}
 		switch {
 		case r.Method == http.MethodGet && p == "":
 			// A project access token reports its role under project_access (Developer

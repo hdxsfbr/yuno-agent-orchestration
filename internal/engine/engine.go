@@ -43,6 +43,11 @@ type Engine struct {
 	bg       sync.WaitGroup // side effects executed after a late approval
 	reports  sync.WaitGroup // report-back sends in flight (report.go)
 
+	// unsavedStarts holds, per run id, the started_at stamp whose write failed in runRun:
+	// the engine's re-reads of the run put it back (readRun), so the attempt still has
+	// the time limit it was claimed with.
+	unsavedStarts sync.Map
+
 	// execute runs one claimed run; tests replace it to observe claims.
 	execute func(ctx context.Context, run *store.Run)
 
@@ -437,7 +442,8 @@ func ProjectForRequest(ctx context.Context, q store.Querier, id string, optsIn b
 // queueRun stores a run with its snapshot (the definition as run, limits resolved, plus
 // the run overrides) and publishes it. The participating agents' hourly rate limits are
 // checked in the transaction that inserts the run (DESIGN 5.11 rule 2); a refusal is a
-// *guardrails.RateLimitError.
+// *guardrails.RateLimitError. A project at a budget cap is refused there too, as a
+// *project.BudgetError (DESIGN 5.19 rule 3).
 func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow.Definition, input json.RawMessage, req TriggerRequest, agents []*store.Agent, proj *store.Project, logAttrs ...any) (*store.Run, error) {
 	snap := runSnapshot{Definition: *def}
 	if req.Model != "" || req.ScriptID != "" {
@@ -484,12 +490,26 @@ func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow
 		if err := guardrails.CheckRateLimit(ctx, tx, agents, e.clock.Now()); err != nil {
 			return err
 		}
+		// A project at its daily or monthly cap takes no new run (DESIGN 5.19 rule 3);
+		// the spend is read in this transaction, after the rate check, and a failed
+		// read fails the trigger.
+		if proj != nil {
+			if err := project.CheckBudget(ctx, tx, proj, e.clock.Now()); err != nil {
+				return err
+			}
+		}
 		return store.CreateRun(ctx, tx, run)
 	})
 	var rl *guardrails.RateLimitError
 	if errors.As(err, &rl) {
 		e.log.Info("run refused by a guardrail", "workflow_id", wf.ID, "agent_id", rl.AgentID, "trigger", trigger, "reason", rl.Error())
 		return nil, rl
+	}
+	var be *project.BudgetError
+	if errors.As(err, &be) {
+		e.log.Info("run refused by a project budget", "workflow_id", wf.ID, "project_id", be.ProjectID, "window", be.Window,
+			"trigger", trigger, "reason", be.Error())
+		return nil, be
 	}
 	if errors.Is(err, store.ErrDuplicateTrigger) {
 		e.log.Info("run not created: its schedule occurrence already has one", "workflow_id", wf.ID, "trigger_ref", req.TriggerRef)

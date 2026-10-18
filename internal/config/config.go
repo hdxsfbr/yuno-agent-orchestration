@@ -67,13 +67,18 @@ type Config struct {
 	ProjectTokenKey string
 
 	// API and engine.
-	APIToken           string
-	EngineWorkers      int
-	EngineStaleAfter   time.Duration
-	SchedulerTick      time.Duration
-	HTTPFetchAllowlist []string
-	ToolOutputMaxBytes int
-	LogLevel           string
+	APIToken         string
+	EngineWorkers    int
+	EngineStaleAfter time.Duration
+	SchedulerTick    time.Duration
+	// BudgetTick is how often project spend is checked for alerts (DESIGN 5.19 rule 5);
+	// MergeRequestSyncInterval how often open merge requests are refreshed from their
+	// provider (DESIGN 5.20 rule 3).
+	BudgetTick               time.Duration
+	MergeRequestSyncInterval time.Duration
+	HTTPFetchAllowlist       []string
+	ToolOutputMaxBytes       int
+	LogLevel                 string
 
 	// Evaluation runner (DESIGN 5.13). The runner is an HTTP client of the api.
 	EvalAPIURL     string
@@ -134,13 +139,15 @@ func FromEnv() Config {
 		ProjectSandboxNetwork: envBool("PROJECT_SANDBOX_NETWORK", false),
 		ProjectTokenKey:       env("PROJECT_TOKEN_KEY", ""),
 
-		APIToken:           env("API_TOKEN", ""),
-		EngineWorkers:      envInt("ENGINE_WORKERS", 4),
-		EngineStaleAfter:   envDuration("ENGINE_STALE_AFTER", 300*time.Second),
-		SchedulerTick:      envDuration("SCHEDULER_TICK", 10*time.Second),
-		HTTPFetchAllowlist: envList("HTTP_FETCH_ALLOWLIST", "docs.python.org,pypi.org,raw.githubusercontent.com"),
-		ToolOutputMaxBytes: envInt("TOOL_OUTPUT_MAX_BYTES", 32768),
-		LogLevel:           env("LOG_LEVEL", "info"),
+		APIToken:                 env("API_TOKEN", ""),
+		EngineWorkers:            envInt("ENGINE_WORKERS", 4),
+		EngineStaleAfter:         envDuration("ENGINE_STALE_AFTER", 300*time.Second),
+		SchedulerTick:            envDuration("SCHEDULER_TICK", 10*time.Second),
+		BudgetTick:               envDuration("BUDGET_TICK", 60*time.Second),
+		MergeRequestSyncInterval: envDuration("MERGE_REQUEST_SYNC_INTERVAL", 120*time.Second),
+		HTTPFetchAllowlist:       envList("HTTP_FETCH_ALLOWLIST", "docs.python.org,pypi.org,raw.githubusercontent.com"),
+		ToolOutputMaxBytes:       envInt("TOOL_OUTPUT_MAX_BYTES", 32768),
+		LogLevel:                 env("LOG_LEVEL", "info"),
 
 		EvalAPIURL:     strings.TrimRight(env("EVAL_API_URL", "http://127.0.0.1:8080"), "/"),
 		EvalProvider:   env("EVAL_PROVIDER", "scripted"),

@@ -266,7 +266,11 @@ func (v *visit) execute(ctx context.Context) outcome {
 		v: v, schema: schema,
 	})
 
-	if res := v.startTurn(ctx, v.taskMessage()); res != nil {
+	msg, err := v.taskMessageFor(ctx)
+	if err != nil {
+		return v.setupFailed(ctx, "project notes: "+err.Error())
+	}
+	if res := v.startTurn(ctx, msg); res != nil {
 		return *res
 	}
 	return v.loop(ctx)
@@ -465,8 +469,34 @@ func cloneInto(ctx context.Context, pc project.Config, ws, runID string) error {
 }
 
 // taskMessage is the rendered node task plus the fixed protocol block (DESIGN 5.6
-// rule 5), with the project lines of DESIGN 5.16 rule 9 for a project visit.
+// rule 5), with the project lines of DESIGN 5.16 rule 9 for a project visit, without the
+// operator's instructions and the project notes (taskMessageFor reads those).
 func (v *visit) taskMessage() string {
+	return v.taskMessageWith(project.Extras{})
+}
+
+// taskMessageFor is taskMessage with what a visit on a project starts knowing (DESIGN
+// 5.18 rule 4): the project row's instructions and its 10 newest live notes, read now
+// from the run's project_id. A failed read is an error: a visit never runs on a silently
+// incomplete prompt.
+func (v *visit) taskMessageFor(ctx context.Context) (string, error) {
+	var x project.Extras
+	if v.project != nil && v.toolchain.Name != "" && v.run.ProjectID != nil {
+		pool, id := v.e.deps.Pool, *v.run.ProjectID
+		instructions, err := store.ProjectInstructions(ctx, pool, id)
+		if err != nil {
+			return "", err
+		}
+		notes, err := memory.NewestProjectFacts(ctx, pool, id, project.TaskNotes, v.e.clock.Now())
+		if err != nil {
+			return "", err
+		}
+		x = project.Extras{Instructions: instructions, Notes: notes}
+	}
+	return v.taskMessageWith(x), nil
+}
+
+func (v *visit) taskMessageWith(x project.Extras) string {
 	schema := v.node.OutputSchema
 	var buf bytes.Buffer
 	if err := json.Compact(&buf, schema); err == nil {
@@ -485,7 +515,7 @@ func (v *visit) taskMessage() string {
 	}
 	sb.WriteString("Work inside the directory runs/" + v.run.ID + "/ of your workspace.\n")
 	if v.project != nil && v.toolchain.Name != "" {
-		sb.WriteString(project.Instructions(*v.project, v.run.ID, v.toolchain))
+		sb.WriteString(project.InstructionsWith(*v.project, v.run.ID, v.toolchain, x))
 	}
 	sb.WriteString(`When finished, call the tool yuno__finish with {"run_token": "` + v.token +
 		`", "result": <object matching this JSON schema>}:` + "\n")
@@ -577,7 +607,7 @@ func (v *visit) startTurn(ctx context.Context, message string) *outcome {
 
 // preflight re-reads the run and refuses to start a turn past a limit.
 func (v *visit) preflight(ctx context.Context) *outcome {
-	if run, err := store.GetRun(ctx, v.e.deps.Pool, v.run.ID); err == nil {
+	if run, err := v.e.readRun(ctx, v.run.ID); err == nil {
 		v.run = run
 	}
 	if viol := checkLimits(v.limitState()); viol != nil {
@@ -1328,7 +1358,7 @@ func (v *visit) closeAcceptance() (json.RawMessage, bool) {
 }
 
 func (v *visit) refreshRun(ctx context.Context) {
-	if run, err := store.GetRun(ctx, v.e.deps.Pool, v.run.ID); err == nil {
+	if run, err := v.e.readRun(ctx, v.run.ID); err == nil {
 		v.run = run
 	}
 }
