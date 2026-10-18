@@ -153,7 +153,8 @@ func detailPaths(t *testing.T, b []byte) []string {
 // fakeEngine implements engine.Service. With a pool it writes the rows the real engine
 // would (materialisation marker, quick-run workflow and run, cancel flag).
 type fakeEngine struct {
-	pool *pgxpool.Pool
+	askOperator func(ctx context.Context, token, question string, options []string) (*store.Approval, error)
+	pool        *pgxpool.Pool
 
 	mu             sync.Mutex
 	materializeErr error
@@ -313,7 +314,11 @@ func (f *fakeEngine) RejectFinish(_ context.Context, token, message string) {
 
 // AskOperator, WaitQuestion and AnswerQuestion are the questions of DESIGN 5.24, which this
 // fake does not play: the tests that need them bring their own engine.
-func (f *fakeEngine) AskOperator(context.Context, string, string, []string) (*store.Approval, error) {
+// askOperator, when set, answers AskOperator (the wiring tests inject it).
+func (f *fakeEngine) AskOperator(ctx context.Context, token, question string, options []string) (*store.Approval, error) {
+	if f.askOperator != nil {
+		return f.askOperator(ctx, token, question, options)
+	}
 	return nil, engine.ErrNotImplemented
 }
 

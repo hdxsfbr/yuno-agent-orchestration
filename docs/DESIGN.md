@@ -2967,7 +2967,9 @@ non-exec approval), so approving a decided question is 422 and answering it 409.
 decision delivery re-tries the re-queue once after a failed handoff and skips the
 unattended re-queue when a live visit was found; the one-pending check reads the row when
 the visit's flag is set, since the waiter clears the flag through the visit's loop and a
-second question in the same turn can arrive first (found by CI). `ask_operator` matches the text
+second question in the same turn can arrive first (found by CI). The tools reach the
+engine through the server's `asker` adapter at call time, since the registry is built
+before the engine exists (found live: the first deploy answered `not configured`). `ask_operator` matches the text
 `invalid run token` (the tools package cannot import the engine), `answer_question` reads
 the row itself before and after the engine call to produce the three texts, refuses a
 blank id with `question_id: must not be empty`, and tells a run call by `Call.Chat`

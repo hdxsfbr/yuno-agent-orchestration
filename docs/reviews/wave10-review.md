@@ -69,6 +69,16 @@ question at a time` although the first was decided. The ask path now reads the r
 the flag is set and clears it for a decided question (5.24 rule 2); the wait helper's
 deadline is 20 s.
 
+## Found live after the deploy
+
+Every `ask_operator` call of the first live runs answered `not configured`: the server
+builds its tool registry before the engine exists and sets the engine afterwards, so the
+Asker the prerequisites wired from the deps at build time was nil in production, while
+every test handed the engine in before building the server. The question tools now reach
+the engine through a server adapter at call time (`asker{s}`, as `delegate_task` does),
+and a test builds the server without an engine, sets it afterwards and calls the tool
+from the registry.
+
 ## Coverage reported by the reviewers
 
 Rules checked and found correct: 5.24 rules 1 to 12 (validation texts, risk and timeout,

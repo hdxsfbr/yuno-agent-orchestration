@@ -574,8 +574,11 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 		MemorySaved:    s.memorySaved,
 		MaxOutputBytes: cfg.ToolOutputMaxBytes,
 		Delegator:      delegator{s},
-		PublicBaseURL:  cfg.PublicBaseURL,
-		MCPToolWait:    cfg.MCPToolWait,
+		// ask_operator and answer_question reach the engine through the server at call
+		// time (DESIGN 5.24): Run sets s.engine after this registry is built.
+		Asker:         asker{s},
+		PublicBaseURL: cfg.PublicBaseURL,
+		MCPToolWait:   cfg.MCPToolWait,
 		Deploy: tools.DeployConfig{
 			TargetURL:       cfg.DeployTargetURL,
 			MaxBytes:        int64(cfg.DeployTargetMaxMB) << 20,
@@ -587,11 +590,6 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 			MaxOutputBytes: cfg.ToolOutputMaxBytes,
 			Transport:      d.FetchTransport,
 		},
-	}
-	// ask_operator and answer_question go through the engine (DESIGN 5.24); without one
-	// they cannot run.
-	if d.Engine != nil {
-		pd.Asker = d.Engine
 	}
 	if cfg.GitLabEnabled() {
 		pd.GitLab = &tools.GitLabConfig{
