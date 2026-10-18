@@ -6,6 +6,88 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-17
 
+**D-048 Parallel steps are explicit `fork` and `join` nodes; a failed branch fails the
+run; a review panel template is the example.** (Andre, 2026-10-17, the recommended
+answers of `docs/ROADMAP.md` 5.26) Fan-out happens only at a `fork` node that names its
+`join`, so the first-true-edge rule of every other node (5.6 rule 4) stays; a branch
+that fails ends the run and cancels its siblings in this version, and a new
+`review_panel` template ships alongside the unchanged Dev pipeline. Why: local
+validation of the branch region and no change to how existing graphs run. Cost: no
+partial fan-in and no parallel review in the Dev pipeline until a later decision.
+Design: DESIGN 5.26 when its wave starts.
+
+**D-047 Run artifacts are collected at the end of every visit, the checkout diff is
+one of them, and they live 30 days.** (Andre, 2026-10-17, the recommended answers of
+`docs/ROADMAP.md` 5.25) Files under `runs/<run id>/out/` are collected after each
+visit, so a later failure still leaves the earlier deliverables; a project run gets
+`diff.patch` automatically; `ARTIFACT_TTL_DAYS` defaults to 30. Design: DESIGN 5.25
+when its wave starts.
+
+**D-046 A question to the operator blocks the tool call, then parks the visit and
+resumes it with the answer; Telegram answers go through a Chief tool.** (Andre,
+2026-10-17, the recommended answers of `docs/ROADMAP.md` 5.24) `ask_operator` waits
+like a gated tool and, past the wait, the visit is parked and re-run with the answer
+appended (the resumed path of 5.21); the operator answers in the inbox or by replying
+to the Chief, which calls `answer_question`. Why: a factory cannot lose a question
+after nine minutes, and no new channel command is needed. Design: DESIGN 5.24 when
+its wave starts.
+
+**D-045 Issue intake polls the provider, drives a label state machine on the issue,
+and runs once per issue.** (Andre, 2026-10-17, the recommended answers of
+`docs/ROADMAP.md` 5.23) A per-project poll lists open issues with the intake label,
+no inbound endpoint and no webhook secret; the label moves `yuno` → `yuno:running` →
+`yuno:done` or `yuno:failed`, and re-adding `yuno` is the explicit retry. Why: both
+providers behave the same and the state is visible where the issue lives. Design:
+DESIGN 5.23 when its wave starts.
+
+**D-044 A run iterating on a merge request reads its threads through a tool, and a
+request closed before the clone is refused at queue time only.** (Andre, 2026-10-17,
+the recommended answers of `docs/ROADMAP.md` 5.22) `read_merge_request` returns the
+unresolved threads when the agent asks, so the task stays short; a request that was
+merged or closed between the request and the clone is refused when queued and
+otherwise runs. Design: DESIGN 5.22 when its wave starts.
+
+**D-043 A retry continues the same run with an attempt counter, from the node it
+stopped at; cancelled runs can be retried.** (Andre, 2026-10-17) `POST
+/api/runs/{id}/retry` re-queues a `failed`, `timed_out` or `cancelled` run from its
+`current_node`, keeping state, counters and the checkout, with `runs.retries` and the
+crash counter `attempt` reset per retry; limits apply to the whole run and are raised
+on the retry when exhausted; the time limit restarts. Why: one run id keeps one trace,
+one report-back thread and (with D-042) one merge request; a new run linked by
+`retry_of` would open a second request on a second branch. Cost: a retried visit has
+new idempotency keys, so `deploy_release` and `gitlab_create_mr` repeat on a retry of
+their node, as on a loop revisit. Design: DESIGN 5.21.
+
+**D-042 Merge requests are records synced from the provider; merging is an operator
+action in the UI; the final state is reported into the conversation once.** (Andre,
+2026-10-17) A `merge_requests` table is written by `open_merge_request` and refreshed
+every two minutes (state, pipeline, unresolved threads); a run has one request, and a
+later `open_merge_request` in the same run pushes onto its branch instead of opening a
+second one; merge is `POST /api/merge-requests/{id}/merge` behind a confirmation, not
+a Deployer tool in this wave; merged or closed is reported once into the run's
+conversation. Why: the factory's loop closes where the work was asked for, and a chat
+tool with `require_approval` is refused by 5.15 rule 7. Cost: polling, no webhooks;
+GitHub thread counts need GraphQL access on the token. Design: DESIGN 5.20.
+
+**D-041 Project budgets refuse new runs at the cap and alert the Chief's latest
+conversation; running runs finish.** (Andre, 2026-10-17) Optional daily and monthly
+caps per project in UTC calendar windows; a trigger on a project at or over a cap is
+refused (429 `project_budget_reached`), running runs are never aborted by the cap, and
+the warning (80 %) and reached alerts go to the newest conversation of the agent bound
+to Telegram, like report-backs, or to a log line and the UI without a binding. Why:
+refusal at queue time is deterministic and bounds the overshoot by the running runs'
+own caps; the report-back route exists and needs no alert chat id. Design: DESIGN
+5.19.
+
+**D-040 Project instructions are the operator's text only; project notes are a shared
+scope any agent of a run on the project may write.** (Andre, 2026-10-17) A project
+carries an `instructions` text rendered into every visit's task on it; the checkout's
+own `AGENTS.md` is not injected (repository text is untrusted; the agent reads it
+itself); `memory_save` and `memory_recall` take `scope: "project"` in a run on a
+project, stored in their own `project_facts` table because `memory_facts` is keyed per
+agent, and any agent with memory enabled reads and writes them. Design: DESIGN 5.18.
+
+
 **D-039 A schedule names the project its runs work on.** (Andre, 2026-10-17)
 `schedules.project_id` (migration 0011) is checked when the schedule is created or
 updated with the rule a run request's `project_id` follows (D-038), through the

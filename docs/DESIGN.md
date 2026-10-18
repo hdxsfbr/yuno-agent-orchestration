@@ -117,7 +117,8 @@ with one exception to T5.1.2: kind `tool` approvals of a succeeded run stay deci
 Rule 2 as implemented in wave 1 (the transition table the engine enforces):
 `queued → running | cancelled`; `running → queued` (re-queue after a lost worker or a
 resume), `running → waiting_approval | succeeded | failed | cancelled | timed_out`;
-`waiting_approval → queued | running | failed | cancelled | timed_out`. Anything else is
+`waiting_approval → queued | running | failed | cancelled | timed_out`; since 5.21,
+`failed | timed_out | cancelled → queued` for an operator retry only. Anything else is
 rejected with `invalid transition <from>→<to>`.
 
 ### 5.2 Termination limits and cancellation
@@ -1258,7 +1259,8 @@ Rules:
     commits as `Yuno <yuno@localhost>` with the title as message (`--no-verify`, no
     signing) and pushes `HEAD` to the branch from the api with the token (rule 4), then
     removes the private directory; (c) an open merge request from that branch is
-    returned with `replayed: true`; otherwise one is opened against the default branch
+    returned with `replayed: true` (since 5.20 rule 2 a run has one request: a later
+    call in the same run pushes onto its branch and returns it `updated`); otherwise one is opened against the default branch
     with the title and description. Output: `{number, url, branch, provider,
     replayed?}`. Registered always since 5.17 (a run without a project is told `this
     run has no project`); `gitlab_create_mr` stays for runs without a project. Commits an agent made
@@ -1274,8 +1276,9 @@ Rules:
     the rest permanent, the first line of the body in the error.
 12. **UI.** The run header shows a `Toolchain: <x>` badge when the run has one, and a
     `Merge request` (GitLab) or `Pull request` (GitHub) link with the number, taken from
-    the newest executed `open_merge_request` call's output in the trace; the runs list
-    shows the toolchain badge.
+    the run's merge request record (5.20 rule 6; before 5.20, from the newest executed
+    `open_merge_request` call's output in the trace); the runs list shows the
+    toolchain badge.
 13. **Trust.** With network on, anything injected into the repository (a README, a test,
     a dependency's install script) can reach the internet from the sandbox and can touch
     the host's published ports; side effects inside the sandbox are not gated. The opt-in
@@ -1449,7 +1452,8 @@ Rules:
    optional with `agent_name` (the quick run then works on the project); an unknown
    name answers `no project named X; choose one of: A, B`. The delegation's approval
    sentence names the project. `run_status` adds `project` (the snapshot's name) and
-   `merge_request_url` (the newest executed `open_merge_request` call's URL) when the
+   `merge_request_url` (the run's merge request record since 5.20 rule 6; before it, the
+   newest executed `open_merge_request` call's URL) when the
    run has them. The seeded Chief's prompt says to find the project the person's words
    name with `list_projects`, to pass its name when delegating, and to ask which
    project when the words name none and the workflow needs one.
@@ -1560,6 +1564,439 @@ Out of scope: per-agent projects; a project's own default limits; more than one 
 per project; GitHub Apps; validating a changed repository URL against the runs that
 used the project.
 
+### 5.18 Project instructions and project notes: what a run on a project starts knowing
+
+Purpose: a visit of a run on a project starts with the operator's standing instructions
+for that repository and with the notes earlier runs on it saved, so an agent does not
+rediscover how the project is built and tested; the notes are shared by every agent
+that works on the project. Decision D-040. Roadmap: `docs/ROADMAP.md`.
+
+Inputs: `projects.instructions` (text, operator-written, through the form and the API);
+`project_facts` rows (saved by agents through `memory_save` with `scope: "project"`); the
+run's `project_id`; the calling agent's memory policy (5.10) for the tools; the injected
+clock.
+
+Units: bytes for text caps (UTF-8, measured after trimming); days for TTLs, converted at
+write time as 5.10 rule 3; counts for caps.
+
+Rules:
+
+1. `instructions` is optional on create and update, trimmed, at most 8192 bytes, with no
+   control character other than newline and tab (422 `instructions: at most 8192 bytes`,
+   `instructions: contains control characters`). Like the other settings, an update
+   replaces it and an absent field clears it (the token is the only field an update
+   keeps when absent, 5.17 rule 2). It is returned as is in the project representation.
+2. Project notes are their own table, `project_facts(id, project_id, key, value,
+   agent_id, source_run_id, created_at, updated_at, expires_at)`, unique `(project_id,
+   key)`, `project_id` referencing `projects` with cascade (a soft-deleted project keeps
+   its notes while its row exists), `agent_id` referencing `agents` with set null (the
+   note outlives the agent that saved it). `key` is 1 to 200 bytes, `value` 1 to 2048
+   bytes, `ttl_days` 0 to 3650 with default 90; at most 100 notes per project, the 101st
+   evicts the oldest by `created_at` first, as 5.10 rule 3. `memory_facts` is untouched:
+   it is keyed per agent and a project note is not.
+3. `memory_save` and `memory_recall` gain an optional `scope`, `agent` (the default,
+   today's behaviour) or `project`. `scope: "project"` needs a run token of a run that
+   names a project; a chat token or a run without a project answers the model
+   `project notes need a run on a project`; the calling agent's memory policy must be
+   enabled, as today (`memory is not enabled for this agent`). Save upserts by
+   `(project_id, key)` with `agent_id` the caller and `source_run_id` the run; recall
+   applies 5.10 rule 4's word match over the project's live notes, at most 20, newest by
+   `updated_at` first. Any agent of a run on the project may read and write (D-040).
+4. The task protocol block of every visit of a run on a project (5.16 rule 9) gains,
+   after the sandbox network line, `Project instructions from the operator:` followed by
+   the instructions when they are not empty, and `Project notes saved by earlier runs,
+   newest first:` followed by up to 10 live notes as `- <key>: <value>` on one line each
+   (a value cut at 300 bytes ends with `…`), when any exist. They are read when the
+   visit's task is rendered, from the run's `project_id`; a deleted project's notes
+   still render while its row exists. Together the two blocks are capped at 12 KiB:
+   the instructions first, then notes dropped oldest first until the cap holds.
+5. The sweeper of 5.10 rule 6 deletes expired project notes in the same pass; expired
+   notes are excluded from recall, from the block and from the API.
+6. API: `GET /api/projects/{id}/facts` lists the live notes newest first, each with the
+   saving agent's name (null when gone) and `source_run_id`; `DELETE
+   /api/projects/{id}/facts/{factId}` answers 204, 404 `project not found` for a missing
+   or deleted project and 404 `memory fact not found` for a missing note.
+7. UI: the project form gets an Instructions textarea (hint: "Standing instructions for
+   every run on this project: conventions, how to build and test, what to leave
+   alone."); the project page (5.20 rule 9) gets a Notes section listing key, value, who
+   saved it and when, with delete.
+8. Shipped prompts: the Coder's and the Reviewer's say to recall project notes before
+   deciding how to build or test, and to save as a project note what they learn about
+   how the project is built, tested or laid out; the materialised `AGENTS.md` memory
+   section names the `project` scope. `make seed-reset` applies the new prompt text to
+   an existing install (5.16 rule 14).
+
+Edge cases: the same key saved by two agents of one run: the later write wins. An
+instructions text of only whitespace is empty. A quick run on a project gets the blocks
+too. The Chief of Staff cannot read project notes in a conversation (no run); the
+operator reads them on the project page. A project with instructions and no notes gets
+the first block only, and the other way round.
+
+Time: TTLs and `expires_at` on the injected clock, UTC.
+
+Failure handling: a database error while reading instructions or notes for a task fails
+the visit with `project notes: <error>`, like a task template error (a visit never runs
+on a silently incomplete prompt). A note write error is a tool error result (5.10).
+
+Consistency: upsert in one statement; eviction and insert in one transaction, as
+`memory.Save`.
+
+Outputs: `projects.instructions`; `project_facts`; the two prompt blocks; the facts API;
+the Notes section and the Instructions field.
+
+Tests: T5.18.1 instructions validation on both sides of 8192 bytes and with a control
+character. T5.18.2 save with scope project upserts by key and records agent and run.
+T5.18.3 a chat token with scope project is refused with the text. T5.18.4 a run without
+a project is refused with the text. T5.18.5 the 101st note evicts the oldest by
+`created_at`. T5.18.6 recall word match and order over project notes only. T5.18.7 the
+task of a project visit carries both blocks in order, the first only, the second only,
+neither. T5.18.8 the 12 KiB cap drops the oldest notes first and never the
+instructions. T5.18.9 an expired note is neither recalled, rendered nor listed, before
+the sweep runs. T5.18.10 facts API list and delete, 404 on a deleted project. T5.18.11
+UI: the form field round-trips; the Notes section lists and deletes. T5.18.12
+`seed --reset-shipped` carries the new prompt text.
+
+Out of scope: injecting the checkout's own `AGENTS.md` or `CLAUDE.md` into the prompt
+(D-040: repository text is untrusted, the agent reads it itself), per-agent
+instructions per project, instructions on a run request, project notes in
+conversations, vector search.
+
+### 5.19 Project budgets: daily and monthly caps with alerts
+
+Purpose: a project cannot spend more than the operator allowed in a UTC day or a UTC
+month; new work on it is refused at the cap, and the operator hears about it at 80 % and
+at the cap. Decision D-041.
+
+Inputs: `projects.budget_day_usd_micros` and `projects.budget_month_usd_micros`
+(nullable; `max_cost_usd_per_day` and `max_cost_usd_per_month` in the API, USD like
+`max_cost_usd`); `runs.cost_usd_micros` and `runs.created_at` of the project's runs; the
+Telegram binding and its agent's conversations for the alert; `BUDGET_TICK` (default
+60 s); the injected clock.
+
+Units: micro-USD in the store and in every comparison; USD with up to six decimals in
+the API, converted at the boundary as `max_cost_usd` is; windows are the UTC calendar
+day `[00:00, 24:00)` and the UTC calendar month `[1st 00:00, next 1st 00:00)`, end
+exclusive.
+
+Rules:
+
+1. Each cap is optional; when set it is `> 0` and `<= 1000000` USD (422
+   `max_cost_usd_per_day: must be greater than 0`, `max_cost_usd_per_day: at most
+   1000000`, the same for the month); absent or null clears it.
+2. The spend of a window is the sum of `cost_usd_micros` of the runs whose `project_id`
+   is the project and whose `created_at` falls in the window, whatever their status: a
+   running run counts what it has spent so far, a run created at 23:59 counts in that
+   day however long it runs, and the runs of a deleted project keep counting. One
+   indexed query per window (`runs (project_id, created_at)`).
+3. Queue-time refusal: a run request, a delegation, a schedule firing, a retry (5.21)
+   or an intake (5.23) that names a project with a cap whose spend is already `>=` the
+   cap is refused inside the trigger transaction, next to the rate check of 5.11 rule
+   2, with `*project.BudgetError{ProjectID, ProjectName, Window, CapMicros,
+   SpendMicros, WindowEnd}`; the day cap is checked before the month cap. HTTP answers
+   429 `project_budget_reached` with the text `project <name> has reached its
+   <daily|monthly> budget ($<cap>); new runs are refused until <window end, RFC 3339
+   UTC>` and details `{project_id, window, max_cost_usd, spent_usd, until}`; a schedule
+   records the text in `last_error` and advances, as it does for a rate limit;
+   `delegate_task` answers the text as a tool error.
+4. Running runs are never aborted by a project cap (D-041): they finish under their own
+   `max_cost_usd`, so a window can overshoot by at most the sum of the running runs'
+   remaining caps.
+5. Alerts: a watcher ticks every `BUDGET_TICK`, computes both windows' spend for every
+   live project with a cap, and sends at most one `warning` alert (spend `>= 80 %` of
+   the cap) and one `reached` alert (spend `>= cap`) per project, window kind and window
+   start. The texts: `[platform] Project <name> has used $<spend> of its $<cap>
+   <daily|monthly> budget (<n> %).` and `[platform] Project <name> has reached its
+   $<cap> <daily|monthly> budget; new runs on it are refused until <window end UTC>.`
+   Sent alerts are rows of `project_budget_alerts(project_id, window, window_start,
+   level, sent_at)`, primary key the first four, written after a send that was not
+   deferred; a restart re-sends nothing, and a deferred send (gateway unreachable) is
+   tried again at the next tick.
+6. The alert goes to the most recent conversation (newest message) of the agent bound
+   to the Telegram channel, through the send path of 5.15 rule 9 (`chat.send` with
+   `deliver`, one attempt, idempotency key `budget-<project id>-<window>-<window
+   start>-<level>`), and is mirrored like a report-back without a run id. Without a
+   binding or a conversation the alert is a log line and the row only; the UI shows
+   the spend either way (D-041).
+7. Representation: `Project` gains `spend: {day_usd, month_usd}` next to the caps,
+   computed on read for gets and lists (one query per window for the whole list). The
+   Projects list shows `spent / cap` for the day and the month with the warning tone
+   from 80 % and the danger tone at the cap; the project form has both cap fields
+   (hint: "Leave empty for no cap. New runs are refused once the cap is reached;
+   running runs finish."); the project page shows the same with the window end.
+8. `list_projects` (5.17 rule 8) adds `budget: {day: {max_usd, spent_usd}, month: {...}}`
+   for a project with a cap, so the Chief can say why a delegation was refused.
+
+Edge cases: spend exactly at the cap refuses. A cap lowered below the current spend
+refuses at once and alerts at the next tick. A project with both caps alerts per window.
+A run created at 23:58 that spends until 00:10 counts in the day it was created. A
+deleted project is not alerted on (not live) and cannot be named by a trigger. Two
+triggers in the same instant can both pass just under the cap (bounded by rule 4).
+
+Time: UTC calendar windows on the injected clock; window end exclusive; the watcher's
+tick on the same clock.
+
+Failure handling: a failed spend query at trigger time fails the trigger (500), never
+silently allows; a failed or deferred send is logged and tried at the next tick (rule
+5); a watcher error on one project is logged and the tick continues with the next.
+
+Consistency: the refusal reads the spend inside the trigger transaction, after the rate
+check; the alert row is written after the send so a crash between the two re-sends at
+most once under the same idempotency key, which the gateway dedupes (5.14 rule 6).
+
+Outputs: the two cap columns; `project_budget_alerts`; the 429 body; `last_error`; the
+alert messages, mirrored; `spend` in the representation; `list_projects.budget`.
+
+Tests: T5.19.1 cap validation at 0, 1000000, above, negative, and clearing. T5.19.2 the
+spend sums only the project's runs, in the window, on both edges of a day and of a
+month. T5.19.3 refusal at `>=` for a run request (429 body and details), a delegation
+(tool error text), a schedule (`last_error` and advance). T5.19.4 a running run
+continues past the cap; the next trigger is refused. T5.19.5 one warning and one reached
+alert per window start; a tick after a restart re-sends nothing; the next day sends
+again. T5.19.6 routing to the bound agent's newest conversation; no binding gives a row
+and a log line only. T5.19.7 a deferred send is tried again at the next tick and not
+recorded before. T5.19.8 `spend` in gets and lists and `list_projects.budget`. T5.19.9
+UI: form fields round-trip; the list shows spent over cap with the tones.
+
+Out of scope: a platform-wide budget, aborting running runs, budgets per agent within a
+project, currencies other than USD, windows in a project's own time zone.
+
+### 5.20 Merge requests as records: status sync, merge, one request per run
+
+Purpose: the platform keeps a record of every merge request it opened, knows whether it
+is open, merged or closed, whether its pipeline passed and whether review threads
+remain, shows that on the run and the project, reports the final state into the
+conversation that asked for the work, and merges it on the operator's request. Decision
+D-042.
+
+Inputs: `open_merge_request` results (5.16 rule 10); the provider APIs of 5.16 rule 11;
+the project's token through the resolver (5.17 rule 6); `MERGE_REQUEST_SYNC_INTERVAL`
+(default 120 s); the injected clock.
+
+Units: `number` is the GitLab `iid` or the GitHub pull number; `state` is `open`,
+`merged` or `closed`; `ci_status` is `none`, `pending`, `passed` or `failed`;
+`unresolved_threads` a count or null when unknown; times UTC.
+
+Rules:
+
+1. Table `merge_requests`: id, project_id (references `projects`), run_id (references
+   `runs`, cascade), provider, number, url, source_branch, target_branch, title, state,
+   ci_status, head_sha, unresolved_threads, last_sync_error, synced_at, reported_state
+   (null, `merged` or `closed`), merged_by, created_at, updated_at, closed_at; unique
+   `(project_id, number)` and unique `run_id`.
+2. One request per run. `open_merge_request` writes the record in the transaction that
+   stores the side effect result (5.4 rule 5), state `open`, `ci_status` `none`,
+   `synced_at` null. A later successful call in the same run (a loop revisit, a retried
+   attempt of 5.21) opens no second request: it copies the working tree as a new commit
+   on top of the record's source branch (5.16 rule 10 step (b) now skips the commit and
+   push only when the tree is unchanged against that branch, which it checks on its
+   private clone), pushes, and returns the record as `{number, url, branch, provider,
+   replayed: true, updated: true}` (`updated` absent when nothing was pushed); the
+   record's title and description are unchanged. The idempotency key of 5.4 still
+   dedupes the identical call within one visit.
+3. Sync: every `MERGE_REQUEST_SYNC_INTERVAL` the loop lists records with state `open`
+   created in the last 14 days, oldest `synced_at` first with nulls first, at most 50 per
+   pass, and refreshes each with a 10 s timeout. GitLab: `GET merge_requests/<iid>`
+   (`opened` → open, `merged` → merged, `closed` and `locked` → closed; `sha`;
+   `merged_at` or `closed_at`), `GET merge_requests/<iid>/discussions` (first 100; the
+   count of threads whose first note is resolvable and not resolved), `GET
+   merge_requests/<iid>/pipelines` (the first entry's status: `success` → passed;
+   `failed`, `canceled` → failed; `created`, `waiting_for_resource`, `preparing`,
+   `pending`, `running`, `manual`, `scheduled` → pending; `skipped` or no entry →
+   none). GitHub: `GET pulls/<n>` (`merged` → merged, `state: closed` → closed, else
+   open; `head.sha`), GraphQL `reviewThreads(first: 100) { isResolved }` on the pull
+   request (the unresolved count; a token without GraphQL access leaves null and
+   records `last_sync_error`), `GET commits/<sha>/check-runs` and `GET
+   commits/<sha>/status` (any `failure`, `timed_out`, `cancelled`, `action_required` or
+   combined `failure` → failed; any `queued`, `in_progress` or combined `pending` →
+   pending; no check and no status → none; otherwise passed). A 404 from the provider
+   sets state `closed` with `last_sync_error = "not found on the provider"`; any other
+   error sets `last_sync_error` and leaves the record as it was. A record that turns
+   merged or closed gets `closed_at` from the provider, or now. `POST
+   /api/merge-requests/{id}/sync` runs the same refresh for one record at once and
+   answers the record; the run page calls it when it shows a record whose `synced_at`
+   is null or older than 30 s.
+4. One report per final state (D-042): when a sync or a merge moves a record to merged
+   or closed and its run reports to a conversation (5.15 rule 9's test), the loop sends
+   `[platform] Run <id>: <merge request|pull request> !<n> was merged.` or `... was
+   closed without being merged.` (`#<n>` on GitHub) with idempotency key
+   `report-<run id>-mr-<state>`, one attempt, sets `reported_state` after a send that
+   was not deferred, and mirrors it like a report-back with the run id.
+5. Merge: `POST /api/merge-requests/{id}/merge` (no body) needs state `open` (409
+   `merge_request_not_open`: `the request is <state>`) and `ci_status` `passed` or
+   `none` (409 `merge_request_ci_not_passed`: `the pipeline is <ci_status>; merge on
+   the provider to override`); it calls GitLab `PUT merge_requests/<iid>/merge` with
+   `should_remove_source_branch: true` or GitHub `PUT pulls/<n>/merge` with
+   `merge_method: merge`. On 2xx the record becomes merged with `closed_at` now and
+   `merged_by` `operator`, then rule 4 reports. 405, 406, 409 and 422 from the provider
+   answer 409 `merge_request_not_mergeable` with the first line of the provider's
+   message; other failures follow 5.5 rule 4 (5xx and timeouts answer 502
+   `provider_unavailable` after one re-sync, since the merge may have landed). There
+   is no tool call and no `side_effects` row: the record's state is the idempotency
+   (a second POST finds it merged).
+6. Representation: `MergeRequest` is the row; `GET /api/merge-requests?project_id=&run_id=&state=&limit=`
+   (newest first, 50 by default, 200 at most) and `GET /api/merge-requests/{id}`.
+   `Run` gains `merge_request` (the record, filled for gets and lists like
+   `agent_names`). The run header's link and `run_status`'s `merge_request_url` read the
+   record instead of the trace (5.16 rule 12 and 5.17 rule 8 amended; rule 7 makes the
+   trace fallback unnecessary); `run_status` adds `merge_request: {number, url, state,
+   ci_status, unresolved_threads}` and keeps `merge_request_url`.
+7. Backfill at api start, once per start and idempotent: every executed
+   `open_merge_request` call with an output `url` whose run has a `project_id` becomes
+   a record (`ON CONFLICT DO NOTHING`), state `open`, `synced_at` null; the first pass
+   settles them. Runs without a project (`gitlab_create_mr`) are not records.
+8. A deleted project's records sync as long as its token row exists (5.17: the token is
+   read from the row, deleted or not); a token that cannot be read (`ErrCannotRead`)
+   records `last_sync_error` and skips the record.
+9. UI. `/projects/{id}` becomes a page: the settings with Edit (the dialog), Check and
+   Delete; the budget and spend of 5.19; the instructions and the Notes of 5.18; a
+   Merge requests table (number, title, run, state, CI, threads, updated); the
+   project's 10 newest runs. The Projects list links each name to it. The run page gets
+   a Merge request card under the header: state badge, CI badge, unresolved threads,
+   the link, Sync, and Merge with a confirmation ("Merge !<n> into <target branch>?");
+   once final it shows Merged or Closed with the time.
+
+Edge cases: a run that opened a request and then failed keeps its record. A request
+merged on the provider before the first sync is recorded merged by that sync and
+reported. A source branch deleted on the provider while the request is open changes
+nothing. GitLab `locked` is closed. A loop revisit with an unchanged tree answers
+`replayed: true` without `updated`. A merge that races a sync: the conditional update
+on state wins once; the other side re-reads.
+
+Time: UTC; `synced_at` and `closed_at` from the injected clock when the provider gives
+none; the 14-day window on `created_at`.
+
+Failure handling: per record; a provider error never stops the pass; a database error
+ends the pass with a log line and the next tick retries. A merge whose provider call
+fails after it landed is caught by the re-sync of rule 5.
+
+Consistency: the record write and the side effect result are one transaction (rule 2);
+a sync is one update per record conditional on `state = 'open'`; `reported_state` is
+written after a non-deferred send, as `reported_at` in 5.15 rule 9.
+
+Outputs: the table; the API; `Run.merge_request`; `run_status.merge_request`; the two
+report lines; the project page and the run card.
+
+Tests: T5.20.1 `open_merge_request` writes the record in the same transaction as the
+side effect; a failed record write leaves no side effect row. T5.20.2 a second call in
+the same run pushes a commit on top and answers replayed and updated; an unchanged tree
+answers replayed only; never a second request. T5.20.3 the mapping table per provider
+for state, pipeline status and check conclusions, including none, skipped and locked.
+T5.20.4 404 closes the record with the text. T5.20.5 the final-state report is sent
+once per state, keyed, and not re-sent after a restart. T5.20.6 merge preconditions
+(not open, CI failed, CI pending) and provider refusals answer 409 with the provider's
+first line. T5.20.7 a merge success records merged, `closed_at`, `merged_by` and
+reports. T5.20.8 the backfill is idempotent and skips runs without a project. T5.20.9 a
+deleted project's record still syncs; an unreadable token is recorded. T5.20.10
+`run_status.merge_request` and `Run.merge_request`. T5.20.11 UI: the run card per
+state, the Merge confirmation, the project page table, the list link.
+
+Out of scope: merging from chat (D-042: a chat tool with `require_approval` is refused
+by 5.15 rule 7), rebasing, conflict resolution, review threads as text (5.22),
+webhooks, more than one request per run, GitHub merge methods other than `merge`,
+approving the request on the provider.
+
+### 5.21 Retry from the failed step
+
+Purpose: a run that ended `failed`, `timed_out` or `cancelled` is re-queued from the
+node it stopped at, keeping its state, its checkout and the work its agents had done,
+instead of being started over from the first node. Decision D-043.
+
+Inputs: the run row (status, `current_node`, the counters, `limits`, `started_at`); the
+operator's optional `limits` override; the engine's resumed path (`runRun` with
+`current_node` set, as after a crash re-queue or an approval); the injected clock.
+
+Units: the run's own limits (5.2: steps, tool calls, micro-USD, seconds); `retries` a
+count per run.
+
+Rules:
+
+1. `POST /api/runs/{id}/retry` with an optional body `{limits}` (the `Limits` shape,
+   validated and clamped as at trigger time, 5.2) on a run whose status is `failed`,
+   `timed_out` or `cancelled` (D-043) and whose `current_node` is set; otherwise 409
+   `run_not_retryable` with `run is <status>` or `run has no step to retry from`. At
+   most 5 retries per run (`runs.retries`); the sixth answers 409 `retry_limit`, `run
+   was retried 5 times`.
+2. Limits. The counters continue: steps, tool calls and cost stay the run's true totals
+   and the caps apply to the whole run. Before re-queueing, each counted limit
+   (`max_steps`, `max_tool_calls`, `max_cost_usd`) is compared with its counter under
+   the limits that will apply, and a counter `>=` its cap refuses with 409
+   `limits_exhausted` and one detail per exhausted limit (`max_steps: 40 of 40 used`);
+   the body's `limits` replaces the run's limits (the snapshot's run overrides) before
+   the check, so raising a cap is how a run that died on it is retried. The time limit
+   restarts: `started_at` is set to now and `paused_total_ms` to 0 when the run is next
+   claimed; the trace keeps every attempt's root span with its own start. The project
+   budget (5.19 rule 3) is checked as for a trigger.
+3. The retry is one conditional update in a transaction that holds the run row:
+   `status = queued`, `retries + 1`, `attempt = 1` (the crash re-queue of 5.1 counts
+   per retry), `failure_reason`, `finished_at`, `cancel_requested`, `cancel_by`,
+   `resume_node_visit_id` and `reported_at` cleared, `limits` replaced when given,
+   `WHERE status IN ('failed', 'timed_out', 'cancelled')`. 5.1 rule 2 gains the
+   transition `failed | timed_out | cancelled → queued` for this path only. A
+   `run_events` entry `retry {retries, by, from_node, limits}` and SSE `run.status`
+   follow. The second of two concurrent retries answers 409 `run_not_retryable`.
+4. Resumption. The claimed run takes `runRun`'s resumed path: its unfinished visits were
+   already failed when it ended; a new root span opens with the attribute `retry: <n>`;
+   the walk continues at `current_node` with a new visit of that node (visit n+1; the
+   failed visit stays in the trace); the copy-forward of 5.6 rule 13 brings the run
+   directory of every earlier visit, so the failed visit's partial edits of the
+   checkout are what the new visit starts from (the point of retrying from the step;
+   the task text is the same). A run that failed before its clone completed
+   (`toolchain` unset) clones again (5.16 rule 3). An approval node reached again asks
+   again (5.6 rule 8). A node that failed and followed its `on_failure` edge moved
+   `current_node` to that target, so the retry resumes there, not at the node.
+5. Side effects. A retried visit is a new visit, so an identical call gets a new
+   idempotency key (5.4's edge case); `open_merge_request` is covered by 5.20 rule 2
+   (the run's record is updated, never a second request); `deploy_release` and
+   `gitlab_create_mr` repeat, as they do on a loop revisit today, and the run page says
+   so on the retry dialog when the run's trace holds an executed call of either.
+6. Report-back: a channel-triggered run reports its new outcome once more when the
+   retry ends (`reported_at` cleared; idempotency key `report-<run id>-terminal-r<n>`),
+   the text of 5.15 rule 9 with `(retry <n>)` after the status.
+7. Representation and UI: `Run` gains `retries`; `run_status` reports `retries`; the
+   run header shows Retry on a `failed`, `timed_out` or `cancelled` run with a step to
+   retry from. One click re-queues; a 409 `limits_exhausted` opens a dialog listing the
+   exhausted limits with fields prefilled from the run's limits, so the operator raises
+   them and retries from there; the Timeline marks the boundary (`Retry <n> from
+   <node>`, from the run event).
+8. The Chief of Staff gets no retry tool: a retry is the operator's decision on the run
+   page; `run_status` tells it the run was retried and from where.
+
+Edge cases: a run cancelled while `waiting_approval` has the approval node as
+`current_node` and retries by asking again. A run that failed before any node
+(`workflow snapshot: ...`) has no `current_node` and is not retryable. A run whose
+workflow or agent was deleted since runs on its snapshot (5.6); a deleted project still
+serves the snapshot and the token row (5.17). A `succeeded` run is never retryable. A
+retry after the stale sweeper failed the run with `worker lost` is allowed. A retried
+visit whose earlier turn is still open in OpenClaw: aborted by the resumed path, as
+today.
+
+Time: `started_at` reset on claim; the time limit counts from there; the injected
+clock.
+
+Failure handling: precondition and validation failures answer 409 or 422 without a
+change; a failure after the update (the event insert) is logged and the run stays
+queued.
+
+Consistency: the limits check and the update are one transaction with the run row
+locked (`SELECT ... FOR UPDATE`); the update is conditional on the status (rule 3).
+
+Outputs: `runs.retries`; the run event; SSE `run.status`; the header button and dialog;
+`run_status.retries`.
+
+Tests: T5.21.1 each non-retryable status and a null `current_node` answer 409 with the
+texts. T5.21.2 the retry limit at 5 and at 6. T5.21.3 an exhausted limit is refused
+with details; a raised limit passes; the raise is clamped. T5.21.4 resume from the
+failed node with the scripted provider: a new visit, the old one kept, state kept,
+counters continued, a file written by the failed visit present. T5.21.5 the time limit
+restarts. T5.21.6 cancelled while waiting at an approval node asks again. T5.21.7 two
+concurrent retries: one 202, one 409. T5.21.8 the report-back is sent once more under
+the retry key. T5.21.9 a project at its budget refuses the retry. T5.21.10 UI: the
+button per status; the exhausted-limits dialog; the Timeline mark. T5.21.11
+`open_merge_request` after a retry updates the run's record (with T5.20.2).
+
+Out of scope: retrying from an earlier node than the one the run stopped at, editing
+state before the retry, a fresh checkout on retry, automatic retries of failed runs.
+
 ## 6. HTTP API summary
 
 Errors: `{error: {code, message, details?}}`; validation failures are 422 with
@@ -1576,7 +2013,10 @@ As revision 1 plus: `GET/POST /skills`, `GET/PUT/DELETE /skills/{id}`;
 `GET /agents/{id}/memory`, `DELETE /agents/{id}/memory/{factId}`; `POST /mcp` (MCP, bearer); `/model-proxy/*` (bearer or
 loopback only); `GET /openclaw/status` (gateway connection, scopes, version);
 `GET/POST /projects`, `GET/PUT/DELETE /projects/{id}`, `POST /projects/{id}/check` (5.17;
-the token is write-only, `token_set` says one is stored).
+the token is write-only, `token_set` says one is stored). Wave 8 (5.18 to 5.21):
+`GET /projects/{id}/facts`, `DELETE /projects/{id}/facts/{factId}`; `GET /merge-requests`,
+`GET /merge-requests/{id}`, `POST /merge-requests/{id}/sync`, `POST /merge-requests/{id}/merge`;
+`POST /runs/{id}/retry`; 429 `project_budget_reached` on a trigger at a project cap.
 
 ## 7. Frontend
 
@@ -1607,6 +2047,8 @@ and the quick-run dialog, the project link on the runs list and the run header, 
 projects list on Status, and the ended-run note on tool approval cards. Then (5.9 rule
 6) the same project selector in the schedule form when the chosen workflow opts in,
 and a Project column on Schedules linking to the project's page.
+
+Wave 8 planned (5.18 to 5.21): the project page at `/projects/{id}` (settings, budget and spend, instructions, notes, merge requests, newest runs), the Instructions and budget fields on the project form, spent over cap on the Projects list, the Merge request card on the run page (state, CI, threads, Sync, Merge with confirmation), and Retry on the run header with the exhausted-limits dialog and the Timeline mark.
 
 ## 8. Docker and Makefile
 
@@ -1649,6 +2091,8 @@ guardrails; scheduler; channels, schedules and skills pages; chat approvals; tun
 
 Wave 4: eval cases to 20+, rubric evaluator, final report; README, diagram, ADRs, threat
 model, AI_USAGE.md, DECISIONS.md; OpenAPI tests; status p95; demo script.
+
+Waves 5 to 7 as built: the Chief of Staff and delegation (5.15), the project repository (5.16), projects as records (5.17). Waves 8 to 11 are planned in `docs/ROADMAP.md`: 8 is 5.18 to 5.21 (project instructions and notes, budgets, merge request records, retry), 9 is iteration on a merge request and issue intake, 10 is questions to the operator and run artifacts, 11 is parallel steps.
 
 ## 10. Product decisions and assumptions
 
