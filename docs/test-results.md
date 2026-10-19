@@ -1,3 +1,19 @@
+# Test results, 2026-10-19 (wave 12: agent files, skill bundles, the skills library; DESIGN 5.27)
+
+Run on the development machine from `main` after the fix pass, in throwaway containers:
+the CI job's own commands (`make ci-up`, `make ci-test`, `make ci-lint`) in an isolated
+compose project, the Go suite again on two CPUs and the engine package on one CPU twice.
+
+| Command | Result |
+|---|---|
+| `go test ./... -count=1` (two CPUs) | every package ok (new: `internal/skillbundle` with zip and Git import, caps, hidden entries, the library importer against the real `skills-library/`; agent files list, additions, overrides, redaction and the 256 KiB cut; bundle materialize with modes, the manifest, file and folder swaps, named pipes; digests instead of bytes for the hash) |
+| `go test ./internal/engine/ -count=2` (one CPU) | ok |
+| `pnpm test` | 49 files, 1096 tests passed (new: the Workspace files section, the Skills page's badges, upload, Git import, file tree and editor) |
+| `go vet ./...`, staticcheck 2026.2.2, `gofmt -l`, eslint, `tsc --noEmit` | clean |
+| `make eval` (public split, local stack on this build) | 17 of 17 on two runs |
+| live on the local stack | the library imported 17 skills; a SOUL.md addition and a USER.md override written to the workspace; `skill-creator` assigned to Coder wrote its 18 files with the scripts executable; a zip export re-imported (409, then 200 with replace); a Git import of `anthropics/skills` `skills/brand-guidelines` (201); a host outside the allowlist refused (422) |
+| review | one Opus reviewer: twelve findings (none high), all fixed (`docs/reviews/wave12-review.md`) |
+
 # Test results, 2026-10-19 (final audit fix pass)
 
 Run on the development machine from `main` after the audit fixes, everything in throwaway
