@@ -439,8 +439,13 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
 8. Done 2026-10-18: Andre answered both lines (D-058, D-059) and approved the briefs;
    wave 10 built by four Sonnet 5.5 agents, reviewed (`docs/reviews/wave10-review.md`),
    fixed, merged to `main` and deployed (`2aad95c`, after the CI host's slowness and a
-   wiring bug found live were fixed). The live verification of the question and
-   artifact paths waits on the model provider's key limit (`docs/test-results.md`).
-9. Next: finish wave 10's live verification once the key is back; then wave 11 (5.26,
-   parallel steps), the last wave, designed when it starts, alone and with the
-   stronger model as planned. The demo recording with projects is still pending.
+   wiring bug found live were fixed). Verified live on 2026-10-19 after the public
+   instance's model provider was switched from an OpenRouter key at its weekly limit to
+   Anthropic: a question answered within the wait, a question left past the wait that
+   parked the step and resumed it as a continuation visit, and the artifacts of a Dev
+   pipeline run (`diff.patch`) and a Research pipeline run (`out/report.md`)
+   (`docs/test-results.md`).
+9. Next: wave 11 (5.26, parallel steps), the last wave, designed when it starts, alone
+   and with the stronger model as planned. The demo recording with projects is still
+   pending, and the Telegram relay of an answer through the Chief has not been tried
+   live (the unit tests cover it).
