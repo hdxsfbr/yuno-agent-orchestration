@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -587,6 +588,12 @@ type parkRun struct {
 }
 
 func startParkInBranch(t *testing.T, env *testEnv) *parkRun {
+	return startParkRun(t, env, false)
+}
+
+// startParkRun is startParkInBranch; with bothPark, branch b asks and parks too instead of
+// being held.
+func startParkRun(t *testing.T, env *testEnv, bothPark bool) *parkRun {
 	t.Helper()
 	ctx := context.Background()
 	agents := forkAgents(env, 4)
@@ -613,7 +620,14 @@ func startParkInBranch(t *testing.T, env *testEnv) *parkRun {
 				pr.asked <- out
 				env.endTurn(p, "saved my progress")
 			}()
-		case node == "b":
+		case node == "b" && visit == 1 && bothPark:
+			pr.h.add(p)
+			go func() {
+				out := env.askAs(p, "Which framework?", nil, 50*time.Millisecond)
+				pr.asked <- out
+				env.endTurn(p, "saved my progress too")
+			}()
+		case node == "b" && visit == 1:
 			pr.h.add(p)
 			pr.bSend <- p
 		default:
@@ -743,6 +757,122 @@ func TestParkedBranchContinuesWithoutReleaseWhenAnsweredEarly(t *testing.T) {
 	if a2 := nodeByID(nodes, "a", 2); a2 == nil || a2.QuestionID == nil || a2.Status != store.NodeSucceeded {
 		t.Fatalf("continuation = %+v", a2)
 	}
+	// The parked visit is closed when the branch continues (review M1), and the branch's
+	// return to running was published (review M3).
+	if a1 := nodeByID(nodes, "a", 1); a1.Status != store.NodeSucceeded || a1.FinishedAt == nil {
+		t.Fatalf("parked visit after the continuation = %+v", a1)
+	}
+	if n := env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='branch.status' AND data->'branch'->>'head'='a' AND data->'branch'->>'status'='running'`, pr.run.ID); n < 2 {
+		t.Fatalf("branch.status running events for a = %d, want the start and the continuation", n)
+	}
+}
+
+// Review H1 and H2: two branches park; the first answer re-queues the run and the claim
+// leaves the other parked branch and its pending question alone; the consumed park is not
+// re-queued again by the sweep; the second answer continues the second branch.
+func TestTwoParkedBranchesResumeOneAtATime(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	pr := startParkRun(t, env, true)
+	first, second := recv(t, pr.asked, "the first ask"), recv(t, pr.asked, "the second ask")
+	byNode := map[string]*store.Approval{first.row.NodeID: first.row, second.row.NodeID: second.row}
+	qa, qb := byNode["a"], byNode["b"]
+	if qa == nil || qb == nil {
+		t.Fatalf("questions = %+v %+v", first.row, second.row)
+	}
+	r := env.wait(pr.done, pr.run.ID) // both parked: the fork releases
+	if r.Status != store.RunWaitingApproval {
+		t.Fatalf("run after both parked = %s", r.Status)
+	}
+	if env.logged(pr.run.ID, "fork panel: waiting for the answer to 2 question(s); 0 branch(es) done") != 1 {
+		t.Fatal("the release log line is missing")
+	}
+	if _, err := env.e.AnswerQuestion(ctx, qa.ID, "Spanish", "api"); err != nil {
+		t.Fatal(err)
+	}
+	r, _ = store.GetRun(ctx, env.pool, pr.run.ID)
+	if r.Status != store.RunQueued {
+		t.Fatalf("run after a's answer = %s", r.Status)
+	}
+	// a's continuation runs and finishes; b stays parked; the fork releases again.
+	r = env.resume(env.e, pr.run.ID)
+	if r.Status != store.RunWaitingApproval {
+		t.Fatalf("run after a's continuation = %s %q", r.Status, deref(r.FailureReason))
+	}
+	if env.logged(pr.run.ID, "unfinished node visit(s) marked failed") != 0 {
+		t.Fatal("the claim treated the parked branch or the fork as a lost worker's")
+	}
+	nodes := runNodes(t, env, pr.run.ID)
+	if b1 := nodeByID(nodes, "b", 1); b1.Status != store.NodeWaitingApproval || b1.ParkedAt == nil {
+		t.Fatalf("b's parked visit after a's continuation = %+v; it must still wait", b1)
+	}
+	if q := env.approvalRow(qb.ID); q.Status != store.ApprovalPending {
+		t.Fatalf("b's question = %s; it must still be pending", q.Status)
+	}
+	if a2 := nodeByID(nodes, "a", 2); a2 == nil || a2.Status != store.NodeSucceeded || a2.QuestionID == nil {
+		t.Fatalf("a's continuation = %+v", a2)
+	}
+	branches := branchRows(t, env, pr.run.ID)
+	if branches["a"].Status != store.BranchSucceeded || branches["b"].Status != store.BranchWaitingApproval {
+		t.Fatalf("branches = %+v", branches)
+	}
+	// The sweep does not re-queue the run on a's consumed answer.
+	if listed, _ := store.ListParkedQuestions(ctx, env.pool); len(listed) != 0 {
+		t.Fatalf("ListParkedQuestions = %+v; a's park is consumed, b's question pending", listed)
+	}
+	env.e.requeueParkedDecided(ctx)
+	r, _ = store.GetRun(ctx, env.pool, pr.run.ID)
+	if r.Status != store.RunWaitingApproval {
+		t.Fatalf("run after the sweep = %s; a consumed park must not re-queue it", r.Status)
+	}
+	if _, err := env.e.AnswerQuestion(ctx, qb.ID, "none", "api"); err != nil {
+		t.Fatal(err)
+	}
+	r = env.resume(env.e, pr.run.ID)
+	if r.Status != store.RunSucceeded {
+		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+	want := []string{"a#1:succeeded", "a#2:succeeded", "b#1:succeeded", "b#2:succeeded", "coder#1:succeeded", "lead#1:succeeded", "merge#1:succeeded", "panel#1:succeeded"}
+	if got := sortedVisits(runNodes(t, env, pr.run.ID)); !slices.Equal(got, want) {
+		t.Fatalf("visits = %v, want %v", got, want)
+	}
+	if n := env.openSpans(pr.run.ID); n != 0 {
+		t.Fatalf("%d spans left open", n)
+	}
+}
+
+// Review M2: a cancel of a run re-queued after a release (not yet claimed) closes the fork
+// row, the branch rows and the other parked question.
+func TestCancelOfARequeuedForkRunClosesEverything(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	pr := startParkRun(t, env, true)
+	first, second := recv(t, pr.asked, "the first ask"), recv(t, pr.asked, "the second ask")
+	byNode := map[string]*store.Approval{first.row.NodeID: first.row, second.row.NodeID: second.row}
+	if r := env.wait(pr.done, pr.run.ID); r.Status != store.RunWaitingApproval {
+		t.Fatalf("run after both parked = %s", r.Status)
+	}
+	if _, err := env.e.AnswerQuestion(ctx, byNode["a"].ID, "Spanish", "api"); err != nil {
+		t.Fatal(err)
+	}
+	done, err := env.e.Cancel(ctx, pr.run.ID, "tester")
+	if err != nil || done.Status != store.RunCancelled {
+		t.Fatalf("cancel = %+v %v", done, err)
+	}
+	if env.count(`SELECT count(*) FROM run_nodes WHERE run_id=$1 AND status IN ('running','waiting_approval','pending')`, pr.run.ID) != 0 {
+		t.Fatalf("visits left open: %v", visitsOf(runNodes(t, env, pr.run.ID)))
+	}
+	for head, b := range branchRows(t, env, pr.run.ID) {
+		if b.Status != store.BranchCancelled || b.FinishedAt == nil {
+			t.Fatalf("branch %s = %+v", head, b)
+		}
+	}
+	if q := env.approvalRow(byNode["b"].ID); q.Status != store.ApprovalExpired {
+		t.Fatalf("b's question after the cancel = %s", q.Status)
+	}
+	if n := env.openSpans(pr.run.ID); n != 0 {
+		t.Fatalf("%d spans left open", n)
+	}
 }
 
 // T5.26.7 (expiry): a parked branch's question that expires fails the run with
@@ -866,7 +996,13 @@ func TestForkReentryAfterCrashAndRetry(t *testing.T) {
 		if r.Status != store.RunFailed || deref(r.FailureReason) != "branch a failed: model error: invalid_request" {
 			t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
 		}
-		if _, err := env.e.Retry(ctx, run.ID, "tester", nil); err != nil {
+		// The retry compares the failed branch's position with max_loop_visits, not the
+		// fork (review L6): a's one visit fills a limit of 1; raising it lets the retry in.
+		var re *RetryError
+		if _, err := env.e.Retry(ctx, run.ID, "tester", &store.Limits{MaxLoopVisits: 1}); !errors.As(err, &re) || re.Code != RetryLimitsExhausted || !slices.Contains(re.Details, "max_loop_visits: 1 of 1 used") {
+			t.Fatalf("retry at max_loop_visits 1 = %v, want limits_exhausted on a's visits", err)
+		}
+		if _, err := env.e.Retry(ctx, run.ID, "tester", &store.Limits{MaxLoopVisits: 3}); err != nil {
 			t.Fatal(err)
 		}
 		r = env.resume(env.e, run.ID)
@@ -1061,5 +1197,80 @@ func TestParkedQuestionsListBranchParks(t *testing.T) {
 	_ = json.Unmarshal(mustJSON(tr), &raw)
 	if len(raw["branches"]) == 0 {
 		t.Fatal("the trace JSON has no branches")
+	}
+}
+
+// Review M4: in a loop around the pair the agents of the sibling branches have earlier
+// visits, and those are not sources either: branch a's second pass receives nothing from
+// b's workspace (b's first-pass file arrives through the coder, after the join), while the
+// step after the join receives everything.
+func TestLoopAroundThePairKeepsSiblingsApart(t *testing.T) {
+	env := newEnv(t)
+	ctx := context.Background()
+	agents := forkAgents(env, 4)
+	def := forkDef(agents, "")
+	for i := range def.Edges {
+		if def.Edges[i].From == "lead" {
+			def.Edges[i] = workflow.Edge{From: "lead", To: "coder", When: cond(t, `{"path":"/lead/verdict","op":"eq","value":"changes_requested"}`)}
+		}
+	}
+	def.Edges = append(def.Edges, workflow.Edge{From: "lead", To: "end"})
+	wf := env.createWorkflow(def)
+	run, err := env.e.Trigger(ctx, TriggerRequest{WorkflowID: wf.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := func(p openclaw.ChatSendParams, rel string) string {
+		return filepath.Join(env.dir, "workspace-"+sessionAgent(p.SessionKey), "runs", run.ID, rel)
+	}
+	exists := func(p openclaw.ChatSendParams, rel string) bool {
+		_, err := os.Stat(path(p, rel))
+		return err == nil
+	}
+	var mu sync.Mutex
+	seen := map[string]string{}
+	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
+		node, visit := visitOf(p.SessionKey)
+		key := fmt.Sprintf("%s#%d", node, visit)
+		mu.Lock()
+		seen[key] = fmt.Sprintf("a1=%v a2=%v b1=%v b2=%v", exists(p, "a-visit1.txt"), exists(p, "a-visit2.txt"), exists(p, "b-visit1.txt"), exists(p, "b-visit2.txt"))
+		mu.Unlock()
+		switch node {
+		case "a", "b":
+			writeFile(t, path(p, fmt.Sprintf("%s-visit%d.txt", node, visit)), "x")
+			go finishThenFinal(t, env, p, `{"ok":true}`)
+		case "lead":
+			verdict := "changes_requested"
+			if visit == 2 {
+				verdict = "approved"
+			}
+			go finishThenFinal(t, env, p, `{"verdict":"`+verdict+`"}`)
+		default:
+			go finishThenFinal(t, env, p, `{"ok":true}`)
+		}
+		return startedTurn(p)
+	}
+	r := env.resume(env.e, run.ID)
+	if r.Status != store.RunSucceeded {
+		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for key, want := range map[string]string{
+		"a#1": "a1=false a2=false b1=false b2=false",
+		// The first pass's files of both branches reached the coder after the join and flow
+		// into the second pass from there; nothing the live sibling writes in this pass does.
+		"a#2":     "a1=true a2=false b1=true b2=false",
+		"b#2":     "a1=true a2=false b1=true b2=false",
+		"lead#1":  "a1=true a2=false b1=true b2=false",
+		"lead#2":  "a1=true a2=true b1=true b2=true",
+		"coder#2": "a1=true a2=false b1=true b2=false",
+	} {
+		if seen[key] != want {
+			t.Errorf("%s started with %s, want %s", key, seen[key], want)
+		}
+	}
+	if n := env.count(`SELECT count(*) FROM run_branches WHERE run_id=$1`, run.ID); n != 4 {
+		t.Fatalf("branch rows = %d, want two passes of two", n)
 	}
 }

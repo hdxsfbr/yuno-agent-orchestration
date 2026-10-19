@@ -81,11 +81,18 @@ func TestForkValidShapes(t *testing.T) {
 		t.Fatalf("region with a loop = %+v %v", r, err)
 	}
 
-	// The same agent before the fork (coder, A1) and inside branch c.
+	// The same agent before the fork (coder, A1) and inside branch c: fine without a
+	// project, and in a project workflow when c is the join's checkout (rule 10).
 	same := panel()
 	same.Nodes[5].AgentID = "A1"
+	same.Project = false
 	if err := same.ValidateStructure(); err != nil {
 		t.Fatalf("same agent before and inside: %v", err)
+	}
+	same.Project = true
+	same.Nodes[6].Checkout = "c"
+	if err := same.ValidateStructure(); err != nil {
+		t.Fatalf("same agent before and inside the checkout branch: %v", err)
 	}
 
 	// A template compares names; distinct names pass.
@@ -186,6 +193,8 @@ func TestForkValidationMessages(t *testing.T) {
 		}, "nodes[11]: 'shared' is reachable from two branches of 'panel' ('a' and 'b'); branches meet only at the join 'merge'"},
 		{"input_from across", func(d *Definition) { d.Nodes[4].InputFrom = []string{"coder", "a"} }, "nodes[4].input_from[1]: 'a' is in another branch of 'panel'"},
 		{"same agent twice", func(d *Definition) { d.Nodes[4].AgentID = "A2" }, "nodes[4].agent_id: agent 'A2' is used in two branches of 'panel' ('a' and 'b'); branches run at once and share one workspace per agent"},
+		{"same agent before and in an unnamed branch of a project", func(d *Definition) { d.Nodes[5].AgentID = "A1" },
+			"nodes[5].agent_id: agent 'A1' runs before the fork 'panel' and inside its branch 'c', which is not the join's checkout; the checkout from before the fork would be lost"},
 		{"same agent name twice", func(d *Definition) {
 			d.Nodes[3].AgentID, d.Nodes[3].AgentName = "", "Reviewer"
 			d.Nodes[5].AgentID, d.Nodes[5].AgentName = "", "reviewer"

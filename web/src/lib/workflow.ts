@@ -185,12 +185,33 @@ export function addEdge(def: WorkflowDefinition, from: string, to: string): { de
   return { def: { ...def, edges: [...def.edges, { from, to }] }, index: def.edges.length };
 }
 
+/** An edge edit that takes a head away from a fork also takes it away from the checkout of the join that fork ends at. */
 export function updateEdge(def: WorkflowDefinition, index: number, patch: Partial<WorkflowEdge>): WorkflowDefinition {
-  return { ...def, edges: def.edges.map((e, i) => (i === index ? patched(e, patch) : e)) };
+  return dropLostCheckouts(def, { ...def, edges: def.edges.map((e, i) => (i === index ? patched(e, patch) : e)) });
 }
 
 export function removeEdge(def: WorkflowDefinition, index: number): WorkflowDefinition {
-  return { ...def, edges: def.edges.filter((_, i) => i !== index) };
+  return dropLostCheckouts(def, { ...def, edges: def.edges.filter((_, i) => i !== index) });
+}
+
+/** The heads of every fork that ends at a join (DESIGN 5.26 rule 1), each once. */
+function headsAtJoin(def: WorkflowDefinition, joinId: string): string[] {
+  return [...new Set(forksJoiningAt(def, joinId).flatMap((f) => forkHeads(def, f.id)))];
+}
+
+/**
+ * `after` is `before` with an edge edited. A join whose checkout was a head of its fork in `before` and is none in `after`
+ * (the edge to it was removed, or now leads or starts elsewhere) loses the checkout, which would name a branch that no longer exists.
+ */
+function dropLostCheckouts(before: WorkflowDefinition, after: WorkflowDefinition): WorkflowDefinition {
+  let changed = false;
+  const nodes = after.nodes.map((n) => {
+    if (n.kind !== "join" || !n.checkout) return n;
+    if (!headsAtJoin(before, n.id).includes(n.checkout) || headsAtJoin(after, n.id).includes(n.checkout)) return n;
+    changed = true;
+    return patched(n, { checkout: undefined });
+  });
+  return changed ? { ...after, nodes } : after;
 }
 
 /** The edges leaving a node in evaluation order (DESIGN 5.6 rule 4), with their array index. */

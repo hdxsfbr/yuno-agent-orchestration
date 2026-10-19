@@ -486,11 +486,11 @@ describe("a run with a fork", () => {
 
     api.send(EVENTS, "branch.status", { branch: branch("performance", { status: "waiting_approval" }) });
     await waitFor(() => expect(head("performance").getByText("Waiting for an answer")).not.toBeNull());
-    expect(header().getByText("panel (2 branches running)")).not.toBeNull();
+    expect(header().getByText("panel (1 branch running, 1 waiting for an answer)")).not.toBeNull();
 
     api.send(EVENTS, "branch.status", { branch: branch("maintainability", { status: "failed", failure_reason: "no verdict", finished_at: at(35) }) });
     await waitFor(() => expect(within(timeline.getByRole("region", { name: "Branch maintainability" })).getByText("no verdict")).not.toBeNull());
-    expect(header().getByText("panel (1 branch running)")).not.toBeNull();
+    expect(header().getByText("panel (1 waiting for an answer)")).not.toBeNull();
 
     // a branch of another run is not shown
     api.send(EVENTS, "branch.status", { branch: { ...branch("elsewhere"), run_id: "other" } });

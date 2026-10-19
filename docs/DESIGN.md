@@ -3367,14 +3367,21 @@ Rules:
    `edges[k].to: leaves the branch of 'F' without reaching its join 'J'`
    (`nodes[n].on_failure: leaves the branch of 'F' without reaching its join 'J'`);
    none enters R from a node other than F: `edges[k].to: enters a branch of 'F' from
-   outside` (`nodes[m].on_failure: ...`, `nodes[m].on_reject: ...` likewise). Each node
+   outside` (`nodes[m].on_failure: ...`, `nodes[m].on_reject: ...` likewise), and the
+   join is reached only through them: `edges[k].to: join 'J' is reached only through the
+   branches of 'F'`. Each node
    of R belongs to exactly one branch: `nodes[n]: '<N>' is reachable from two branches
    of 'F' ('a' and 'b'); branches meet only at the join 'J'`. `input_from` across
    branches is refused: `nodes[n].input_from[j]: '<x>' is in another branch of 'F'`.
    The agents of different branches are distinct (D-062): `nodes[n].agent_id: agent
    '<id>' is used in two branches of 'F' ('a' and 'b'); branches run at once and share
    one workspace per agent` (a template compares `agent_name`, case-insensitive, with
-   `nodes[n].agent_name:` as the path). Loops inside a branch (edges among its nodes)
+   `nodes[n].agent_name:` as the path). In a project workflow an agent that runs before
+   the fork may be inside a branch only when that branch is the join's checkout:
+   `nodes[n].agent_id: agent '<id>' runs before the fork 'F' and inside its branch '<h>',
+   which is not the join's checkout; the checkout from before the fork would be lost`
+   (its one workspace held the checkout the later steps need; review M5). Loops inside a
+   branch (edges among its nodes)
    and around a fork-join pair (an edge from J or after it back to F or before it) are
    allowed; the 5.6 rules (reachability, outgoing edges, conditions, the reserved id)
    apply unchanged. The same agent before the fork and inside one branch is allowed.
@@ -3477,7 +3484,10 @@ Rules:
     visit receives the run directory of every earlier visit that is not a sibling's:
     visits outside the region, visits of earlier fork visits, and earlier visits of its
     own branch; never a visit of another branch of the same fork visit, finished or not
-    (a sibling's files are partial and its own). After the join, later visits receive
+    (a sibling's files are partial and its own), and never from the workspace of an agent
+    that works in a sibling branch, whatever earlier visit of that agent is looked at (in
+    a loop around the pair its earlier pass's files reach the branch through the step
+    after the join, review M4). After the join, later visits receive
     every branch's files as 5.6 rule 13 says (sources ordered by their last visit's
     start, a later one's file winning), with one exception: `runs/<run id>/repo/` (the
     project checkout) flows from an agent whose last visit was a branch visit only when
@@ -3516,8 +3526,10 @@ Rules:
     by side (one column per branch, in edge order: the head, the branch's status badge,
     its node cards in order, its `failure_reason`), the join as a short card (`Joined 3
     branches`), and the header's step line reads `<fork id> (3 branches running)` while
-    `current_node` is a fork and the run is live; `Asks:` on the header works as today
-    once the fork released the run. The templates drawer lists Review panel.
+    `current_node` is a fork and the run is live, counting the branches whose status is
+    `running`; a parked branch reads as waiting: `(1 waiting for an answer)`, or `(2
+    branches running, 1 waiting for an answer)` (review M1); `Asks:` on the header works
+    as today once the fork released the run. The templates drawer lists Review panel.
 14. **Shipped example (D-064).** `templates/review_panel.json`: start → `coder` (Coder) →
     `panel` (fork, join `merge`) → `security` (Security Reviewer), `performance`
     (Performance Reviewer), `maintainability` (Maintainability Reviewer) → `merge`
@@ -3532,6 +3544,50 @@ Rules:
     files, to run nothing that changes the tree, and never to edit); `make seed-reset`
     restores their prompts and instantiates the template. The Dev pipeline is
     unchanged.
+
+As built (wave 11): the validator computes what lies before the fork (reachable from
+`start` without taking the fork's edges) and after the join (reachable from the join
+without passing the fork), and a branch edge into either is `leaves the branch`; so an
+edge from a branch to the shared `end` reads `leaves the branch`, and `an end node cannot
+be inside a branch` names an end node reached only through the branch. A head that is
+also reached before the fork draws `enters a branch from outside` on the entering edge
+(and `leaves` on the way back). At run time a branch's `no matching edge from <node>`
+and every limit violation end the run with that reason, as they do outside a fork (the
+outcome's limit flag), while a node's own failure is wrapped as `branch <head> failed:
+<reason>`; the sibling rows read `stopped: <that reason>`. A branch visit a stop reaches
+closes `failed` with the stop reason through the visit's own finish, which collects its
+artifacts; a sibling that ends on its own while the stop is under way keeps its own
+reason, its branch row `cancelled`. The fork's span is one per entry (fresh or re-entry),
+ended at the join, the failure or the release. The branch rows of one fork visit are
+inserted a microsecond apart, so `started_at` order is edge order (the contract says so).
+The fork visit a run resumes at after a release is excluded from the lost-worker
+bookkeeping of the claim (`FailRunningNodesExcept`: the resume target when it has no
+agent); every other resume target is closed before the re-queue as before. On a retry
+both `failed` and `cancelled` branches run again (the stopped siblings too); a parked
+branch whose question expires while a sibling still runs is failed by the sweep's
+`failRun`, which stops every live visit with `question unanswered`. `RequeueParkedRun`
+also sets the parked branch's row back to `running`. `run_status.branches` is present
+whenever `current_node` is a fork, `[]` before the rows exist. The review panel's limits
+are double the Dev pipeline's (80 steps, 160 tool calls, 1800 s, $4): one round is six
+agent visits (template agent's report). After the review's fix pass
+(`docs/reviews/wave11-review.md`): a visit still parked on its question is never a lost
+worker's at a claim, so the other parked branch of a fork keeps its question when the
+first is answered (H1); the parked predicates see a parked visit only while it is still
+`waiting_approval`, so a consumed park is never re-queued again (H2); the fork closes the
+parked visit itself when it continues a branch whose answer landed during a sibling's
+run, and the release's re-check re-queues through `RequeueParkedRun` (M1); a cancel of a
+run re-queued after a release closes its fork row, its visits, its branch rows and its
+other questions, and `finishRun` closes any visit an ending left open (M2); the branch
+row's return to `running` and the visits a stop closed are published (M3); the agents of
+sibling branches are never copy-forward sources (M4); the same agent before the fork and
+in an unnamed branch of a project workflow is refused (M5); the run's position moves
+before the fork row closes at the join (L1); a branch's `no matching edge` and
+`node iteration limit` are wrapped as the branch's failure (L3); a sibling that failed on
+its own during the stop is recorded as it ended (L4); the retry check at a fork compares
+the unfinished branches' positions with `max_loop_visits` (L6). Not changed: an expired
+parked question while a sibling still runs is acted on after the release, by the next
+sweep (L2); the stale sweeper's attempt-limit failure leaves branch rows open (M2's third
+case); a retry mark on the Timeline lands after the fork card (UI L1).
 
 Edge cases: a fork whose conditions leave one edge true runs one branch and joins when
 it ends. Two branches end at the same moment: one join. A branch's node fails and its

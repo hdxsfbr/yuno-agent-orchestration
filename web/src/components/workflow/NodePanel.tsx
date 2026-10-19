@@ -178,12 +178,14 @@ export default function NodePanel({ def, node, agents, errors, edgeErrors, onCha
 
       {node.kind === "fork" ? (
         <>
-          {joinIds.length > 0 ? (
+          {joinIds.length > 0 || node.join ? (
+            // A join that names no join node stays on show whatever the workflow holds, so it can be replaced or cleared.
             <SelectField
               label="Join"
               required
               value={node.join ?? ""}
-              options={idOptions({ value: "", label: "Choose a join…" }, joinIds, node.join ?? "")}
+              options={idOptions({ value: "", label: joinIds.length > 0 ? "Choose a join…" : "None" }, joinIds, node.join ?? "")}
+              hint={joinIds.length > 0 ? undefined : "Add a join node for this fork to end at."}
               errors={errorsFor(errors, "join")}
               onChange={(v) => onChange({ join: v })}
             />

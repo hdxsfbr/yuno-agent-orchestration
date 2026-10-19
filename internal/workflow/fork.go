@@ -346,6 +346,13 @@ func (d *Definition) validateRegion(fi int, f *Node, j *Node, start string, fork
 			} else if !used {
 				agentIn[key] = r.Members[id]
 			}
+			// In a project workflow the checkout from before the fork lives in the workspaces
+			// of the agents that ran before it; one of them working in a branch the join does
+			// not name would overwrite it with that branch's tree (rule 10, review M5).
+			if d.Project && j.Checkout != r.Members[id] && agentBefore(d, pre, key) {
+				msgs = append(msgs, fmt.Sprintf("nodes[%d].%s: agent '%s' runs before the fork '%s' and inside its branch '%s', which is not the join's checkout; the checkout from before the fork would be lost",
+					ni, path, n.AgentID+n.AgentName, F, r.Members[id]))
+			}
 		}
 		for k, from := range n.InputFrom {
 			if owner, in := r.Members[from]; in && owner != r.Members[id] {
@@ -380,6 +387,24 @@ func (d *Definition) validateRegion(fi int, f *Node, j *Node, start string, fork
 		}
 	}
 	return msgs
+}
+
+// agentBefore reports whether an agent (by id, or by lower-cased name) runs on a node
+// reached before the fork.
+func agentBefore(d *Definition, pre map[string]bool, key string) bool {
+	for _, n := range d.Nodes {
+		if n.Kind != KindAgent || !pre[n.ID] {
+			continue
+		}
+		k := n.AgentID
+		if k == "" {
+			k = strings.ToLower(n.AgentName)
+		}
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 // reachedBy lists the nodes a branch from head reaches without passing the join or

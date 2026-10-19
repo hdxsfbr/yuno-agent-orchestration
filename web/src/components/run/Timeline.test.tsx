@@ -246,6 +246,18 @@ describe("a fork visit", () => {
     expect(screen.getAllByRole("region", { name: /^Node / })).toHaveLength(3);
   });
 
+  it("keeps the heading levels in order: the fork card, then the branches, then the node cards inside them", () => {
+    renderRun([fork(), visit("n-sec", "security", "b-sec"), visit("n-perf", "performance", "b-perf"), join(), visit("n-lead", "lead", "")], two);
+    expect(screen.getByRole("heading", { name: "panel" }).tagName).toBe("H3");
+    expect(column("security").getByRole("heading", { name: "security", level: 4 })).not.toBeNull();
+    const card = within(screen.getByRole("region", { name: "Node security, branch security" }));
+    expect(card.getByRole("heading", { name: "security", level: 5 })).not.toBeNull();
+    expect(column("security").queryByRole("heading", { level: 3 })).toBeNull();
+    // the join and a node outside any fork keep the top level
+    expect(screen.getByRole("heading", { name: "merge" }).tagName).toBe("H3");
+    expect(within(screen.getByRole("region", { name: "Node lead" })).getByRole("heading", { name: "lead", level: 3 })).not.toBeNull();
+  });
+
   it("shows a branch status badge in each column, and reads a parked branch as waiting for an answer", () => {
     renderRun(
       [fork({ status: "running", finished_at: undefined }), visit("n-sec", "security", "b-sec", { status: "waiting_approval", finished_at: undefined }), visit("n-perf", "performance", "b-perf", { status: "running", finished_at: undefined })],
@@ -270,22 +282,60 @@ describe("a fork visit", () => {
     expect(column("performance").queryByText("reviewer gave no verdict")).toBeNull();
   });
 
-  it("stacks the columns on a narrow screen and puts them side by side from a medium one", () => {
+  it("shows the reason of a branch the fork stopped as a plain note, and keeps the alert for the branch that failed", () => {
+    renderRun(
+      [fork({ status: "failed" })],
+      [branch({ status: "failed", failure_reason: "reviewer gave no verdict" }), branch({ id: "b-perf", head: "performance", status: "cancelled", failure_reason: "stopped: branch security failed" })],
+    );
+    expect(column("security").getByRole("alert").textContent).toBe("reviewer gave no verdict");
+    const stopped = column("performance").getByText("stopped: branch security failed");
+    expect(column("performance").queryByRole("alert")).toBeNull();
+    expect(stopped.getAttribute("role")).toBeNull();
+    expect(stopped.className).toContain("text-zinc-500");
+    expect(stopped.className).not.toContain("bg-red-50");
+  });
+
+  it("shows the fork's own reason above the columns, as a node card shows its reason", () => {
+    renderRun(
+      [fork({ status: "failed", failure_reason: "no matching edge from panel" }), visit("n-sec", "security", "b-sec")],
+      two,
+    );
+    const alert = within(screen.getByRole("region", { name: "Fork panel" })).getByRole("alert");
+    expect(alert.textContent).toBe("no matching edge from panel");
+    expect(alert.className).toContain("bg-red-50");
+    expect(before(alert, screen.getByRole("region", { name: "Branch security" }))).toBe(true);
+    // it belongs to the fork, not to a column
+    expect(column("security").queryByText("no matching edge from panel")).toBeNull();
+    cleanup();
+    renderRun([fork(), visit("n-sec", "security", "b-sec")], two);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("stacks the columns below the large breakpoint and puts them side by side from it", () => {
     renderRun([fork(), visit("n-sec", "security", "b-sec")], two);
     const grid = screen.getByRole("region", { name: "Branch security" }).parentElement as HTMLElement;
     expect(grid.className).toContain("grid");
-    expect(grid.className).toContain("md:grid-cols-2");
+    expect(grid.className).toContain("lg:grid-cols-2");
+    expect(grid.className).not.toContain("md:grid-cols");
     expect(grid.className).not.toMatch(/(^| )grid-cols-/);
   });
 
-  it("gives each of three branches a column, and four or five the wide breakpoint", () => {
+  it("gives each of three branches a column, and four or five the extra large breakpoint", () => {
     const three = [...two, branch({ id: "b-main", head: "maintainability" })];
     renderRun([fork({ output: { branches: ["security", "performance", "maintainability"] } })], three);
-    expect((screen.getByRole("region", { name: "Branch security" }).parentElement as HTMLElement).className).toContain("md:grid-cols-3");
+    expect((screen.getByRole("region", { name: "Branch security" }).parentElement as HTMLElement).className).toContain("lg:grid-cols-3");
+    cleanup();
+    const four = ["a", "b", "c", "d"].map((head) => branch({ id: `b-${head}`, head }));
+    renderRun([fork({ output: { branches: ["a", "b", "c", "d"] } })], four);
+    const grid4 = (screen.getByRole("region", { name: "Branch a" }).parentElement as HTMLElement).className;
+    expect(grid4).toContain("xl:grid-cols-4");
+    expect(grid4).not.toContain("lg:grid-cols");
     cleanup();
     const five = ["a", "b", "c", "d", "e"].map((head) => branch({ id: `b-${head}`, head }));
     renderRun([fork({ output: { branches: ["a", "b", "c", "d", "e"] } })], five);
-    expect((screen.getByRole("region", { name: "Branch a" }).parentElement as HTMLElement).className).toContain("lg:grid-cols-5");
+    const grid5 = (screen.getByRole("region", { name: "Branch a" }).parentElement as HTMLElement).className;
+    expect(grid5).toContain("xl:grid-cols-5");
+    expect(grid5).not.toContain("lg:grid-cols");
   });
 
   it("says a branch has not started a step yet, and that an ended one recorded none", () => {
@@ -341,6 +391,37 @@ describe("a fork visit", () => {
     expect(screen.getByRole("region", { name: "Fork panel, visit 2" })).not.toBeNull();
     expect(screen.getByRole("region", { name: "Node security, visit 2, branch security" })).not.toBeNull();
     expect(screen.getByRole("region", { name: "Node security, visit 1, branch security" })).not.toBeNull();
+  });
+
+  it("names the columns and the join with the fork visit's number when a loop around the pair ran it more than once", () => {
+    renderRun(
+      [
+        fork(),
+        visit("n-sec", "security", "b-sec"),
+        visit("n-perf", "performance", "b-perf"),
+        join(),
+        fork({ id: "f2", visit: 2, started_at: at(60), finished_at: at(90) }),
+        visit("n-sec-2", "security", "b-sec-2", { visit: 2, started_at: at(61), finished_at: at(80) }),
+        visit("n-perf-2", "performance", "b-perf-2", { visit: 2, started_at: at(61), finished_at: at(80) }),
+        join({ id: "j2", visit: 2, started_at: at(90), finished_at: at(90) }),
+      ],
+      [
+        ...two,
+        branch({ id: "b-sec-2", fork_visit_id: "f2", started_at: at(60) }),
+        branch({ id: "b-perf-2", fork_visit_id: "f2", head: "performance", started_at: at(60) }),
+      ],
+    );
+    const names = (re: RegExp) => screen.getAllByRole("region", { name: re }).map((el) => el.getAttribute("aria-label"));
+    expect(names(/^Branch /)).toEqual(["Branch security, visit 1", "Branch performance, visit 1", "Branch security, visit 2", "Branch performance, visit 2"]);
+    expect(names(/^Join /)).toEqual(["Join merge, visit 1", "Join merge, visit 2"]);
+    expect(names(/^Fork /)).toEqual(["Fork panel, visit 1", "Fork panel, visit 2"]);
+    // each name leads to its own column
+    expect(within(screen.getByRole("region", { name: "Branch security, visit 2" })).getByRole("region", { name: "Node security, visit 2, branch security" })).not.toBeNull();
+  });
+
+  it("leaves the names without a number when the fork ran once", () => {
+    renderRun([fork(), visit("n-sec", "security", "b-sec"), join()], two);
+    expect(screen.getAllByRole("region", { name: /^(Branch|Join) / }).map((el) => el.getAttribute("aria-label"))).toEqual(["Branch security", "Branch performance", "Join merge"]);
   });
 
   it("leaves a run without branches as it was", () => {

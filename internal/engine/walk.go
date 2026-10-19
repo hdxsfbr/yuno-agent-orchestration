@@ -325,17 +325,25 @@ func (w *walk) carrySources(ctx context.Context, v *visit) ([]carrySource, error
 	for _, b := range rows {
 		branches[b.ID] = b
 	}
+	// The agents of the sibling branches of this fork visit are never sources, whatever
+	// visit of theirs is looked at: their one workspace holds the sibling's partial work,
+	// also when an earlier pass of the pair left them an earlier visit (review M4).
+	siblingAgents := map[string]bool{}
+	if w.branch != nil {
+		for _, n := range visits {
+			if n.BranchID != nil && n.SessionKey != nil && *n.BranchID != w.branch.ID && branches[*n.BranchID].ForkVisitID == w.branch.ForkVisitID {
+				siblingAgents[sessionAgent(*n.SessionKey)] = true
+			}
+		}
+	}
 	last := map[string]int{} // OpenClaw agent id -> index of its last earlier visit
 	var order []string
 	for i, n := range visits {
 		if n.ID == v.rn.ID || n.SessionKey == nil {
 			continue
 		}
-		if n.BranchID != nil && w.branch != nil && *n.BranchID != w.branch.ID && branches[*n.BranchID].ForkVisitID == w.branch.ForkVisitID {
-			continue // a sibling branch of this fork visit
-		}
 		id := sessionAgent(*n.SessionKey)
-		if id == "" {
+		if id == "" || siblingAgents[id] {
 			continue
 		}
 		if _, ok := last[id]; !ok {

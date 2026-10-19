@@ -203,13 +203,31 @@ func CloseBranchVisits(ctx context.Context, q Querier, branchID, reason string, 
 	return tag.RowsAffected(), nil
 }
 
-// FailRunningNodesExcept is FailRunningNodes that leaves one visit alone: the fork visit a
-// run resumes at after its branches parked (DESIGN 5.26 rule 8) is not lost, it waits.
+// FailRunningNodesExcept is FailRunningNodes that leaves alone the one visit named and
+// every visit still parked on its question (parked_at set, waiting_approval): the fork
+// visit a run resumes at after its branches parked (DESIGN 5.26 rule 8) and the parked
+// branch visits whose questions are still pending (rule 9) are not lost, they wait.
 func FailRunningNodesExcept(ctx context.Context, q Querier, runID, exceptID, reason string, at time.Time) (int64, error) {
 	tag, err := q.Exec(ctx, `UPDATE run_nodes SET status=$2, failure_reason=$3, finished_at=$4
-		WHERE run_id=$1 AND id <> $8 AND status IN ($5, $6, $7)`, runID, NodeFailed, reason, at.UTC(), NodePending, NodeRunning, NodeWaitingApproval, exceptID)
+		WHERE run_id=$1 AND id <> $8 AND status IN ($5, $6, $7) AND NOT (parked_at IS NOT NULL AND status = $7)`,
+		runID, NodeFailed, reason, at.UTC(), NodePending, NodeRunning, NodeWaitingApproval, exceptID)
 	if err != nil {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+// ParkedVisitOfBranch returns the branch's visit that is parked on its question (parked_at
+// set and still waiting_approval), ErrNotFound when none is.
+func ParkedVisitOfBranch(ctx context.Context, q Querier, branchID string) (*RunNode, error) {
+	rows, err := q.Query(ctx, `SELECT `+runNodeColumns+` FROM run_nodes WHERE branch_id=$1 AND parked_at IS NOT NULL AND status=$2
+		ORDER BY visit DESC LIMIT 1`, branchID, NodeWaitingApproval)
+	if err != nil {
+		return nil, err
+	}
+	n, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[RunNode])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return n, err
 }

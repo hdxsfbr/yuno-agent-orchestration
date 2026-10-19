@@ -110,7 +110,11 @@ Researcher gain `ask_operator` and the sentence about asking, the Writer the sen
 about `out/`, the Chief the answering sentence, and the research template's writer task
 names `out/`. `ARTIFACT_DIR` and `ARTIFACT_TTL_DAYS` (wave 10) have defaults; the deploy
 creates the `artifacts` volume on the api, the first named volume it mounts (back it up
-with `pgdata` if the delivered files matter).
+with `pgdata` if the delivered files matter). After the wave 11 deploy run `make
+seed-reset` once more: it creates the three reviewer agents of the Review panel
+(Security, Performance and Maintainability Reviewer) and instantiates the `review_panel`
+template; migration `0015_wave11.sql` (the branch rows) applies at the api's start. The
+Chief needs no change: `run_status` names a run's branches from the same rows.
 
 ## Deploying from GitLab CI
 

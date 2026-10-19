@@ -629,9 +629,10 @@ func (e *Engine) Cancel(ctx context.Context, runID, by string) (*store.Run, erro
 	if run.Status == store.RunQueued {
 		reason := "cancelled by " + by
 		if done, err := store.TransitionRun(ctx, e.deps.Pool, runID, []string{store.RunQueued}, store.RunCancelled, &reason, e.clock.Now()); err == nil {
-			e.emit(ctx, runID, "run.status", map[string]any{"run": done})
 			e.log.Info("run cancelled before start", "run_id", runID, "by", by)
-			e.afterTerminal(ctx, done)
+			// A run re-queued after a release (DESIGN 5.26 rule 8) still has its fork row,
+			// its parked visits and their questions open: closed as a waiting run's are.
+			e.closeWaitingRun(context.WithoutCancel(ctx), done, reason, "run cancelled")
 			return done, nil
 		}
 	}

@@ -67,6 +67,14 @@ function UpdatedRequest({ run }: { run: Run }) {
   );
 }
 
+/** `2 branches running`, `1 waiting for an answer`, or both joined by a comma: how the branches of the fork stand. */
+function forkCounts({ running, waiting }: { running: number; waiting: number }): string {
+  const parts: string[] = [];
+  if (running > 0) parts.push(`${running} ${running === 1 ? "branch" : "branches"} running`);
+  if (waiting > 0) parts.push(`${waiting} waiting for an answer`);
+  return parts.join(", ");
+}
+
 type Props = {
   run: Run;
   connection: Connection;
@@ -75,7 +83,7 @@ type Props = {
   toolCalls?: readonly ToolCall[];
   /** The run's approvals so far: while the run waits on a question, the header says what it asks. */
   approvals?: readonly Approval[];
-  /** The run's branches so far: while the run is inside a fork, the step line says how many of them are still working. */
+  /** The run's branches so far: while the run is inside a fork, the step line says how many of them are running and how many wait for an answer. */
   branches?: readonly RunBranch[];
   /** Called with the run the API returns after a cancel or a retry. */
   onRunChange: (run: Run) => void;
@@ -105,7 +113,7 @@ export default function RunHeader({ run, connection, now, toolCalls = [], approv
   const asking = run.status === "waiting_approval" ? pendingQuestion(approvals) : undefined;
   // Inside a fork the run's step is the fork until the join passes; the line says how many branches still work.
   const inFork = terminal ? undefined : forkProgress(branches, run.current_node);
-  const step = inFork && inFork.running > 0 ? `${inFork.fork} (${inFork.running} ${inFork.running === 1 ? "branch" : "branches"} running)` : run.current_node;
+  const step = inFork && inFork.running + inFork.waiting > 0 ? `${inFork.fork} (${forkCounts(inFork)})` : run.current_node;
 
   return (
     <section aria-label="Run summary">

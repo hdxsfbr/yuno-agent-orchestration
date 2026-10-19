@@ -339,6 +339,16 @@ func (e *Engine) requeueParked(ctx context.Context, a *store.Approval) bool {
 	}
 	if rn, err := store.GetRunNode(ctx, e.deps.Pool, a.RunNodeID); err == nil {
 		e.emit(ctx, a.RunID, "node.status", map[string]any{"node": rn})
+		if rn.BranchID != nil {
+			// The statement set the parked branch back to running (DESIGN 5.26 rule 8).
+			if rows, err := store.ListRunBranches(ctx, e.deps.Pool, a.RunID); err == nil {
+				for i := range rows {
+					if rows[i].ID == *rn.BranchID {
+						e.emit(ctx, a.RunID, "branch.status", map[string]any{"branch": &rows[i]})
+					}
+				}
+			}
+		}
 	}
 	e.emit(ctx, a.RunID, "run.status", map[string]any{"run": run})
 	what := "answered"

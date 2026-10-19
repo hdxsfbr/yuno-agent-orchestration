@@ -408,6 +408,7 @@ describe("buildTimelineEntries with a fork", () => {
     if (j.kind !== "join") throw new Error("not a join entry");
     expect(j.group.node?.node_id).toBe("merge");
     expect(j.branches).toBe(2);
+    expect(j.fork.id).toBe("f1");
   });
 
   it("orders the columns as the fork's edges, which its output records, whatever order the rows arrive in", () => {
@@ -472,6 +473,24 @@ describe("buildTimelineEntries with a fork", () => {
     expect(second.branches.map((b) => b.groups.map((g) => g.node?.id))).toEqual([["n4"], ["n5"]]);
   });
 
+  it("tells each join entry which fork visit it ended when the pair loops", () => {
+    const entries = buildTimelineEntries({
+      ...rest,
+      branches: [...two, branch({ id: "b-sec2", fork_visit_id: "f2", head: "security", started_at: at(52) }), branch({ id: "b-perf2", fork_visit_id: "f2", head: "performance", started_at: at(52) })],
+      nodes: [
+        fork(),
+        join(),
+        fork({ id: "f2", visit: 2, started_at: at(52), finished_at: at(58) }),
+        join({ id: "j2", visit: 2, started_at: at(58), finished_at: at(58) }),
+      ],
+    });
+    expect(entries.map((e) => e.kind)).toEqual(["fork", "join", "fork", "join"]);
+    expect(entries.flatMap((e) => (e.kind === "join" ? [[e.group.node?.id, e.fork.id, e.fork.visit]] : []))).toEqual([
+      ["j1", "f1", 1],
+      ["j2", "f2", 2],
+    ]);
+  });
+
   it("places a retry mark after the fork card it follows and before the join", () => {
     const entries = buildTimelineEntries({
       ...rest,
@@ -491,8 +510,8 @@ describe("buildTimelineEntries with a fork", () => {
 describe("forkProgress", () => {
   const two = [branch({ id: "b1", head: "security" }), branch({ id: "b2", head: "performance", status: "succeeded" }), branch({ id: "b3", head: "maintainability", status: "waiting_approval" })];
 
-  it("counts the branches still working (running or waiting for an answer) when the run is at the fork", () => {
-    expect(forkProgress(two, "panel")).toEqual({ fork: "panel", running: 2 });
+  it("counts the running branches and the ones waiting for an answer apart when the run is at the fork", () => {
+    expect(forkProgress(two, "panel")).toEqual({ fork: "panel", running: 1, waiting: 1 });
   });
 
   it("is undefined when the run is elsewhere or has no branches", () => {
@@ -508,11 +527,15 @@ describe("forkProgress", () => {
       branch({ id: "b4", fork_visit_id: "f2", head: "security", started_at: "2026-10-15T10:05:00Z" }),
       branch({ id: "b5", fork_visit_id: "f2", head: "performance", started_at: "2026-10-15T10:05:00Z" }),
     ];
-    expect(forkProgress(loop, "panel")).toEqual({ fork: "panel", running: 2 });
+    expect(forkProgress(loop, "panel")).toEqual({ fork: "panel", running: 2, waiting: 0 });
     expect(forkProgress([...loop, branch({ id: "b6", fork_visit_id: "f2", head: "third", status: "failed", started_at: "2026-10-15T10:05:00Z" })], "panel")?.running).toBe(2);
   });
 
+  it("does not count a parked branch as running", () => {
+    expect(forkProgress([branch({ status: "waiting_approval" }), branch({ id: "b2", head: "performance", status: "succeeded" })], "panel")).toEqual({ fork: "panel", running: 0, waiting: 1 });
+  });
+
   it("says none are working once every branch has ended", () => {
-    expect(forkProgress([branch({ status: "succeeded" })], "panel")).toEqual({ fork: "panel", running: 0 });
+    expect(forkProgress([branch({ status: "succeeded" })], "panel")).toEqual({ fork: "panel", running: 0, waiting: 0 });
   });
 });

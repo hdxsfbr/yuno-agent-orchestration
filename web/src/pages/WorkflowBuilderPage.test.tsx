@@ -686,6 +686,61 @@ describe("fork and join nodes", () => {
     expect(saved().definition.nodes[2]).toEqual({ id: "panel", kind: "fork", join: "" });
   });
 
+  it("keeps a join that names no node on show when the workflow has no join node, so it can be cleared", async () => {
+    const stale = forkDefinition().nodes.filter((n) => n.id !== "merge").map((n) => (n.id === "panel" ? { ...n, join: "merge" } : n));
+    openWith(forkDefinition({ nodes: stale, edges: forkDefinition().edges.filter((e) => e.to !== "merge" && e.from !== "merge") }));
+    renderBuilder();
+    const panel = await open("Node panel");
+    const select = panel.getByLabelText(/^Join/) as HTMLSelectElement;
+    expect(select.value).toBe("merge");
+    expect(Array.from(select.options).map((o) => [o.value, o.textContent])).toEqual([
+      ["", "None"],
+      ["merge", "merge"],
+    ]);
+    expect(panel.getByText("Add a join node for this fork to end at.")).not.toBeNull();
+    fireEvent.change(select, { target: { value: "" } });
+    save();
+    await waitFor(() => expect(api.made("PUT", "/api/workflows/wf1")).toHaveLength(1));
+    expect(saved().definition.nodes.find((n) => n.id === "panel")).toEqual({ id: "panel", kind: "fork", join: "" });
+    // with the value cleared the sentence stands alone again
+    expect(nodePanel().queryByLabelText(/^Join/)).toBeNull();
+    expect(nodePanel().getByText("Add a join node for this fork to end at.")).not.toBeNull();
+  });
+
+  it("clears the join's checkout when the edge to that head is deleted", async () => {
+    openWith(forkDefinition({ nodes: forkDefinition().nodes.map((n) => (n.id === "merge" ? { ...n, checkout: "security" } : n)) }));
+    renderBuilder();
+    fireEvent.click((await outline()).getByRole("button", { name: "Edge panel to security, order 1" }));
+    fireEvent.click(within(screen.getByRole("region", { name: "Edge settings" })).getByRole("button", { name: "Delete edge" }));
+    const panel = await open("Node merge");
+    expect((panel.getByLabelText("Checkout") as HTMLSelectElement).value).toBe("");
+    expect(Array.from((panel.getByLabelText("Checkout") as HTMLSelectElement).options).map((o) => o.value)).toEqual(["", "performance"]);
+    save();
+    await waitFor(() => expect(api.made("PUT", "/api/workflows/wf1")).toHaveLength(1));
+    expect("checkout" in saved().definition.nodes[5]).toBe(false);
+  });
+
+  it("clears the join's checkout when the edge to that head is pointed at another node", async () => {
+    openWith(forkDefinition({ nodes: forkDefinition().nodes.map((n) => (n.id === "merge" ? { ...n, checkout: "security" } : n)) }));
+    renderBuilder();
+    fireEvent.click((await outline()).getByRole("button", { name: "Edge panel to security, order 1" }));
+    fireEvent.change(within(screen.getByRole("region", { name: "Edge settings" })).getByLabelText("To"), { target: { value: "end" } });
+    const panel = await open("Node merge");
+    expect((panel.getByLabelText("Checkout") as HTMLSelectElement).value).toBe("");
+    save();
+    await waitFor(() => expect(api.made("PUT", "/api/workflows/wf1")).toHaveLength(1));
+    expect("checkout" in saved().definition.nodes[5]).toBe(false);
+  });
+
+  it("keeps the join's checkout when an edge to another head is deleted", async () => {
+    openWith(forkDefinition({ nodes: forkDefinition().nodes.map((n) => (n.id === "merge" ? { ...n, checkout: "security" } : n)) }));
+    renderBuilder();
+    fireEvent.click((await outline()).getByRole("button", { name: "Edge panel to performance, order 2" }));
+    fireEvent.click(within(screen.getByRole("region", { name: "Edge settings" })).getByRole("button", { name: "Delete edge" }));
+    const panel = await open("Node merge");
+    expect((panel.getByLabelText("Checkout") as HTMLSelectElement).value).toBe("security");
+  });
+
   it("names the fork that joins at a join node, lists its heads in edge order and offers each as the checkout", async () => {
     openWith(forkDefinition());
     renderBuilder();

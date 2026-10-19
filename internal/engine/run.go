@@ -83,7 +83,11 @@ func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 			}
 		}
 	}
-	stale = slices.DeleteFunc(stale, func(n store.RunNode) bool { return n.ID == keep })
+	// A visit still parked on its question (a branch whose sibling was answered first,
+	// DESIGN 5.26 rule 9) waits for its own decision: it is not lost either.
+	stale = slices.DeleteFunc(stale, func(n store.RunNode) bool {
+		return n.ID == keep || (n.ParkedAt != nil && n.Status == store.NodeWaitingApproval)
+	})
 	if len(stale) > 0 {
 		if n, err := store.FailRunningNodesExcept(wctx, e.deps.Pool, run.ID, keep, "worker lost", now); err == nil && n > 0 {
 			e.logEvent(ctx, run.ID, "warn", fmt.Sprintf("attempt %d: %d unfinished node visit(s) marked failed", run.Attempt, n))
@@ -188,6 +192,13 @@ func (e *Engine) finishRun(ctx context.Context, runID string, res outcome, rootS
 		}
 		e.expireRunApprovals(ctx, runID, why)
 		e.closeBranches(ctx, run, res.reason)
+		// A visit the ending left open (a fork row a limit found at re-entry, DESIGN 5.26
+		// rule 12) closes with the run's reason.
+		if n, err := store.FailRunningNodes(ctx, e.deps.Pool, runID, res.reason, now); err != nil {
+			e.log.Warn("close open visits failed", "run_id", runID, "error", err)
+		} else if n > 0 {
+			e.log.Info("open visits closed with the run", "run_id", runID, "visits", n)
+		}
 	}
 	e.endSpan(ctx, rootSpan, now, map[string]any{"status": run.Status, "steps": run.StepCount,
 		"tool_calls": run.ToolCallCount, "cost_usd_micros": run.CostUSDMicros, "reason": res.reason})

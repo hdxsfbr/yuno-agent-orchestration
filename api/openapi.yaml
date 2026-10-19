@@ -1403,7 +1403,7 @@ components:
     RunBranch:
       type: object
       description: "One branch of a fork visit: the part of the run that started at one outgoing edge of the fork and runs at the same time as its siblings until the join (DESIGN 5.26). The rows of one fork visit are created in the fork's edge order with started_at a microsecond apart, so the started_at order is the edge order."
-      required: [id, run_id, fork_visit_id, fork_id, head, status, started_at]
+      required: [id, run_id, fork_visit_id, fork_id, head, status, current_node, started_at]
       properties:
         id: { type: string }
         run_id: { type: string }

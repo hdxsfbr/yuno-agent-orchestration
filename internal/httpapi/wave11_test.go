@@ -54,8 +54,15 @@ func TestTraceServesBranches(t *testing.T) {
 		Branches []store.RunBranch `json:"branches"`
 	}
 	mustDo(t, json.Unmarshal(resp, &tr))
-	if len(tr.Branches) != 2 || tr.Branches[0].Head != "security" || tr.Branches[1].Head != "performance" || tr.Branches[1].Status != store.BranchWaitingApproval {
+	if len(tr.Branches) != 2 || tr.Branches[0].Head != "security" || tr.Branches[1].Head != "performance" || tr.Branches[1].Status != store.BranchWaitingApproval ||
+		tr.Branches[0].CurrentNode != "merge" || tr.Branches[1].CurrentNode != "performance" || tr.Branches[0].ForkID != "panel" ||
+		tr.Branches[0].ForkVisitID == "" || tr.Branches[0].ForkVisitID != tr.Branches[1].ForkVisitID || tr.Branches[0].StartedAt.IsZero() {
 		t.Fatalf("branches = %+v", tr.Branches)
+	}
+	for _, n := range tr.Nodes {
+		if n.NodeID == "panel" && (n.BranchID != nil || n.ID != tr.Branches[0].ForkVisitID) {
+			t.Fatalf("fork row = %+v; the branches name it", n)
+		}
 	}
 	var inBranch int
 	for _, n := range tr.Nodes {

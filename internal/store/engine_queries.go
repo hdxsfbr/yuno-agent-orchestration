@@ -320,8 +320,8 @@ func ParkVisit(ctx context.Context, db interface {
 func IsParkedOn(ctx context.Context, q Querier, runID, runNodeID string) (bool, error) {
 	var parked bool
 	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE runs.id=$1 AND runs.status=$3 AND `+parkedResumeSQL+`
-		AND EXISTS (SELECT 1 FROM run_nodes n WHERE n.id=$2 AND n.parked_at IS NOT NULL))`,
-		runID, runNodeID, RunWaitingApproval).Scan(&parked)
+		AND EXISTS (SELECT 1 FROM run_nodes n WHERE n.id=$2 AND n.parked_at IS NOT NULL AND n.status=$4))`,
+		runID, runNodeID, RunWaitingApproval, NodeWaitingApproval).Scan(&parked)
 	return parked, err
 }
 
@@ -349,7 +349,7 @@ func RequeueParkedRun(ctx context.Context, q Querier, runID, runNodeID string, a
 			paused_total_ms = paused_total_ms + GREATEST(0, COALESCE(EXTRACT(EPOCH FROM ($3::timestamptz - paused_at)) * 1000, 0))::bigint,
 			paused_at=NULL, updated_at=now()
 		WHERE runs.id=$1 AND runs.status=$4 AND `+parkedResumeSQL+`
-		  AND EXISTS (SELECT 1 FROM run_nodes WHERE id=$2 AND parked_at IS NOT NULL)
+		  AND EXISTS (SELECT 1 FROM run_nodes WHERE id=$2 AND parked_at IS NOT NULL AND status=$8)
 		RETURNING `+runColumns,
 		runID, runNodeID, at.UTC(), RunWaitingApproval, NodeSucceeded, NodePending, NodeRunning, NodeWaitingApproval, RunQueued))
 }

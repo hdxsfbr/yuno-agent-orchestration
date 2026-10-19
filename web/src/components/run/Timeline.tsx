@@ -51,7 +51,7 @@ export default function Timeline({ view, active, now }: Props) {
           case "join":
             return (
               <li key={entry.group.node?.id ?? "join"}>
-                {entry.group.node ? <JoinCard node={entry.group.node} branches={entry.branches} /> : null}
+                {entry.group.node ? <JoinCard node={entry.group.node} branches={entry.branches} visit={repeated(entry.fork) || entry.fork.visit > 1 ? entry.fork.visit : undefined} /> : null}
               </li>
             );
           case "node":
@@ -112,11 +112,13 @@ type CardProps = {
 
 function NodeCard({ node, items, now, repeated, branch }: CardProps) {
   const running = node.status === "running" || node.status === "waiting_approval";
+  // Inside a branch column the card sits below the column's heading (h4), which sits below the fork card's (h3).
+  const Heading = branch ? "h5" : "h3";
   const label = `Node ${node.node_id}${repeated ? `, visit ${node.visit}` : ""}${branch ? `, branch ${branch}` : ""}`;
   return (
     <section className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" aria-label={label}>
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-zinc-200 px-4 py-2.5 dark:border-zinc-800">
-        <h3 className="font-mono text-sm font-semibold">{node.node_id}</h3>
+        <Heading className="font-mono text-sm font-semibold">{node.node_id}</Heading>
         <StatusBadge kind="node" status={node.status} />
         {repeated || node.visit > 1 || node.question_id ? (
           // A visit that continues after a question is a second visit of the step because the operator answered.
@@ -153,43 +155,60 @@ function NodeCard({ node, items, now, repeated, branch }: CardProps) {
   );
 }
 
-/** Columns of a fork card by branch count: they stack on a narrow screen, and four or five need the wider breakpoint. */
-const columns = (n: number) => (n <= 1 ? "" : n === 2 ? "md:grid-cols-2" : n === 3 ? "md:grid-cols-3" : n === 4 ? "lg:grid-cols-4" : "lg:grid-cols-5");
+/** Columns of a fork card by branch count: they stack below the large breakpoint, and four or five need the extra large one. */
+const columns = (n: number) => (n <= 1 ? "" : n === 2 ? "lg:grid-cols-2" : n === 3 ? "lg:grid-cols-3" : n === 4 ? "xl:grid-cols-4" : "xl:grid-cols-5");
 
 /** A fork visit: the fork's own times, then one column per branch with the node visits made inside it. */
 function ForkCard({ node, branches, now, repeated }: { node: RunNode; branches: TimelineBranch[]; now: number; repeated: (n: RunNode) => boolean }) {
-  const label = `Fork ${node.node_id}${repeated(node) || node.visit > 1 ? `, visit ${node.visit}` : ""}`;
+  const numbered = repeated(node) || node.visit > 1;
+  const label = `Fork ${node.node_id}${numbered ? `, visit ${node.visit}` : ""}`;
   return (
     <section className="rounded-lg border border-violet-200 bg-white dark:border-violet-900 dark:bg-zinc-900" aria-label={label}>
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-violet-200 px-4 py-2.5 dark:border-violet-900">
         <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">Fork</span>
         <h3 className="font-mono text-sm font-semibold">{node.node_id}</h3>
         <StatusBadge kind="node" status={node.status} />
-        {repeated(node) || node.visit > 1 ? <span className="text-xs text-zinc-500">visit {node.visit}</span> : null}
+        {numbered ? <span className="text-xs text-zinc-500">visit {node.visit}</span> : null}
         <VisitTimes node={node} now={now} />
       </header>
+      {node.failure_reason ? (
+        <div className="px-4 pt-4">
+          <p role="alert" className="rounded-md border border-red-200 bg-red-50 p-2.5 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+            {node.failure_reason}
+          </p>
+        </div>
+      ) : null}
       <div className={`grid gap-3 p-4 ${columns(branches.length)}`}>
         {branches.map((b) => (
-          <BranchColumn key={b.branch.id} item={b} now={now} repeated={repeated} />
+          <BranchColumn key={b.branch.id} item={b} now={now} repeated={repeated} visit={numbered ? node.visit : undefined} />
         ))}
       </div>
     </section>
   );
 }
 
-function BranchColumn({ item, now, repeated }: { item: TimelineBranch; now: number; repeated: (n: RunNode) => boolean }) {
+/** `visit` is the number of the fork visit when the fork ran more than once: a loop around the pair repeats every column's name. */
+function BranchColumn({ item, now, repeated, visit }: { item: TimelineBranch; now: number; repeated: (n: RunNode) => boolean; visit?: number }) {
   const { branch, groups } = item;
   const ended = branch.status !== "running" && branch.status !== "waiting_approval";
   return (
-    <section className="min-w-0 space-y-3 rounded-md border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950" aria-label={`Branch ${branch.head}`}>
+    <section
+      className="min-w-0 space-y-3 rounded-md border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950"
+      aria-label={`Branch ${branch.head}${visit !== undefined ? `, visit ${visit}` : ""}`}
+    >
       <header className="flex flex-wrap items-center gap-2">
         <h4 className="font-mono text-sm font-semibold">{branch.head}</h4>
         <StatusBadge kind="branch" status={branch.status} />
       </header>
       {branch.failure_reason ? (
-        <p role="alert" className="rounded-md border border-red-200 bg-red-50 p-2.5 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
-          {branch.failure_reason}
-        </p>
+        branch.status === "cancelled" ? (
+          // A sibling the fork stopped did not fail itself: its reason is a note, not an alarm.
+          <p className="text-sm text-zinc-500">{branch.failure_reason}</p>
+        ) : (
+          <p role="alert" className="rounded-md border border-red-200 bg-red-50 p-2.5 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+            {branch.failure_reason}
+          </p>
+        )
       ) : null}
       {groups.length > 0 ? (
         <ol className="space-y-3">
@@ -209,12 +228,12 @@ function BranchColumn({ item, now, repeated }: { item: TimelineBranch; now: numb
 }
 
 /** The short card where the branches of a fork visit meet. */
-function JoinCard({ node, branches }: { node: RunNode; branches: number }) {
+function JoinCard({ node, branches, visit }: { node: RunNode; branches: number; visit?: number }) {
   const at = node.finished_at ?? node.started_at;
   return (
     <section
       className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-violet-200 bg-white px-4 py-2.5 dark:border-violet-900 dark:bg-zinc-900"
-      aria-label={`Join ${node.node_id}`}
+      aria-label={`Join ${node.node_id}${visit !== undefined ? `, visit ${visit}` : ""}`}
     >
       <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">Join</span>
       <h3 className="font-mono text-sm font-semibold">{node.node_id}</h3>

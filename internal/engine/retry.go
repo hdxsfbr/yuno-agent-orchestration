@@ -15,6 +15,7 @@ import (
 	"yuno/internal/obs"
 	"yuno/internal/project"
 	"yuno/internal/store"
+	"yuno/internal/workflow"
 )
 
 // Retry from the failed step (DESIGN 5.21, decision D-043). An operator re-queues a run
@@ -95,7 +96,14 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 		// visit in that would continue an answered question whatever the count, so a
 		// retry of a run with such a question counts nothing either (review L13).
 		visits := 0
-		if under.MaxLoopVisits > 0 {
+		if under.MaxLoopVisits > 0 && resumesAtFork(run) {
+			// The fork is re-entered, not counted (DESIGN 5.26 rule 9); its unfinished
+			// branches run again from their positions, and those visits are counted at
+			// their nodes' entry, so the most visited of them is what the check compares.
+			if visits, err = forkRetryVisits(ctx, tx, run); err != nil {
+				return fmt.Errorf("run %s: count branch visits: %w", runID, err)
+			}
+		} else if under.MaxLoopVisits > 0 {
 			switch _, cerr := store.ContinuationQuestion(ctx, tx, runID, *run.CurrentNode); {
 			case cerr == nil:
 				// The next visit is a continuation: free of the limit.
@@ -166,6 +174,51 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 	e.logEvent(ctx, runID, "info", fmt.Sprintf("retry %d: continuing from %s", retried.Retries, from),
 		"node_id", from, "by", by)
 	return retried, nil
+}
+
+// resumesAtFork reports whether the run's current node is a fork of its snapshot: the
+// retry re-enters the fork visit (DESIGN 5.26 rule 9), which the loop count does not see.
+func resumesAtFork(run *store.Run) bool {
+	if run.CurrentNode == nil {
+		return false
+	}
+	var snap runSnapshot
+	if json.Unmarshal(run.WorkflowSnapshot, &snap) != nil {
+		return false
+	}
+	n, ok := snap.Definition.Node(*run.CurrentNode)
+	return ok && n.Kind == workflow.KindFork
+}
+
+// forkRetryVisits is the largest loop-visit count among the positions of the branches the
+// fork's latest visit will run again (every branch not succeeded).
+func forkRetryVisits(ctx context.Context, q store.Querier, run *store.Run) (int, error) {
+	latest, err := store.LatestNodeVisit(ctx, q, run.ID, *run.CurrentNode)
+	if errors.Is(err, store.ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	rows, err := store.ListForkBranches(ctx, q, latest.ID)
+	if err != nil {
+		return 0, err
+	}
+	most := 0
+	for _, b := range rows {
+		if b.Status == store.BranchSucceeded {
+			continue
+		}
+		if _, cerr := store.ContinuationQuestion(ctx, q, run.ID, b.CurrentNode); cerr == nil {
+			continue // a continuation visit is free of the limit (5.24 rule 5)
+		}
+		n, err := store.CountNodeLoopVisits(ctx, q, run.ID, b.CurrentNode)
+		if err != nil {
+			return 0, err
+		}
+		most = max(most, n)
+	}
+	return most, nil
 }
 
 // retryRow is store.RetryRun with the answers of the two live-run indexes turned into

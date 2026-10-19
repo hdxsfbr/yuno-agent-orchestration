@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"strings"
@@ -140,5 +141,97 @@ func TestMigration0015Upgrade(t *testing.T) {
 	mustDo(t, err)
 	if !strings.Contains(def, "branch_id IS NOT NULL") {
 		t.Errorf("index run_nodes_branch_idx = %s", def)
+	}
+}
+
+// 5.26 rules 8 and 9 (review H1, H2): the lost-worker bookkeeping of a claim leaves the
+// named fork visit and every still-parked visit alone; the parked predicates see a parked
+// visit only while it is still waiting, so a consumed park is never re-queued again.
+func TestParkedBranchVisitsAreKeptAndConsumedParksAreNotListed(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	run := w9MustRun(t, pool, w9Workflow(t, pool), nil)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	fork := &RunNode{RunID: run.ID, NodeID: "panel", Status: NodeRunning, StartedAt: &now}
+	mustDo(t, CreateRunNode(ctx, pool, fork))
+	a := &RunBranch{RunID: run.ID, ForkVisitID: fork.ID, ForkID: "panel", Head: "a", Status: BranchWaitingApproval, CurrentNode: "a", StartedAt: now}
+	b := &RunBranch{RunID: run.ID, ForkVisitID: fork.ID, ForkID: "panel", Head: "b", Status: BranchWaitingApproval, CurrentNode: "b", StartedAt: now.Add(time.Microsecond)}
+	mustDo(t, InsertRunBranch(ctx, pool, a))
+	mustDo(t, InsertRunBranch(ctx, pool, b))
+	parkedA := &RunNode{RunID: run.ID, NodeID: "a", Status: NodeWaitingApproval, StartedAt: &now, BranchID: &a.ID, ParkedAt: &now}
+	parkedB := &RunNode{RunID: run.ID, NodeID: "b", Status: NodeWaitingApproval, StartedAt: &now, BranchID: &b.ID, ParkedAt: &now}
+	lost := &RunNode{RunID: run.ID, NodeID: "c", Status: NodeRunning, StartedAt: &now}
+	for _, n := range []*RunNode{parkedA, parkedB, lost} {
+		mustDo(t, CreateRunNode(ctx, pool, n))
+	}
+	qa := &Approval{RunID: run.ID, RunNodeID: parkedA.ID, Kind: ApprovalKindQuestion, NodeID: "a", Message: "a?", RequestedAt: now, ExpiresAt: now.Add(time.Hour)}
+	qb := &Approval{RunID: run.ID, RunNodeID: parkedB.ID, Kind: ApprovalKindQuestion, NodeID: "b", Message: "b?", RequestedAt: now.Add(time.Second), ExpiresAt: now.Add(time.Hour)}
+	mustDo(t, InsertApproval(ctx, pool, qa))
+	mustDo(t, InsertApproval(ctx, pool, qb))
+	// The run was released on the fork visit, then re-queued by a's answer: the claim finds
+	// resume_node_visit_id still the fork visit.
+	_, err := pool.Exec(ctx, `UPDATE runs SET status=$2, resume_node_visit_id=$3 WHERE id=$1`, run.ID, RunQueued, fork.ID)
+	mustDo(t, err)
+
+	n, err := FailRunningNodesExcept(ctx, pool, run.ID, fork.ID, "worker lost", now)
+	if err != nil || n != 1 {
+		t.Fatalf("FailRunningNodesExcept closed %d visits (%v), want the one lost visit only", n, err)
+	}
+	for _, id := range []string{fork.ID, parkedA.ID, parkedB.ID} {
+		got, err := GetRunNode(ctx, pool, id)
+		mustDo(t, err)
+		if got.Status == NodeFailed {
+			t.Fatalf("visit %s was marked lost: %+v", got.NodeID, got)
+		}
+	}
+	if got, _ := GetRunNode(ctx, pool, lost.ID); got.Status != NodeFailed {
+		t.Fatalf("the lost visit = %+v", got)
+	}
+
+	// b's question is answered while the run waits on the fork visit: the re-queue goes
+	// through the fork visit, closes the parked visit and sets the branch running.
+	_, err = pool.Exec(ctx, `UPDATE runs SET status=$2 WHERE id=$1`, run.ID, RunWaitingApproval)
+	mustDo(t, err)
+	_, err = AnswerApprovalAt(ctx, pool, qb.ID, "yes", "api", now)
+	mustDo(t, err)
+	if parked, _ := IsParkedOn(ctx, pool, run.ID, parkedB.ID); !parked {
+		t.Fatal("IsParkedOn does not see a branch park through the fork visit")
+	}
+	listed, err := ListParkedQuestions(ctx, pool)
+	if err != nil || len(listed) != 1 || listed[0].ID != qb.ID {
+		t.Fatalf("ListParkedQuestions = %+v %v; want b's decided question only", listed, err)
+	}
+	requeued, err := RequeueParkedRun(ctx, pool, run.ID, parkedB.ID, now.Add(time.Minute))
+	if err != nil || requeued.Status != RunQueued {
+		t.Fatalf("RequeueParkedRun = %+v %v", requeued, err)
+	}
+	if got, _ := GetRunNode(ctx, pool, parkedB.ID); got.Status != NodeSucceeded || got.FinishedAt == nil {
+		t.Fatalf("parked visit after the re-queue = %+v", got)
+	}
+	if rows, _ := ListForkBranches(ctx, pool, fork.ID); rows[1].Status != BranchRunning || rows[0].Status != BranchWaitingApproval {
+		t.Fatalf("branches after the re-queue = %+v", rows)
+	}
+	// The consumed park no longer matches: released again, nothing re-queues it on b's old
+	// answer, and a's pending question is not listed.
+	_, err = pool.Exec(ctx, `UPDATE runs SET status=$2 WHERE id=$1`, run.ID, RunWaitingApproval)
+	mustDo(t, err)
+	if parked, _ := IsParkedOn(ctx, pool, run.ID, parkedB.ID); parked {
+		t.Fatal("a consumed park still matches IsParkedOn")
+	}
+	if _, err := RequeueParkedRun(ctx, pool, run.ID, parkedB.ID, now.Add(2*time.Minute)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("RequeueParkedRun on a consumed park = %v, want ErrNotFound", err)
+	}
+	if listed, _ := ListParkedQuestions(ctx, pool); len(listed) != 0 {
+		t.Fatalf("ListParkedQuestions after the consumed park = %+v", listed)
+	}
+	if got, err := ParkedVisitOfBranch(ctx, pool, a.ID); err != nil || got.ID != parkedA.ID {
+		t.Fatalf("ParkedVisitOfBranch(a) = %+v %v", got, err)
+	}
+	if _, err := ParkedVisitOfBranch(ctx, pool, b.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ParkedVisitOfBranch(b) after the re-queue = %v", err)
+	}
+	closed, err := CloseOpenBranches(ctx, pool, run.ID, BranchFailed, nil, now)
+	if err != nil || closed != 2 {
+		t.Fatalf("CloseOpenBranches = %d %v", closed, err)
 	}
 }

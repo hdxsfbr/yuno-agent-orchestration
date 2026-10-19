@@ -441,9 +441,27 @@ describe("the step line inside a fork", () => {
     expect(stepLine().textContent).toBe("panel (3 branches running)");
   });
 
-  it("counts a branch that waits for an answer as working, and not one that has ended", () => {
+  it("counts a branch that waits for an answer apart from the running ones, and not one that has ended", () => {
     renderBranches(live(), [branch({ status: "waiting_approval" }), branch({ id: "b2", head: "performance", status: "succeeded" }), branch({ id: "b3", head: "maintainability", status: "running" })]);
-    expect(stepLine().textContent).toBe("panel (2 branches running)");
+    expect(stepLine().textContent).toBe("panel (1 branch running, 1 waiting for an answer)");
+  });
+
+  it("says how many run and how many wait when several of each", () => {
+    renderBranches(live(), [
+      branch(),
+      branch({ id: "b2", head: "performance" }),
+      branch({ id: "b3", head: "maintainability", status: "waiting_approval" }),
+      branch({ id: "b4", head: "style", status: "waiting_approval" }),
+    ]);
+    expect(stepLine().textContent).toBe("panel (2 branches running, 2 waiting for an answer)");
+  });
+
+  it("says only that branches wait for an answer when none runs", () => {
+    renderBranches(live(), [branch({ status: "waiting_approval" }), branch({ id: "b2", head: "performance", status: "succeeded" })]);
+    expect(stepLine().textContent).toBe("panel (1 waiting for an answer)");
+    cleanup();
+    renderBranches(live(), [branch({ status: "waiting_approval" }), branch({ id: "b2", head: "performance", status: "waiting_approval" })]);
+    expect(stepLine().textContent).toBe("panel (2 waiting for an answer)");
   });
 
   it("says one branch in the singular", () => {
@@ -496,7 +514,7 @@ describe("the step line inside a fork", () => {
         </MemoryRouter>
       </QueryClientProvider>,
     );
-    expect(stepLine().textContent).toBe("panel (1 branch running)");
+    expect(stepLine().textContent).toBe("panel (1 waiting for an answer)");
     expect(screen.getByRole("link", { name: "Asks: Which branch should I review?" })).not.toBeNull();
   });
 });

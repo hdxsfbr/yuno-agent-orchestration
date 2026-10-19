@@ -221,7 +221,7 @@ export type TimelineBranch = { branch: RunBranch; groups: TimelineNode[] };
 export type TimelineEntry =
   | { kind: "node"; group: TimelineNode }
   | { kind: "fork"; group: TimelineNode; branches: TimelineBranch[] }
-  | { kind: "join"; group: TimelineNode; branches: number }
+  | { kind: "join"; group: TimelineNode; branches: number; fork: RunNode }
   | { kind: "retry"; mark: RetryMark };
 
 /** The heads a fork or join row names in its output, `{"branches": [...]}` (DESIGN 5.26 rules 3 and 5). */
@@ -268,7 +268,7 @@ function inEdgeOrder(fork: RunNode, branches: readonly RunBranch[]): RunBranch[]
  * branches, each with the node visits made inside it (`branch_id`); a visit whose branch or fork
  * row the view does not hold yet stays an ordinary entry. The join that ended a fork visit, the
  * row without an agent whose output lists exactly that visit's heads, follows it as an entry of
- * its own.
+ * its own that holds the fork visit it ended.
  */
 export function buildTimelineEntries(
   view: Pick<RunView, "nodes" | "model_calls" | "tool_calls" | "approvals" | "retries"> & { branches?: readonly RunBranch[] },
@@ -303,7 +303,7 @@ export function buildTimelineEntries(
   }
 
   const out: TimelineEntry[] = [];
-  const open: { heads: string[] }[] = [];
+  const open: { heads: string[]; fork: RunNode }[] = [];
   let next = 0;
   for (const group of top) {
     const started = group.node?.started_at ? timeOf(group.node.started_at) : Number.POSITIVE_INFINITY;
@@ -312,7 +312,7 @@ export function buildTimelineEntries(
     const owned = row ? forkBranches.get(row.id) : undefined;
     if (row && owned) {
       const ordered = inEdgeOrder(row, owned);
-      open.push({ heads: ordered.map((b) => b.head) });
+      open.push({ heads: ordered.map((b) => b.head), fork: row });
       out.push({ kind: "fork", group, branches: ordered.map((branch) => ({ branch, groups: inside.get(branch.id) ?? [] })) });
       continue;
     }
@@ -321,8 +321,8 @@ export function buildTimelineEntries(
     let fork = -1;
     if (joined) for (let i = open.length - 1; i >= 0 && fork < 0; i--) if (sameSet(open[i].heads, joined)) fork = i;
     if (joined && fork >= 0) {
-      open.splice(fork, 1);
-      out.push({ kind: "join", group, branches: joined.length });
+      const [visit] = open.splice(fork, 1);
+      out.push({ kind: "join", group, branches: joined.length, fork: visit.fork });
       continue;
     }
     out.push({ kind: "node", group });
@@ -332,10 +332,13 @@ export function buildTimelineEntries(
 }
 
 /**
- * Where a live run stands inside a fork: while `currentNode` is the fork of the newest fork visit, the fork's id and how
- * many of that visit's branches are still working (running, or parked on a question). Undefined when the run is not in a fork.
+ * Where a live run stands inside a fork: while `currentNode` is the fork of the newest fork visit, the fork's id, how many
+ * of that visit's branches are running and how many are parked on a question. Undefined when the run is not in a fork.
  */
-export function forkProgress(branches: readonly RunBranch[] | undefined, currentNode: string | undefined): { fork: string; running: number } | undefined {
+export function forkProgress(
+  branches: readonly RunBranch[] | undefined,
+  currentNode: string | undefined,
+): { fork: string; running: number; waiting: number } | undefined {
   if (!currentNode) return undefined;
   const ofFork = (branches ?? []).filter((b) => b.fork_id === currentNode);
   if (ofFork.length === 0) return undefined;
@@ -347,5 +350,9 @@ export function forkProgress(branches: readonly RunBranch[] | undefined, current
   let newest = ofFork[0];
   for (const b of ofFork) if (startedAt(b) >= startedAt(newest)) newest = b;
   const visit = ofFork.filter((b) => b.fork_visit_id === newest.fork_visit_id);
-  return { fork: currentNode, running: visit.filter((b) => b.status === "running" || b.status === "waiting_approval").length };
+  return {
+    fork: currentNode,
+    running: visit.filter((b) => b.status === "running").length,
+    waiting: visit.filter((b) => b.status === "waiting_approval").length,
+  };
 }

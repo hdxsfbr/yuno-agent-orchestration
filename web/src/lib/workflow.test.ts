@@ -246,6 +246,48 @@ describe("fork and join nodes", () => {
   });
 });
 
+describe("a join's checkout when the fork's edges change", () => {
+  const checkoutOf = (def: WorkflowDefinition) => def.nodes.find((n) => n.id === "merge")?.checkout;
+  // edges: 2 panel>performance, 3 panel>security, 4 security>merge, 5 performance>merge
+
+  it("clears the checkout when the edge to its head is removed", () => {
+    const def = removeEdge(panel(), 3);
+    expect("checkout" in (def.nodes.find((n) => n.id === "merge") ?? {})).toBe(false);
+    expect(def.edges.map((e) => `${e.from}>${e.to}`)).toEqual(["start>coder", "coder>panel", "panel>performance", "security>merge", "performance>merge", "merge>end"]);
+  });
+
+  it("clears the checkout when the edge to its head now leads elsewhere, or now starts elsewhere", () => {
+    expect(checkoutOf(updateEdge(panel(), 3, { to: "end" }))).toBeUndefined();
+    expect(checkoutOf(updateEdge(panel(), 3, { from: "coder" }))).toBeUndefined();
+    expect("checkout" in (updateEdge(panel(), 3, { to: "end" }).nodes.find((n) => n.id === "merge") ?? {})).toBe(false);
+  });
+
+  it("keeps the checkout while the head is still a target of the fork's edges", () => {
+    const twice: WorkflowDefinition = { ...panel(), edges: [...panel().edges, { from: "panel", to: "security", when: { path: "/coder/risky", op: "eq", value: false } }] };
+    expect(checkoutOf(removeEdge(twice, 3))).toBe("security");
+    expect(checkoutOf(removeEdge(twice, 7))).toBe("security");
+  });
+
+  it("keeps the checkout when another edge changes", () => {
+    expect(checkoutOf(removeEdge(panel(), 2))).toBe("security");
+    expect(checkoutOf(updateEdge(panel(), 2, { to: "end" }))).toBe("security");
+    expect(checkoutOf(updateEdge(panel(), 3, { when: undefined }))).toBe("security");
+    expect(checkoutOf(removeEdge(panel(), 4))).toBe("security");
+    expect(checkoutOf(removeEdge(panel(), 6))).toBe("security");
+  });
+
+  it("returns the same nodes when nothing was dropped", () => {
+    const def = panel();
+    expect(removeEdge(def, 2).nodes).toBe(def.nodes);
+    expect(updateEdge(def, 3, { when: undefined }).nodes).toBe(def.nodes);
+  });
+
+  it("leaves a checkout that was no head before the edit to the validation", () => {
+    const odd: WorkflowDefinition = { ...panel(), nodes: panel().nodes.map((n) => (n.id === "merge" ? { ...n, checkout: "audit" } : n)) };
+    expect(checkoutOf(removeEdge(odd, 3))).toBe("audit");
+  });
+});
+
 describe("shipped templates", () => {
   it("is a template row only while an agent node names its agent without an id", () => {
     const named = { template_key: "dev", definition: { nodes: [{ id: "c", kind: "agent" as const, agent_name: "Coder" }], edges: [] } };

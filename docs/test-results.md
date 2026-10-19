@@ -1,3 +1,19 @@
+# Test results, 2026-10-18 (wave 11: parallel steps, fork and join; DESIGN 5.26)
+
+Run on the development machine from the worktree branch `claude/eloquent-wu-44b501`
+after the fix pass and before its merge to `main`, everything inside throwaway containers
+on the stack's network (the compose tool services cannot be used from a worktree while
+the stack runs); CI runs the same commands on `main` and deploys the commit.
+
+| Command | Result |
+|---|---|
+| `go test ./... -count=1` (against a `yuno_test_coord` database; what `make test-go` runs) | 22 packages ok, 0 failures (new: the region validation with one case per message of 5.26 rule 2, the branch rows and migration 0015, two branches run at once with the state and the join's successor's task, fork edge conditions, a branch failure stopping its sibling, the summed step limit and a cancel across branches, a gated call inside a branch pausing the node only and the clock running through it, a parked branch released and resumed through the fork visit, a decision during the sibling's run, two parked branches resumed one at a time with the consumed park never re-queued, a cancel of a re-queued fork run, an expired parked question, re-entry after a crash and after a retry (the retry check at a fork), a loop around the pair keeping siblings apart, the files and the checkout past the join with the diff skipped for the unnamed branch, the trace's branches and the validate endpoint, the template's shape and instantiation, the three seeded agents, `run_status.branches`) |
+| `pnpm test` (vitest; what `make test-web` runs) | 47 files, 1070 tests passed (new: the Fork and Join nodes and panels, the edge panel's line, the error mapping of `nodes[i].join` and `.checkout`, `branch.status` in the trace, the fork card with its columns, the join card, the header's branch count, the run page driven by SSE) |
+| `go vet ./...`, staticcheck 2026.2.2, `gofmt -l`, eslint, `tsc --noEmit` (what `make lint` runs) | clean |
+| review | two Sonnet 5.5 reviewer agents (engine, store and validation; API, contract, UI, template and seed): two highs (a sibling's parked question expired at the claim after the first answer; a consumed park re-queued by every sweep), five mediums and the kept lows fixed in one pass (the engine by the coordinator, the UI by a Sonnet 5.5 fix agent), the rest recorded as limitations; `docs/reviews/wave11-review.md` |
+
+Live verification on the public instance: pending the deploy (`scripts/deploy/verify-wave11.sh`).
+
 # Test results, 2026-10-18 (wave 10: questions to the operator, run artifacts; DESIGN 5.24 and 5.25)
 
 Run on the development machine from the worktree branch `claude/eloquent-wu-44b501`

@@ -64,6 +64,11 @@ func (w *walk) forkNode(ctx context.Context, node *workflow.Node) (string, *outc
 		}
 		e.emit(ctx, w.run.ID, "node.status", map[string]any{"node": fv})
 		e.logEvent(ctx, w.run.ID, "info", "fork "+node.ID+": resumed", "node_id", node.ID)
+		if rows, err := store.ListForkBranches(ctx, e.deps.Pool, fv.ID); err == nil {
+			for _, b := range rows {
+				heads = append(heads, b.Head)
+			}
+		}
 	} else {
 		if res := w.enter(ctx, node); res != nil {
 			return "", res
@@ -124,6 +129,13 @@ func (w *walk) runBranches(ctx context.Context, fork, join *workflow.Node, regio
 	running := map[string]*liveBranch{}
 	var failure *branchEnd
 	stopReason := ""
+	wrapped := false // the run's reason is `branch <head> failed: <reason>` (rule 6)
+	finished := func(id string) {
+		if l := running[id]; l != nil {
+			l.cancel()
+		}
+		delete(running, id)
+	}
 	start := func(b *store.RunBranch) {
 		bctx, cancel := context.WithCancel(ctx)
 		bw := &walk{e: e, run: w.run, def: w.def, over: w.over, rootSpan: w.rootSpan, branch: b, region: region, parentSpan: span, stale: stale}
@@ -134,7 +146,7 @@ func (w *walk) runBranches(ctx context.Context, fork, join *workflow.Node, regio
 	drain := func() {
 		for len(running) > 0 {
 			r := <-results
-			delete(running, r.w.branch.ID)
+			finished(r.w.branch.ID)
 			w.sessions = append(w.sessions, r.w.sessions...)
 		}
 	}
@@ -167,7 +179,7 @@ func (w *walk) runBranches(ctx context.Context, fork, join *workflow.Node, regio
 			e.endSpan(ctx, span, e.clock.Now(), map[string]any{"interrupted": true})
 			return "", &outcome{interrupted: true}
 		case r := <-results:
-			delete(running, r.w.branch.ID)
+			finished(r.w.branch.ID)
 			w.sessions = append(w.sessions, r.w.sessions...)
 			b := r.w.branch
 			switch {
@@ -182,25 +194,27 @@ func (w *walk) runBranches(ctx context.Context, fork, join *workflow.Node, regio
 				// The park wrote the branch row waiting_approval and published it
 				// (questionTurnEnd); the fork decides below whether the run waits.
 			case failure != nil:
-				// A sibling stopped by the fork (or ended on its own meanwhile): recorded as
-				// the stop, cancelled, as rule 6 says.
-				reason := stopReason
+				// A sibling stopped by the fork is recorded cancelled with the stop reason;
+				// one that ended on its own meanwhile is recorded as it ended (rule 6).
 				if !r.res.interrupted && r.res.reason != "" && !strings.HasPrefix(r.res.reason, "stopped: ") {
-					reason = r.res.reason
+					reason := r.res.reason
+					w.finishBranch(ctx, b, branchStatusOf(r.res), &reason)
+					break
 				}
+				reason := stopReason
 				w.finishBranch(ctx, b, store.BranchCancelled, &reason)
 			default:
 				// The first branch to fail ends the fork visit (rule 6).
 				failure = &r
 				reason := r.res.reason
-				status := store.BranchFailed
-				if r.res.runStatus == store.RunCancelled {
-					status = store.BranchCancelled
-				}
-				w.finishBranch(ctx, b, status, &reason)
-				stopReason = "stopped: branch " + b.Head + " failed"
-				if r.res.limit {
-					stopReason = "stopped: " + reason
+				w.finishBranch(ctx, b, branchStatusOf(r.res), &reason)
+				// A limit the run shares (steps, cost, tool calls, time, a cancel, the loop
+				// limit) is the run's own reason; a node's failure, a node with no true edge
+				// and the per-visit iteration limit are the branch's (rules 4 and 6).
+				wrapped = !r.res.limit || strings.HasPrefix(reason, "no matching edge from ") || strings.HasPrefix(reason, "node iteration limit ")
+				stopReason = "stopped: " + reason
+				if wrapped {
+					stopReason = "stopped: branch " + b.Head + " failed"
 				}
 				e.logEvent(ctx, w.run.ID, "warn", fmt.Sprintf("branch %s failed: %s; stopping %d branch(es)", b.Head, reason, len(running)), "node_id", fork.ID)
 				for _, l := range running {
@@ -212,7 +226,16 @@ func (w *walk) runBranches(ctx context.Context, fork, join *workflow.Node, regio
 			}
 		}
 	}
-	return w.failFork(ctx, fork, fv, span, *failure, stopReason)
+	return w.failFork(ctx, fork, fv, span, *failure, stopReason, wrapped)
+}
+
+// branchStatusOf is the branch row's status for an outcome that ended it: cancelled for a
+// cancelled run, failed otherwise.
+func branchStatusOf(res outcome) string {
+	if res.runStatus == store.RunCancelled {
+		return store.BranchCancelled
+	}
+	return store.BranchFailed
 }
 
 // runBranch runs one branch of a fork visit from its position to the join (DESIGN 5.26
@@ -265,6 +288,11 @@ func (w *walk) runnableBranches(ctx context.Context, forkVisitID string) (runnab
 			_, qerr := store.ContinuationQuestion(ctx, e.deps.Pool, w.run.ID, b.CurrentNode)
 			switch {
 			case qerr == nil:
+				// The decision landed while a sibling ran (rule 8): the parked visit is closed
+				// here, as RequeueParkedRun closes it on the other path.
+				if err := w.closeParkedVisit(ctx, b); err != nil {
+					return nil, 0, 0, err
+				}
 				if err := w.reopenBranch(ctx, b); err != nil {
 					return nil, 0, 0, err
 				}
@@ -282,6 +310,25 @@ func (w *walk) runnableBranches(ctx context.Context, forkVisitID string) (runnab
 		}
 	}
 	return runnable, done, parked, nil
+}
+
+// closeParkedVisit closes a parked branch visit succeeded without output once its
+// question was decided and the branch continues in this walk (DESIGN 5.24 rule 5 (c)).
+func (w *walk) closeParkedVisit(ctx context.Context, b *store.RunBranch) error {
+	e := w.e
+	parked, err := store.ParkedVisitOfBranch(ctx, e.deps.Pool, b.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	row, err := store.FinishRunNode(ctx, e.deps.Pool, parked.ID, store.NodeSucceeded, nil, e.clock.Now())
+	if err != nil {
+		return err
+	}
+	e.emit(ctx, w.run.ID, "node.status", map[string]any{"node": row})
+	return nil
 }
 
 func (w *walk) reopenBranch(ctx context.Context, b *store.RunBranch) error {
@@ -312,6 +359,8 @@ func (w *walk) closeFork(ctx context.Context, fv *store.RunNode, span, status st
 	if row, err := store.FinishRunNode(ctx, e.deps.Pool, fv.ID, status, reason, now); err == nil {
 		*fv = *row
 		e.emit(ctx, w.run.ID, "node.status", map[string]any{"node": fv})
+	} else {
+		e.log.Warn("close fork visit failed", "run_id", w.run.ID, "node_id", fv.NodeID, "error", err)
 	}
 	attrs := map[string]any{"status": status}
 	if reason != nil {
@@ -349,11 +398,14 @@ func (w *walk) joinBranches(ctx context.Context, fork, join *workflow.Node, fv *
 		return "", &o
 	}
 	e.emit(ctx, w.run.ID, "node.status", map[string]any{"node": jrow})
-	w.closeFork(ctx, fv, span, store.NodeSucceeded, nil)
+	// The run's position moves before the fork row closes: a crash between the two leaves a
+	// fork row the next claim marks lost, never a fork a claim would enter afresh (review L1).
 	next, res := w.follow(ctx, join)
 	if res != nil {
+		w.closeFork(ctx, fv, span, store.NodeFailed, &res.reason)
 		return "", res
 	}
+	w.closeFork(ctx, fv, span, store.NodeSucceeded, nil)
 	e.logEvent(ctx, w.run.ID, "info", fmt.Sprintf("fork %s: joined; continuing %s", fork.ID, next), "node_id", join.ID)
 	return next, nil
 }
@@ -382,14 +434,18 @@ func (w *walk) releaseFork(ctx context.Context, fork *workflow.Node, fv *store.R
 			if b.Status != store.BranchWaitingApproval {
 				continue
 			}
-			if _, qerr := store.ContinuationQuestion(ctx, e.deps.Pool, run.ID, b.CurrentNode); qerr == nil {
-				if requeued, rerr := store.RequeuePausedRunAt(ctx, e.deps.Pool, run.ID, e.clock.Now()); rerr == nil {
-					w.run = requeued
-					e.emit(ctx, run.ID, "run.status", map[string]any{"run": requeued})
-					e.logEvent(ctx, run.ID, "info", "question answered; continuing branch "+b.Head, "node_id", fork.ID)
-				}
-				break
+			q, qerr := store.ContinuationQuestion(ctx, e.deps.Pool, run.ID, b.CurrentNode)
+			if qerr != nil {
+				continue
 			}
+			// The same re-queue a decision makes (rule 8): it closes the parked visit, sets the
+			// branch back to running and queues the run, all in one statement.
+			if e.requeueParked(ctx, q) {
+				if fresh, err := e.readRun(ctx, run.ID); err == nil {
+					w.run = fresh
+				}
+			}
+			break
 		}
 	}
 	o := w.applyPendingCancel(ctx, w.run)
@@ -400,7 +456,7 @@ func (w *walk) releaseFork(ctx context.Context, fork *workflow.Node, fv *store.R
 // cancelled with the stop reason and their open visits closed, the fork row fails, and the
 // run's outcome is the failing branch's own for a limit or a cancellation, else
 // `branch <head> failed: <reason>`.
-func (w *walk) failFork(ctx context.Context, fork *workflow.Node, fv *store.RunNode, span string, failure branchEnd, stopReason string) (string, *outcome) {
+func (w *walk) failFork(ctx context.Context, fork *workflow.Node, fv *store.RunNode, span string, failure branchEnd, stopReason string, wrapped bool) (string, *outcome) {
 	e := w.e
 	now := e.clock.Now()
 	reason := stopReason
@@ -408,18 +464,32 @@ func (w *walk) failFork(ctx context.Context, fork *workflow.Node, fv *store.RunN
 		e.log.Warn("close branches failed", "run_id", w.run.ID, "error", err)
 	}
 	if rows, err := store.ListForkBranches(ctx, e.deps.Pool, fv.ID); err == nil {
+		closed := map[string]bool{}
 		for i := range rows {
 			b := &rows[i]
 			if b.Status == store.BranchCancelled {
-				if _, err := store.CloseBranchVisits(ctx, e.deps.Pool, b.ID, reason, now); err != nil {
+				if n, err := store.CloseBranchVisits(ctx, e.deps.Pool, b.ID, reason, now); err != nil {
 					e.log.Warn("close branch visits failed", "run_id", w.run.ID, "branch", b.Head, "error", err)
+				} else if n > 0 {
+					closed[b.ID] = true
 				}
 				e.emit(ctx, w.run.ID, "branch.status", map[string]any{"branch": b})
 			}
 		}
+		if len(closed) > 0 {
+			// The visits a stop closed (a parked one among them) are published too.
+			if nodes, err := store.ListRunNodes(ctx, e.deps.Pool, w.run.ID); err == nil {
+				for i := range nodes {
+					n := &nodes[i]
+					if n.BranchID != nil && closed[*n.BranchID] && n.FinishedAt != nil && n.FinishedAt.Equal(now) {
+						e.emit(ctx, w.run.ID, "node.status", map[string]any{"node": n})
+					}
+				}
+			}
+		}
 	}
 	o := failure.res
-	if !o.limit {
+	if wrapped {
 		o = failed(store.RunFailed, "branch "+failure.w.branch.Head+" failed: "+failure.res.reason)
 	}
 	w.closeFork(ctx, fv, span, store.NodeFailed, &o.reason)
