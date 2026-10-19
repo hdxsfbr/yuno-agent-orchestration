@@ -1,3 +1,19 @@
+# Test results, 2026-10-19 (delivery process wave 2: tickets, wave labels, escalation, plans view; DESIGN 5.29)
+
+Run on the development machine from `main` (commit `65dba31`), in throwaway containers: the
+CI job's own commands in an isolated compose project, the Go suite again on two CPUs and the
+engine package on one CPU twice.
+
+| Command | Result |
+|---|---|
+| `go test ./... -count=1` (two CPUs) | every package ok (new: `internal/plans` with escalation, retry and the notice resend sweep; `publish_tickets` with marker dedupe, slicer shape, caps; `escalate`; `auto_after` limited to paths under `docs/`; draft and ready merge requests; plan cancel; merged tickets on sync) |
+| `go test ./internal/engine/ -count=2` (one CPU) | ok |
+| `pnpm test` | 1112 tests passed (new: the Plans section with pause, resume and cancel) |
+| `go vet ./...`, staticcheck 2026.2.2, `gofmt -l`, eslint, `tsc --noEmit` | clean |
+| `make eval` (public split, local stack on this build) | 20 of 20 on one run, including 026 (review loop limit escalates) and 027 (PRD gap escalates) |
+| `make eval-final` | not rerun; wave 2 adds no private cases |
+| review | one Opus reviewer: two high, nine medium, nine low; all fixed but L2, L8 and L9 disclosed (`docs/reviews/factory-wave2-review.md`) |
+
 # Test results, 2026-10-19 (delivery process wave 1: factory agents, plan and wave pipelines; DESIGN 5.28)
 
 Run on the development machine from `main` (commit `bfdf061` and the eval fix on top), in

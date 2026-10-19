@@ -440,3 +440,12 @@ eval 025 with question answers in the eval runner); one Opus reviewer found thre
 (retirement could delete operator copies and silently stop intake; step limits too small);
 two Sonnet agents fixed every kept finding. The coordinator ran the suites under the CI
 runner's limits and the evals live, and widened the margin of a flaky time-limit case.
+
+2026-10-19, delivery process wave 2: the coordinator split the wave into a shared
+contract and five Sonnet agents on disjoint files (tickets and the issue provider,
+escalation in the engine, plans service and store, the wave pipeline's draft and ready
+merge requests with `auto_after`, the Plans section in the UI), plus evals 026 and 027.
+One Opus reviewer found two highs (issue bodies read fields the slicer never wrote; a
+retried escalated ticket stayed failed) and nine mediums; three Sonnet agents fixed them
+on disjoint files. The coordinator ran the CI job's commands under the runner's limits
+and one live eval run.
