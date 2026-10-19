@@ -118,7 +118,10 @@ ones that matter:
 Yuno runs a fixed delivery process against a project repository (DESIGN 5.28 and 5.29;
 the plan and its mapping are in `docs/briefs/delivery-process/`). Eight agents do the
 work: Analyst, Scout, Architect, Planner, Builder, Code Reviewer, Doc Auditor and
-Integrator; the Chief of Staff stays the one agent on Telegram.
+Integrator; the Chief of Staff stays the one agent on Telegram. Through it you can also ask
+what is waiting for approval and approve or reject it, and add a repository as a project
+(reusing the token of a project on the same host, or `PROJECT_GIT_TOKEN`; a token is never
+typed in chat).
 
 - **Plan** (`Plan pipeline`, once per feature, input `task` and a `feature` slug): the
   Analyst asks you about anything ambiguous and writes `PRD.md`; the Scout reviews it
@@ -154,7 +157,16 @@ Integrator; the Chief of Staff stays the one agent on Telegram.
   Integrator saves the wave's lessons as project notes and calls `advance_wave`, which
   closes the wave's issues and releases the next wave. After the last wave you check the
   live app against `PRD.md` and accept the feature, which finishes the plan. Rejecting
-  either approval pauses the waves with your reason.
+  either approval pauses the waves with your reason. The Integrator also proposes a small
+  merge request appending the wave's lessons to the repository's `CLAUDE.md`, which you
+  approve like any other.
+- **Changes requested**: a ticket with a merge request has a Request changes action on
+  the project page; your notes start another Wave pipeline run on the same merge request.
+- **Revising a plan**: run `Plan pipeline` with `revise_plan` (the plan's id) and the
+  change as the task. The agents amend the documents; the Integrator updates the changed
+  tickets' issues, opens issues for new ones and closes dropped ones (finished waves are
+  left alone), resets the current wave's failed tickets and resumes the waves. This is
+  also how a ticket that escalated gets going again.
 
 The earlier templates (`dev_pipeline`, `research_pipeline`, `review_panel`) and their
 agents were retired with this change; their definitions are kept in `templates/legacy/`

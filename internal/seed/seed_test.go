@@ -122,7 +122,7 @@ func TestSeedCreatesChief(t *testing.T) {
 		!chief.MemoryPolicy.Enabled || !strings.HasPrefix(chief.ChatToken, "c_") {
 		t.Fatalf("chief = %+v", chief)
 	}
-	want := []string{"answer_question", "delegate_task", "list_agents", "list_projects", "list_workflows", "memory_recall", "memory_save", "read_merge_request", "run_status"}
+	want := []string{"add_project", "answer_question", "decide_approval", "delegate_task", "list_agents", "list_approvals", "list_projects", "list_workflows", "memory_recall", "memory_save", "read_merge_request", "run_status"}
 	got := slices.Sorted(slices.Values(chief.ToolAllowlist))
 	if !slices.Equal(got, want) || slices.Contains(chief.ToolAllowlist, "exec") {
 		t.Fatalf("chief tools = %v", chief.ToolAllowlist)
@@ -188,7 +188,7 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 		"Builder":       {"claude-sonnet-5-5", []string{"read", "ls", "write", "edit", "exec", "ask_operator", "memory_save", "memory_recall", "escalate", "finish"}, true},
 		"Code Reviewer": {"claude-opus-5-5", []string{"read", "ls", "exec", "read_merge_request", "escalate", "finish"}, false},
 		"Doc Auditor":   {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "exec", "escalate", "finish"}, false},
-		"Integrator":    {"claude-sonnet-5-5", []string{"open_merge_request", "publish_tickets", "advance_wave", "read", "ls", "memory_save", "escalate", "finish"}, true},
+		"Integrator":    {"claude-sonnet-5-5", []string{"open_merge_request", "publish_tickets", "advance_wave", "read", "ls", "write", "edit", "memory_save", "escalate", "finish"}, true},
 	}
 	if len(created) != len(want)+1 {
 		t.Fatalf("created %v", created)
@@ -256,6 +256,9 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 	if !strings.Contains(integrator.SystemPrompt, "advance_wave exactly once") || !strings.Contains(integrator.SystemPrompt, "after the smoke test passed") {
 		t.Error("the Integrator prompt does not say when to advance the wave")
 	}
+	if !strings.Contains(integrator.SystemPrompt, `paths ["CLAUDE.md"]`) || !strings.Contains(integrator.SystemPrompt, "best effort") {
+		t.Error("the Integrator prompt does not cover the lessons merge request")
+	}
 	if !strings.Contains(builder.SystemPrompt, "failing test") || !strings.Contains(reviewer.SystemPrompt, "never rewrite") ||
 		!strings.Contains(auditor.SystemPrompt, "never patch around an unmet requirement") {
 		t.Error("the Builder, Reviewer or Auditor prompt lost its rule")
@@ -266,6 +269,16 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 	must(t, err)
 	if chief.SystemPrompt != ChiefPrompt || chief.Model != "claude-opus-5-5" || !chief.MemoryPolicy.Enabled {
 		t.Fatalf("chief = %+v", chief)
+	}
+	// D-081: the routing names the delivery workflows, never the retired Dev pipeline.
+	for _, phrase := range []string{"Plan pipeline", "revise_plan", "Never run the Ship pipeline by hand", "never start the Wave pipeline",
+		"Scout", "Architect", "Builder", "list_approvals", "decide_approval", "its code", "untrusted_content", "never ask the person for a token"} {
+		if !strings.Contains(ChiefPrompt, phrase) {
+			t.Errorf("the Chief's prompt lacks %q", phrase)
+		}
+	}
+	if strings.Contains(ChiefPrompt, "Dev pipeline") {
+		t.Error("the Chief's prompt still names the Dev pipeline")
 	}
 	b := &fakeBinder{}
 	bound, err := BindChief(ctx, pool, b)
@@ -985,5 +998,131 @@ func TestSeedTemplatesKeepEditedCopy(t *testing.T) {
 	out := logs.String()
 	if !strings.Contains(out, "kept: edited since seeded; use seed-reset to restore") || !strings.Contains(out, `workflow="Wave pipeline"`) {
 		t.Fatalf("log = %s", out)
+	}
+}
+
+// shippedAgent returns the live agent of a shipped name, failing the test when absent.
+func shippedAgent(t *testing.T, pool *pgxpool.Pool, name string) *store.Agent {
+	t.Helper()
+	a, err := findAgent(context.Background(), pool, name)
+	must(t, err)
+	if a == nil {
+		t.Fatalf("agent %s missing", name)
+	}
+	return a
+}
+
+// An agent with no hash (made before migration 0021) and old values is upgraded: role,
+// prompt and allowlist become the shipped ones, MaterializedHash is cleared, the hash is recorded.
+func TestUpgradeAgentsNullHash(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	a := shippedAgent(t, pool, "Integrator")
+	a.Role, a.SystemPrompt, a.ToolAllowlist, a.MaterializedHash = "old role", "old prompt", []string{"read", "finish"}, "pushed"
+	a.Model = "claude-haiku-5-5"
+	must(t, store.UpdateAgent(ctx, pool, a))
+	_, err = pool.Exec(ctx, `UPDATE agents SET seeded_hash = NULL`)
+	must(t, err)
+
+	done, err := UpgradeAgents(ctx, pool, slog.New(slog.DiscardHandler))
+	if err != nil || !slices.Equal(done, []string{"Integrator"}) {
+		t.Fatalf("upgrade: %v %v", done, err)
+	}
+	got := shippedAgent(t, pool, "Integrator")
+	if got.SystemPrompt != shippedPrompt(t, "Integrator") || !slices.Contains(got.ToolAllowlist, tools.AdvanceWaveName) || got.Role == "old role" {
+		t.Fatalf("not upgraded: %q %v", got.Role, got.ToolAllowlist)
+	}
+	if got.MaterializedHash != "" || got.Model != "claude-haiku-5-5" {
+		t.Fatalf("materialized %q model %s", got.MaterializedHash, got.Model)
+	}
+	if got.SeededHash == nil || *got.SeededHash != store.AgentSeedHash(got.Role, got.SystemPrompt, got.ToolAllowlist) {
+		t.Fatalf("hash %v", got.SeededHash)
+	}
+	// Every other shipped agent was current: it only gained its hash.
+	for _, tpl := range Agents {
+		if g := shippedAgent(t, pool, tpl.Name); g.SeededHash == nil {
+			t.Fatalf("%s has no hash", tpl.Name)
+		}
+	}
+}
+
+// An agent whose hash matches its values follows the shipped values when they change.
+func TestUpgradeAgentsMatchingHash(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	// The agent as an earlier release shipped it, with the hash that release recorded.
+	a := shippedAgent(t, pool, "Integrator")
+	a.SystemPrompt, a.ToolAllowlist, a.MaterializedHash = "release one prompt", []string{"read", "finish"}, "pushed"
+	must(t, store.UpdateAgent(ctx, pool, a))
+	must(t, store.SetAgentSeededHash(ctx, pool, a.ID, store.AgentSeedHash(a.Role, a.SystemPrompt, a.ToolAllowlist)))
+
+	done, err := UpgradeAgents(ctx, pool, slog.New(slog.DiscardHandler))
+	if err != nil || !slices.Equal(done, []string{"Integrator"}) {
+		t.Fatalf("upgrade: %v %v", done, err)
+	}
+	got := shippedAgent(t, pool, "Integrator")
+	if got.SystemPrompt != shippedPrompt(t, "Integrator") || got.MaterializedHash != "" || got.SeededHash == nil ||
+		*got.SeededHash != store.AgentSeedHash(got.Role, got.SystemPrompt, got.ToolAllowlist) {
+		t.Fatalf("after upgrade: %q hash %q seeded %v", got.SystemPrompt, got.MaterializedHash, got.SeededHash)
+	}
+}
+
+// An agent edited after it was seeded (hash mismatch) is kept, logged, and not touched.
+func TestUpgradeAgentsKeepEdited(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	a := shippedAgent(t, pool, "Integrator")
+	a.SystemPrompt, a.MaterializedHash = "the operator's prompt", "pushed"
+	must(t, store.UpdateAgent(ctx, pool, a))
+	before := shippedAgent(t, pool, "Integrator")
+
+	var logs bytes.Buffer
+	done, err := UpgradeAgents(ctx, pool, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil || len(done) != 0 {
+		t.Fatalf("edited: %v %v", done, err)
+	}
+	after := shippedAgent(t, pool, "Integrator")
+	if after.SystemPrompt != "the operator's prompt" || after.MaterializedHash != "pushed" || !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("agent changed: %q %q", after.SystemPrompt, after.MaterializedHash)
+	}
+	if out := logs.String(); !strings.Contains(out, "kept: edited since seeded; use seed-reset to restore") || !strings.Contains(out, "agent=Integrator") {
+		t.Fatalf("log = %s", out)
+	}
+}
+
+// Agents already equal to the shipped values cause no update, with or without a recorded
+// hash: updated_at stays and the hash is only filled in.
+func TestUpgradeAgentsUnchangedNoUpdate(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	_, err = pool.Exec(ctx, `UPDATE agents SET seeded_hash = NULL, materialized_hash = 'pushed'`)
+	must(t, err)
+	before, err := store.ListAgents(ctx, pool)
+	must(t, err)
+
+	for range 2 {
+		done, err := UpgradeAgents(ctx, pool, slog.New(slog.DiscardHandler))
+		if err != nil || len(done) != 0 {
+			t.Fatalf("unchanged: %v %v", done, err)
+		}
+	}
+	after, err := store.ListAgents(ctx, pool)
+	must(t, err)
+	for i := range after {
+		if !after[i].UpdatedAt.Equal(before[i].UpdatedAt) || after[i].MaterializedHash != "pushed" || after[i].SeededHash == nil {
+			t.Fatalf("%s: updated %v hash %q seeded %v", after[i].Name, after[i].UpdatedAt, after[i].MaterializedHash, after[i].SeededHash)
+		}
+	}
+	// The Chief of Staff is in the shipped set.
+	if !slices.ContainsFunc(Agents, func(a store.Agent) bool { return a.Name == ChiefName }) {
+		t.Fatal("chief not in Agents")
 	}
 }

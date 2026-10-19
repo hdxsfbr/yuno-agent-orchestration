@@ -1144,6 +1144,10 @@ The full design with inputs, edge cases, failure handling and tests is
     Each later seed also upgrades the copies nobody edited to the template's current
     definition (the copy's `seeded_hash` matches its definition, or it has none and is at
     version 1) and keeps the edited ones, logged by name (D-080).
+    Seeding does the same for the shipped agents' role, prompt and allowlist (`seeded_hash`
+    holds their sha256; an agent without one counts as untouched, since nothing records an
+    edit of those fields and the one operator of this install, Andre, never edited the
+    factory agents), clearing `materialized_hash` so the api pushes the upgrade (D-080).
 14. Seeding binds the Chief of Staff when Telegram is enabled and nothing is bound; it
     never changes an existing binding.
 15. The materialiser writes a `## Chatting` section into `AGENTS.md` only for agents whose
@@ -4056,7 +4060,28 @@ Rules:
     retried run that ends badly again is told again.
 16. **Revising a plan** (wave 4): `plan_pipeline` with input `revise_plan` amends the
     documents and `publish_tickets` adds or updates issues by marker; the plan resumes at
-    its current wave.
+    its current wave. Choices: `revise_plan` names an open plan of the run's project whose
+    feature is the run's; a plan that is done or cancelled, another project's, or one for another
+    feature is refused before any effect. The current wave is the lowest wave with a ticket not
+    `closed`; tickets that are merged or closed are left as they are (issue, title, wave), nothing
+    may be placed in an earlier wave, and a changed ticket is the one whose title, body or wave
+    differs from its issue. A dropped ticket's issue is commented and closed, its plan ticket set
+    `closed`. Resuming unpauses the project (a `resumed` event only when it was paused), moves a
+    `shipping` or `accepting` plan back to `building` when the revision added or reset tickets or
+    moved the current wave, and re-releases the current wave's pending tickets (intake label on,
+    `:failed` and `:running` off) when that wave was released before or is a new one.
+    Review fixes (wave 4): a run whose `revise_plan` cannot be revised is refused when it is
+    triggered; a revision is refused while the current wave's ship run is live and it adds to
+    that wave, moves a building or in-review ticket to a later wave, or leaves no ticket to
+    build (cancel the plan instead); a released ticket moved to a later wave loses the intake
+    label and goes back to `pending`; a reset ticket's closed issue is reopened; the approval
+    text names the building or in-review tickets whose text changes (the operator then requests
+    changes) and the pause it will lift with its reason; issue bodies keep the plan's first
+    merge request link; only tickets added to, moved into or reset in the current wave move a
+    `shipping` or `accepting` plan back to `building`; each ship attempt has the ref
+    `plan:<id>:wave:<n>:<k>` (the form without `k` is attempt 1), and the watcher starts attempt
+    k+1 when the wave's latest attempt ended without `wave_done` and the plan is `building`
+    again with its tickets merged and main green.
 17. **The fake forge (D-079).** Evals that need a tracker run against `forgefake`, a role
     of the one binary started only under the compose profile `eval`: an in-memory GitLab
     REST subset (the issue, label, merge request and pipeline endpoints the platform

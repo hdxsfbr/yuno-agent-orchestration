@@ -50,6 +50,7 @@ const (
 	PlanEventResumed          = "resumed"
 	PlanEventRetried          = "retried"
 	PlanEventCancelled        = "cancelled"
+	PlanEventRevised          = "revised"
 )
 
 const (
@@ -315,6 +316,18 @@ func SetTicketIssue(ctx context.Context, q Querier, planID, ticketID string, num
 		planID, ticketID, number, url)
 }
 
+// ResetFailedTicket sets a failed ticket back to pending and unlinks its run and merge
+// request, so the next run that takes its issue starts clean (DESIGN 5.29 rule 16). It
+// reports whether the ticket was failed.
+func ResetFailedTicket(ctx context.Context, q Querier, planID, ticketID string) (bool, error) {
+	tag, err := q.Exec(ctx, `UPDATE plan_tickets SET status='pending', run_id=NULL, merge_request_id=NULL, updated_at=now()
+		WHERE plan_id=$1 AND ticket_id=$2 AND status='failed'`, planID, ticketID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // AddPlanEvent appends an event (ID, At and an empty Detail are filled in).
 func AddPlanEvent(ctx context.Context, q Querier, e *PlanEvent) error {
 	if e.ID == "" {
@@ -576,26 +589,47 @@ func PlansWithTicketsInReviewSince(ctx context.Context, q Querier, since time.Ti
 	return out, rows.Err()
 }
 
-// ShipRef is the trigger_ref of the ship run of a plan's wave (DESIGN 5.29 rule 12).
+// ShipRef is the trigger_ref of the first ship run of a plan's wave, in the form used before
+// attempts were numbered (DESIGN 5.29 rule 12); ParseShipRef still accepts it, as attempt 1.
 func ShipRef(planID string, wave int) string {
 	return "plan:" + planID + ":wave:" + strconv.Itoa(wave)
 }
 
+// ShipAttemptRef is the trigger_ref of attempt k (from 1) at shipping a plan's wave:
+// "plan:<plan id>:wave:<n>:<k>". A revision of a wave whose earlier attempt ended without
+// closing it lets the watcher start the next attempt (rule 12).
+func ShipAttemptRef(planID string, wave, attempt int) string {
+	return ShipRef(planID, wave) + ":" + strconv.Itoa(max(attempt, 1))
+}
+
 // ParseShipRef splits a ship run's trigger_ref; ok is false for any other text.
 func ParseShipRef(ref string) (planID string, wave int, ok bool) {
+	planID, wave, _, ok = ParseShipAttempt(ref)
+	return planID, wave, ok
+}
+
+// ParseShipAttempt is ParseShipRef with the attempt number, 1 for the form without one.
+func ParseShipAttempt(ref string) (planID string, wave, attempt int, ok bool) {
 	rest, found := strings.CutPrefix(ref, "plan:")
 	if !found {
-		return "", 0, false
+		return "", 0, 0, false
 	}
 	i := strings.LastIndex(rest, ":wave:")
 	if i <= 0 {
-		return "", 0, false
+		return "", 0, 0, false
 	}
-	n, err := strconv.Atoi(rest[i+len(":wave:"):])
+	waveText, attemptText, hasAttempt := strings.Cut(rest[i+len(":wave:"):], ":")
+	n, err := strconv.Atoi(waveText)
 	if err != nil || n < 1 {
-		return "", 0, false
+		return "", 0, 0, false
 	}
-	return rest[:i], n, true
+	attempt = 1
+	if hasAttempt {
+		if attempt, err = strconv.Atoi(attemptText); err != nil || attempt < 1 {
+			return "", 0, 0, false
+		}
+	}
+	return rest[:i], n, attempt, true
 }
 
 // PlanMain is the default branch's status as the wave watcher last read it (rule 11).
@@ -662,21 +696,56 @@ func ListShipRuns(ctx context.Context, q Querier, planID string) ([]ShipRun, err
 		return nil, err
 	}
 	defer rows.Close()
-	out := []ShipRun{}
+	// One entry per wave: its newest attempt (a revision can start another, rule 12).
+	best := map[int]int{}
+	byWave := map[int]ShipRun{}
 	for rows.Next() {
 		var id, status, ref string
 		if err := rows.Scan(&id, &status, &ref); err != nil {
 			return nil, err
 		}
-		if pid, wave, ok := ParseShipRef(ref); ok && pid == planID {
-			out = append(out, ShipRun{Wave: wave, RunID: id, Status: status})
+		if pid, wave, attempt, ok := ParseShipAttempt(ref); ok && pid == planID && attempt >= best[wave] {
+			best[wave] = attempt
+			byWave[wave] = ShipRun{Wave: wave, RunID: id, Status: status}
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Wave < out[j].Wave })
+	out := []ShipRun{}
+	for _, r := range byWave {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Wave < out[j].Wave })
 	return out, nil
+}
+
+// LatestShipRun returns the newest attempt's ship run of the plan's wave and its attempt
+// number; ErrNotFound when the wave has none.
+func LatestShipRun(ctx context.Context, q Querier, planID string, wave int) (*Run, int, error) {
+	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE trigger=$1 AND (trigger_ref=$2 OR trigger_ref LIKE $3)`,
+		TriggerPlan, ShipRef(planID, wave), escapeLike(ShipRef(planID, wave))+`:%`)
+	if err != nil {
+		return nil, 0, err
+	}
+	list, err := pgx.CollectRows(rows, pgx.RowToStructByName[Run])
+	if err != nil {
+		return nil, 0, err
+	}
+	var best *Run
+	bestAttempt := 0
+	for i := range list {
+		if list[i].TriggerRef == nil {
+			continue
+		}
+		if pid, w, attempt, ok := ParseShipAttempt(*list[i].TriggerRef); ok && pid == planID && w == wave && attempt >= bestAttempt {
+			best, bestAttempt = &list[i], attempt
+		}
+	}
+	if best == nil {
+		return nil, 0, ErrNotFound
+	}
+	return best, bestAttempt, nil
 }
 
 func escapeLike(s string) string {

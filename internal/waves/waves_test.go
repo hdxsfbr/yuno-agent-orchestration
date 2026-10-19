@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -399,7 +400,7 @@ func TestWatcherShipsAWaveOnlyWhenMergedAndGreenAfterTheMerges(t *testing.T) {
 	if in["plan_id"] != e.plan.ID || in["feature"] != "search" || in["wave"] != float64(1) || in["last_wave"] != float64(2) {
 		t.Fatalf("ship run input = %v", in)
 	}
-	if e.eng.last.Trigger != store.TriggerPlan || e.eng.last.TriggerRef != "plan:"+e.plan.ID+":wave:1" || e.eng.last.ProjectID != e.project.ID {
+	if e.eng.last.Trigger != store.TriggerPlan || e.eng.last.TriggerRef != "plan:"+e.plan.ID+":wave:1:1" || e.eng.last.ProjectID != e.project.ID {
 		t.Fatalf("trigger = %+v", e.eng.last)
 	}
 	evs, _ := store.ListPlanEvents(context.Background(), testPool, e.plan.ID, 0)
@@ -908,4 +909,66 @@ func TestPauseLandingMidwayStopsTheRelease(t *testing.T) {
 			t.Fatalf("plan = %s, labelled %v", p.Status, e.issues.added)
 		}
 	})
+}
+
+// H1: a wave whose ship attempt ended without closing it, and whose plan a revision put back
+// in building, ships again as the next attempt once its tickets merged; the plan does not go
+// back to shipping on the old run.
+func TestWatcherStartsANewShipAttemptAfterARevision(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, store.PlanBuilding)
+	t0 := e.now.Add(-time.Hour)
+	e.setStatus("T1", store.TicketReleased)
+	e.merged("T1", 31, t0)
+	e.setStatus("T2", store.TicketReleased) // added by the revision, not built yet
+	old := e.newRun(store.TriggerPlan, store.ShipAttemptRef(e.plan.ID, 1, 1))
+	_, err := testPool.Exec(ctx, `UPDATE runs SET status='failed' WHERE id=$1`, old.ID)
+	mustDo(t, err)
+	e.setMain("passed", t0.Add(time.Minute))
+
+	e.pass()
+	if p := e.reload(); p.Status != store.PlanBuilding || e.eng.calls != 0 {
+		t.Fatalf("the old run moved the plan: %s, %d triggers", p.Status, e.eng.calls)
+	}
+	e.merged("T2", 32, t0.Add(10*time.Minute))
+	e.setMain("passed", t0.Add(11*time.Minute))
+	e.pass()
+	if e.eng.calls != 1 || e.eng.last.TriggerRef != store.ShipAttemptRef(e.plan.ID, 1, 2) {
+		t.Fatalf("triggers %d, last %+v; want attempt 2", e.eng.calls, e.eng.last)
+	}
+	ships := e.ships()
+	if len(ships) != 1 || ships[0].RunID == old.ID || e.reload().Status != store.PlanShipping {
+		t.Fatalf("ship runs = %+v, plan %s", ships, e.reload().Status)
+	}
+}
+
+// A live attempt is recorded, not replaced (the process stopped before the plan moved).
+func TestWatcherRecordsALiveShipAttempt(t *testing.T) {
+	e := newEnv(t, store.PlanBuilding)
+	e.setStatus("T1", store.TicketMerged)
+	e.setStatus("T2", store.TicketMerged)
+	e.setMain("passed", e.now)
+	run := e.newRun(store.TriggerPlan, store.ShipAttemptRef(e.plan.ID, 1, 3))
+	e.pass()
+	if p := e.reload(); p.Status != store.PlanShipping || e.eng.calls != 0 {
+		t.Fatalf("plan %s, %d triggers", p.Status, e.eng.calls)
+	}
+	if ships := e.ships(); len(ships) != 1 || ships[0].RunID != run.ID {
+		t.Fatalf("ships = %+v", ships)
+	}
+}
+
+// Advance closes a wave only when each of its tickets merged: a ticket a revision added
+// since the smoke test began is not shipped.
+func TestAdvanceRefusesWhileATicketOfTheWaveIsNotMerged(t *testing.T) {
+	e := newEnv(t, store.PlanBuilding)
+	run := e.shipping(1, "T1") // T2 stays pending
+	_, err := e.svc.Advance(context.Background(), run.ID)
+	var refused *tools.AdvanceRefused
+	if !errors.As(err, &refused) || !strings.Contains(refused.Reason, "T2") {
+		t.Fatalf("advance = %v, want a refusal naming T2", err)
+	}
+	if len(e.issues.closed) != 0 || e.status("T2") != store.TicketPending {
+		t.Fatalf("closed %v, T2 %s", e.issues.closed, e.status("T2"))
+	}
 }

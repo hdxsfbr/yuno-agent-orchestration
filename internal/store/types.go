@@ -50,7 +50,7 @@ const (
 	// trigger_ref is "<project id>#<n>" (DESIGN 5.23 units).
 	TriggerIssue = "issue"
 	// TriggerPlan marks a ship run the wave watcher started; its trigger_ref is
-	// "plan:<plan id>:wave:<n>" (DESIGN 5.29 rule 12), unique by runs_plan_wave_idx.
+	// "plan:<plan id>:wave:<n>:<attempt>" (DESIGN 5.29 rule 12), unique by runs_plan_wave_idx.
 	TriggerPlan = "plan"
 )
 
@@ -146,6 +146,9 @@ type Agent struct {
 	Thinking         string            `db:"thinking" json:"thinking"`
 	ExecPolicy       ExecPolicy        `db:"exec_policy" json:"exec_policy"`
 	MaterializedHash string            `db:"materialized_hash" json:"materialized_hash"`
+	// SeededHash is the sha256 of the role, prompt and allowlist the seed last wrote to a
+	// shipped agent (nil for agents made before it was recorded and for other agents).
+	SeededHash *string `db:"seeded_hash" json:"-"`
 	// ChatToken identifies the agent's chat-time platform tool calls (DESIGN 5.15 rule
 	// 1). It is never serialised: the API, events and logs do not carry it.
 	ChatToken string     `db:"chat_token" json:"-"`

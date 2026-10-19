@@ -6,6 +6,26 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-19
 
+**D-081 Approvals and project setup from Telegram through the Chief.** (Andre 2026-10-19)
+The Chief of Staff gets `list_approvals`, `decide_approval` and `add_project`, and its prompt
+routes requests to the delivery workflows (Plan pipeline, `revise_plan`, the Scout, the
+Architect, the Builder; never the Ship pipeline by hand). `decide_approval` calls the
+engine's `DecideApproval`, the web UI's path, with `decided_by chat:telegram`; it answers
+only a chat token whose conversation is the calling agent's own on Telegram. `add_project`
+runs the API's project creation; its input has no token member, and the server uses the
+token of a project on the same host and provider in the same repository namespace (owner or
+group path), else `PROJECT_GIT_TOKEN`, else tells the person to add the project once in the
+web UI. Chat tools cannot be approval-gated (an approval pauses a run and a conversation
+has none), so all three are computational or read-only, and the operator asking in their
+own bound chat is the approval. Because model-written run text reaches the same session as
+`[platform]` turns, a decision is bound to the person: `list_approvals` shows a 4-character
+code per approval (HMAC of the id under a server secret), and `decide_approval` takes
+`{approval_id, code, decision, reason}` and accepts it only when the code matches and
+appears in the newest inbound message of the bound conversation that is not a `[platform]`
+injection or the Chief's own. The injected payloads are also wrapped as untrusted content.
+Consequence: anyone holding that chat can approve (threat model). Alternative rejected:
+letting the model receive tokens in chat.
+
 **D-080 Shipped workflow copies follow their template until the operator edits them.**
 (Coordinator) The seed used to instantiate each shipped template once and never touch the
 copy again, so a template that gained nodes in a later release never reached a running
@@ -15,6 +35,12 @@ versions) to each copy whose definition still hashes to it, or that has no hash 
 version 1 (the rule `retire.go` uses), unless the resolved definition already equals the
 template's. An edited copy is kept and logged; `seed-reset` still restores it.
 Alternative rejected: always resetting, which would overwrite operator edits.
+Agents too: `agents.seeded_hash` (migration 0021) holds the sha256 of the role, prompt and
+allowlist the seed last wrote; every seed run upgrades a shipped agent (the eight factory
+agents, the Chief of Staff included, binding kept) whose current values hash to it, or that
+has no hash, and clears its `materialized_hash`; an edited one is kept and logged. A NULL
+hash counts as untouched because nothing distinguishes an edit (`agent_file_edits` holds
+workspace files, not these fields) and the only operator, Andre, never edited them.
 
 **D-079 Wave evals run against a fake forge.** (Coordinator, within D-071 to D-078's
 plan, WAVES T3.5) Eval 028 needs issues, labels, merge requests, merges and a default

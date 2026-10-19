@@ -305,7 +305,7 @@ func (e *Engine) runReportText(ctx context.Context, run *store.Run) string {
 		status += fmt.Sprintf(" (retry %d)", run.Retries)
 	}
 	text := fmt.Sprintf("[platform] Run %s %s after %s, cost $%s: %s %s", run.ID, status, reportDuration(end.Sub(start)),
-		reportCost(run.CostUSDMicros), sentence(outcome), tools.RunURL(e.deps.Cfg.PublicBaseURL, run.ID))
+		reportCost(run.CostUSDMicros), untrustedReport("run outcome", outcome), tools.RunURL(e.deps.Cfg.PublicBaseURL, run.ID))
 	if run.MergeRequestID != nil {
 		// DESIGN 5.22 rule 9: a run that names a request ends with its link when it pushed
 		// onto it, and says nothing of the request otherwise. The run has no record of its
@@ -400,6 +400,12 @@ func sentence(s string) string {
 	return s + "."
 }
 
+// untrustedReport wraps text a model or an outside page wrote (a run's outcome, a
+// question, an approval's message) as untrusted content, so the Chief reads it as data
+// even when it looks like a [platform] line or an instruction (D-081). The platform's own
+// words around it stay outside the block.
+func untrustedReport(source, text string) string { return tools.WrapUntrustedFrom(source, text) }
+
 // questionKey is the chat.send idempotency key of a question's notice to the Telegram-bound
 // agent's conversation under DESIGN 5.24 rule 6 (b): report-<run id>-question-<approval id>,
 // the shape reportRunID reads the run from, so the mirrored message links the run.
@@ -467,11 +473,11 @@ func (e *Engine) announceToBoundAgent(ctx context.Context, runID, approvalID, te
 // it on (question <id>)." The Options sentence is only there when the question has options;
 // the question ends with a full stop unless it already ends a sentence.
 func (e *Engine) questionReportText(run *store.Run, a *store.Approval) string {
-	question := sentence(obs.Redact(strings.TrimSpace(a.Message)))
+	question := untrustedReport("run question", obs.Redact(strings.TrimSpace(a.Message)))
 	options := ""
 	var list []string
 	if len(a.Options) > 0 && json.Unmarshal(a.Options, &list) == nil && len(list) > 0 {
-		options = " Options: " + obs.Redact(strings.Join(list, " | ")) + "."
+		options = " Options: " + untrustedReport("run question options", obs.Redact(strings.Join(list, " | ")))
 	}
 	return fmt.Sprintf("[platform] Run %s asks: %s%s Answer it at %s, or tell me the answer and I will pass it on (question %s).",
 		run.ID, question, options, tools.RunURL(e.deps.Cfg.PublicBaseURL, run.ID), a.ID)
@@ -489,7 +495,7 @@ func (e *Engine) approvalReportText(run *store.Run, a *store.Approval) string {
 		msg = "no description"
 	}
 	return fmt.Sprintf("[platform] Run %s is waiting for an approval: %s, %s Decide it at %s", run.ID, a.Kind,
-		sentence(msg), tools.RunURL(e.deps.Cfg.PublicBaseURL, run.ID))
+		untrustedReport("approval message", msg), tools.RunURL(e.deps.Cfg.PublicBaseURL, run.ID))
 }
 
 // lastNodeOutput is the output of the run's last node visit that produced one, as

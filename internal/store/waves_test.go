@@ -24,6 +24,56 @@ func TestShipRef(t *testing.T) {
 	}
 }
 
+func TestShipAttemptRef(t *testing.T) {
+	ref := ShipAttemptRef("plan-1", 3, 2)
+	if ref != "plan:plan-1:wave:3:2" {
+		t.Fatalf("ref = %q", ref)
+	}
+	if id, w, a, ok := ParseShipAttempt(ref); !ok || id != "plan-1" || w != 3 || a != 2 {
+		t.Fatalf("parse = %q %d %d %v", id, w, a, ok)
+	}
+	if id, w, ok := ParseShipRef(ref); !ok || id != "plan-1" || w != 3 {
+		t.Fatalf("ParseShipRef = %q %d %v", id, w, ok)
+	}
+	// The form without an attempt is attempt 1.
+	if _, _, a, ok := ParseShipAttempt(ShipRef("plan-1", 3)); !ok || a != 1 {
+		t.Fatalf("legacy attempt = %d %v", a, ok)
+	}
+	for _, bad := range []string{"plan:x:wave:1:0", "plan:x:wave:1:a", "plan:x:wave:1:2:3", "plan:x:wave:0:1"} {
+		if _, _, ok := ParseShipRef(bad); ok {
+			t.Fatalf("%q parsed", bad)
+		}
+	}
+}
+
+func TestLatestShipRunAndAttempts(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	p, run := planFixture(t, "waves-attempts")
+	plan := &Plan{ProjectID: p.ID, Feature: "search", PlanRunID: run.ID, Status: PlanBuilding}
+	mustDo(t, CreatePlan(ctx, pool, plan))
+	wf := w9Workflow(t, pool)
+	mk := func(ref string) *Run {
+		return w9MustRun(t, pool, wf, func(r *Run) { r.Trigger, r.TriggerRef = TriggerPlan, &ref })
+	}
+	if _, _, err := LatestShipRun(ctx, pool, plan.ID, 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("no ship run: %v", err)
+	}
+	old := mk(ShipRef(plan.ID, 1))
+	if got, k, err := LatestShipRun(ctx, pool, plan.ID, 1); err != nil || got.ID != old.ID || k != 1 {
+		t.Fatalf("legacy = %v %d %v", got, k, err)
+	}
+	second := mk(ShipAttemptRef(plan.ID, 1, 2))
+	other := mk(ShipAttemptRef(plan.ID, 2, 1))
+	if got, k, err := LatestShipRun(ctx, pool, plan.ID, 1); err != nil || got.ID != second.ID || k != 2 {
+		t.Fatalf("latest = %v %d %v", got, k, err)
+	}
+	list, err := ListShipRuns(ctx, pool, plan.ID)
+	if err != nil || len(list) != 2 || list[0].RunID != second.ID || list[1].RunID != other.ID {
+		t.Fatalf("ship runs = %+v %v", list, err)
+	}
+}
+
 func TestPlanMainAndShipRuns(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()

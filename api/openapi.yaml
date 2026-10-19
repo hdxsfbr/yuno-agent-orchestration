@@ -904,6 +904,30 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { description: "plan_finished: the plan is done or cancelled already", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "422": { $ref: "#/components/responses/Error" }
+  /api/plans/{id}/tickets/{ticket}/changes:
+    post:
+      tags: [projects]
+      summary: Request changes on a ticket's merge request
+      description: |
+        Starts a run of the project's wave pipeline on the ticket's open merge request, so it
+        pushes to the same branch. The run's task is the ticket's issue and the notes. The run is
+        linked to the ticket, the ticket goes back to `building` and a `changes_requested` event
+        records the notes. 409 when the plan is done or cancelled (`plan_finished`), when the
+        ticket has no open merge request in review (`no_open_merge_request`) or when a run on the
+        merge request is live (`run_live`).
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: ticket, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ChangesRequestInput" } } }
+      responses:
+        "201": { description: the run, content: { application/json: { schema: { $ref: "#/components/schemas/Run" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: "plan_finished, no_open_merge_request or run_live", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /api/projects/{id}/waves/pause:
     post:
       tags: [projects]
@@ -1377,7 +1401,7 @@ components:
         id: { type: string }
         plan_id: { type: string }
         at: { type: string, format: date-time }
-        kind: { type: string, description: "published | wave_released | smoke_test_waiting | wave_done | accept_waiting | feature_done | escalated | paused | resumed | retried | cancelled" }
+        kind: { type: string, description: "published | wave_released | smoke_test_waiting | wave_done | accept_waiting | feature_done | escalated | paused | resumed | retried | cancelled | changes_requested | revised" }
         wave: { type: integer }
         ticket_id: { type: string }
         detail: { type: object, description: "kind-specific fields, for example reason" }
@@ -1412,6 +1436,13 @@ components:
         wave: { type: integer, minimum: 1 }
         run_id: { type: string }
         status: { type: string, description: "the run's status" }
+    ChangesRequestInput:
+      type: object
+      description: "The body of a changes request."
+      required: [notes]
+      additionalProperties: false
+      properties:
+        notes: { type: string, minLength: 1, maxLength: 4000 }
     WavesPauseInput:
       type: object
       description: "The body of a pause."

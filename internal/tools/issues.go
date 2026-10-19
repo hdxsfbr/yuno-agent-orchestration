@@ -103,6 +103,15 @@ const (
 // feature:<name>).
 const IssueColorTicket = "#6e7781"
 
+// IssueEditor is the part of a provider that rewrites an issue (DESIGN 5.29 rule 16); both
+// providers built by IssueProviderFor implement it.
+type IssueEditor interface {
+	// Update replaces the issue's title and body.
+	Update(ctx context.Context, number int64, title, body string) error
+	// Reopen opens a closed issue again; reopening an open issue is fine.
+	Reopen(ctx context.Context, number int64) error
+}
+
 // ensuredLabels is the set of label names a provider value has ensured already.
 type ensuredLabels struct {
 	mu   sync.Mutex
@@ -283,6 +292,18 @@ func (g *gitlabIssues) Close(ctx context.Context, number int64) error {
 	return err
 }
 
+// Update is PUT issues/<iid> {title, description} (DESIGN 5.29 rule 16).
+func (g *gitlabIssues) Update(ctx context.Context, number int64, title, body string) error {
+	_, err := g.api.do(ctx, http.MethodPut, fmt.Sprintf("%s/issues/%d", g.base, number), map[string]any{"title": title, "description": body}, nil)
+	return err
+}
+
+// Reopen is PUT issues/<iid> {state_event: reopen} (rule 16).
+func (g *gitlabIssues) Reopen(ctx context.Context, number int64) error {
+	_, err := g.api.do(ctx, http.MethodPut, fmt.Sprintf("%s/issues/%d", g.base, number), map[string]any{"state_event": "reopen"}, nil)
+	return err
+}
+
 // IssueState is GET issues/<iid> (DESIGN 5.29 rule 12): "opened" is open, any other state closed.
 func (g *gitlabIssues) IssueState(ctx context.Context, number int64) (string, error) {
 	var i struct {
@@ -460,6 +481,18 @@ func (g *githubIssues) Comment(ctx context.Context, number int64, body string) e
 // Close is PATCH issues/<n> {state: closed} (DESIGN 5.29 rule 14).
 func (g *githubIssues) Close(ctx context.Context, number int64) error {
 	_, err := g.api.do(ctx, http.MethodPatch, fmt.Sprintf("%s/issues/%d", g.base, number), map[string]any{"state": "closed"}, nil)
+	return err
+}
+
+// Update is PATCH issues/<n> {title, body} (DESIGN 5.29 rule 16).
+func (g *githubIssues) Update(ctx context.Context, number int64, title, body string) error {
+	_, err := g.api.do(ctx, http.MethodPatch, fmt.Sprintf("%s/issues/%d", g.base, number), map[string]any{"title": title, "body": body}, nil)
+	return err
+}
+
+// Reopen is PATCH issues/<n> {state: open} (rule 16).
+func (g *githubIssues) Reopen(ctx context.Context, number int64) error {
+	_, err := g.api.do(ctx, http.MethodPatch, fmt.Sprintf("%s/issues/%d", g.base, number), map[string]any{"state": "open"}, nil)
 	return err
 }
 

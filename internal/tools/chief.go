@@ -32,10 +32,10 @@ const (
 )
 
 // ChatToolNames are the tools callable with a chat token (DESIGN 5.15 rule 2, 5.17 rule
-// 8, 5.22 rule 6, 5.24 rule 9), sorted. The registry marks the same tools Chat; a test
+// 8, 5.22 rule 6, 5.24 rule 9, D-081), sorted. The registry marks the same tools Chat; a test
 // keeps the two in step.
-var ChatToolNames = []string{AnswerQuestionName, DelegateTaskName, ListAgentsName, ListProjectsName, ListWorkflowsName, MemoryRecallName,
-	MemorySaveName, ReadMergeRequestName, RunStatusName}
+var ChatToolNames = []string{AddProjectName, AnswerQuestionName, DecideApprovalName, DelegateTaskName, ListAgentsName, ListApprovalsName,
+	ListProjectsName, ListWorkflowsName, MemoryRecallName, MemorySaveName, ReadMergeRequestName, RunStatusName}
 
 // IsChatTool reports whether name (with or without the platform prefix) is
 // chat-capable.
@@ -531,7 +531,7 @@ func NewListProjects(pool *pgxpool.Pool) *Tool {
 		Description: "List the projects (git repositories) the platform can work on: name, repository, provider, " +
 			"default branch, whether the sandbox has network access, and the last run on each; a project with a " +
 			"budget cap also shows the cap and what it has spent today and this month, since new runs on it are " +
-			"refused once a cap is reached; intake says whether labelled issues become runs on it and which label. " +
+			"refused once a cap is reached; intake says whether labelled issues become runs on it and which label; open_plan is the plan in progress (id, feature, status). " +
 			"Call it to find the project a person names, then pass its name as project to delegate_task; a " +
 			"workflow that works on a project repository needs one.",
 		InputSchema: listAgentsSchema,
@@ -567,6 +567,11 @@ func NewListProjects(pool *pgxpool.Pool) *Tool {
 				Enabled bool   `json:"enabled"`
 				Label   string `json:"label"`
 			}
+			type planView struct {
+				ID      string `json:"id"`
+				Feature string `json:"feature"`
+				Status  string `json:"status"`
+			}
 			type projectView struct {
 				Name           string      `json:"name"`
 				Repository     string      `json:"repository"`
@@ -576,11 +581,19 @@ func NewListProjects(pool *pgxpool.Pool) *Tool {
 				LastRun        *lastRun    `json:"last_run"`
 				Budget         *budgetView `json:"budget,omitempty"`
 				Intake         intakeView  `json:"intake"`
+				// OpenPlan is the project's plan that is not done or cancelled, the one
+				// "Plan pipeline" with revise_plan changes (D-081).
+				OpenPlan *planView `json:"open_plan,omitempty"`
 			}
 			out := []projectView{}
 			for _, p := range projects {
 				v := projectView{Name: p.Name, Repository: p.RepoURL, Provider: p.Provider, DefaultBranch: p.DefaultBranch, SandboxNetwork: p.SandboxNetwork,
 					Budget: budgetOf(&p), Intake: intakeView{Enabled: p.IntakeEnabled, Label: p.IntakeLabel}}
+				if pl, err := store.OpenPlanForProject(ctx, pool, p.ID); err != nil {
+					return Result{}, err
+				} else if pl != nil {
+					v.OpenPlan = &planView{ID: pl.ID, Feature: pl.Feature, Status: pl.Status}
+				}
 				if r, ok := latest[p.ID]; ok {
 					v.LastRun = &lastRun{RunID: r.ID, Status: r.Status, Toolchain: r.Toolchain}
 					if r.FinishedAt != nil {

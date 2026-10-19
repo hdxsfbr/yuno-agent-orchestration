@@ -492,6 +492,28 @@ const shipInput = `{"plan_id":"p1","feature":"x","wave":1,"last_wave":2}`
 // smoke_test, the count of advance calls and the scripted sender.
 func shipRun(t *testing.T, env *testEnv, last bool) (*store.Run, *int32, *scripted) {
 	t.Helper()
+	r, calls, sc, _ := shipRunLessons(t, env, last, false, nil)
+	return r, calls, sc
+}
+
+// lessonsGate is the integrator's open_merge_request for the lessons, as the MCP handler
+// raises it: a recorded call and a pending tool approval the handler waits on.
+type lessonsGate struct {
+	wait   chan error
+	status chan string
+}
+
+// shipRunLessons is shipRun whose integrator, when lessonsMR is set, also calls the
+// approval-gated open_merge_request with paths ["CLAUDE.md"] after advance_wave and waits
+// for the operator's decision before it finishes (DESIGN 5.29 rule 13). The finish
+// carries lessons.
+func shipRunLessons(t *testing.T, env *testEnv, last, lessonsMR bool, lessons []string) (*store.Run, *int32, *scripted, *lessonsGate) {
+	t.Helper()
+	if lessons == nil {
+		lessons = []string{"pin the migration order", "smoke test the export"}
+	}
+	lj, _ := json.Marshal(lessons)
+	lg := &lessonsGate{wait: make(chan error, 1), status: make(chan string, 1)}
 	ctx := context.Background()
 	wf := templatePipeline(t, env, "ship_pipeline.json")
 	sc := env.script(map[string][]string{})
@@ -518,7 +540,33 @@ func shipRun(t *testing.T, env *testEnv, last bool) (*store.Run, *int32, *script
 			if err != nil || !strings.Contains(string(res.Output), `"plan_id":"p1"`) {
 				t.Errorf("advance_wave: %v %+v", err, res)
 			}
-			finishThenFinal(t, env, p, `{"wave":1,"last":`+strconv.FormatBool(last)+`,"lessons":["pin the migration order","smoke test the export"]}`)
+			if lessonsMR {
+				rc, ok := env.e.ResolveRunToken(tokenIn(p.Message))
+				if !ok {
+					t.Error("token not live")
+					return
+				}
+				key := "key-lessons"
+				call := &store.ToolCall{RunID: rc.RunID, RunNodeID: rc.RunNodeID, ToolUseID: "mcp-" + store.NewID(), ToolName: "open_merge_request",
+					Input:  json.RawMessage(`{"run_token":"` + tokenIn(p.Message) + `","title":"Lessons from x, wave 1","description":"Lessons of wave 1.","paths":["CLAUDE.md"]}`),
+					Status: store.ToolAwaitingApproval, IdempotencyKey: &key}
+				if err := store.InsertToolCall(ctx, env.pool, call); err != nil {
+					t.Error(err)
+					return
+				}
+				a, err := env.e.RequestApproval(ctx, ApprovalRequest{Token: tokenIn(p.Message), ToolName: "open_merge_request", ToolCallID: call.ID,
+					Message: "Open a merge request: Lessons from x, wave 1 (1 file)", Input: call.Input})
+				if err != nil {
+					t.Errorf("RequestApproval: %v", err)
+					return
+				}
+				got, err := env.e.WaitApproval(ctx, a.ID)
+				lg.wait <- err
+				if err == nil {
+					lg.status <- got.Status
+				}
+			}
+			finishThenFinal(t, env, p, `{"wave":1,"last":`+strconv.FormatBool(last)+`,"lessons":`+string(lj)+`}`)
 		}()
 		return startedTurn(p)
 	}
@@ -531,7 +579,92 @@ func shipRun(t *testing.T, env *testEnv, last bool) (*store.Run, *int32, *script
 	if r.Status != store.RunWaitingApproval || deref(r.CurrentNode) != "smoke_test" {
 		t.Fatalf("run = %s at %s %q", r.Status, deref(r.CurrentNode), deref(r.FailureReason))
 	}
-	return r, &calls, sc
+	return r, &calls, sc, lg
+}
+
+// shipWithLessonsMR approves the smoke test and runs the integrator to its end while the
+// lessons merge request is decided as decision (DESIGN 5.29 rule 13, D-075).
+func shipWithLessonsMR(t *testing.T, decision string, lessons []string) (*testEnv, *store.Run, *int32, *lessonsGate) {
+	t.Helper()
+	ctx := context.Background()
+	env := newEnv(t)
+	r, calls, _, lg := shipRunLessons(t, env, false, decision != "", lessons)
+	if _, err := env.e.DecideApproval(ctx, pendingApproval(t, env, r.ID).ID, DecisionApprove, "andre", ""); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimQueuedRun(ctx, env.pool)
+	if err != nil || claimed.ID != r.ID {
+		t.Fatalf("claim: %+v %v", claimed, err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		env.e.runRun(ctx, claimed)
+	}()
+	if decision != "" {
+		var ap *store.Approval
+		eventually(t, "the lessons approval", func() bool {
+			pending, _ := store.ListPendingApprovals(ctx, env.pool, r.ID)
+			if len(pending) == 1 {
+				ap = &pending[0]
+			}
+			return ap != nil
+		})
+		call, err := store.GetToolCall(ctx, env.pool, deref(ap.ToolCallID))
+		var in struct{ Paths []string }
+		if err == nil {
+			err = json.Unmarshal(call.Input, &in)
+		}
+		if err != nil || ap.Kind != store.ApprovalKindTool || ap.NodeID != "integrator" || call.ToolName != "open_merge_request" ||
+			!slices.Equal(in.Paths, []string{"CLAUDE.md"}) {
+			t.Fatalf("approval = %+v call %+v %v", ap, call, err)
+		}
+		if _, err := env.e.DecideApproval(ctx, ap.ID, decision, "andre", "not now"); err != nil {
+			t.Fatal(err)
+		}
+		if err := recv(t, lg.wait, "the lessons decision"); err != nil {
+			t.Fatalf("wait: %v", err)
+		}
+	}
+	return env, env.wait(done, r.ID), calls, lg
+}
+
+// DESIGN 5.29 rule 13 (D-075): the integrator opens the lessons merge request through the
+// normal approval gate; approved or rejected, the ship run still succeeds, and the
+// rejection reaches the agent as a decision, not a failure.
+func TestShipPipelineLessonsMergeRequest(t *testing.T) {
+	for _, decision := range []string{DecisionApprove, DecisionReject} {
+		t.Run(decision, func(t *testing.T) {
+			env, r, calls, lg := shipWithLessonsMR(t, decision, nil)
+			if r.Status != store.RunSucceeded {
+				t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+			}
+			want := store.ApprovalApproved
+			if decision == DecisionReject {
+				want = store.ApprovalRejected
+			}
+			if got := recv(t, lg.status, "the status"); got != want {
+				t.Fatalf("status = %s", got)
+			}
+			if n := atomic.LoadInt32(calls); n != 1 {
+				t.Fatalf("advance_wave calls = %d", n)
+			}
+			if n := env.count(`SELECT count(*) FROM approvals a JOIN tool_calls c ON c.id=a.tool_call_id WHERE a.run_id=$1 AND a.kind='tool' AND c.tool_name='open_merge_request'`, r.ID); n != 1 {
+				t.Fatalf("lessons approvals = %d", n)
+			}
+		})
+	}
+}
+
+// DESIGN 5.29 rule 13: a wave without lessons opens no merge request.
+func TestShipPipelineNoLessonsNoMergeRequest(t *testing.T) {
+	env, r, _, _ := shipWithLessonsMR(t, "", []string{})
+	if r.Status != store.RunSucceeded {
+		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+	if n := env.count(`SELECT count(*) FROM approvals WHERE run_id=$1 AND kind='tool'`, r.ID); n != 0 {
+		t.Fatalf("tool approvals = %d", n)
+	}
 }
 
 // DESIGN 5.29 rule 13: a wave that is not the last ends after the integrator. The smoke

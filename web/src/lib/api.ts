@@ -1205,6 +1205,9 @@ export const getPlan = (id: string) => api<PlanDetail>(`/api/plans/${seg(id)}`);
 export const pauseWaves = (projectId: string, reason: string) => api<Project>(`/api/projects/${seg(projectId)}/waves/pause`, withBody("POST", { reason }));
 /** Cancels a plan with a reason; its feature name can be used again. */
 export const cancelPlan = (id: string, reason: string) => api<Plan>(`/api/plans/${seg(id)}/cancel`, withBody("POST", { reason }));
+/** Starts a run on the ticket's open merge request with the notes (the run's body is the response). */
+export const requestChanges = (planId: string, ticketId: string, notes: string) =>
+  api<Run>(`/api/plans/${seg(planId)}/tickets/${seg(ticketId)}/changes`, withBody("POST", { notes }));
 export const resumeWaves = (projectId: string) => api<Project>(`/api/projects/${seg(projectId)}/waves/resume`, withBody("POST"));
 
 /** The project's live notes, newest first. */

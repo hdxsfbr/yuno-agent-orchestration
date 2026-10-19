@@ -449,3 +449,21 @@ One Opus reviewer found two highs (issue bodies read fields the slicer never wro
 retried escalated ticket stayed failed) and nine mediums; three Sonnet agents fixed them
 on disjoint files. The coordinator ran the CI job's commands under the runner's limits
 and one live eval run.
+
+2026-10-19, delivery process wave 3: five Sonnet agents built against contracts fixed in
+the wave's brief (providers and `advance_wave`, the watcher and plan lifecycle, the ship
+template, the fake forge with eval support, the wave timeline); one Opus reviewer found two
+highs (main's pipeline compared with our clock instead of the provider's; a ship run that
+succeeds without closing its wave stranded the plan); three Sonnet agents fixed ten
+findings. The live eval run caught a bug no unit test did: shipped workflow copies never
+followed their template, so the live pipelines were the wave 1 ones (D-080). Andre cut the
+process back: one CI run at full speed per push, evals only when prompts or templates
+change.
+
+2026-10-19, delivery process wave 4 and the Chief: three Sonnet agents built plan
+revision, changes requested and the lessons merge request on disjoint files; a fourth gave
+the Chief of Staff `list_approvals`, `decide_approval` and `add_project` and rewrote its
+routing to the factory's workflows after Andre said he works only through the Chief. The
+live eval of case 028 found that shipped agents, like shipped workflows, never followed
+their shipped version (the Integrator lacked `advance_wave`); a Sonnet agent extended
+D-080 to agents. One Opus reviewer reviewed the wave.

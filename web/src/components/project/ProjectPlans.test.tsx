@@ -396,3 +396,42 @@ describe("staying current", () => {
     expect(api.made("GET", "/api/plans/pl1")).toHaveLength(before);
   });
 });
+
+describe("requesting changes", () => {
+  it("offers the action only on tickets with a request in review", async () => {
+    renderPlans();
+    await screen.findByText("Add the test");
+    expect(screen.getAllByRole("button", { name: "Request changes" })).toHaveLength(1);
+  });
+
+  it("sends the notes for the ticket and closes the dialog", async () => {
+    api.on("POST", "/api/plans/pl1/tickets/T2/changes", () => ({ id: "run-new" }));
+    renderPlans();
+    fireEvent.click(await screen.findByRole("button", { name: "Request changes" }));
+    const dialog = within(await screen.findByRole("dialog"));
+    const submit = dialog.getByRole("button", { name: "Request changes" }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    fireEvent.change(dialog.getByLabelText(/Notes/), { target: { value: "Handle the empty query" } });
+    fireEvent.click(submit);
+    await waitFor(() => expect(api.made("POST", "/api/plans/pl1/tickets/T2/changes")).toHaveLength(1));
+    expect(api.made("POST", "/api/plans/pl1/tickets/T2/changes")[0].body).toEqual({ notes: "Handle the empty query" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("shows the server's message when the request is refused", async () => {
+    api.on("POST", "/api/plans/pl1/tickets/T2/changes", () => apiError(409, "run_live", "a run is working on the merge request"));
+    renderPlans();
+    fireEvent.click(await screen.findByRole("button", { name: "Request changes" }));
+    const dialog = within(await screen.findByRole("dialog"));
+    fireEvent.change(dialog.getByLabelText(/Notes/), { target: { value: "x" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Request changes" }));
+    expect((await dialog.findByRole("alert")).textContent).toBe("a run is working on the merge request");
+  });
+
+  it("reads the changes_requested event with its notes", async () => {
+    detail.events = [event({ id: "e3", kind: "changes_requested", ticket_id: "T2", detail: { notes: "Handle the empty query" } })];
+    renderPlans();
+    expect(await screen.findByText("Changes requested on ticket T2")).not.toBeNull();
+    expect(screen.getByText("Handle the empty query")).not.toBeNull();
+  });
+});

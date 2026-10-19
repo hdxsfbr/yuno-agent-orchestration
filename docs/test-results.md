@@ -1,3 +1,15 @@
+# Test results, 2026-10-19 (delivery process wave 3: waves that advance themselves; DESIGN 5.29 rules 10 to 15, 17)
+
+Run on the development machine from `main` (commits `41c61e3` and `5283f50`): the CI job's own
+targets (`make ci-up`, `make ci-test`, `make ci-lint`) in an isolated compose project.
+
+| Command | Result |
+|---|---|
+| `make ci-test` (Go suite and `pnpm test`) | every Go package ok (new: `internal/waves` watcher and `Advance`, ship run endings in `internal/plans`, `advance_wave` and its gate, default-branch status and issue close and state on GitLab and GitHub, `internal/forgefake`, the eval runner's project steps, seeded copies following their template); 1136 web tests passed |
+| `make ci-lint` (go vet, staticcheck 2026.2.2, gofmt, eslint, `tsc --noEmit`) | clean |
+| `make eval` (public split, local stack) | 20 of 21 on the first run: case 028 (two waves advancing, with the pause) failed because the seeded "Wave pipeline" copy was still the wave 1 definition; that bug is fixed in `5283f50` (D-080) |
+| review | one Opus reviewer: two high, three medium, eight low; ten fixed, three disclosed (`docs/reviews/factory-wave3-review.md`) |
+
 # Test results, 2026-10-19 (delivery process wave 2: tickets, wave labels, escalation, plans view; DESIGN 5.29)
 
 Run on the development machine from `main` (commit `65dba31`), in throwaway containers: the

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"crypto/rand"
 	"net/http"
 	"sort"
 	"time"
@@ -62,6 +63,15 @@ type PlatformDeps struct {
 	// AdvanceWave closes the run's wave and releases the next one (DESIGN 5.29 rule 14);
 	// late-bound like Escalate, nil leaves advance_wave unable to run.
 	AdvanceWave AdvanceWaveFunc
+	// DecideApproval is the engine's DecideApproval, late-bound, for decide_approval
+	// (D-081); nil leaves the tool unable to run.
+	DecideApproval DecideApprovalFunc
+	// AddProject creates a project through the API's own code for add_project (D-081);
+	// nil leaves the tool unable to run.
+	AddProject AddProjectFunc
+	// ApprovalCodeKey keys the codes decide_approval requires (D-081); empty gets a
+	// random key for the life of the process.
+	ApprovalCodeKey []byte
 	// RunIDForToken resolves a run token for publish_tickets' approval sentence (5.29
 	// rule 2); nil gives the generic sentence.
 	RunIDForToken func(token string) (runID string, ok bool)
@@ -70,6 +80,11 @@ type PlatformDeps struct {
 // NewPlatformRegistry returns the platform tools served over MCP (DESIGN 5.7).
 func NewPlatformRegistry(d PlatformDeps) *Registry {
 	r := NewRegistry()
+	codeKey := d.ApprovalCodeKey
+	if len(codeKey) == 0 {
+		codeKey = make([]byte, 32)
+		_, _ = rand.Read(codeKey)
+	}
 	r.Register(NewFinish(d.AcceptFinish, d.RejectFinish))
 	r.Register(NewDeployRelease(d.Deploy))
 	r.Register(NewHTTPFetch(d.Fetch))
@@ -88,6 +103,9 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 		MaxOutputBytes: d.MaxOutputBytes}))
 	r.Register(NewAskOperator(d))
 	r.Register(NewAnswerQuestion(d))
+	r.Register(NewListApprovals(d.Pool, codeKey))
+	r.Register(NewDecideApproval(d.Pool, d.DecideApproval, codeKey))
+	r.Register(NewAddProject(d.Pool, d.AddProject))
 	pt := PublishTicketsConfig{Projects: d.Projects, Client: d.ProviderClient, RunIDForToken: d.RunIDForToken}
 	if d.Pool != nil {
 		pt.DB = d.Pool

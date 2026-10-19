@@ -60,6 +60,13 @@ func (e *Engine) triggerWorkflow(ctx context.Context, req TriggerRequest) (*stor
 	}
 	msgs = append(msgs, ValidateInput(def.InputSchema, input)...)
 	if len(msgs) == 0 {
+		reviseMsgs, err := checkRevisePlan(ctx, e.deps.Pool, proj, input)
+		if err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, reviseMsgs...)
+	}
+	if len(msgs) == 0 {
 		// Templates render against the actual input and an empty state; only a
 		// definition that is otherwise sound gets this far.
 		msgs = append(msgs, def.ValidateTemplates(input)...)

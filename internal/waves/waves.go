@@ -327,16 +327,26 @@ func (s *Service) building(ctx context.Context, plan *store.Plan, proj *store.Pr
 	if proj.WavesPaused {
 		return nil
 	}
-	if run, err := store.GetRunByTrigger(ctx, s.Pool, store.TriggerPlan, store.ShipRef(plan.ID, wave)); err == nil {
-		// The run was started and the plan not moved (the process stopped between the two).
-		return s.recordShipping(ctx, plan, wave, run.ID)
+	attempt := 1
+	if run, last, err := store.LatestShipRun(ctx, s.Pool, plan.ID, wave); err == nil {
+		if !store.IsTerminal(run.Status) {
+			// The run was started and the plan not moved (the process stopped between the two).
+			return s.recordShipping(ctx, plan, wave, run.ID)
+		}
+		// The wave's latest attempt ended and the plan is building again: a revision added
+		// or reset tickets of the wave (rule 16). The wave ships again, as a new attempt,
+		// once those tickets merged, unless its `wave_done` is recorded already.
+		if _, done, err := s.advanced(ctx, s.Pool, plan.ID, wave); err != nil || done {
+			return err
+		}
+		attempt = last + 1
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
 	if !shippable(tickets, main) {
 		return nil
 	}
-	return s.startShip(ctx, plan, proj, wave, tickets, main.URL)
+	return s.startShip(ctx, plan, proj, wave, attempt, tickets, main.URL)
 }
 
 // shippable is rule 11: every ticket merged and the default branch passed for the pipeline
@@ -428,10 +438,10 @@ func (s *Service) escalate(ctx context.Context, t store.WaveTicketMerge, reason 
 	return ev != nil
 }
 
-// startShip starts the wave's ship run (rules 12 and 13) and moves the plan to shipping. The
+// startShip starts attempt k at the wave's ship run (rules 12 and 13) and moves the plan to shipping. The
 // unique index on the run's trigger_ref settles two watchers starting it together: the loser
 // finds the run and records it.
-func (s *Service) startShip(ctx context.Context, plan *store.Plan, proj *store.Project, wave int, tickets []store.WaveTicketMerge, mainURL string) error {
+func (s *Service) startShip(ctx context.Context, plan *store.Plan, proj *store.Project, wave, attempt int, tickets []store.WaveTicketMerge, mainURL string) error {
 	mergeRequests := []map[string]string{}
 	for _, t := range tickets {
 		if t.MRState == store.MergeRequestMerged {
@@ -462,10 +472,11 @@ func (s *Service) startShip(ctx context.Context, plan *store.Plan, proj *store.P
 		in["main_url"] = mainURL
 	}
 	input, _ := json.Marshal(in)
+	ref := store.ShipAttemptRef(plan.ID, wave, attempt)
 	run, err := s.Engine.Trigger(ctx, engine.TriggerRequest{WorkflowID: wf.ID, ProjectID: proj.ID, Trigger: store.TriggerPlan,
-		TriggerRef: store.ShipRef(plan.ID, wave), Input: input})
+		TriggerRef: ref, Input: input})
 	if errors.Is(err, engine.ErrDuplicateTrigger) || errors.Is(err, store.ErrDuplicateTrigger) {
-		run, err = store.GetRunByTrigger(ctx, s.Pool, store.TriggerPlan, store.ShipRef(plan.ID, wave))
+		run, err = store.GetRunByTrigger(ctx, s.Pool, store.TriggerPlan, ref)
 	}
 	if err != nil {
 		return fmt.Errorf("start the ship run: %w", err)
@@ -582,6 +593,16 @@ func (s *Service) Advance(ctx context.Context, runID string) (tools.AdvanceResul
 			return err
 		} else if paused {
 			return &tools.AdvanceRefused{Reason: pausedReason(reason)}
+		}
+		// A ticket the wave gained since its smoke test began (a revision) is not shipped.
+		fresh, err := store.ListWaveTickets(ctx, q, planID, wave)
+		if err != nil {
+			return err
+		}
+		for _, t := range fresh {
+			if t.Status != store.TicketMerged && t.Status != store.TicketClosed {
+				return &tools.AdvanceRefused{Reason: fmt.Sprintf("ticket %s of wave %d is %s, not merged; the wave cannot be closed yet", t.TicketID, wave, t.Status)}
+			}
 		}
 		for _, t := range all {
 			if t.Wave != wave || t.IssueNumber == nil {

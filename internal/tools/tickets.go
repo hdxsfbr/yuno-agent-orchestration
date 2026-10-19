@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -79,8 +81,10 @@ var featureSlug = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
 // publishPlan is the validated plan of a run: its tickets in wave order.
 type publishPlan struct {
 	feature string
-	waves   [][]planTicketIn // index = wave - 1
-	count   int
+	// revise is the id of the plan this run amends (input revise_plan, rule 16); "" for a new plan.
+	revise string
+	waves  [][]planTicketIn // index = wave - 1
+	count  int
 }
 
 // publishTicketsOutput is the tool's result.
@@ -88,6 +92,16 @@ type publishTicketsOutput struct {
 	PlanID string               `json:"plan_id"`
 	Issues []publishedTicketOut `json:"issues"`
 	Reused int                  `json:"reused"`
+	// The counts of a revision (rule 16); absent for a new plan.
+	Revised bool `json:"revised,omitempty"`
+	Added   int  `json:"added,omitempty"`
+	Updated int  `json:"updated,omitempty"`
+	Dropped int  `json:"dropped,omitempty"`
+	Reset   int  `json:"reset,omitempty"`
+	// ChangedInFlight names the building or in-review tickets whose text changed: their work
+	// in progress was built from the old text, so the operator requests changes (rule 16).
+	ChangedInFlight []string `json:"changed_in_flight,omitempty"`
+	Released        int      `json:"released,omitempty"`
 }
 
 type publishedTicketOut struct {
@@ -114,7 +128,8 @@ func NewPublishTickets(cfg PublishTicketsConfig) *Tool {
 		Description: "Publish the plan's tickets as tracker issues: one issue per ticket of the plan you wrote, " +
 			"labelled with its wave and feature, in wave order. Takes only the run_token; the platform reads the " +
 			"tickets and waves from the run's earlier steps, so nothing else is passed. Refuses when the project " +
-			"already has an open plan. Needs a human approval. Returns the plan id and each ticket's issue number " +
+			"already has an open plan. When the run's input names a plan to revise, it amends that plan instead: new tickets " +
+			"get issues, changed tickets update theirs, dropped tickets are closed. Needs a human approval. Returns the plan id and each ticket's issue number " +
 			"and URL; if a human has not decided yet it returns status pending_approval, and if they refused it " +
 			"returns status rejected with a reason.",
 		InputSchema: publishTicketsSchema,
@@ -157,6 +172,9 @@ func (p *publishTickets) describe(input json.RawMessage) string {
 	for i, w := range plan.waves {
 		parts[i] = fmt.Sprintf("wave %d: %d", i+1, len(w))
 	}
+	if plan.revise != "" {
+		return reviseDescription(ctx, p.cfg.DB, plan, parts)
+	}
 	return fmt.Sprintf("Publish %d tickets of feature %q as issues (%s), labelled wave:<n> and feature:%s",
 		plan.count, plan.feature, strings.Join(parts, ", "), plan.feature)
 }
@@ -164,10 +182,17 @@ func (p *publishTickets) describe(input json.RawMessage) string {
 // readPublishPlan reads and checks the plan in a run's state and input.
 func readPublishPlan(run *store.Run) (*publishPlan, error) {
 	var in struct {
-		Feature string `json:"feature"`
+		Feature    string `json:"feature"`
+		RevisePlan string `json:"revise_plan"`
 	}
 	_ = json.Unmarshal(run.Input, &in)
 	feature := strings.TrimSpace(in.Feature)
+	revise := strings.TrimSpace(in.RevisePlan)
+	if revise != "" {
+		if _, err := uuid.Parse(revise); err != nil {
+			return nil, fmt.Errorf("revise_plan %q is not a plan id", revise)
+		}
+	}
 	if feature == "" {
 		return nil, errors.New("the run's input has no feature")
 	}
@@ -210,7 +235,7 @@ func readPublishPlan(run *store.Run) (*publishPlan, error) {
 		byID[t.ID] = t
 	}
 	sort.SliceStable(waves.Waves, func(i, j int) bool { return waves.Waves[i].N < waves.Waves[j].N })
-	plan := &publishPlan{feature: feature}
+	plan := &publishPlan{feature: feature, revise: revise}
 	placed := map[string]bool{}
 	for i, w := range waves.Waves {
 		if w.N != i+1 {
@@ -267,6 +292,9 @@ func (p *publishTickets) exec(ctx context.Context, call Call) (Result, error) {
 		return Result{}, &ModelError{Message: "publish_tickets: " + err.Error()}
 	}
 
+	if plan.revise != "" {
+		return p.revise(ctx, q, run, pc, plan)
+	}
 	planID := uuid.NewSHA1(planIDNamespace, []byte(call.RunID+"\x00"+plan.feature)).String()
 	stored, perr := p.ensurePlan(ctx, q, run, planID, plan.feature)
 	if perr != nil {
@@ -325,6 +353,9 @@ func (p *publishTickets) exec(ctx context.Context, call Call) (Result, error) {
 				row.IssueNumber, row.IssueURL = prev.IssueNumber, prev.IssueURL
 			}
 			if err := store.UpsertPlanTicket(ctx, q, &row); err != nil {
+				return Result{}, err
+			}
+			if err := store.SetTicketContentHash(ctx, q, planID, t.ID, ticketContentHash(plan.feature, t)); err != nil {
 				return Result{}, err
 			}
 			if row.IssueNumber != nil {
@@ -432,6 +463,13 @@ func openPlanError(open *store.Plan) error {
 // ticketMarker is the hidden last line of an issue's body (rule 2).
 func ticketMarker(planID, ticketID string) string {
 	return "<!-- yuno-ticket:" + planID + ":" + ticketID + " -->"
+}
+
+// ticketContentHash identifies the text a ticket's issue is written from (its title, slice,
+// files and tests), not the links around it.
+func ticketContentHash(feature string, t planTicketIn) string {
+	sum := sha256.Sum256([]byte(ticketIssueTitle(feature, t) + "\x00" + ticketIssueBody(feature, t, nil, "", "")))
+	return hex.EncodeToString(sum[:])
 }
 
 func ticketIssueTitle(feature string, t planTicketIn) string {

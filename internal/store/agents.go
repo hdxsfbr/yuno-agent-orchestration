@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -16,7 +19,7 @@ var ErrNotFound = errors.New("not found")
 
 const agentColumns = `id, name, role, system_prompt, model, effort, max_tokens, tool_allowlist,
 	interaction_rules, limits, guardrails, memory_policy, channels, openclaw_agent_id, skills,
-	thinking, exec_policy, materialized_hash, created_at, updated_at, deleted_at`
+	thinking, exec_policy, materialized_hash, created_at, updated_at, deleted_at, seeded_hash`
 
 // agentSelect reads an agent for scanning: agentColumns plus the chat token, "" until
 // the backfill has filled a row that predates it.
@@ -56,10 +59,10 @@ func CreateAgent(ctx context.Context, q Querier, a *Agent) error {
 	now := time.Now().UTC()
 	a.CreatedAt, a.UpdatedAt = now, now
 	_, err := q.Exec(ctx, `INSERT INTO agents (`+agentColumns+`, chat_token)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NULL,$21)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,NULL,$21,$22)`,
 		a.ID, a.Name, a.Role, a.SystemPrompt, a.Model, a.Effort, a.MaxTokens, a.ToolAllowlist,
 		a.InteractionRules, a.Limits, a.Guardrails, a.MemoryPolicy, a.Channels, a.OpenClawAgentID, a.Skills,
-		a.Thinking, a.ExecPolicy, a.MaterializedHash, a.CreatedAt, a.UpdatedAt, a.ChatToken)
+		a.Thinking, a.ExecPolicy, a.MaterializedHash, a.CreatedAt, a.UpdatedAt, a.SeededHash, a.ChatToken)
 	return err
 }
 
@@ -259,4 +262,28 @@ func BackfillChatTokens(ctx context.Context, q Querier) (int, error) {
 		n += int(tag.RowsAffected())
 	}
 	return n, nil
+}
+
+// AgentSeedHash is the sha256 (hex) the seed records for a shipped agent: the digest of
+// its role, system prompt and tool allowlist, the three things the seed writes.
+func AgentSeedHash(role, prompt string, allowlist []string) string {
+	if allowlist == nil {
+		allowlist = []string{}
+	}
+	raw, _ := json.Marshal([]any{role, prompt, allowlist})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// SetAgentSeededHash records the hash of the role, prompt and allowlist the seed last
+// wrote to the agent, without touching updated_at or any other column.
+func SetAgentSeededHash(ctx context.Context, q Querier, id, hash string) error {
+	tag, err := q.Exec(ctx, `UPDATE agents SET seeded_hash=$2 WHERE id=$1 AND deleted_at IS NULL`, id, hash)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

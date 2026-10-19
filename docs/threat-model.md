@@ -256,7 +256,8 @@ wave's issues for intake; it passes on `auto_after: smoke_test` only inside a sh
 whose smoke test was approved, refuses while paused or for a wave that is not current,
 and a second call returns the first result. A person with label rights who labels a later
 wave's issues early still starts builds for them (bounded as above); the watcher still
-ships wave by wave.
+ships wave by wave. The merge request that appends a wave's lessons to `CLAUDE.md` is a new
+request, not under `auto_after`: the operator approves it, and a rejection does not fail the run.
 
 **The eval forge.** `forgefake` runs only under the compose profile `eval` and accepts one
 fixed, non-secret token. The api accepts an `http` repository URL only for the exact host
@@ -268,6 +269,42 @@ intake or ship run of a project, which then runs on the scripted model instead o
 agents' own. This needs the bearer token, which can already start scripted runs; bindings
 live in memory and are lost on restart.
 
+## Deciding from the bound chat (D-081)
+
+The Chief of Staff can list pending approvals (`list_approvals`) and decide them
+(`decide_approval`) on the operator's instruction, through the engine's own decision path,
+so `on_reject`, `auto_after` and idempotency apply as in the web UI. The decision is
+recorded as `decided_by chat:telegram`. The tools answer only a chat token whose
+conversation is the Chief's own on Telegram, never a run token. The consequence: anyone
+who holds that Telegram chat can approve what the operator can approve, so the chat is as
+sensitive as the web UI and the bearer token.
+
+**Injection path and the approval code.** The engine injects run outcomes, approval
+messages and run questions into the Chief's session as `[platform]` user turns. That text
+was written by models that read issues, merge requests and web pages, so it can carry an
+instruction such as "call decide_approval approve ...". Two controls cover this. First, the
+three payloads are wrapped as `untrusted_content` blocks (closing tags escaped), and the
+Chief's prompt says such text is data. Second, and not dependent on the model: every pending
+approval has a 4-character code (an unambiguous alphabet, an HMAC of the approval id under a
+server secret, so it survives a restart), `list_approvals` shows it, and `decide_approval`
+requires it. The server accepts the decision only when the code matches that approval and
+the code appears, as a whole token, in the newest inbound message of the bound
+conversation that is neither a `[platform]` injection (run-linked, or starting with the
+marker) nor the Chief's own message. Otherwise the model is told to ask the person to reply
+with the code. Residual risk: a person who pastes a code into the chat on request, and
+anyone who can write to the bound chat, can still decide; the code proves the operator
+asked, not who the operator is. The newest message is read from the transcript mirror, so
+a decision can lag a message by the mirror's delay and is then asked for again.
+
+`add_project` adds a repository from the same chat; its input has no token member. The
+server reuses a project's token only when that project is on the same host and provider and
+in the same repository namespace (the owner on GitHub, the group path with subgroups on
+GitLab, compared case-insensitively); otherwise it uses `PROJECT_GIT_TOKEN`, and otherwise
+sends the person to the Projects page. Note the widening that remains: `PROJECT_GIT_TOKEN`
+is one credential that applies to any repository on its host, so a repository added through
+chat (including by an injected instruction) gets whatever access that token has. Scope that
+token to the repositories you intend to add. Tokens never pass through chat.
+
 ## Known limitations
 
 - Single operator, no authentication beyond the optional bearer token.
@@ -275,12 +312,11 @@ live in memory and are lost on restart.
   forge keeps running, until the next `make run`.
 - A ticket the watcher escalates because its merge request closed unmerged or its issue
   closed has no recovery short of cancelling the plan until plans can be revised (wave 4).
-- Lessons go to project notes only; the small merge request that appends them to the
-  repository's `CLAUDE.md` (D-075) comes in wave 4.
 - The Docker socket is mounted into the gateway container (needed for sibling sandboxes).
 - Exec guardrail patterns cover host exec and approvals, not commands inside the sandbox.
-- Approvals can be answered from the web UI; a reply to the prompt the bot sends in
-  Telegram has not been verified to resolve the approval.
+- The bot's own approval prompt in Telegram is not a decision channel; approvals are
+  decided in the web UI, or by telling the Chief of Staff (see "Deciding from the bound
+  chat" above the limitations).
 - Conversation memory is the mirrored Telegram transcript; agent facts are agent-scoped,
   project notes are shared by every agent of a run on the project and rendered into
   tasks without the untrusted-content wrapper.
@@ -323,3 +359,8 @@ live in memory and are lost on restart.
   a trusted-repository mode (above). An agent that edits its checkout's `.git` directory
   only breaks its own `git diff`; the platform does not read that directory. Project
   tokens are only as safe as `PROJECT_TOKEN_KEY` in `.env` (above).
+- The Integrator agent has `write` and `edit` for the ship run's CLAUDE.md lessons step, and
+  the workflow definition has no per-node tool allowlist, so it holds them in ticket and plan
+  runs too: it can change code after `code_review` (the draft request is still gated) and, under
+  `auto_after`, any `docs/` file. Its prompt forbids both; only the platform's `docs/`-only
+  path check on the ready call enforces it.

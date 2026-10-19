@@ -417,6 +417,7 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/projects/{id}/plans", s.listPlans)
 	mux.HandleFunc("GET /api/plans/{id}", s.getPlan)
 	mux.HandleFunc("POST /api/plans/{id}/cancel", s.cancelPlan)
+	mux.HandleFunc("POST /api/plans/{id}/tickets/{ticket}/changes", s.requestChanges)
 	mux.HandleFunc("POST /api/projects/{id}/waves/pause", s.pauseWaves)
 	mux.HandleFunc("POST /api/projects/{id}/waves/resume", s.resumeWaves)
 	// Project notes (DESIGN 5.18 rule 6) and merge requests (DESIGN 5.20 rule 6).
@@ -610,6 +611,16 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 		// ask_operator and answer_question reach the engine through the server at call
 		// time (DESIGN 5.24): Run sets s.engine after this registry is built.
 		Asker: asker{s},
+		// decide_approval and add_project reach the engine and the project code at call time (D-081).
+		DecideApproval: func(ctx context.Context, id, decision, by, reason string) (*store.Approval, error) {
+			if s.engine == nil {
+				return nil, errEngineUnavailable
+			}
+			return s.engine.DecideApproval(ctx, id, decision, by, reason)
+		},
+		AddProject: s.chatAddProject,
+		// decide_approval's codes: keyed by the server's own secrets, random when none is set.
+		ApprovalCodeKey: approvalCodeKey(cfg),
 		// escalate and publish_tickets reach the engine at call time as ask_operator does.
 		Escalate: func(ctx context.Context, runID, kind, reason string) error {
 			e, ok := s.engine.(interface {
@@ -679,4 +690,13 @@ func (s *Server) emit(ctx context.Context, runID, typ string, v any) {
 	if _, err := s.rec.Emit(context.WithoutCancel(ctx), runID, typ, v); err != nil {
 		s.log.Warn("emit event failed", "run_id", runID, "event", typ, "error", err)
 	}
+}
+
+// approvalCodeKey is the key of the codes decide_approval requires: the project token key
+// and the API token, whichever are set; nil (a random key per process) when neither is.
+func approvalCodeKey(cfg config.Config) []byte {
+	if cfg.ProjectTokenKey == "" && cfg.APIToken == "" {
+		return nil
+	}
+	return []byte("approval-code\x00" + cfg.ProjectTokenKey + "\x00" + cfg.APIToken)
 }

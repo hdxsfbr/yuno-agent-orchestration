@@ -255,45 +255,57 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &in, maxProjectBody) {
 		return
 	}
+	created, fe, err := s.createProjectFrom(ctx, &in)
+	switch {
+	case errors.Is(err, errTokensUnavailable):
+		writeTokensUnavailable(w)
+	case err != nil:
+		s.internalError(w, r, "create project", err)
+	case len(fe) > 0:
+		writeValidation(w, "invalid project", fe)
+	default:
+		writeJSON(w, http.StatusCreated, created)
+	}
+}
+
+var errTokensUnavailable = errors.New("PROJECT_TOKEN_KEY is not set; no token can be stored")
+
+// createProjectFrom is what POST /api/projects and the Chief's add_project share: it
+// validates the input, checks the intake settings and the name, seals the token and
+// stores the project. Field problems come back as fe with a nil project; the error is
+// errTokensUnavailable or a database one.
+func (s *Server) createProjectFrom(ctx context.Context, in *projectInput) (*store.Project, fieldErrors, error) {
 	p, token, fe := in.validate(true)
-	ife, err := s.applyIntake(ctx, &in, p, nil)
+	ife, err := s.applyIntake(ctx, in, p, nil)
 	if err != nil {
-		s.internalError(w, r, "check the intake settings", err)
-		return
+		return nil, nil, fmt.Errorf("check the intake settings: %w", err)
 	}
 	if fe = append(fe, ife...); len(fe) > 0 {
-		writeValidation(w, "invalid project", fe)
-		return
+		return nil, fe, nil
 	}
 	if s.cipher == nil {
-		writeTokensUnavailable(w)
-		return
+		return nil, nil, errTokensUnavailable
 	}
 	if fe, err := s.projectNameTaken(ctx, p.Name, ""); err != nil || len(fe) > 0 {
-		s.projectNameError(w, r, fe, err)
-		return
+		return nil, fe, err
 	}
 	p.ID = store.NewID()
 	blob, err := s.cipher.Seal(p.ID, token)
 	if err != nil {
-		s.internalError(w, r, "seal project token", err)
-		return
+		return nil, nil, fmt.Errorf("seal project token: %w", err)
 	}
 	if err := store.CreateProject(ctx, s.pool, p, blob); err != nil {
 		if isUniqueViolation(err) {
-			writeValidation(w, "invalid project", projectNameTakenErrors(p.Name))
-			return
+			return nil, projectNameTakenErrors(p.Name), nil
 		}
-		s.internalError(w, r, "create project", err)
-		return
+		return nil, nil, fmt.Errorf("create project: %w", err)
 	}
 	// The answer is the project as a get shows it, spend included (DESIGN 5.19 rule 7).
 	created, err := s.projectView(ctx, p.ID)
 	if err != nil {
-		s.internalError(w, r, "read the created project", err)
-		return
+		return nil, nil, fmt.Errorf("read the created project: %w", err)
 	}
-	writeJSON(w, http.StatusCreated, created)
+	return created, nil, nil
 }
 
 // updateProject replaces a project's settings. An absent or empty token keeps the

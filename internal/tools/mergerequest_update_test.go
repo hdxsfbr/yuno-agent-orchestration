@@ -472,3 +472,38 @@ func TestOpenMergeRequestClosesTheIssueAfterARetry(t *testing.T) {
 		t.Fatalf("description = %q", got)
 	}
 }
+
+// Review M1: an iteration that pushes onto its ticket's request returns the ticket from
+// building to in_review, so another change request can follow.
+func TestIterationReturnsTheTicketToReview(t *testing.T) {
+	e := newRecordEnv(t, project.ProviderGitLab)
+	ctx := context.Background()
+	rec := e.openFirst()
+	plan := &store.Plan{ProjectID: e.project.ID, Feature: "iter-" + store.NewID()[:8], PlanRunID: e.run.ID, Status: store.PlanBuilding}
+	must(t, store.CreatePlan(ctx, testPool, plan))
+	n := int64(7)
+	tk := store.PlanTicket{PlanID: plan.ID, TicketID: "T1", Wave: 1, Title: "T1", IssueNumber: &n}
+	must(t, store.UpsertPlanTicket(ctx, testPool, &tk))
+	must(t, store.SetTicketMR(ctx, testPool, plan.ID, "T1", rec.ID))
+	must(t, store.SetTicketStatus(ctx, testPool, plan.ID, "T1", store.TicketInReview))
+	t.Cleanup(func() { _, _ = testPool.Exec(ctx, `DELETE FROM plans WHERE id=$1`, plan.ID) })
+	status := func() string {
+		tks, err := store.ListPlanTickets(ctx, testPool, plan.ID)
+		must(t, err)
+		return tks[0].Status
+	}
+	for i, key := range []byte{'a', 'b'} {
+		u := e.newUpdater(rec, nil)
+		if moved, err := store.LinkTicketIteration(ctx, testPool, plan.ID, "T1", u.run.ID); err != nil || !moved || status() != store.TicketBuilding {
+			t.Fatalf("iteration %d: link %v %v, status %s", i, moved, err, status())
+		}
+		u.edit(t, "README.md", "# demo\niteration "+string(rune('1'+i))+"\n")
+		if out, _, err := e.call(u, key, "Address the review"); err != nil || out.Result.IsError {
+			t.Fatalf("iteration %d call: %+v %v", i, out, err)
+		}
+		if got := status(); got != store.TicketInReview {
+			t.Fatalf("iteration %d: ticket is %s, want in_review", i, got)
+		}
+		must(t, store.SetRunStatus(ctx, testPool, u.run.ID, store.RunSucceeded, nil))
+	}
+}

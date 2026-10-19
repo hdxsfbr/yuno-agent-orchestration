@@ -77,6 +77,10 @@ export function eventText(e: PlanEvent): { label: string; detail?: string } {
       return { label: reason ? `Plan cancelled: ${reason}` : "Plan cancelled" };
     case "retried":
       return { label: e.ticket_id ? `Ticket ${e.ticket_id} retried` : "Ticket retried", detail: reason };
+    case "changes_requested": {
+      const notes = typeof e.detail?.notes === "string" && e.detail.notes ? e.detail.notes : undefined;
+      return { label: e.ticket_id ? `Changes requested on ticket ${e.ticket_id}` : "Changes requested", detail: notes };
+    }
     case "paused":
       return { label: "Waves paused", detail: reason };
     case "resumed":

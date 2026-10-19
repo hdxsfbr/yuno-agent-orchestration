@@ -92,7 +92,8 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 				a == nil || a.Kind != workflow.KindApproval || a.OnReject != "" {
 				t.Errorf("ship wiring: integrator %+v smoke_test %+v accept_feature %+v", i, s, a)
 			}
-			if !strings.Contains(string(i.OutputSchema), "lessons") || !strings.Contains(i.Task, "advance_wave") || !strings.Contains(i.Task, "memory_save") {
+			if !strings.Contains(string(i.OutputSchema), "lessons") || !strings.Contains(i.Task, "advance_wave") || !strings.Contains(i.Task, "memory_save") ||
+				!strings.Contains(i.Task, `paths ["CLAUDE.md"]`) || strings.Contains(i.Task, "with the branch") {
 				t.Errorf("ship integrator = %+v", i)
 			}
 		}

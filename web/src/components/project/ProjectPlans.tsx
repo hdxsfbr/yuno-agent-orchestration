@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { cancelPlan, getPlan, listApprovals, listMergeRequests, listProjectPlans, pauseWaves, resumeWaves, type PlanEvent, type PlanMain, type PlanTicket, type Project } from "@/lib/api";
+import { cancelPlan, getPlan, listApprovals, listMergeRequests, listProjectPlans, pauseWaves, requestChanges, resumeWaves, type PlanEvent, type PlanMain, type PlanTicket, type Project } from "@/lib/api";
 import { formatAgo, formatDateTime, shortId } from "@/lib/format";
 import { eventText, isOpenPlan, MAIN_STATE_LABEL, MAIN_STATE_TONE, PLAN_STATUS_LABEL, PLAN_STATUS_TONE, planWaves, TICKET_STATUS_LABEL, TICKET_STATUS_TONE, waitingLabel, WAVE_STATE_LABEL, WAVE_STATE_TONE, type WaveView } from "@/lib/plan";
 import { requestRef } from "@/lib/mergeRequest";
@@ -99,7 +99,46 @@ function CancelPlanDialog({ planId, feature, onClose }: { planId: string; featur
   );
 }
 
-function TicketRow({ t, mr }: { t: PlanTicket; mr?: { url: string; ref: string; draft: boolean } }) {
+function ChangesDialog({ planId, ticket, onClose }: { planId: string; ticket: PlanTicket; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [notes, setNotes] = useState("");
+  const send = useMutation({
+    mutationFn: () => requestChanges(planId, ticket.ticket_id, notes.trim()),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["plans"] });
+      void qc.invalidateQueries({ queryKey: ["runs"] });
+      onClose();
+    },
+  });
+  return (
+    <Modal title="Request changes" onClose={send.isPending ? () => undefined : onClose}>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (notes.trim()) send.mutate();
+        }}
+      >
+        <p className="mb-3 text-sm text-zinc-600 dark:text-zinc-400">{`Say what should change on ${ticket.ticket_id}, ${ticket.title}. A new run updates the same merge request.`}</p>
+        <TextAreaField label="Notes" value={notes} onChange={setNotes} rows={5} required />
+        {send.error ? (
+          <div className="mt-3">
+            <InlineError>{errorText(send.error)}</InlineError>
+          </div>
+        ) : null}
+        <div className="mt-5 flex justify-end gap-2">
+          <Button onClick={onClose} disabled={send.isPending}>
+            Cancel
+          </Button>
+          <Button type="submit" variant="primary" disabled={send.isPending || !notes.trim()}>
+            {send.isPending ? "Sending…" : "Request changes"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function TicketRow({ t, mr, onRequestChanges }: { t: PlanTicket; mr?: { url: string; ref: string; draft: boolean }; onRequestChanges?: (t: PlanTicket) => void }) {
   return (
     <tr>
       <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs">{t.ticket_id}</td>
@@ -140,6 +179,13 @@ function TicketRow({ t, mr }: { t: PlanTicket; mr?: { url: string; ref: string; 
       </td>
       <td className="px-4 py-2.5">
         <Badge tone={TICKET_STATUS_TONE[t.status] ?? "zinc"}>{TICKET_STATUS_LABEL[t.status] ?? t.status}</Badge>
+      </td>
+      <td className="whitespace-nowrap px-4 py-2.5 text-right">
+        {onRequestChanges && t.merge_request_id && t.status === "in_review" ? (
+          <Button size="sm" onClick={() => onRequestChanges(t)}>
+            Request changes
+          </Button>
+        ) : null}
       </td>
     </tr>
   );
@@ -220,6 +266,7 @@ export default function ProjectPlans({ project }: { project: Project }) {
   const qc = useQueryClient();
   const [pausing, setPausing] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [changing, setChanging] = useState<PlanTicket | null>(null);
 
   const plans = useQuery({ queryKey: plansKey(project.id), queryFn: () => listProjectPlans(project.id) });
   const open = plans.data?.find(isOpenPlan);
@@ -341,11 +388,14 @@ export default function ProjectPlans({ project }: { project: Project }) {
                           <th className="px-4 py-2 font-medium">Run</th>
                           <th className="px-4 py-2 font-medium">Request</th>
                           <th className="px-4 py-2 font-medium">Status</th>
+                          <th className="px-4 py-2 font-medium">
+                            <span className="sr-only">Actions</span>
+                          </th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
                         {g.tickets.map((t) => (
-                          <TicketRow key={t.ticket_id} t={t} mr={t.merge_request_id ? mrById.get(t.merge_request_id) : undefined} />
+                          <TicketRow key={t.ticket_id} t={t} mr={t.merge_request_id ? mrById.get(t.merge_request_id) : undefined} onRequestChanges={open ? setChanging : undefined} />
                         ))}
                       </tbody>
                     </table>
@@ -378,6 +428,7 @@ export default function ProjectPlans({ project }: { project: Project }) {
         </div>
       ) : null}
 
+      {changing && open ? <ChangesDialog planId={open.id} ticket={changing} onClose={() => setChanging(null)} /> : null}
       {cancelling && open ? <CancelPlanDialog planId={open.id} feature={open.feature} onClose={() => setCancelling(false)} /> : null}
       {pausing ? <PauseDialog projectId={project.id} onClose={() => setPausing(false)} /> : null}
     </section>

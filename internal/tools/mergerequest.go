@@ -349,6 +349,13 @@ func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *projec
 				"; the commit was pushed to " + rec.SourceBranch}, nil
 		}
 	}
+	if updating != nil && call.Tx != nil {
+		// An iteration on a ticket's request: the request is linked already, so the ticket
+		// goes back to review here (LinkTicketMergeRequest only runs for a new record).
+		if _, err := store.ReturnTicketToReview(ctx, call.Tx, call.RunID); err != nil {
+			return Result{}, fmt.Errorf("return the ticket to review: %w", err)
+		}
+	}
 	if updating == nil {
 		if err := m.updateMeta(ctx, call, provider, rec, in, run, &out); err != nil {
 			return Result{}, err

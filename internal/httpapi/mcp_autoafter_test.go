@@ -284,3 +284,27 @@ func TestGateAdvanceWave(t *testing.T) {
 		}
 	})
 }
+
+// Review M3: the lessons request the ship template asks for goes through the MCP handler's
+// schema validation. The call without a branch (the platform names it) reaches the
+// operator's approval; one that passes a branch is refused by the schema.
+func TestShipLessonsRequestCall(t *testing.T) {
+	lessons := func(f *autoFixture, extra map[string]any) map[string]any {
+		a := map[string]any{"run_token": f.token, "title": "Lessons from x, wave 1", "description": "Lessons of wave 1.",
+			"paths": []string{"CLAUDE.md"}}
+		for k, v := range extra {
+			a[k] = v
+		}
+		return a
+	}
+	f := newShipFixture(t, store.TriggerPlan, store.ShipRef("plan-"+uniqueSuffix(), 2))
+	f.decide(t, 1, store.ApprovalApproved)
+	text, _ := f.call(t, "open_merge_request", lessons(f, nil))
+	if !strings.Contains(text, "pending_approval") || len(f.fe.approvalReqs) != 1 || f.execs != 0 {
+		t.Fatalf("lessons request: %s (approvals requested %d, execs %d)", text, len(f.fe.approvalReqs), f.execs)
+	}
+	text, isErr := f.call(t, "open_merge_request", lessons(f, map[string]any{"branch": "lessons/x-wave-1"}))
+	if !isErr || !strings.Contains(text, "branch") || len(f.fe.approvalReqs) != 1 || f.execs != 0 {
+		t.Fatalf("with a branch: err %v %s", isErr, text)
+	}
+}
