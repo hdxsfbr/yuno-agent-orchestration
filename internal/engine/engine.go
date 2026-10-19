@@ -288,7 +288,11 @@ func (e *Engine) loadAgentForRun(ctx context.Context, agentID string) (*store.Ag
 // records the hash and OpenClaw id.
 func (e *Engine) materialize(ctx context.Context, a *store.Agent, skills []store.Skill) error {
 	prev := a.MaterializedHash
-	hash, err := openclaw.Materialize(ctx, e.deps.Gateway, e.deps.StateDir, a, skills)
+	ex, err := openclaw.LoadExtras(ctx, e.deps.Pool, a.ID, skills)
+	if err != nil {
+		return fmt.Errorf("agent files: %w", err)
+	}
+	hash, err := openclaw.MaterializeWith(ctx, e.deps.Gateway, e.deps.StateDir, a, skills, ex)
 	if err != nil {
 		return err
 	}
@@ -306,6 +310,36 @@ func (e *Engine) materialize(ctx context.Context, a *store.Agent, skills []store
 	a.MaterializedHash = hash
 	e.log.Info("agent materialised", "agent_id", a.ID, "openclaw_agent_id", *a.OpenClawAgentID)
 	return nil
+}
+
+// desired is the hash materialising the agent now would record, with the operator's file
+// edits and the skills' bundle file digests it was computed from (DESIGN 5.27 rules 4 and
+// 8). ok is false when they cannot be read: the caller then materialises (and fails
+// visibly) rather than assuming the agent is in sync.
+func (e *Engine) desired(ctx context.Context, a *store.Agent, skills []store.Skill) (hash string, ex openclaw.Extras, ok bool) {
+	ex, err := openclaw.LoadExtras(ctx, e.deps.Pool, a.ID, skills)
+	if err != nil {
+		e.log.Warn("agent files not read for the hash", "agent_id", a.ID, "error", err)
+		return "", openclaw.Extras{}, false
+	}
+	return openclaw.DesiredHashWith(e.deps.StateDir, a, skills, ex), ex, true
+}
+
+// desiredHash is desired's hash alone; "" when it could not be computed, which never equals
+// a stored hash.
+func (e *Engine) desiredHash(ctx context.Context, a *store.Agent, skills []store.Skill) string {
+	h, _, _ := e.desired(ctx, a, skills)
+	return h
+}
+
+// refreshWorkspace writes the agent's workspace files again while the gateway already holds
+// its configuration: OpenClaw rewrites the runtime files it seeds, and the operator's
+// overrides, additions and the skills' bundle files must come back (identical files are
+// skipped, bundle bytes are read only for a file that must be written).
+func (e *Engine) refreshWorkspace(a *store.Agent, skills []store.Skill, ex openclaw.Extras) {
+	if err := openclaw.SyncWorkspace(e.deps.StateDir, a, skills, ex); err != nil {
+		e.log.Warn("agent workspace files not refreshed", "agent_id", a.ID, "error", err)
+	}
 }
 
 // MaterializeAgent pushes the agent's current configuration to OpenClaw and returns
@@ -335,7 +369,7 @@ func (e *Engine) runtimeView(ctx context.Context, a *store.Agent, skills []store
 	if err != nil {
 		return nil, err
 	}
-	inSync := v.InSync && a.MaterializedHash == openclaw.DesiredHash(e.deps.StateDir, a, skills)
+	inSync := v.InSync && a.MaterializedHash == e.desiredHash(ctx, a, skills)
 	return &RuntimeView{
 		OpenClawAgentID: v.OpenClawAgentID,
 		Materialized:    v.Materialized,

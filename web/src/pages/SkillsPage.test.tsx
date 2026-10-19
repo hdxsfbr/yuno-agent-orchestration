@@ -56,7 +56,7 @@ describe("SkillsPage list", () => {
     expect(within(first).getByText("Reviews diffs for bugs")).not.toBeNull();
     expect(within(first).getByText(formatDateTime("2026-10-15T10:30:00Z"))).not.toBeNull();
     const second = screen.getByRole("button", { name: "release-notes" }).closest("tr") as HTMLElement;
-    expect(within(second).getByText("—")).not.toBeNull();
+    expect(within(second).getAllByText("—").length).toBeGreaterThan(0);
   });
 
   it("says so when there are none", async () => {

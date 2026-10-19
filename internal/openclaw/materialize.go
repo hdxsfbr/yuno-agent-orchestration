@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"yuno/internal/guardrails"
@@ -223,6 +224,12 @@ type desired struct {
 	Entry     map[string]any    `json:"entry"`
 	Exec      execAgentPolicy   `json:"exec"`
 	Files     map[string]string `json:"files"`
+	// Bundle holds the skills' other files (DESIGN 5.27 rule 8) by workspace path: the
+	// hash covers size, digest and mode, never the bytes. Omitted while empty, so agents
+	// without bundles keep their hash.
+	Bundle map[string]bundleFile `json:"bundle,omitempty"`
+	// load fetches the bundle bytes for the write path (nil when every file has its data).
+	load func() (map[string]map[string][]byte, error)
 }
 
 func agentID(a *store.Agent) string {
@@ -328,6 +335,14 @@ func skillMD(s store.Skill) string {
 }
 
 func plan(stateDir string, a *store.Agent, skills []store.Skill) desired {
+	return planWith(stateDir, a, skills, Extras{})
+}
+
+// planWith is plan with the operator's file edits and the skills' bundle files (DESIGN
+// 5.27): a generated file carries its addition after the platform's part, a runtime file
+// with an override is written with it, and bundle files are listed for the sweep and the
+// writes.
+func planWith(stateDir string, a *store.Agent, skills []store.Skill, ex Extras) desired {
 	id := agentID(a)
 	sorted := slices.Clone(skills)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
@@ -338,9 +353,30 @@ func plan(stateDir string, a *store.Agent, skills []store.Skill) desired {
 		"AGENTS.md": AgentsMD + memorySection(allow) + questionsSection(a) + chatSection(a, allow),
 		"MEMORY.md": MemoryMD,
 	}
+	for _, name := range GeneratedFiles {
+		if e, ok := ex.Edits[name]; ok && e.Addition != nil {
+			files[name] = WithAddition(files[name], *e.Addition)
+		}
+	}
+	for _, name := range RuntimeFiles {
+		if e, ok := ex.Edits[name]; ok && e.Override != nil {
+			files[name] = *e.Override
+		}
+	}
+	var bundle map[string]bundleFile
 	for _, s := range sorted {
 		names = append(names, s.Name)
 		files[filepath.Join("skills", s.Name, "SKILL.md")] = skillMD(s)
+		for _, f := range ex.SkillFiles[s.Name] {
+			rel := bundlePath(s.Name, f.Path)
+			if rel == "" {
+				continue
+			}
+			if bundle == nil {
+				bundle = map[string]bundleFile{}
+			}
+			bundle[rel] = newBundleFile(s.Name, f)
+		}
 	}
 	// The exec policy with the agent's blocked exec patterns applied (DESIGN 5.11
 	// implementation note).
@@ -362,6 +398,8 @@ func plan(stateDir string, a *store.Agent, skills []store.Skill) desired {
 		Entry:     desiredEntry(a, names),
 		Exec:      exec,
 		Files:     files,
+		Bundle:    bundle,
+		load:      ex.Load,
 	}
 }
 
@@ -383,19 +421,37 @@ func DesiredHash(stateDir string, a *store.Agent, skills []store.Skill) string {
 	return plan(stateDir, a, skills).hash()
 }
 
+// DesiredHashWith is DesiredHash with the operator's file edits and the skills' bundle
+// files (DESIGN 5.27 rules 4 and 8).
+func DesiredHashWith(stateDir string, a *store.Agent, skills []store.Skill, ex Extras) string {
+	return planWith(stateDir, a, skills, ex).hash()
+}
+
 // Materialize pushes an agent to OpenClaw (DESIGN 5.14 rule 4): agents.create when the
 // id is unknown, config.patch of agents.entries.<id>, exec.approvals.set, and the
 // workspace files through the shared state directory. It sets a.OpenClawAgentID when
 // it was empty and returns the hash the caller stores with store.SetAgentMaterialized.
 // When a.MaterializedHash already equals the hash nothing is called or written.
 func Materialize(ctx context.Context, c Client, stateDir string, a *store.Agent, skills []store.Skill) (string, error) {
-	d := plan(stateDir, a, skills)
+	return MaterializeWith(ctx, c, stateDir, a, skills, Extras{})
+}
+
+// MaterializeWith is Materialize with the operator's file edits and the skills' bundle
+// files (DESIGN 5.27).
+func MaterializeWith(ctx context.Context, c Client, stateDir string, a *store.Agent, skills []store.Skill, ex Extras) (string, error) {
+	d := planWith(stateDir, a, skills, ex)
 	h := d.hash()
 	if a.OpenClawAgentID == nil || *a.OpenClawAgentID == "" {
 		id := d.ID
 		a.OpenClawAgentID = &id
 	}
 	if a.MaterializedHash == h {
+		// Nothing to push to the gateway, but the workspace files are written again (they
+		// are cheap and skipped when identical): OpenClaw rewrites runtime files it seeds
+		// and the operator's overrides must come back.
+		if err := syncWorkspace(d); err != nil {
+			return "", fmt.Errorf("materialize %s: workspace: %w", d.ID, err)
+		}
 		return h, nil
 	}
 	if c == nil {
@@ -435,10 +491,27 @@ func Materialize(ctx context.Context, c Client, stateDir string, a *store.Agent,
 	if err := setExecPolicy(ctx, c, d); err != nil {
 		return "", fmt.Errorf("materialize %s: %w", d.ID, err)
 	}
-	if err := writeWorkspace(d); err != nil {
+	if err := writeWorkspace(d, false); err != nil {
 		return "", fmt.Errorf("materialize %s: workspace: %w", d.ID, err)
 	}
 	return h, nil
+}
+
+// SyncWorkspace writes the agent's workspace files again without touching the gateway: the
+// generated files, the operator's overrides and additions, the skills and their bundle
+// files. A file that already holds the content is left alone. an existing MEMORY.md is not rewritten (the
+// facts render it); a no-op while the agent has no OpenClaw id.
+func SyncWorkspace(stateDir string, a *store.Agent, skills []store.Skill, ex Extras) error {
+	if a.OpenClawAgentID == nil || *a.OpenClawAgentID == "" {
+		return nil
+	}
+	return syncWorkspace(planWith(stateDir, a, skills, ex))
+}
+
+func syncWorkspace(d desired) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	return writeWorkspace(d, true)
 }
 
 // ConfigEntries extracts agents.entries from a config.get payload.
@@ -565,8 +638,9 @@ func setExecPolicy(ctx context.Context, c Client, d desired) error {
 // writeWorkspace writes the bootstrap and skill files and removes stale skills. Every
 // operation goes through an os.Root opened on the workspace: the agent can write to its
 // own workspace from the sandbox, and a symlink it plants (skills -> another
-// workspace) must not redirect the platform's writes or deletions outside it.
-func writeWorkspace(d desired) error {
+// workspace) must not redirect the platform's writes or deletions outside it. keepMemory
+// leaves an existing MEMORY.md alone (the facts rendering owns it between materialisations).
+func writeWorkspace(d desired, keepMemory bool) error {
 	if err := os.MkdirAll(d.Workspace, 0o755); err != nil {
 		return err
 	}
@@ -577,6 +651,11 @@ func writeWorkspace(d desired) error {
 	defer root.Close()
 	paths := make([]string, 0, len(d.Files))
 	for p := range d.Files {
+		if keepMemory && p == "MEMORY.md" {
+			if _, err := root.Lstat(p); err == nil {
+				continue
+			}
+		}
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
@@ -585,16 +664,242 @@ func writeWorkspace(d desired) error {
 			return err
 		}
 	}
+	skills := assignedSkills(d)
+	// Stale bundle paths go first, so a path that was a file and is now a folder (or the
+	// reverse) is free when the new files are written.
+	for _, name := range skills {
+		if err := pruneBundle(root, name, d); err != nil {
+			return err
+		}
+	}
+	bpaths := make([]string, 0, len(d.Bundle))
+	for p := range d.Bundle {
+		bpaths = append(bpaths, p)
+	}
+	sort.Strings(bpaths)
+	bl := &bundleLoader{d: d}
+	for _, rel := range bpaths {
+		if err := writeBundleFile(root, rel, d.Bundle[rel], bl); err != nil {
+			return err
+		}
+	}
+	for _, name := range skills {
+		if err := writeManifest(root, name, d); err != nil {
+			return err
+		}
+	}
 	return removeStaleSkills(root, d)
+}
+
+// assignedSkills lists the skills the plan writes a SKILL.md for, by name.
+func assignedSkills(d desired) []string {
+	var out []string
+	for rel := range d.Files {
+		dir, file := filepath.Split(rel)
+		if file != "SKILL.md" {
+			continue
+		}
+		if parent, name := filepath.Split(filepath.Clean(dir)); filepath.Clean(parent) == "skills" && name != "" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// bundleLoader fetches the bundle bytes once, the first time a file needs writing.
+type bundleLoader struct {
+	d      desired
+	loaded map[string]map[string][]byte
+	err    error
+	done   bool
+}
+
+func (l *bundleLoader) bytes(b bundleFile) ([]byte, error) {
+	if b.data != nil || b.Size == 0 {
+		if b.data == nil {
+			return []byte{}, nil
+		}
+		return b.data, nil
+	}
+	if !l.done {
+		l.done = true
+		if l.d.load == nil {
+			l.err = errors.New("bundle file content is not available")
+		} else {
+			l.loaded, l.err = l.d.load()
+		}
+	}
+	if l.err != nil {
+		return nil, l.err
+	}
+	data, ok := l.loaded[b.skill][b.sub]
+	sum := sha256.Sum256(data)
+	if !ok || hex.EncodeToString(sum[:]) != b.SHA256 {
+		return nil, fmt.Errorf("skill %s file %s changed while the agent was materialised", b.skill, b.sub)
+	}
+	return data, nil
+}
+
+// writeBundleFile writes one bundle file unless the workspace already holds it (same
+// digest and mode); the bytes are loaded only when it must be written.
+func writeBundleFile(root *os.Root, rel string, b bundleFile, l *bundleLoader) error {
+	if fi, err := root.Lstat(rel); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm() == os.FileMode(b.Mode) && fi.Size() == int64(b.Size) {
+		if cur, err := root.ReadFile(rel); err == nil {
+			sum := sha256.Sum256(cur)
+			if hex.EncodeToString(sum[:]) == b.SHA256 {
+				return nil
+			}
+		}
+	}
+	data, err := l.bytes(b)
+	if err != nil {
+		return err
+	}
+	return writeAtomicMode(root, rel, data, os.FileMode(b.Mode))
+}
+
+// manifestMax bounds the manifest read back from the workspace (the agent can write there).
+const manifestMax = 1 << 20
+
+func manifestRel(skill string) string {
+	return filepath.Join("skills", skill, store.SkillManifestFile)
+}
+
+// readManifest returns the workspace paths the platform listed for a skill's bundle, only
+// those that are safe paths under the skill's folder.
+func readManifest(root *os.Root, skill string) []string {
+	rel := manifestRel(skill)
+	fi, err := root.Lstat(rel)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > manifestMax {
+		return nil
+	}
+	b, err := root.ReadFile(rel)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if p := bundlePath(skill, strings.TrimSpace(line)); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// pruneBundle removes the paths the manifest lists that the skill's bundle no longer has,
+// then the folders that end up empty. Files the agent created in the folder are not in the
+// manifest and stay.
+func pruneBundle(root *os.Root, skill string, d desired) error {
+	base := filepath.Join("skills", skill)
+	for _, rel := range readManifest(root, skill) {
+		if _, keep := d.Bundle[rel]; keep {
+			continue
+		}
+		if err := removeEntry(root, rel); err != nil {
+			return err
+		}
+		for dir := filepath.Dir(rel); dir != base && dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
+			if root.Remove(dir) != nil { // not empty (or gone): stop
+				break
+			}
+		}
+	}
+	return nil
+}
+
+// removeEntry removes a file, link or folder at rel inside the root; a missing entry is fine.
+func removeEntry(root *os.Root, rel string) error {
+	fi, err := root.Lstat(rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() {
+		return root.RemoveAll(rel)
+	}
+	if err := root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// writeManifest records the bundle paths written for a skill, or removes the manifest when
+// the skill has no bundle files.
+func writeManifest(root *os.Root, skill string, d desired) error {
+	prefix := filepath.Join("skills", skill) + string(filepath.Separator)
+	var lines []string
+	for rel := range d.Bundle {
+		if strings.HasPrefix(rel, prefix) {
+			lines = append(lines, filepath.ToSlash(strings.TrimPrefix(rel, prefix)))
+		}
+	}
+	if len(lines) == 0 {
+		return removeEntry(root, manifestRel(skill))
+	}
+	sort.Strings(lines)
+	return writeAtomic(root, manifestRel(skill), strings.Join(lines, "\n")+"\n")
 }
 
 // writeAtomic replaces rel inside root with content through a temporary file and a
 // rename, unless it already holds exactly that content. The rename replaces a symlink
 // at rel rather than writing through it.
 func writeAtomic(root *os.Root, rel, content string) error {
-	if cur, err := root.ReadFile(rel); err == nil && string(cur) == content {
-		return nil
+	return writeAtomicMode(root, rel, []byte(content), 0o644)
+}
+
+// writeAtomicMode is writeAtomic for bytes and an explicit permission (0644 or 0755): a
+// regular file that holds the content with the mode is left alone. The entry is checked
+// with Lstat first, so a named pipe or device the agent made is never opened (that would
+// block) and a folder where a file belongs is removed; likewise a file where a parent
+// folder belongs. All inside the root.
+func writeAtomicMode(root *os.Root, rel string, content []byte, mode os.FileMode) error {
+	if fi, err := root.Lstat(rel); err == nil {
+		if fi.Mode().IsRegular() {
+			if cur, err := root.ReadFile(rel); err == nil && string(cur) == string(content) && fi.Mode().Perm() == mode {
+				return nil
+			}
+		} else if err := removeEntry(root, rel); err != nil {
+			return err
+		}
 	}
+	err := replaceFile(root, rel, content, mode)
+	if errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EISDIR) || errors.Is(err, syscall.EEXIST) {
+		if cerr := clearConflict(root, rel); cerr != nil {
+			return cerr
+		}
+		err = replaceFile(root, rel, content, mode)
+	}
+	return err
+}
+
+// clearConflict removes what stands in the way of a file at rel: the first parent that
+// exists and is not a folder, or the entry at rel itself when it is a folder.
+func clearConflict(root *os.Root, rel string) error {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	for i := 1; i <= len(parts); i++ {
+		p := filepath.FromSlash(strings.Join(parts[:i], "/"))
+		fi, err := root.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if i < len(parts) && fi.IsDir() {
+			continue
+		}
+		if i == len(parts) && !fi.IsDir() {
+			return nil
+		}
+		return removeEntry(root, p)
+	}
+	return nil
+}
+
+func replaceFile(root *os.Root, rel string, content []byte, mode os.FileMode) error {
 	dir := filepath.Dir(rel)
 	if err := root.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -604,13 +909,13 @@ func writeAtomic(root *os.Root, rel, content string) error {
 		return err
 	}
 	tmp := filepath.Join(dir, "."+filepath.Base(rel)+".tmp-"+hex.EncodeToString(rnd[:]))
-	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	_, err = f.WriteString(content)
+	_, err = f.Write(content)
 	if err == nil {
-		err = f.Chmod(0o644) // on the descriptor: the umask does not decide the mode
+		err = f.Chmod(mode) // on the descriptor: the umask does not decide the mode
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
@@ -650,6 +955,9 @@ func removeStaleSkills(root *os.Root, d desired) error {
 		rel := filepath.Join("skills", e.Name(), "SKILL.md")
 		if _, keep := d.Files[rel]; keep {
 			continue
+		}
+		if fi, err := root.Lstat(rel); err != nil || !fi.Mode().IsRegular() {
+			continue // a pipe or link the agent made is not a platform SKILL.md (and must not be opened)
 		}
 		b, err := root.ReadFile(rel)
 		if err != nil || !strings.HasPrefix(string(b), "---\nname: "+e.Name()+"\n") {
@@ -825,5 +1133,9 @@ func RenderMemory(ctx context.Context, q store.Querier, stateDir string, a *stor
 	if err != nil {
 		return fmt.Errorf("memory facts: %w", err)
 	}
-	return WriteMemoryMD(stateDir, *a.OpenClawAgentID, memory.RenderMemoryMD(facts))
+	edits, err := store.GetAgentFileEdits(ctx, q, a.ID)
+	if err != nil {
+		return fmt.Errorf("memory file edits: %w", err)
+	}
+	return WriteMemoryMD(stateDir, *a.OpenClawAgentID, ComposeMemory(memory.RenderMemoryMD(facts), edits))
 }

@@ -177,6 +177,19 @@ func TestArtifactSettings(t *testing.T) {
 	}
 }
 
+// DESIGN 5.27 rule 7: the Git hosts a skill may be imported from default to GitHub and
+// GitLab; the list is comma separated, trimmed, and empty entries are dropped.
+func TestSkillImportHosts(t *testing.T) {
+	t.Setenv("SKILL_IMPORT_HOSTS", "")
+	if got := strings.Join(FromEnv().SkillImportHosts, ","); got != "github.com,gitlab.com" {
+		t.Fatalf("default = %q", got)
+	}
+	t.Setenv("SKILL_IMPORT_HOSTS", " git.example.org , ,codeberg.org")
+	if got := strings.Join(FromEnv().SkillImportHosts, ","); got != "git.example.org,codeberg.org" {
+		t.Fatalf("set = %q", got)
+	}
+}
+
 // Review L7: the artifacts volume is mounted on the api where ARTIFACT_DIR says, not at a
 // fixed path, with config's default as the compose default; it is mounted nowhere else.
 func TestComposeMountsTheArtifactVolumeWhereArtifactDirSays(t *testing.T) {

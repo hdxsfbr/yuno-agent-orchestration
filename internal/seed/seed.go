@@ -19,6 +19,7 @@ import (
 	"yuno/internal/engine"
 	"yuno/internal/httpapi"
 	"yuno/internal/openclaw"
+	"yuno/internal/skillbundle"
 	"yuno/internal/store"
 	"yuno/internal/tools"
 )
@@ -207,6 +208,11 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger, opts Options)
 	sh := httpapi.NewShared(httpapi.Deps{Cfg: cfg, Log: log, Pool: pool})
 	made, _ := Templates(ctx, pool, sh, log)
 	log.Info("seed: workflows from templates", "created", strings.Join(made, ","))
+
+	// The skills library (DESIGN 5.27 rule 10): skills not yet present, none overwritten.
+	if _, err := skillbundle.ImportLibrary(ctx, pool, cfg.SkillsLibraryDir, log); err != nil {
+		log.Warn("seed: skills library not imported", "error", err)
+	}
 
 	if opts.ResetShipped {
 		agents, workflows, err := ResetShipped(ctx, pool, sh)

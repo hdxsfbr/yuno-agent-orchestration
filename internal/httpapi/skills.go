@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
 	"slices"
 	"unicode/utf8"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"yuno/internal/obs"
+	"yuno/internal/skillbundle"
 	"yuno/internal/store"
 )
 
@@ -26,7 +26,7 @@ const (
 
 // skillName is the skills table's name rule (DESIGN section 4); it is also the
 // directory name under skills/ in the agent's workspace.
-var skillName = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+var skillName = skillbundle.NamePattern
 
 // skillInput is SkillInput; the read-only Skill fields are accepted and ignored so a
 // client can PUT back what it fetched.
@@ -38,6 +38,13 @@ type skillInput struct {
 	ID        json.RawMessage `json:"id"`
 	CreatedAt json.RawMessage `json:"created_at"`
 	UpdatedAt json.RawMessage `json:"updated_at"`
+
+	// Wave 12 read-only fields (DESIGN 5.27 rule 10), accepted and ignored the same way.
+	Source     json.RawMessage `json:"source"`
+	SourceURL  json.RawMessage `json:"source_url"`
+	SourceRef  json.RawMessage `json:"source_ref"`
+	License    json.RawMessage `json:"license"`
+	FilesCount json.RawMessage `json:"files_count"`
 }
 
 func (in *skillInput) validate() fieldErrors {
@@ -288,7 +295,7 @@ func (s *Server) skillNameError(w http.ResponseWriter, r *http.Request, fe field
 		s.internalError(w, r, "skill name", err)
 		return
 	}
-	writeValidation(w, "invalid skill", fe)
+	writeReasons(w, "invalid skill", fe)
 }
 
 // isUniqueViolation catches the race the name check cannot: two saves of one name at

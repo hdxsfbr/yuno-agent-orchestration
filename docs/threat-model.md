@@ -213,6 +213,24 @@ token, no users, roles or audit of who approved beyond `decided_by: api`.
 **Supply chain.** Pinned OpenClaw image (`2026.10.3`), Go module sums, pnpm lockfile,
 derived gateway image adds only the static Docker CLI.
 
+**Imported skills.** A skill from a zip, a Git repository or the library carries text the
+agent reads and scripts it may run. Mitigation: paths are checked (no `..`, absolute
+paths, backslashes, symlinks or devices; hidden folders skipped), sizes are counted while
+reading (200 files, 2 MiB per file, 20 MiB per skill, 25 MiB per upload, 50 MiB per
+clone); Git import is https-only to allowlisted hosts, without credentials in the URL,
+redirects checked against the allowlist, git run with no prompts, no system config, only
+the https protocol, a 60 s timeout and its temporary directory always removed; the api
+never runs anything it imports, and scripts run only through `exec` in the agent's
+sandbox under its exec policy (5.7). The library's skills were read in full before they
+were committed (`skills-library/SOURCES.md`). Limit: the platform does not judge what an
+imported skill's instructions ask the agent to do; assign skills from sources you trust.
+
+**Workspace files.** The operator's edits to an agent's files reach the model. Mitigation:
+the platform's generated part of `SOUL.md`, `AGENTS.md` and `MEMORY.md` cannot be removed
+from the UI; reads and writes go through the workspace root, only regular files are read
+or replaced, so a link or pipe the agent creates cannot redirect or block them; shown
+content is redacted, and a redacted file cannot be saved back.
+
 ## Known limitations
 
 - Single operator, no authentication beyond the optional bearer token.

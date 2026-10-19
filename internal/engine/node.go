@@ -239,7 +239,8 @@ func (v *visit) execute(ctx context.Context) outcome {
 		return *res
 	}
 	v.abortStale(ctx)
-	if v.agent.MaterializedHash != openclaw.DesiredHash(e.deps.StateDir, v.agent, v.skills) || v.agent.OpenClawAgentID == nil {
+	want, ex, known := e.desired(ctx, v.agent, v.skills)
+	if !known || v.agent.MaterializedHash != want || v.agent.OpenClawAgentID == nil {
 		sctx, done := v.setupContext(ctx)
 		err := e.materialize(sctx, v.agent, v.skills)
 		done()
@@ -252,6 +253,8 @@ func (v *visit) execute(ctx context.Context) outcome {
 			v.rn.SessionKey = &v.key
 			v.saveNode(ctx)
 		}
+	} else {
+		e.refreshWorkspace(v.agent, v.skills, ex)
 	}
 	if err := v.prepareRunDir(); err != nil {
 		return failed(store.RunFailed, "run directory: "+err.Error())
@@ -371,7 +374,10 @@ func (v *visit) renderMemory(ctx context.Context) {
 	}
 	facts, err := memory.PromptFactsFor(ctx, v.e.deps.Pool, v.agent.ID, v.e.clock.Now())
 	if err == nil {
-		err = openclaw.WriteMemoryMD(v.e.deps.StateDir, v.ocID, memory.RenderMemoryMD(facts))
+		var edits map[string]store.AgentFileEdit
+		if edits, err = store.GetAgentFileEdits(ctx, v.e.deps.Pool, v.agent.ID); err == nil {
+			err = openclaw.WriteMemoryMD(v.e.deps.StateDir, v.ocID, openclaw.ComposeMemory(memory.RenderMemoryMD(facts), edits))
+		}
 	}
 	if err != nil {
 		v.log.Warn("render MEMORY.md failed", "error", err)

@@ -255,7 +255,8 @@ func (e *Engine) syncAgent(ctx context.Context, agentID string, listed map[strin
 		return
 	}
 	missing := a.OpenClawAgentID == nil || !listed[*a.OpenClawAgentID]
-	if !missing && a.MaterializedHash == openclaw.DesiredHash(e.deps.StateDir, a, skills) {
+	if want, ex, known := e.desired(ctx, a, skills); !missing && known && a.MaterializedHash == want {
+		e.refreshWorkspace(a, skills, ex)
 		return
 	}
 	if missing {

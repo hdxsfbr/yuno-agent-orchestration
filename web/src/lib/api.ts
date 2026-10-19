@@ -18,7 +18,8 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const sent = getToken();
   const res = await fetch(path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...authHeaders(sent), ...(init?.headers ?? {}) },
+    // A multipart body sets its own Content-Type (with the boundary).
+    headers: { ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }), ...authHeaders(sent), ...(init?.headers ?? {}) },
   });
   if (res.status === 401) reportUnauthorized(sent);
   if (res.status === 204) return undefined as T;
@@ -1015,7 +1016,39 @@ export type Schedule = ScheduleInput & {
 };
 
 export type SkillInput = { name: string; description: string; body: string };
-export type Skill = SkillInput & { id: string; created_at: string; updated_at: string };
+/** Where a skill came from: made on the page (user), shipped with the platform (library), or imported. */
+export type SkillSource = "user" | "library" | "git" | "upload";
+export type Skill = SkillInput & {
+  id: string;
+  source?: SkillSource;
+  source_url?: string;
+  source_ref?: string;
+  license?: string;
+  /** Number of bundle files besides SKILL.md. */
+  files_count?: number;
+  created_at: string;
+  updated_at: string;
+};
+
+/** One file of a skill bundle. A listing carries path, size and mode; a read of one file adds the content. */
+export type SkillFile = { path: string; size?: number; /** 420 (0644) or 493 (0755, executable) */ mode?: number; content?: string };
+export type SkillImportGit = { url: string; ref?: string; path?: string };
+
+export type AgentFileName = "AGENTS.md" | "SOUL.md" | "MEMORY.md" | "IDENTITY.md" | "USER.md" | "BOOTSTRAP.md" | "HEARTBEAT.md" | "TOOLS.md" | "DREAMS.md";
+/** One workspace file of an agent. Generated files take an addition, runtime files an override. */
+export type AgentFile = {
+  name: AgentFileName;
+  kind: "generated" | "runtime";
+  exists: boolean;
+  content: string;
+  truncated?: boolean;
+  /** True when secrets were masked in the shown content. */
+  redacted?: boolean;
+  addition?: string | null;
+  override?: string | null;
+  updated_at?: string;
+};
+export type AgentFileEdit = { addition?: string; override?: string | null };
 
 export type MemoryFact = { id: string; key: string; value: string; created_at: string; expires_at?: string | null };
 
@@ -1055,6 +1088,42 @@ export const listSkills = async () => (await api<Skill[] | null>("/api/skills"))
 export const createSkill = (input: SkillInput) => api<Skill>("/api/skills", withBody("POST", input));
 export const updateSkill = (id: string, input: SkillInput) => api<Skill>(`/api/skills/${seg(id)}`, withBody("PUT", input));
 export const deleteSkill = (id: string) => api<void>(`/api/skills/${seg(id)}`, withBody("DELETE"));
+
+const replaceQuery = (replace?: boolean) => (replace ? "?replace=true" : "");
+export const importSkillZip = (file: File, replace = false) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api<Skill>(`/api/skills/import${replaceQuery(replace)}`, { method: "POST", body: form });
+};
+export const importSkillGit = (input: SkillImportGit, replace = false) =>
+  api<Skill>(`/api/skills/import-git${replaceQuery(replace)}`, withBody("POST", input));
+export const listSkillFiles = async (id: string) => (await api<SkillFile[] | null>(`/api/skills/${seg(id)}/files`)) ?? [];
+export const getSkillFile = (id: string, path: string) => api<SkillFile>(`/api/skills/${seg(id)}/files/${seg(path)}`);
+export const putSkillFile = (id: string, path: string, content: string, mode?: number) =>
+  api<SkillFile>(`/api/skills/${seg(id)}/files/${seg(path)}`, withBody("PUT", { path, content, ...(mode ? { mode } : {}) }));
+export const deleteSkillFile = (id: string, path: string) => api<void>(`/api/skills/${seg(id)}/files/${seg(path)}`, withBody("DELETE"));
+export const skillExportUrl = (id: string) => `/api/skills/${seg(id)}/export`;
+
+/** The skill's bundle as a zip, fetched with the API token (a plain link could not send it). */
+export async function downloadSkillExport(id: string): Promise<Blob> {
+  const sent = getToken();
+  const res = await fetch(skillExportUrl(id), { headers: authHeaders(sent) });
+  if (res.status === 401) reportUnauthorized(sent);
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      message = ((await res.json()) as { error?: { message?: string } }).error?.message ?? message;
+    } catch {
+      /* keep the status text */
+    }
+    throw new ApiError(res.status, "http_error", message);
+  }
+  return res.blob();
+}
+
+export const listAgentFiles = async (agentId: string) => (await api<AgentFile[] | null>(`/api/agents/${seg(agentId)}/files`)) ?? [];
+export const putAgentFile = (agentId: string, name: string, edit: AgentFileEdit) =>
+  api<AgentFile | undefined>(`/api/agents/${seg(agentId)}/files/${seg(name)}`, withBody("PUT", edit));
 
 export const listAgentMemory = async (agentId: string) => (await api<MemoryFact[] | null>(`/api/agents/${seg(agentId)}/memory`)) ?? [];
 export const deleteAgentMemory = (agentId: string, factId: string) =>

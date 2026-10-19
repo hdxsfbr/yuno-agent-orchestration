@@ -211,6 +211,7 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	if err := s.LoadTemplates(ctx); err != nil {
 		log.Warn("workflow templates not loaded", "error", err)
 	}
+	s.ImportSkillLibrary(ctx)
 	if cfg.MCPToken == "" {
 		log.Warn("YUNO_MCP_TOKEN is empty; every MCP request will be refused")
 	}
@@ -339,6 +340,8 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("DELETE /api/agents/{id}", s.deleteAgent)
 	mux.HandleFunc("POST /api/agents/{id}/materialize", s.materializeAgent)
 	mux.HandleFunc("GET /api/agents/{id}/runtime", s.agentRuntime)
+	mux.HandleFunc("GET /api/agents/{id}/files", s.listAgentFiles)
+	mux.HandleFunc("PUT /api/agents/{id}/files/{name}", s.putAgentFile)
 
 	mux.HandleFunc("GET /api/tools", s.listTools)
 
@@ -378,6 +381,14 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/skills/{id}", s.getSkill)
 	mux.HandleFunc("PUT /api/skills/{id}", s.updateSkill)
 	mux.HandleFunc("DELETE /api/skills/{id}", s.deleteSkill)
+	// Skill bundles (DESIGN 5.27 rules 6, 7 and 11).
+	mux.HandleFunc("POST /api/skills/import", s.importSkillZip)
+	mux.HandleFunc("POST /api/skills/import-git", s.importSkillGit)
+	mux.HandleFunc("GET /api/skills/{id}/files", s.listSkillFiles)
+	mux.HandleFunc("GET /api/skills/{id}/files/{path...}", s.getSkillFile)
+	mux.HandleFunc("PUT /api/skills/{id}/files/{path...}", s.putSkillFile)
+	mux.HandleFunc("DELETE /api/skills/{id}/files/{path...}", s.deleteSkillFile)
+	mux.HandleFunc("GET /api/skills/{id}/export", s.exportSkill)
 	// Projects (DESIGN 5.17 rule 3).
 	mux.HandleFunc("GET /api/projects", s.listProjects)
 	mux.HandleFunc("POST /api/projects", s.createProject)

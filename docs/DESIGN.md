@@ -3692,6 +3692,119 @@ recorded as D-062 to D-064):
    panel with Reviewer and Critic and the Writer as the lead, which reads oddly for a
    code change.
 
+### 5.27 Agent files, skill bundles and the skills library
+
+Purpose: the operator sees and edits every file in an agent's OpenClaw workspace, skills
+carry scripts and resources rather than one text body, and a library of existing skills
+ships with the platform, ready to assign. Decisions D-067 to D-070 (Andre, 2026-10-19).
+
+Inputs: the agent row and its skills; the agent's workspace on the gateway's state
+directory (`WorkspaceDir`, 5.6 rule 13); the `skills` rows and their files; an uploaded
+zip; a Git URL; the library directory baked into the api image (`skills-library/`).
+
+Units: a "workspace file" is one of the named top-level files OpenClaw reads from an
+agent's workspace: `AGENTS.md`, `SOUL.md`, `MEMORY.md` (the "generated" files, written
+by the platform, 5.6, 5.10) and `IDENTITY.md`, `USER.md`, `BOOTSTRAP.md`, `HEARTBEAT.md`,
+`TOOLS.md`, `DREAMS.md` (the "runtime" files, seeded or written by OpenClaw); an
+"addition" is the operator's text for a generated file; an "override" is the operator's
+full content for a runtime file; a "bundle" is a skill's files (`SKILL.md` plus any
+others); sizes in bytes; times UTC.
+
+Rules:
+
+1. **The list.** `GET /api/agents/{id}/files` returns every workspace file name above
+   with: `kind` (`generated` | `runtime`), `content` (what is on disk now, or empty with
+   `exists: false`), `addition` (generated) or `override` (runtime, null when none), and
+   `updated_at` of the stored edit. Content is read from the workspace through
+   `os.Root` (no path outside it); a file over 256 KiB is returned truncated with
+   `truncated: true`. Secrets in the content (the chat token in `AGENTS.md`, 5.15) are
+   redacted in the response like everywhere else.
+2. **Generated files keep the platform's part.** `PUT /api/agents/{id}/files/{name}`
+   with `{"addition": "..."}` stores the addition (`agent_file_edits`, at most 64 KiB);
+   materialize writes the generated content, then `\n\n## Operator additions\n\n` and
+   the addition, so the platform's rules (finish protocol, approvals, memory section,
+   chat rules) can never be deleted from the UI. An empty addition removes the section.
+   `MEMORY.md`'s addition goes after the rendered facts (5.10 keeps rendering them).
+3. **Runtime files are the operator's when edited.** `PUT` with `{"override": "..."}`
+   (at most 64 KiB) stores it, and materialize writes it over what OpenClaw wrote;
+   `{"override": null}` deletes the stored override and leaves the file to OpenClaw
+   from then on (the platform does not restore OpenClaw's original text). A runtime
+   file with no override is never written by the platform.
+4. **Edits change the hash.** Additions and overrides are part of the desired state
+   (5.6 `desired.Files`), so a save re-materializes the agent like any config change and
+   the background sync converges a gateway that lost them. Names outside the list are
+   `400 unknown file`; a body that is not UTF-8 is `400`.
+5. **Skills are bundles.** A skill keeps `name`, `description` and `body` (the
+   `SKILL.md` body, as today) and gains files: `skill_files(skill_id, path, content
+   bytea, mode, size)`. `path` is relative, cleaned, without `..`, absolute parts,
+   backslashes or a leading dot directory other than `.` files inside (pathcheck), and
+   not `SKILL.md` (the body is). Caps per skill: 200 files, 2 MiB per file, 20 MiB
+   total; mode is 0644 or 0755 (executable bit kept from the zip or the Git tree).
+   Symlinks, devices and directories as entries are refused.
+6. **Upload.** `POST /api/skills/import` with a zip (multipart, at most 25 MiB): the
+   archive's root is the directory that holds `SKILL.md` (a single top folder is
+   stripped); `SKILL.md`'s front matter gives `name` and `description` (the body is the
+   rest); the caps of rule 5 apply to the extracted sizes before anything is stored (a
+   zip bomb is refused by counting while reading); an existing skill of that name is
+   `409` unless `?replace=true`, which replaces body and files in one transaction.
+7. **Git import.** `POST /api/skills/import-git {url, ref?, path?}`: `https` only, the
+   host must be in `SKILL_IMPORT_HOSTS` (default `github.com,gitlab.com`), no
+   credentials in the URL; the api runs `git clone --depth 1 --no-checkout` with
+   `GIT_TERMINAL_PROMPT=0`, submodules off, a 60 s timeout and a 50 MiB clone cap, then
+   checks out only `path` (default the root) and applies rule 6 to that directory. The
+   skill records `source: git`, `source_url`, `source_ref` (the resolved commit). The
+   api never executes anything from the clone; the temporary directory is removed on
+   every path.
+8. **Assigned skills reach the workspace whole.** Materialize writes `skills/<name>/`
+   with `SKILL.md` and every bundle file with its mode; files the skill no longer has are
+   removed (the existing stale-skill sweep, extended to files). The hash covers file
+   paths, sizes and a content digest, not the bytes.
+9. **Scripts run only in the sandbox.** A bundle's scripts are run by the agent through
+   `exec`, which the exec policy and the sandbox govern (5.7); nothing in the platform
+   runs them. The skill page says which files are executable.
+10. **The library.** The repository ships `skills-library/<source>/<name>/` (each with
+    its `LICENSE` or the source's licence named in `skills-library/SOURCES.md`),
+    copied into the api image. `make seed` and the api's start import every library
+    skill that is not yet in `skills` with `source: library`, `source_url`, `license`;
+    an existing skill of the same name is left alone (the operator's edits win).
+    Library skills are assigned to no agent. Sources (D-069): Anthropic's skills
+    repository (Apache-2.0 skills only), OpenClaw's bundled skills (MIT), and a few
+    ClawHub skills (MIT-0, security scan "Pass"), each read in full before it is
+    committed.
+11. **Editing a bundle.** `GET /api/skills/{id}/files` lists paths, sizes and modes;
+    `GET /api/skills/{id}/files/{path}` returns a text file (UTF-8, at most 256 KiB) or
+    `415` for binary; `PUT` replaces a text file, `DELETE` removes a file; `GET
+    /api/skills/{id}/export` returns the bundle as a zip.
+
+Edge cases: a runtime file OpenClaw has not created yet (`exists: false`; saving an
+override creates it); an agent with no workspace yet (`409 not materialized`); two
+saves in a row (last write wins, the hash converges); a zip with `SKILL.md` in two
+folders (`400 several SKILL.md`); a zip whose name collides with a different-cased one
+(names are unique as today); a Git URL that redirects to another host (refused: the
+redirect target is checked against the allowlist); a library skill renamed upstream (a
+new skill; the old one stays until deleted).
+
+Failure handling: a failed materialize after a save returns `502 materialize_failed`
+with the edit stored (the sync applies it later, 5.6); a clone that fails or times out
+is `502 import_failed` with git's first error line; caps exceeded are `413` naming the
+cap.
+
+Tests: T5.27.1 list returns every name with kind and redacted content; T5.27.2 an
+addition is written after the generated part and survives a re-materialize; T5.27.3 a
+runtime override is written, and `null` stops writing it; T5.27.4 unknown name and
+non-UTF-8 are 400; T5.27.5 zip import (single top folder stripped, front matter read,
+modes kept); T5.27.6 caps (file count, file size, total, zip bomb) and path traversal
+(`../`, absolute, symlink) refused; T5.27.7 replace is atomic; T5.27.8 git import
+refuses a host outside the allowlist, a credentialed URL and a redirect off the
+allowlist (fake git and a local test server); T5.27.9 materialize writes bundle files
+with their modes and removes dropped ones; T5.27.10 library import is idempotent and
+never overwrites an existing skill; T5.27.11 file edit/delete/export round-trip.
+
+Limitations: the platform does not restore OpenClaw's original runtime-file text after
+an override is removed; library skills that need a network or a CLI the sandbox image
+lacks (for example `gh`) only work in a sandbox that has them; a skill's own licence
+travels with it, and the platform does not check what an imported skill does.
+
 ## 6. HTTP API summary
 
 Errors: `{error: {code, message, details?}}`; validation failures are 422 with

@@ -24,6 +24,8 @@ RUN apk add --no-cache ca-certificates tzdata wget git && adduser -D -u 1000 app
 WORKDIR /src
 COPY --from=build /out/yuno /usr/local/bin/yuno
 COPY --from=build /src/templates ./templates
+# The skills library (DESIGN 5.27 rule 10), imported at start; not part of the build stage.
+COPY skills-library ./skills-library
 # /data is the deploytarget release volume and /data/artifacts the api's artifact store
 # (DESIGN 5.25 rule 4); a named volume inherits this ownership when it is first created.
 USER app

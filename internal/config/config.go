@@ -86,6 +86,12 @@ type Config struct {
 	// finished its artifacts are kept, 0 for ever (rule 6).
 	ArtifactDir     string
 	ArtifactTTLDays int
+	// SkillImportHosts are the hosts a skill may be imported from by Git URL (DESIGN 5.27
+	// rule 7); a redirect to any other host is refused.
+	SkillImportHosts []string
+	// SkillsLibraryDir holds the skills library imported at start (DESIGN 5.27 rule 10),
+	// relative to the working directory (/src in the api image).
+	SkillsLibraryDir string
 
 	// Evaluation runner (DESIGN 5.13). The runner is an HTTP client of the api.
 	EvalAPIURL     string
@@ -158,6 +164,8 @@ func FromEnv() Config {
 		LogLevel:                 env("LOG_LEVEL", "info"),
 		ArtifactDir:              env("ARTIFACT_DIR", "/data/artifacts"),
 		ArtifactTTLDays:          envInt("ARTIFACT_TTL_DAYS", 30),
+		SkillImportHosts:         envList("SKILL_IMPORT_HOSTS", "github.com,gitlab.com"),
+		SkillsLibraryDir:         "skills-library", // /src/skills-library in the api image; not an env setting
 
 		EvalAPIURL:     strings.TrimRight(env("EVAL_API_URL", "http://127.0.0.1:8080"), "/"),
 		EvalProvider:   env("EVAL_PROVIDER", "scripted"),

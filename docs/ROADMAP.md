@@ -466,3 +466,9 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
    deleting (docs/test-results.md, wave 11).
    The demo recording with projects is still pending, and the Telegram relay of an
    answer through the Chief has not been tried live (the unit tests cover it).
+12. 2026-10-19, wave 12 (agent files, skill bundles, the skills library; DESIGN 5.27,
+   D-067 to D-070): Andre asked to see and edit every agent workspace file, to give skills
+   scripts and resources, and to ship a library of existing skills. Designed, approved,
+   built by four Sonnet 5.5 agents (prerequisites, then workspace files and bundle
+   materialize, skill import and the library, frontend in parallel), reviewed
+   (`docs/reviews/wave12-review.md`, twelve findings kept) and fixed in one pass.

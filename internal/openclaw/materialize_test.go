@@ -252,8 +252,10 @@ func TestMaterializeUnchangedHashIsNoOp(t *testing.T) {
 	if n := len(m.f.allCalls()) - before; n != 0 {
 		t.Fatalf("%d gateway calls on an unchanged agent", n)
 	}
-	if _, err := os.Stat(filepath.Join(m.dir, "workspace-"+*a.OpenClawAgentID)); !os.IsNotExist(err) {
-		t.Fatal("files written on an unchanged agent")
+	// The workspace files are written again (OpenClaw rewrites what it seeds; overrides
+	// must come back), only the gateway is left alone.
+	if got := wsRead(t, filepath.Join(m.dir, "workspace-"+*a.OpenClawAgentID), "AGENTS.md"); got == "" {
+		t.Fatal("workspace files not restored on an unchanged agent")
 	}
 	if DesiredHash(m.dir, a, nil) != hash {
 		t.Fatal("DesiredHash differs from Materialize's hash")

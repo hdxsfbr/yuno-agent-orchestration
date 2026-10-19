@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Yuno Agent Orchestration API
-  version: 0.8.0
+  version: 0.9.0
   description: |
     Control plane for configurable AI agents and multi-agent workflows executed on
     OpenClaw. All endpoints are JSON. When API_TOKEN is set, every /api path except
@@ -141,6 +141,44 @@ paths:
       responses:
         "204": { description: deleted }
         "404": { $ref: "#/components/responses/Error" }
+  /api/agents/{id}/files:
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    get:
+      tags: [agents]
+      summary: List the agent's workspace files with what is on disk and the operator's edits
+      description: |
+        DESIGN 5.27 rule 1. Every name the platform knows: the generated
+        files (AGENTS.md, SOUL.md, MEMORY.md) and the runtime files (IDENTITY.md, USER.md,
+        BOOTSTRAP.md, HEARTBEAT.md, TOOLS.md, DREAMS.md). Content is read from the workspace,
+        redacted like everywhere else, and truncated above 256 KiB. 409 `not_materialized` while
+        the agent has no workspace yet.
+      responses:
+        "200": { description: files, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/AgentFile" } } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /api/agents/{id}/files/{name}:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - { name: name, in: path, required: true, schema: { type: string } }
+    put:
+      tags: [agents]
+      summary: Store the operator's addition (generated file) or override (runtime file) and re-materialise
+      description: |
+        DESIGN 5.27 rules 2 to 4. `{"addition": "..."}` for a generated
+        file, `{"override": "..." | null}` for a runtime file; at most 64 KiB (413 above),
+        UTF-8. An unknown name, a body that is not UTF-8 or the wrong field for the file kind
+        is 400. 409 `not_materialized` while the agent has no workspace yet. When the agent could not be pushed to
+        OpenClaw the edit is still saved and the answer is 502 `materialize_failed`.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/AgentFileEdit" } } }
+      responses:
+        "200": { description: the file, content: { application/json: { schema: { $ref: "#/components/schemas/AgentFile" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
   /api/agents/{id}/materialize:
     post:
       tags: [agents]
@@ -650,6 +688,108 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
 
+  /api/skills/import:
+    post:
+      tags: [skills]
+      summary: Import a skill bundle from a zip
+      description: |
+        DESIGN 5.27 rule 6. The archive's root is the directory that
+        holds SKILL.md (a single top folder is stripped); its front matter gives name and
+        description. At most 25 MiB, 200 files, 2 MiB per file, 20 MiB extracted. An existing
+        skill of that name is 409 unless `replace=true`. Caps exceeded are 413.
+      parameters:
+        - { name: replace, in: query, schema: { type: boolean, default: false } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Skill" } } } }
+        "200": { description: replaced, content: { application/json: { schema: { $ref: "#/components/schemas/Skill" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/skills/import-git:
+    post:
+      tags: [skills]
+      summary: Import a skill bundle from a Git repository
+      description: |
+        DESIGN 5.27 rule 7. https only, host in SKILL_IMPORT_HOSTS, no
+        credentials in the URL, a redirect off the allowlist refused. The skill records
+        `source: git`, `source_url` and the resolved commit as `source_ref`. A clone that
+        fails or times out is 502 `import_failed`.
+      parameters:
+        - { name: replace, in: query, schema: { type: boolean, default: false } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SkillImportGit" } } }
+      responses:
+        "201": { description: created, content: { application/json: { schema: { $ref: "#/components/schemas/Skill" } } } }
+        "200": { description: replaced, content: { application/json: { schema: { $ref: "#/components/schemas/Skill" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+  /api/skills/{id}/files:
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    get:
+      tags: [skills]
+      summary: List a skill's bundle files (path, size, mode)
+      description: DESIGN 5.27 rule 11. SKILL.md is the skill's body and is not listed.
+      responses:
+        "200": { description: files, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/SkillFile" } } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/skills/{id}/files/{path}:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - { name: path, in: path, required: true, schema: { type: string }, description: "the file's relative path, url-encoded (slashes as %2F or literal)" }
+    get:
+      tags: [skills]
+      summary: Read a text file of the bundle
+      description: DESIGN 5.27 rule 11. UTF-8 text up to 256 KiB; a binary or larger file is 415.
+      responses:
+        "200": { description: the file, content: { application/json: { schema: { $ref: "#/components/schemas/SkillFile" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "415": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [skills]
+      summary: Replace (or create) a text file of the bundle and re-materialise the agents that use the skill
+      description: DESIGN 5.27 rules 5 and 11. The path is checked as in an import; caps apply. 502 as for a skill update.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/SkillFile" } } }
+      responses:
+        "200": { description: the file, content: { application/json: { schema: { $ref: "#/components/schemas/SkillFile" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "413": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [skills]
+      summary: Delete a file of the bundle and re-materialise the agents that use the skill
+      description: DESIGN 5.27 rule 11.
+      responses:
+        "204": { description: deleted }
+        "404": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+  /api/skills/{id}/export:
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    get:
+      tags: [skills]
+      summary: Export the bundle as a zip (SKILL.md and its files, modes kept)
+      description: DESIGN 5.27 rule 11.
+      responses:
+        "200": { description: zip, content: { application/zip: { schema: { type: string, format: binary } } } }
+        "404": { $ref: "#/components/responses/Error" }
+
   /api/projects:
     get:
       tags: [projects]
@@ -955,8 +1095,50 @@ components:
         name: { type: string }
         description: { type: string }
         body: { type: string }
+        source: { type: string, enum: [user, library, git, upload], description: "Where the skill came from (DESIGN 5.27 rule 10); user for every skill made on the page" }
+        source_url: { type: string, description: "The repository or library source; empty for a user skill" }
+        source_ref: { type: string, description: "The resolved commit of a Git import; empty otherwise" }
+        license: { type: string, description: "The skill's licence as recorded on import; empty for a user skill" }
+        files_count: { type: integer, description: "Number of bundle files besides SKILL.md" }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    SkillFile:
+      type: object
+      description: "One file of a skill bundle (DESIGN 5.27 rules 5 and 11). `content` is present on a read of one file and required on a PUT; a listing carries path, size and mode only."
+      required: [path]
+      properties:
+        path: { type: string, description: "relative, cleaned, no .., not SKILL.md" }
+        size: { type: integer, description: bytes }
+        mode: { type: integer, enum: [420, 493], description: "0644 or 0755 (executable), as decimal" }
+        content: { type: string, description: "UTF-8 text" }
+    SkillImportGit:
+      type: object
+      description: "Import a skill from a Git repository (DESIGN 5.27 rule 7)."
+      required: [url]
+      properties:
+        url: { type: string, description: "https URL without credentials; the host must be in SKILL_IMPORT_HOSTS" }
+        ref: { type: string, description: "branch, tag or full 40-character commit sha; the default branch when absent" }
+        path: { type: string, description: "directory inside the repository that holds SKILL.md; the root when absent" }
+    AgentFile:
+      type: object
+      description: "One workspace file of an agent (DESIGN 5.27 rule 1)."
+      required: [name, kind, exists, content, redacted]
+      properties:
+        name: { type: string, enum: [AGENTS.md, SOUL.md, MEMORY.md, IDENTITY.md, USER.md, BOOTSTRAP.md, HEARTBEAT.md, TOOLS.md, DREAMS.md] }
+        kind: { type: string, enum: [generated, runtime], description: "generated: written by the platform, the operator adds to it; runtime: OpenClaw's, the operator may override it" }
+        exists: { type: boolean }
+        content: { type: string, description: "what is on disk now, redacted; empty when exists is false" }
+        truncated: { type: boolean, description: "content was cut at 256 KiB" }
+        redacted: { type: boolean, description: "redaction (secrets, the agent's chat token) changed the content; true means the content is not what is on disk and must not seed an override" }
+        addition: { type: [string, "null"], description: "generated files: the operator's text, null when none" }
+        override: { type: [string, "null"], description: "runtime files: the operator's full content, null when none" }
+        updated_at: { type: string, format: date-time, description: "of the stored edit; absent without one" }
+    AgentFileEdit:
+      type: object
+      description: "Body of PUT /api/agents/{id}/files/{name}: `addition` for a generated file (empty removes the section), `override` for a runtime file (null removes the override). At most 64 KiB."
+      properties:
+        addition: { type: string }
+        override: { type: [string, "null"] }
     ProjectSettings:
       type: object
       description: A project's settings without its token; also a run's snapshot of the project it works on.

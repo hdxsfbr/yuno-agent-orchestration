@@ -6,6 +6,32 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-19
 
+**D-070 Multi-file skills arrive by zip upload or from a public Git URL.** (Andre,
+2026-10-19) Zip or folder upload, plus import from a Git repository path on an allowlisted
+host (`SKILL_IMPORT_HOSTS`, default github.com and gitlab.com), shallow and capped; the api
+never executes imported content, and scripts run only through `exec` in the sandbox.
+Alternative: zip upload only (less surface). Design: DESIGN 5.27 rules 5 to 9.
+
+**D-069 The skills library ships Anthropic's Apache-2.0 skills, OpenClaw's bundled MIT
+skills and a few ClawHub skills.** (Andre, 2026-10-19) Vendored under `skills-library/`
+with their licences, each read in full before it is committed; imported at start without
+overwriting an existing skill of the same name, assigned to no agent. Anthropic's docx,
+pdf, pptx and xlsx skills are excluded (their licence does not allow redistribution).
+Alternative: write our own. Design: DESIGN 5.27 rule 10.
+
+**D-068 Skills become bundles.** (coordinator, 2026-10-19, following D-070) A skill keeps
+its `SKILL.md` body and gains files with paths and modes in `skill_files`, capped at 200
+files, 2 MiB per file and 20 MiB per skill. Why: scripts and resources are what make
+existing skills useful. Design: DESIGN 5.27 rules 5 and 8.
+
+**D-067 Every agent workspace file is visible; generated files take an operator
+addition, runtime files an override.** (Andre, 2026-10-19) SOUL.md, AGENTS.md and
+MEMORY.md keep the platform's generated part with an "Operator additions" section below
+it; IDENTITY.md, USER.md, BOOTSTRAP.md, HEARTBEAT.md, TOOLS.md and DREAMS.md are fully
+editable. Edits are stored in Postgres and written on every materialize. Alternatives:
+full override (can delete the rules the engine depends on), edit on disk only (lost on
+the next sync). Design: DESIGN 5.27 rules 1 to 4.
+
 **D-066 The platform restarts the gateway when a config patch needs a recovery restart,
 and gateway calls wait out a restart.** (coordinator, 2026-10-19, from the final audit)
 The pinned gateway answers config.patch with "persisted … but a recovery restart is

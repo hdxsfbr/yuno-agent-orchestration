@@ -152,12 +152,49 @@ type Agent struct {
 }
 
 type Skill struct {
-	ID          string    `db:"id" json:"id"`
-	Name        string    `db:"name" json:"name"`
-	Description string    `db:"description" json:"description"`
-	Body        string    `db:"body" json:"body"`
-	CreatedAt   time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+	ID          string `db:"id" json:"id"`
+	Name        string `db:"name" json:"name"`
+	Description string `db:"description" json:"description"`
+	Body        string `db:"body" json:"body"`
+	// Source is user | library | git | upload (DESIGN 5.27 rule 10); SourceURL, SourceRef
+	// (the resolved commit for git) and License are empty for a user skill. FilesCount is
+	// the number of bundle files besides SKILL.md; it is read, never written.
+	Source     string    `db:"source" json:"source"`
+	SourceURL  string    `db:"source_url" json:"source_url"`
+	SourceRef  string    `db:"source_ref" json:"source_ref"`
+	License    string    `db:"license" json:"license"`
+	FilesCount int       `db:"files_count" json:"files_count"`
+	CreatedAt  time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt  time.Time `db:"updated_at" json:"updated_at"`
+}
+
+// Skill sources (DESIGN 5.27 rule 10).
+const (
+	SkillSourceUser    = "user"
+	SkillSourceLibrary = "library"
+	SkillSourceGit     = "git"
+	SkillSourceUpload  = "upload"
+)
+
+// SkillFile is one bundle file of a skill besides SKILL.md (DESIGN 5.27 rule 5). Mode is
+// 0644 (420) or 0755 (493). Content is empty in metadata-only reads.
+type SkillFile struct {
+	Path    string `json:"path"`
+	Content []byte `json:"-"`
+	Mode    int    `json:"mode"`
+	Size    int    `json:"size"`
+	// SHA256 is the digest of the content, set on write and read with or without it.
+	SHA256 []byte `json:"-"`
+}
+
+// AgentFileEdit is the operator's stored text for one workspace file of an agent (DESIGN
+// 5.27 rules 2 and 3): Addition for a generated file, Override for a runtime file.
+type AgentFileEdit struct {
+	AgentID   string    `json:"agent_id"`
+	Name      string    `json:"name"`
+	Addition  *string   `json:"addition"`
+	Override  *string   `json:"override"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Approval struct {

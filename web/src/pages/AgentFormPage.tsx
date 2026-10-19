@@ -6,6 +6,7 @@ import { parseFieldErrors, type FieldErrors } from "@/lib/agentForm";
 import { formatDateTime } from "@/lib/format";
 import { useSkills } from "@/lib/useSkills";
 import AgentForm from "@/components/agent/AgentForm";
+import AgentFiles from "@/components/agent/AgentFiles";
 import MemoryFacts from "@/components/agent/MemoryFacts";
 import RuntimeCard from "@/components/agent/RuntimeCard";
 import TelegramLine from "@/components/agent/TelegramLine";
@@ -220,6 +221,8 @@ function EditAgent({ id }: { id: string }) {
           save.mutate(input);
         }}
       />
+
+      <AgentFiles agentId={id} />
 
       {running ? <QuickRunDialog agent={agent} onClose={() => setRunning(false)} /> : null}
       {confirmDelete ? (

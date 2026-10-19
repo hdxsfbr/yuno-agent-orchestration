@@ -104,7 +104,12 @@ func DeleteWorkflow(ctx context.Context, q Querier, id string) error {
 	return nil
 }
 
-const skillColumns = `id, name, description, body, created_at, updated_at`
+// skillColumns are the columns a skill is written with; skillSelect also reads the count
+// of its bundle files.
+const skillColumns = `id, name, description, body, source, source_url, source_ref, license, created_at, updated_at`
+const skillSelect = `id, name, description, body, source, source_url, source_ref, license,
+	(SELECT count(*)::int FROM skill_files f WHERE f.skill_id = skills.id) AS files_count,
+	created_at, updated_at`
 
 func CreateSkill(ctx context.Context, q Querier, s *Skill) error {
 	if s.ID == "" {
@@ -112,13 +117,16 @@ func CreateSkill(ctx context.Context, q Querier, s *Skill) error {
 	}
 	now := time.Now().UTC()
 	s.CreatedAt, s.UpdatedAt = now, now
-	_, err := q.Exec(ctx, `INSERT INTO skills (`+skillColumns+`) VALUES ($1,$2,$3,$4,$5,$6)`,
-		s.ID, s.Name, s.Description, s.Body, s.CreatedAt, s.UpdatedAt)
+	if s.Source == "" {
+		s.Source = SkillSourceUser
+	}
+	_, err := q.Exec(ctx, `INSERT INTO skills (`+skillColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		s.ID, s.Name, s.Description, s.Body, s.Source, s.SourceURL, s.SourceRef, s.License, s.CreatedAt, s.UpdatedAt)
 	return err
 }
 
 func GetSkill(ctx context.Context, q Querier, id string) (*Skill, error) {
-	rows, err := q.Query(ctx, `SELECT `+skillColumns+` FROM skills WHERE id=$1`, id)
+	rows, err := q.Query(ctx, `SELECT `+skillSelect+` FROM skills WHERE id=$1`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +138,7 @@ func GetSkill(ctx context.Context, q Querier, id string) (*Skill, error) {
 }
 
 func ListSkills(ctx context.Context, q Querier) ([]Skill, error) {
-	rows, err := q.Query(ctx, `SELECT `+skillColumns+` FROM skills ORDER BY name`)
+	rows, err := q.Query(ctx, `SELECT `+skillSelect+` FROM skills ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +154,7 @@ func ListSkillsByName(ctx context.Context, q Querier, names []string) ([]Skill, 
 	if len(names) == 0 {
 		return []Skill{}, nil
 	}
-	rows, err := q.Query(ctx, `SELECT `+skillColumns+` FROM skills WHERE name = ANY($1) ORDER BY name`, names)
+	rows, err := q.Query(ctx, `SELECT `+skillSelect+` FROM skills WHERE name = ANY($1) ORDER BY name`, names)
 	if err != nil {
 		return nil, err
 	}
@@ -161,6 +169,20 @@ func UpdateSkill(ctx context.Context, q Querier, s *Skill) error {
 	s.UpdatedAt = time.Now().UTC()
 	tag, err := q.Exec(ctx, `UPDATE skills SET name=$2, description=$3, body=$4, updated_at=$5 WHERE id=$1`,
 		s.ID, s.Name, s.Description, s.Body, s.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetSkillSource records where a skill came from (an import that replaced an existing
+// skill, DESIGN 5.27 rule 6). UpdateSkill leaves these columns alone.
+func SetSkillSource(ctx context.Context, q Querier, id, source, sourceURL, sourceRef, license string) error {
+	tag, err := q.Exec(ctx, `UPDATE skills SET source=$2, source_url=$3, source_ref=$4, license=$5 WHERE id=$1`,
+		id, source, sourceURL, sourceRef, license)
 	if err != nil {
 		return err
 	}
