@@ -1537,8 +1537,10 @@ func TestPollSkipsConfidentialIssuesT5232(t *testing.T) {
 // reports them.
 func TestCloserStopsAtAProviderTimeoutT5236(t *testing.T) {
 	e := newEnv(t, envOpts{})
-	e.loop.Timeout = 150 * time.Millisecond
+	// The setup takes the three issues at the normal timeout; only the pass under test is
+	// cut short (a slow CI host can spend 150 ms taking one issue).
 	finishThree(e)
+	e.loop.Timeout = 150 * time.Millisecond
 	for n := 1; n <= 3; n++ {
 		e.tr.slowOn(fmt.Sprintf("PUT /issues/%d", n), 10*time.Second)
 	}
@@ -1577,8 +1579,8 @@ func TestCloserStopsAtAProviderTimeoutT5236(t *testing.T) {
 // when the deadline comes, and the runs not reached wait for the next pass.
 func TestCloserPassHasOneDeadlineT5236(t *testing.T) {
 	e := newEnv(t, envOpts{})
-	e.loop.CloseTimeout = 600 * time.Millisecond
 	finishThree(e)
+	e.loop.CloseTimeout = 600 * time.Millisecond
 	for n := 1; n <= 3; n++ {
 		e.tr.slowOn(fmt.Sprintf("PUT /issues/%d", n), 350*time.Millisecond)
 	}
