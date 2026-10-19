@@ -103,6 +103,8 @@ As in revision 1 (tables `agents`, `workflows`, `runs`, `run_nodes`, `model_call
   artifacts live under `<workspace>/runs/<run_id>/` and the deploy tools read from there.
 - `approvals.kind` is `exec` (OpenClaw exec approval id in `external_id`), `tool`
   (platform side effect) or `node` (workflow approval node).
+- Since 5.26: `run_branches` (one row per branch of a fork visit: head, status, position)
+  and `run_nodes.branch_id`.
 
 ## 5. Design briefs
 
@@ -142,6 +144,9 @@ Rules 1 to 10 stand with these definitions:
   error.
 - Retry backoff (5.5) is 1, 2, 4, 8 … s capped at 30 s without jitter, so tests are
   deterministic; a wait longer than the time remaining times the run out.
+- Since 5.26 the counters sum across the branches of a fork and the time limit is wall
+  clock across them; a pause inside a branch does not stop the clock (5.26 rule 7), the
+  fork's own release on parked branches does (5.26 rule 8).
 
 Tests T5.2.1 to T5.2.10 stand, driven by the scripted provider (5.14 rule 9).
 
@@ -370,7 +375,8 @@ Rules:
    or `any` group is a validation error (`edges[i].when: empty all/any group`) and
    evaluates false if it ever reaches the engine. No expression strings, no code.
 4. An edge without `when` is always true. Edges from a node are evaluated in array order;
-   the first true one is taken (5.1 rule 5). A node with no true outgoing edge and not of
+   the first true one is taken (5.1 rule 5; since 5.26 a `fork` node takes every true
+   edge, 5.26 rule 1). A node with no true outgoing edge and not of
    kind `end` ends the run `failed` with reason `no matching edge from <node>`.
 5. An `agent` node runs the referenced agent as one OpenClaw turn on a node-scoped
    session (5.14 rule 5) with `task` rendered by Go `text/template` over `{input, state}`
@@ -428,7 +434,9 @@ Rules:
     overwritten by an older copy (coder → reviewer → coder copies nothing back into
     the coder's second visit); regular files and directories are copied with their
     permission bits, links and special files are skipped, and deletions do not flow
-    forward. (D-019, from the wave-2 evaluator agent's finding that Reviewer and
+    forward. Since 5.26 a visit inside a fork's branch receives nothing from its sibling
+    branches, and `repo/` flows past the join only from the branch the join names (5.26
+    rule 10). (D-019, from the wave-2 evaluator agent's finding that Reviewer and
     Deployer could not see the Coder's files.) Since 5.25 the `out/` directory inside it
     is also collected as the run's artifacts at the end of every agent visit (5.25 rule 2).
 
@@ -455,7 +463,7 @@ revisit. T5.6.10 instantiate resolves agent names and reports a missing one. T5.
 input schema violation at trigger → 422. T5.6.12 a file written by node 1's agent is
 present in node 2's agent workspace before its turn; a file node 2 rewrites wins on node 3.
 
-Out of scope: parallel branches (fan-out/fan-in), sub-workflows.
+Out of scope: sub-workflows. Parallel branches (fan-out/fan-in) are 5.26.
 
 ### 5.7 Platform tools over MCP
 
@@ -1115,7 +1123,8 @@ The full design with inputs, edge cases, failure handling and tests is
 8. `run_status` returns status, trigger, times, duration, steps, tool calls, cost, final
    state (4 KB cap), failure reason, and a pending approval's kind and message; unknown
    id answers `no run <id>`. Since 5.24 it adds `question` for a run waiting on one
-   (5.24 rule 11), since 5.25 `artifacts` and `artifact_count` (5.25 rule 5).
+   (5.24 rule 11), since 5.25 `artifacts` and `artifact_count` (5.25 rule 5), since
+   5.26 `branches` while the run is at a fork (5.26 rule 12).
 9. A channel-triggered run reaching a terminal status sends one `[platform] Run <id>
    <status> after <duration>, cost $<x>: <outcome>. <url>` into its conversation's
    session with `chat.send {deliver: true}` [probed: the text is a user turn, the reply
@@ -2041,7 +2050,10 @@ Rules:
    again (5.6 rule 8). A node that failed and followed its `on_failure` edge moved
    `current_node` to that target, so the retry resumes there, not at the node. Since
    5.24 a run failed by `question unanswered` retries at the step that asked, and the
-   new visit's task lists the unanswered question (5.24 rules 7 and 8).
+   new visit's task lists the unanswered question (5.24 rules 7 and 8). Since 5.26 a run
+   that failed inside a fork's region has the fork as `current_node`: the retry re-enters
+   the fork and runs the failed or cancelled branches from where they stopped, the
+   succeeded ones not again (5.26 rule 9).
 5. Side effects. A retried visit is a new visit, so an identical call gets a new
    idempotency key (5.4's edge case); `open_merge_request` is covered by 5.20 rule 2
    (the run's record is updated, never a second request); `deploy_release` and
@@ -2857,7 +2869,10 @@ Rules:
    entry check and 5.21 rule 2 use it) and is not refused by that limit at its own
    entry either (the parked visit may have been the last the limit allowed; the answer
    still continues it); its steps count toward `max_steps` as any visit's do, and
-   `max_node_iterations` bounds each visit as today.
+   `max_node_iterations` bounds each visit as today. Inside a fork's branch the park
+   marks the visit and its branch and leaves the run running; the fork releases the
+   worker once every branch has ended or parked, and a decision finds the run through
+   the fork's visit (5.26 rule 8).
 6. **Where the question is announced.** (a) A run with a conversation (5.15 rule 10's
    route): one notice per question, `[platform] Run <id> asks: <question> Options: <a>
    | <b>. Answer it at <url>, or tell me the answer and I will pass it on (question
@@ -3147,7 +3162,8 @@ Rules:
    Deployer pushes, `checkout_sha` moves to the pushed commit, 5.22 rule 2, and the
    checkout matches it; the stored patch is still what the run changed); a file the
    agent itself put at `out/diff.patch` wins and the generated one is skipped with a log
-   line. A clone or fetch failure, or a checkout over 500 MiB (the working-tree copy
+   line. Since 5.26 a branch visit's generated diff is produced only for the join's
+   `checkout` branch (5.26 rule 11). A clone or fetch failure, or a checkout over 500 MiB (the working-tree copy
    honours the deadline and stops there; review L1), skips the diff with the log line
    `artifacts: diff skipped: <reason>` and nothing else changes. Cost: one shallow clone
    per agent visit of a project run, on the api side, inside the 60 s deadline.
@@ -3261,8 +3277,9 @@ written or updated, so a row never points at a partial file; a crash between the
 leaves a file the next sweep removes (no row) or, on an update, the old row over the new
 file (the next collection writes it again, since the sha differs; review L10). The per-run caps are
 checked against the rows and the sizes read in one query before the walk, then
-against what this visit added, so two visits of one run never run at once (one visit
-per run, 5.1) and the cap holds.
+against what this visit added, so two visits of one run never collect at once (one
+visit per run, 5.1; the branches of 5.26 are serialised by the collector's per-run lock)
+and the cap holds.
 
 Outputs: the `run_artifacts` rows and the files under `ARTIFACT_DIR`; the log lines
 and the `artifacts` span; SSE `run.artifacts`; the two endpoints; the Artifacts
@@ -3298,6 +3315,324 @@ signed download link without the token, collecting from the deploy target's rele
 (5.7's `deploy_release` is its own store), a per-project or per-workflow cap (the
 run's caps are fixed).
 
+### 5.26 Parallel steps: fork and join
+
+Purpose: a workflow runs several agents at once and continues when all of them are done:
+a panel of reviewers on one change, or a task split across coders. Decision D-048
+(explicit `fork` and `join` nodes; a failed branch fails the run; the review panel
+template is the example) and D-060 to D-064. Roadmap: `docs/ROADMAP.md` 5.26.
+
+Inputs: the definition (nodes of kind `fork` with `join`, nodes of kind `join` with an
+optional `checkout`); the run's state, limits and counters; the branch rows
+(`run_branches`); the agents' workspaces (5.6 rule 13); the injected clock.
+
+Units: a "fork visit" is one entry of a fork node in a run (a `run_nodes` row of the
+fork); a "branch" is the part of a fork visit that starts at one outgoing edge of the
+fork, named by its "head" (the edge's target node id); the "region" of a fork is the
+set of nodes reachable from its heads without passing its join; a branch's "visit" is a
+node visit inside it (`run_nodes.branch_id`); "every branch" means every branch the
+fork visit started; a branch is "parked" when its newest visit parked on a question
+(5.24 rule 5); times UTC.
+
+Rules:
+
+1. **Two node kinds.** A `fork` names its join (`join: "<node id>"`) and has 2 to 5
+   outgoing edges, each with an optional `when`; a `join` has outgoing edges like any
+   node and, in a workflow that works on a project, an optional `checkout: "<head>"`
+   (rule 10). Neither has a task, an agent, a message, `on_reject` or `on_failure`
+   (`nodes[i].on_failure: a fork has none; a failed branch fails the run`,
+   `nodes[i].on_failure: a join has none`). A fork's edges start one branch each:
+   unlike every other node (5.6 rule 4), **every** edge whose condition holds is taken,
+   in array order; no true edge is `no matching edge from <fork>` as today (the run
+   `failed`, no `on_failure`).
+2. **The region, validated at save** (5.6 rule 2's path-qualified messages, one per
+   violation; the builder shows each on the node or edge it names). For a fork F with
+   join J and heads h1..hn (the targets of its edges, in array order): `nodes[i].join:
+   required for fork nodes`; `nodes[i].join: unknown node 'x'`; `nodes[i].join: 'x' is
+   not a join node`; `nodes[i].join: 'J' is already the join of 'F1'`; `nodes[i]: a fork
+   needs at least two outgoing edges`; `nodes[i]: a fork may have at most 5 outgoing
+   edges`; `edges[k].to: a branch of 'F' cannot start at its join`; `edges[k].to:
+   duplicate branch of 'F'` (two edges to one head). For a join: `nodes[i]: join 'J' is
+   not named by any fork`; `nodes[i].checkout: unknown branch 'x'` (not a head of its
+   fork); `nodes[i].checkout: the workflow does not work on a project`; on any other
+   kind `nodes[i].checkout: only join nodes have one`, `nodes[i].join: only fork nodes
+   have one`. The region R of F is every node reachable from a head through edges and
+   `on_failure` targets without passing J. Every node of R is an `agent` node:
+   `nodes[n]: an approval node cannot be inside a branch of 'F'; put the gate after its
+   join 'J'`, `nodes[n]: a fork cannot be inside a branch of 'F' (forks do not nest)`,
+   `nodes[n]: join 'X' cannot be inside a branch of 'F'`, `nodes[n]: an end node cannot
+   be inside a branch of 'F'`. No edge or `on_failure` leaves R except to J:
+   `edges[k].to: leaves the branch of 'F' without reaching its join 'J'`
+   (`nodes[n].on_failure: leaves the branch of 'F' without reaching its join 'J'`);
+   none enters R from a node other than F: `edges[k].to: enters a branch of 'F' from
+   outside` (`nodes[m].on_failure: ...`, `nodes[m].on_reject: ...` likewise). Each node
+   of R belongs to exactly one branch: `nodes[n]: '<N>' is reachable from two branches
+   of 'F' ('a' and 'b'); branches meet only at the join 'J'`. `input_from` across
+   branches is refused: `nodes[n].input_from[j]: '<x>' is in another branch of 'F'`.
+   The agents of different branches are distinct (D-062): `nodes[n].agent_id: agent
+   '<id>' is used in two branches of 'F' ('a' and 'b'); branches run at once and share
+   one workspace per agent` (a template compares `agent_name`, case-insensitive, with
+   `nodes[n].agent_name:` as the path). Loops inside a branch (edges among its nodes)
+   and around a fork-join pair (an edge from J or after it back to F or before it) are
+   allowed; the 5.6 rules (reachability, outgoing edges, conditions, the reserved id)
+   apply unchanged. The same agent before the fork and inside one branch is allowed.
+3. **Entering a fork.** The walk reaches F as any node: `enter` applies the limits and
+   the loop count of F (`CountNodeLoopVisits(run, F)` counts F's visits, so
+   `max_loop_visits` bounds how often the pair runs) and sets `current_node = F`, which
+   stays F until the join passes: F is the run's re-entry point (rule 9). A fresh entry
+   creates, in one transaction, F's visit row (`run_nodes`: `status running`,
+   `agent_id` null, `output {"branches": [<heads in edge order>]}`) and one
+   `run_branches` row per true edge (`id, run_id, fork_visit_id, fork_id, head, status
+   running, current_node = head, started_at`); F's node span opens under the root span
+   with `branches`; SSE `node.status` (F's row) and `branch.status {branch}` per row;
+   the log line `fork <F>: <n> branches started: a, b, c`.
+4. **Running the branches.** Every started branch runs at once, each as its own walk
+   over the region with the same `enter`, `agentNode`, `advance`, `nodeFailed` and
+   `renderTask` as a sequential run, and these differences: `setCurrent` writes
+   `run_branches.current_node`, never `runs.current_node`; `advance` writes
+   `state[<node>]` and the branch's `current_node` in one transaction
+   (`SetRunStateNodeInBranch`); every visit row carries `branch_id`; a visit's node
+   span hangs under F's span; `e.active` holds every live visit of the run (`Cancel`,
+   the unattended re-queue and `visitOf` look at all of them). A branch ends `succeeded`
+   when its walk's next node is J (`finished_at`; log `branch <head> done`); `failed`
+   when a visit fails and no `on_failure` inside the region applies, when a node has
+   no true edge (`no matching edge from <node>`), or when a limit stops it (rule 6).
+   The visits a lost worker left (the stale list) are aborted once, by the fork, before
+   any branch starts (today's `abortStale` and `expireStepQuestions`, on the first
+   branch's first visit). The state a branch writes is visible to the others as it
+   lands: a condition or a task inside one branch that reads another branch's output
+   reads whatever is there at that moment (edge cases), which is why rule 2 refuses
+   `input_from` across branches.
+5. **The join.** When every branch has ended `succeeded`, the fork creates J's visit row
+   (`status succeeded`, `started_at = finished_at`, `output {"branches": [<heads>]}`),
+   closes F's row `succeeded`, ends F's span, logs `fork <F>: joined; continuing
+   <next>` and continues along J's first true edge over the state (5.6 rule 4; none is
+   `no matching edge from <J>`), `current_node` moving to that node. The
+   `agent_messages` rows of the branches' last visits point `to = J`, as `advance`
+   writes them; the fork and the join write none.
+6. **A branch fails; limits; cancellation (D-048).** The first branch to end `failed`
+   ends the fork visit: the live sibling visits are stopped (`chat.abort` and the abort
+   wait of 5.2; their visit rows `failed` with reason `stopped: branch <head> failed`,
+   their branch rows `cancelled` with the same reason, their pending questions and
+   approvals expired with `run ended`), F's row closes `failed` and the run fails with
+   `branch <head> failed: <reason>` (no `on_failure` applies; a retry re-enters F, rule
+   9). A limit violation or a cancellation seen by any branch visit (`checkLimits`; the
+   run's counters are shared: `step_count`, `tool_call_count` and cost sum across the
+   branches as they are written; the time limit is wall clock, rule 7) ends the run
+   with that violation's status and reason as today, the siblings stopped with
+   `stopped: <reason>`; `max_node_iterations` bounds each visit as today and counts as
+   a branch failure. A branch that ends while a sibling is being stopped is recorded as
+   it ended. The fork returns the first outcome that ends the run; the others are rows.
+   Log: `branch <head> failed: <reason>; stopping <n> branch(es)`.
+7. **Pauses inside a branch (D-063).** An exec approval, a tool approval or a question of
+   a branch visit pauses the node (`waiting_approval`) and not the run: the run stays
+   `running`, `paused_at` is not set and the time limit keeps counting while the
+   siblings work; `resumeIfClear` returns the node to `running`. The gated call blocks
+   for the wait as 5.3 rule 5 says and the decision reaches it the same way (the
+   waiter, else the pending effect of 5.3 rule 5). Approval nodes cannot be inside a
+   region (rule 2), so the only pause that releases the worker inside a region is a
+   park (rule 8).
+8. **A question parks a branch (5.24 rule 5 amended).** A branch visit whose turn ends
+   with its question pending parks as 5.24 says, except that the park writes
+   `run_nodes.parked_at`, the node `waiting_approval` and the branch row
+   `waiting_approval`, and leaves the run `running`; the branch's walk returns `paused`
+   and the siblings go on. When every branch has ended or parked and none failed, with
+   at least one parked: the fork releases the worker, `PauseRunAt(run, <F's visit id>)`
+   (`waiting_approval`, `resume_node_visit_id` the fork's visit, the paused time
+   excluded from the time limit as for an approval node), F's row stays `running`, the
+   log line `fork <F>: waiting for the answer to <n> question(s); <m> branch(es) done`,
+   and the walk returns `paused`; right after, the fork re-reads the parked branches'
+   questions and re-queues the run itself (`RequeuePausedRunAt`) when one was decided
+   meanwhile. The delivery of a decision (5.24 rule 5) keeps its order; its step (i) and
+   the sweeper's `requeueParkedDecided` find a run waiting on a parked branch visit
+   through the fork's visit: `RequeueParkedRun`, `IsParkedOn` and `ListParkedQuestions`
+   accept a `resume_node_visit_id` equal to the parked visit **or** to the fork visit
+   its branch belongs to, and `RequeueParkedRun` closes the parked visit `succeeded`
+   without output as today. A decision that lands while a sibling still runs (the run
+   `running`, the parked visit gone from `active`) stays in its row: when the sibling
+   ends, the fork finds the parked branch's question decided and continues the branch at
+   once, without releasing. An expired parked question of a branch fails the run with
+   `question unanswered` (5.24 rule 8; the siblings stopped as rule 6). The continuation
+   visit (`question_id`, exempt from `max_loop_visits`, the answer paragraph) is
+   5.24's.
+9. **Re-entry: a claim, a retry, a park.** The walk re-enters F whenever a claim finds
+   `current_node = F`: after a park's re-queue, after a crash (`FailRunningNodes` marked
+   the fork row and the branch visits `failed`, `worker lost`), or after an operator
+   retry (5.21; the run failed inside the region). F's latest visit row is reused:
+   reopened (`status running`, `finished_at` and `failure_reason` cleared) when it is
+   not `succeeded`; its branch rows decide what runs: a `succeeded` branch runs nothing;
+   a `waiting_approval` branch whose parked visit's question is decided
+   (`ContinuationQuestion(run, current_node)`) runs from its `current_node` as a
+   continuation visit; one whose question is still pending stays parked; a `running`,
+   `failed` or `cancelled` branch runs from its `current_node` with a new visit (counted
+   toward `max_loop_visits` as a recovery visit is today; a `failed` or `cancelled`
+   branch row goes back to `running`). The loop count of F is not applied on a
+   re-entry (the entry was counted). When nothing runs and at least one branch is
+   parked, the fork releases the worker as rule 8 says; when every branch is
+   `succeeded` (a crash between the last branch's end and the join) the fork joins at
+   once.
+10. **Files: the run directory and the checkout (5.6 rule 13 amended; D-061).** A branch
+    visit receives the run directory of every earlier visit that is not a sibling's:
+    visits outside the region, visits of earlier fork visits, and earlier visits of its
+    own branch; never a visit of another branch of the same fork visit, finished or not
+    (a sibling's files are partial and its own). After the join, later visits receive
+    every branch's files as 5.6 rule 13 says (sources ordered by their last visit's
+    start, a later one's file winning), with one exception: `runs/<run id>/repo/` (the
+    project checkout) flows from an agent whose last visit was a branch visit only when
+    that branch is its join's `checkout`; from any other such agent the copy leaves
+    `repo/` out, so the checkout a later agent works on is the one from before the
+    fork, or the named branch's, and never a file-by-file mixture of two working trees.
+    A join without `checkout` lets no branch's checkout past it: a branch that edited
+    the checkout keeps its edits in its agent's workspace and in its `diff.patch` (rule
+    11) only. The sandbox hold (5.16 rule 7) is per agent, and branches use distinct
+    agents (rule 2), so each branch visit holds its own.
+11. **Artifacts (5.25 amended).** Every branch visit's `out/` is collected when it ends,
+    serialised by the collector's per-run lock. The generated `diff.patch` is produced
+    for a branch visit only when its branch is the join's `checkout` (log line
+    `artifacts: diff skipped: parallel branch <head>` otherwise), so the run's one
+    `diff.patch` never flips between branches; an agent's own `out/diff.patch` is
+    collected as any file.
+12. **Representation.** `RunNode` gains `branch_id`; `Trace` gains `branches:
+    RunBranch[]` (`{id, run_id, fork_visit_id, fork_id, head, status, current_node,
+    failure_reason, started_at, finished_at}`, by `started_at` then `id`; `status` one
+    of `running`, `waiting_approval`, `succeeded`, `failed`, `cancelled`); SSE
+    `branch.status {branch}` on every change of a branch row; `WorkflowNode.kind` gains
+    `fork` and `join`, `WorkflowNode` gains `join` and `checkout`. `run_status` (5.15
+    rule 8) adds `branches: [{head, status, current_node}]` while the run's
+    `current_node` is a fork (the newest fork visit's rows). Every terminal transition
+    of a run closes its open branch rows (`failed` or `cancelled` with the run's
+    reason, `CloseOpenBranches`), where `closeWaitingRun` and `finishRun` close visits.
+13. **UI.** Builder: Fork and Join in the add-node menu and the outline (labels `Fork`,
+    `Join`); the fork panel has a Join selector over the join nodes (empty: `Add a join
+    node for this fork to end at.`); the join panel names the fork that joins there,
+    lists its heads, and, when the workflow works on a project, a Checkout selector
+    (`None` default) under `Branches run at once and meet here; the checkout of the
+    chosen branch continues past the join.`; the canvas draws fork and join with their
+    own accent; the edge panel on a fork's edge says `Every edge whose condition holds
+    starts a branch.`; Validate maps the messages of rule 2 onto nodes and edges as
+    today. Run page: the Timeline shows a fork visit as one card with its branches side
+    by side (one column per branch, in edge order: the head, the branch's status badge,
+    its node cards in order, its `failure_reason`), the join as a short card (`Joined 3
+    branches`), and the header's step line reads `<fork id> (3 branches running)` while
+    `current_node` is a fork and the run is live; `Asks:` on the header works as today
+    once the fork released the run. The templates drawer lists Review panel.
+14. **Shipped example (D-064).** `templates/review_panel.json`: start → `coder` (Coder) →
+    `panel` (fork, join `merge`) → `security` (Security Reviewer), `performance`
+    (Performance Reviewer), `maintainability` (Maintainability Reviewer) → `merge`
+    (join) → `lead` (Reviewer: merges the three reviews into one verdict and one
+    feedback) → `changes_requested` back to `coder` | `approved` → `gate` (approval) →
+    `deployer` (Deployer) → `end`; `project: true`; every reviewer's and the lead's
+    output `{verdict: approved|changes_requested, feedback}`; `state_schema` lists every
+    agent node; no `checkout` on the join (the reviewers edit nothing). `make seed`
+    creates the three reviewer agents (Sonnet; allowlist `read, ls, exec, finish`;
+    prompts focused on security, on performance and on maintainability, each told to
+    review the change in the checkout with `git diff <default branch>`, to read new
+    files, to run nothing that changes the tree, and never to edit); `make seed-reset`
+    restores their prompts and instantiates the template. The Dev pipeline is
+    unchanged.
+
+Edge cases: a fork whose conditions leave one edge true runs one branch and joins when
+it ends. Two branches end at the same moment: one join. A branch's node fails and its
+`on_failure` is J: the branch ends `succeeded` at the join without that node's output
+(the author handled the failure). A loop inside a branch reaches `max_loop_visits`:
+the branch fails on the limit and the run fails with `loop limit <n> exceeded for
+<node>`, siblings stopped. Two branches ask: one answered within the wait goes on and
+ends; the other parks; the fork releases when the first ends; the answer re-queues the
+run and the parked branch continues. A sibling still runs when a parked branch's answer
+arrives: the branch continues when the sibling ends, with no release. Cancel while
+released: `cancelWaitingRun` as for an approval node, the parked question expired `run
+cancelled`, the branch rows `cancelled`. A crash while branches run: on re-claim the
+unfinished visits are `worker lost` and every unfinished branch re-runs from its
+`current_node`. A loop around the pair enters F again: a new fork visit (visit 2) with
+new branch rows; `max_loop_visits` on F bounds it. `max_steps` is reached by the sum:
+the visit that sees it ends the run, the siblings are stopped. The same agent before
+the fork and in a branch: its branch visit copies from the pre-fork visits of other
+agents only; its own workspace already holds its files. A retry of a run failed in a
+region: the failed branch re-runs from where it stopped; the succeeded ones keep their
+outputs in the state. The join names a `checkout` branch that failed: the run failed
+anyway. A gated side effect inside a branch (`open_merge_request`, `deploy_release`):
+allowed; the pause is rule 7's. A workflow with a fork run through `delegate_task`:
+unchanged.
+
+Time: the time limit is wall clock from `started_at` minus the run's pauses, and inside
+a region only the fork's release (rule 8) pauses; every stamp from the injected clock;
+the abort wait of 5.2 bounds the stopping of siblings.
+
+Failure handling: a failed insert of the fork or branch rows fails the run before any
+branch starts (`fork <F>: <error>`); a failed state write fails the branch as `advance`
+fails a run today; a failed `chat.abort` on a sibling is logged, its rows are still
+closed, and a turn that outlives the run ends on its own or is aborted by the stale
+handling of the next claim (a retry); failed event inserts are logged as today.
+
+Consistency: the fork row and its branch rows are one transaction; a branch's state
+write and its position are one transaction; `runs.state` is written key-wise
+(`jsonb_set`), so two branches writing at once lose nothing; the counters are `+=`
+updates; the fork's release is conditional on `status = running` and the re-read after
+it closes the race with a decision; the fork reads its branch rows fresh at every
+re-entry and after every branch end; `RequeueParkedRun` is conditional on the run
+waiting on the parked visit or on its fork visit.
+
+Outputs: the `run_branches` rows, the fork and join visit rows, `run_nodes.branch_id`;
+SSE `branch.status` and the `node.status` of the fork and join rows; `Trace.branches`;
+`run_status.branches`; the log lines of rules 3 to 8; the validation messages of rule
+2; the builder and run page of rule 13; the template and the three seeded agents.
+
+Tests: T5.26.1 validation: each message of rule 2 from a definition that violates it
+alone, path-qualified; valid: a loop inside a branch, a loop around the pair, the same
+agent before the fork and in a branch, the shipped template. T5.26.2 two branches run at
+once with the scripted gateway: both `chat.send` are made before either turn ends; the
+state holds both outputs; the join's successor's task carries both (`input_from`);
+rows, `branch_id`, the fork and join rows, the `branch.status` events, `current_node`
+F throughout and the successor after. T5.26.3 conditions on fork edges: one true edge
+runs one branch; none is `no matching edge from <F>`. T5.26.4 a branch fails: the
+sibling's turn is aborted, its rows read `stopped: branch <head> failed`, the branch rows
+and the fork row read as rule 6, the run fails with `branch <head> failed: <reason>`.
+T5.26.5 limits: `max_steps` summed across branches ends the run and stops the sibling;
+cancel stops both; the time limit counts through a branch's pause. T5.26.6 a tool
+approval in a branch pauses the node and not the run (`paused_at` null, status
+`running`); the decision reaches the waiter; a question answered within the wait.
+T5.26.7 a parked branch: the sibling runs on; the release when it ends (`waiting_approval`,
+`resume_node_visit_id` the fork visit); the answer re-queues and the continuation
+visit carries `question_id` and the paragraph; a decision during the sibling's run
+continues without a release; an expired parked question fails the run. T5.26.8
+re-entry after a crash (both unfinished branches re-run) and after a retry (the failed
+branch only). T5.26.9 files: a sibling's file is absent in a branch visit's workspace;
+present after the join; `repo/` flows from the named branch only; a join without
+`checkout` passes the pre-fork checkout. T5.26.10 artifacts: `diff.patch` from the named
+branch, the skip line for the others, `out/` from every branch. T5.26.11 contract: the
+trace with `branches`, the SSE event, `WorkflowNode.join` and `.checkout`;
+`run_status.branches`; conformance steps. T5.26.12 UI: adding a fork and a join, the
+panels, the Problems mapping of rule 2's messages, the Timeline's fork card with two
+columns, the join card, the header line. T5.26.13 the template validates, instantiates
+with the seeded agents (the three created by `make seed`) and, with the scripted
+gateway, loops once (`lead` → `coder`) so the fork runs twice: visit 2 and new branch
+rows.
+
+Out of scope: nested forks, `any` or `first` join policies, dynamic fan-out (one branch
+per item of a list), merging checkouts across branches, sub-workflows, approval nodes
+inside a branch, a per-branch time limit, pausing the run's clock during a branch's
+wait, per-visit workspaces (which would let one agent run in two branches), an eval
+case with parallel branches (the scripted provider serves a script's steps in order, so
+concurrent turns would interleave; a per-node script is a later change), the Dev
+pipeline with a parallel review.
+
+Open lines (answer before the wave runs; the recommended answer stands until then):
+
+1. **One agent, one branch (D-062).** Recommended: a fork whose branches share an agent
+   is refused at save, since every agent has one workspace and two visits of it at once
+   would write the same `runs/<run id>/` (and the same checkout). Alternative: a
+   workspace per visit, a change to 5.14 rule 5 and 5.6 rule 13 that is out of this
+   wave's size.
+2. **Waits inside a branch (D-063).** Recommended: a branch's approval or question wait
+   does not stop the run's clock (its siblings keep working), and approval nodes are not
+   allowed inside a branch (the gate goes after the join). Alternative: stop the clock
+   while every live branch waits, which needs a count of paused visits on the run row.
+3. **The review panel's agents (D-064).** Recommended: three new seeded agents (Security
+   Reviewer, Performance Reviewer, Maintainability Reviewer) with the existing Reviewer
+   as the lead that merges their verdicts. Alternative: no new agents, a two-reviewer
+   panel with Reviewer and Critic and the Writer as the lead, which reads oddly for a
+   code change.
+
 ## 6. HTTP API summary
 
 Errors: `{error: {code, message, details?}}`; validation failures are 422 with
@@ -3328,6 +3663,10 @@ Wave 10 (5.24 and 5.25, planned; `x-planned: wave 10` in the contract until buil
 /approvals/{id}/answer` (422 on another kind, 409 `not_pending`), `RunNode.question_id`,
 `GET /runs/{id}/artifacts` and `GET /runs/{id}/artifacts/{artifactId}` (a download with
 `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`).
+Wave 11 (5.26, planned; `x-planned: wave 11` in the contract until built):
+`WorkflowNode.kind` values `fork` and `join` with `WorkflowNode.join` and
+`WorkflowNode.checkout`, `RunNode.branch_id`, `Trace.branches` (`RunBranch`), the SSE
+event `branch.status`.
 
 ## 7. Frontend
 
@@ -3374,6 +3713,10 @@ run page (option buttons, an answer box, Decline), the `Asks:` line on the run h
 the Question rows on the Timeline; the Artifacts section on the run page (table,
 Download through a blob, Preview for small text and images, the empty states).
 
+Wave 11 (5.26, planned): Fork and Join nodes in the builder with their panels and
+messages; on the run page the fork card with its branches side by side, the join card and
+the header's branch count; the Review panel template in the drawer.
+
 ## 8. Docker and Makefile
 
 Services: `postgres`, `openclaw-init` (writes the baseline config, exits), `openclaw`
@@ -3418,7 +3761,8 @@ Wave 4: eval cases to 20+, rubric evaluator, final report; README, diagram, ADRs
 model, AI_USAGE.md, DECISIONS.md; OpenAPI tests; status p95; demo script.
 
 Waves 5 to 8 as built: the Chief of Staff and delegation (5.15), the project repository (5.16), projects as records (5.17), project instructions and notes, budgets, merge request records and retry (5.18 to 5.21). Waves 9 to 11 are planned in `docs/ROADMAP.md`: 9 is 5.22 and 5.23 (iteration on an open merge request, issue intake; designed, briefs under `docs/briefs/wave9/`), 10 is 5.24 and 5.25 (questions to the operator, run artifacts; designed, briefs under
-`docs/briefs/wave10/`), 11 is parallel steps.
+`docs/briefs/wave10/`), 11 is 5.26 (parallel steps; designed, briefs under
+`docs/briefs/wave11/`).
 
 ## 10. Product decisions and assumptions
 

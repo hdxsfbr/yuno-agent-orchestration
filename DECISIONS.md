@@ -6,6 +6,28 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-18
 
+**D-061 Past a join, the checkout flows only from the branch the join names, and the
+generated diff comes only from that branch.** (Claude, coordinator, 2026-10-18) The
+copy-forward of 5.6 rule 13 leaves `runs/<run id>/repo/` out of every branch visit's
+contribution unless its branch is the join's `checkout`; a join without one passes the
+pre-fork checkout; `diff.patch` is generated for the named branch's visits only. Why: a
+file-by-file merge of two working trees is a corrupted repository, and one `diff.patch`
+row that flips between branches tells the operator nothing. Alternative: a real merge
+of branch checkouts, out of scope (D-048). Design: DESIGN 5.26 rules 10 and 11.
+
+**D-060 A fork runs its branches as concurrent walks inside one worker, recorded as
+`run_branches` rows, and is the run's re-entry point until its join passes.** (Claude,
+coordinator, 2026-10-18) The run's `current_node` stays on the fork while branches run;
+each branch keeps its own position on its row and writes the state key-wise; the first
+branch to fail stops the siblings and fails the run (D-048); a branch parked on a
+question leaves the run running until every branch has ended or parked, then the fork
+releases the worker and the decision re-queues the run through the fork's visit; a
+claim, a retry or a re-queue re-enters the fork and runs only the branches that are not
+done; at most 5 branches per fork. Why: no second queue or worker pool, crash recovery
+and retry fall out of the existing resumed path, and the operator sees one row per
+branch. Cost: a branch's approval wait does not stop the run's clock (D-063). Design:
+DESIGN 5.26 rules 3 to 9.
+
 **D-059 A declined question continues the step; the run does not fail.** (Andre,
 2026-10-18, the recommended answer of DESIGN 5.24's second open line) When the operator
 declines to answer, the agent reads `The operator declined to answer<: <reason>>.

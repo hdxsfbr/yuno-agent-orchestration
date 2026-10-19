@@ -445,7 +445,13 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
    parked the step and resumed it as a continuation visit, and the artifacts of a Dev
    pipeline run (`diff.patch`) and a Research pipeline run (`out/report.md`)
    (`docs/test-results.md`).
-9. Next: wave 11 (5.26, parallel steps), the last wave, designed when it starts, alone
-   and with the stronger model as planned. The demo recording with projects is still
-   pending, and the Telegram relay of an answer through the Chief has not been tried
-   live (the unit tests cover it).
+9. Done 2026-10-18 for wave 11: `docs/DESIGN.md` 5.26 is written in full, the decisions
+   it settles beyond D-048 are D-060 and D-061 (its three open lines become D-062 to
+   D-064 when Andre answers them), `api/openapi.yaml` 0.8.0 carries the wave 11 contract
+   marked `x-planned: wave 11`, and the briefs are under `docs/briefs/wave11/`: the
+   coordinator builds the prerequisites and the engine itself (the stronger model, as
+   this item planned), two Sonnet 5.5 agents build the frontend and the template with
+   its agents in parallel.
+10. Next: Andre's answers to 5.26's three lines and the briefs' approval; then the wave.
+   The demo recording with projects is still pending, and the Telegram relay of an
+   answer through the Chief has not been tried live (the unit tests cover it).
