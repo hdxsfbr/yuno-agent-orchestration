@@ -1,3 +1,20 @@
+# Test results, 2026-10-19 (final audit fix pass)
+
+Run on the development machine from `main` after the audit fixes, everything in throwaway
+containers. The Go suite and the web suite ran as the CI job runs them (`make ci-up`,
+`make ci-test`, `make ci-lint` in an isolated compose project), the Go suite again limited
+to two CPUs and the engine package to one CPU twice, as the shared CI runner sees them.
+
+| Command | Result |
+|---|---|
+| `go test ./... -count=1` (two CPUs) | 22 packages ok, 0 failures (new: the gateway recovery restart, calls waiting out a restart, memory re-rendered after materialize, memory tools offered when memory is on, untrusted wrapping of `run_status` and error bodies, the read-only `channels` field, the eval report's expected-outcome and succeeded lines) |
+| `go test ./internal/engine/ -count=2` (one CPU) | ok |
+| `pnpm test` | 47 files, 1070 tests passed |
+| `go vet ./...`, staticcheck 2026.2.2, `gofmt -l`, eslint, `tsc --noEmit` | clean (staticcheck first found SA2001 in the new recovery code; fixed) |
+| `make eval` (public split, scripted model, local stack) | before the fix 6 of 17 (agent saves refused by a gateway waiting for a recovery restart); after it 16 of 17 on the first run (case 016's five-second limit ran out during a restart), then 17 of 17 on two runs in a row |
+| `make eval-final` (every split) | 24 of 24, every evaluator 1.000, 15 of 15 cases that expect success succeeded, rubric 4 of 4 (`evals/reports/final.md`) |
+| OpenAPI against the router | 67 operations in the contract, all registered; the only route outside it is `GET /api/openapi.yaml` itself |
+
 # Test results, 2026-10-18 (wave 11: parallel steps, fork and join; DESIGN 5.26)
 
 Run on the development machine from the worktree branch `claude/eloquent-wu-44b501`

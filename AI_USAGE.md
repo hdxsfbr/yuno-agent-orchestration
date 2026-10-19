@@ -411,3 +411,20 @@ limits are doubled); the frontend agent's note that the trace carries no explici
 order for branches led to the contract stating that branch rows are created in edge
 order. The coordinator ran the full suite and lint, the review and the fix pass, and
 wrote the derived docs.
+
+2026-10-19, after wave 11 (Claude Opus 5.5 as coordinator, Sonnet 5.5 subagents, taking
+over from an earlier session): the demo was re-recorded against the public instance in ten
+scenes, with two new ones (the review panel, the Chief of Staff on Telegram). A Sonnet
+agent rewrote the scenes and the script; the coordinator ran the recordings, caught three
+broken takes (a Deployer task its tools could not do, a page selector, a project Check
+timing out at GitLab) and re-recorded them, and the narration was voiced locally with
+Chatterbox from Andre's own reference recording. Andre sent the Telegram message himself;
+the first take showed the Chief could not find a run without its id, and the retake named
+the run. Then the final audit: two independent Opus auditors, one per spec, read the code
+with the project's documents excluded as evidence; the coordinator checked the deliverables
+and the OpenAPI contract and re-ran `make eval`, which had fallen to 6 of 17 on a gateway
+stuck after quick agent churn. Two Sonnet agents fixed the gateway recovery and the memory
+gaps, and the untrusted wrapping, the channels field and the eval labels, on disjoint
+files; the coordinator rewrote the README, ADR, threat model and compliance documents
+against the code, re-ran the evals (24 of 24) and the CI job's commands under the CI
+runner's CPU limits before pushing.

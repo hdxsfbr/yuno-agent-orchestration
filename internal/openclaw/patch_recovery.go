@@ -23,6 +23,9 @@ var (
 	recoveryTimeout  = 60 * time.Second
 	recoveryBackoff  = 250 * time.Millisecond
 	recoveryBackoffM = 3 * time.Second
+
+	inFlightMu sync.Mutex
+	inFlight   chan struct{} // closed when the recovery in flight ends; nil when none is
 )
 
 // recoveryCtxKey marks the calls the recovery itself makes.
@@ -31,8 +34,12 @@ type recoveryCtxKey struct{}
 // waitRecovery blocks while a recovery restart is in flight, so other callers wait on it
 // instead of failing against the restarting gateway.
 func waitRecovery(ctx context.Context) {
-	done := make(chan struct{})
-	go func() { recoveryMu.Lock(); recoveryMu.Unlock(); close(done) }()
+	inFlightMu.Lock()
+	done := inFlight
+	inFlightMu.Unlock()
+	if done == nil {
+		return
+	}
 	select {
 	case <-done:
 	case <-ctx.Done():
@@ -51,6 +58,16 @@ func needsRecoveryRestart(err error) bool {
 func recoverPatch(ctx context.Context, c Client, started time.Time, raw string) error {
 	recoveryMu.Lock()
 	defer recoveryMu.Unlock()
+	done := make(chan struct{})
+	inFlightMu.Lock()
+	inFlight = done
+	inFlightMu.Unlock()
+	defer func() {
+		inFlightMu.Lock()
+		inFlight = nil
+		inFlightMu.Unlock()
+		close(done)
+	}()
 	ctx = context.WithValue(ctx, recoveryCtxKey{}, true) // our own calls do not wait on us
 	if !lastRecoveryDone.After(started) {
 		slog.Info("openclaw gateway restart after config.patch", "reason", "recovery restart required")

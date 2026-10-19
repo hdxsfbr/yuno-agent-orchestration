@@ -4,6 +4,30 @@ Newest first. Each entry says what was decided, by whom, and why. Design rules t
 refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR under
 `docs/adr/`.
 
+## 2026-10-19
+
+**D-066 The platform restarts the gateway when a config patch needs a recovery restart,
+and gateway calls wait out a restart.** (coordinator, 2026-10-19, from the final audit)
+The pinned gateway answers config.patch with "persisted … but a recovery restart is
+required" after agents are deleted and created in quick succession, and then refuses
+every later patch; nothing restarted it, so agent saves failed and `make eval` fell to
+6 of 17. The client now requests `gateway.restart.request` once (serialised), confirms
+the patch with `config.get`, and retries any call refused as restarting or cut by a
+disconnect for up to 60 s (read-only calls are resent after a disconnect; writes are
+not). Why: the patch had persisted, so confirming it is correct, and a restart in place
+takes seconds. Alternative: pin a newer gateway (unknown behaviour, no time to probe it).
+
+**D-065 Final audit dispositions.** (Andre, 2026-10-19: "do it") Fixed: the gateway
+restart above, MEMORY.md re-rendered after every materialize, memory tools offered when
+memory is on, `run_status` and provider error bodies wrapped as untrusted, the agent
+`channels` field read-only, eval reports separating expected outcome from succeeded,
+and the README, ADR and threat model rewritten against the code. Disclosed rather than
+fixed (`docs/prd-compliance.md` deviations 35 to 39): the hand-off between agents goes
+through shared state in one worker; an expired conversation stays in the gateway's own
+session; a retry or resumed run can repeat a `deploy_release`; the API is open without
+`API_TOKEN`; the Chief looks runs up by id only. Why: each is a design change of a day or
+more, and none is a requirement either brief states as a number.
+
 ## 2026-10-18
 
 **D-064 The review panel ships with three new seeded reviewer agents and the Reviewer
