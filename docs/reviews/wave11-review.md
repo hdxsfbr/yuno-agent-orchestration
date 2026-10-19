@@ -49,6 +49,16 @@ fix agent in one pass.
 Recorded, not changed: a replayed older `branch.status` event moves a branch back in time
 until the newer one arrives, as `node.status` does (the stream replays in order).
 
+## Found by CI after the fix pass
+
+The CI host runs the engine package about six times slower than the development machine,
+and the first pipeline on `main` failed two new tests there: the step-limit test expected
+one branch stopped by the fork, but on the slow host both branches saw the summed limit
+themselves and were recorded as they ended (what rule 6 allows; the test now accepts
+either), and a park test read the branch's park log line as soon as the branch row showed
+it parked, a moment before the line was written (it now waits for the line). No code
+changed.
+
 ## Coverage reported by the reviewers
 
 Rules checked and found correct: 5.26 rule 1 (both kinds, every true fork edge, `no

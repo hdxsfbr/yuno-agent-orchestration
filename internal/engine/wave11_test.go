@@ -390,16 +390,22 @@ func TestLimitsAndCancelAcrossBranches(t *testing.T) {
 		if r.Status != store.RunFailed || deref(r.FailureReason) != "step limit 5 exceeded" || r.StepCount < 5 {
 			t.Fatalf("run = %s %q steps %d", r.Status, deref(r.FailureReason), r.StepCount)
 		}
+		// The first branch to see the summed limit fails with it; the other is stopped by
+		// the fork, or, on a slow host, sees the limit itself first and is recorded as it
+		// ended (rule 6): either way both rows are closed with the limit as the reason.
 		branches := branchRows(t, env, run.ID)
-		statuses := []string{branches["a"].Status, branches["b"].Status}
-		sort.Strings(statuses)
-		if !slices.Equal(statuses, []string{store.BranchCancelled, store.BranchFailed}) {
-			t.Fatalf("branch statuses = %v", statuses)
-		}
-		for _, b := range branches {
-			if b.Status == store.BranchCancelled && deref(b.FailureReason) != "stopped: step limit 5 exceeded" {
-				t.Fatalf("stopped branch = %+v", b)
+		failures := 0
+		for head, b := range branches {
+			switch {
+			case b.Status == store.BranchFailed && deref(b.FailureReason) == "step limit 5 exceeded":
+				failures++
+			case b.Status == store.BranchCancelled && deref(b.FailureReason) == "stopped: step limit 5 exceeded":
+			default:
+				t.Fatalf("branch %s = %+v", head, b)
 			}
+		}
+		if failures < 1 {
+			t.Fatalf("no branch failed on the limit: %+v", branches)
 		}
 		if env.count(`SELECT count(*) FROM run_nodes WHERE run_id=$1 AND status IN ('running','waiting_approval','pending')`, run.ID) != 0 {
 			t.Fatal("a visit was left open")
@@ -661,9 +667,9 @@ func TestParkedBranchReleasesWhenSiblingsEnd(t *testing.T) {
 	if a1.Status != store.NodeWaitingApproval || a1.ParkedAt == nil {
 		t.Fatalf("parked visit = %+v", a1)
 	}
-	if env.logged(pr.run.ID, "waits for the answer to question "+out.row.ID+"; branch a continues when it arrives") != 1 {
-		t.Fatal("the branch park log line is missing")
-	}
+	eventually(t, "the branch park log line", func() bool { // written after the park is visible
+		return env.logged(pr.run.ID, "waits for the answer to question "+out.row.ID+"; branch a continues when it arrives") == 1
+	})
 	// The sibling ends: nothing runs, one branch is parked, the fork releases the worker.
 	bp := recv(t, pr.bSend, "b's send")
 	go finishThenFinal(t, env, bp, `{"ok":true}`)
