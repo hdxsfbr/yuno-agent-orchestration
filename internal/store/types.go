@@ -234,10 +234,13 @@ type Workflow struct {
 	TemplateKey *string         `db:"template_key" json:"template_key,omitempty"`
 	// FromTemplate is the key of the template the workflow was instantiated from
 	// (DESIGN 5.15 rule 13); nil for workflows built from scratch.
-	FromTemplate *string    `db:"from_template" json:"from_template,omitempty"`
-	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt    time.Time  `db:"updated_at" json:"updated_at"`
-	DeletedAt    *time.Time `db:"deleted_at" json:"deleted_at,omitempty"`
+	FromTemplate *string `db:"from_template" json:"from_template,omitempty"`
+	// SeededHash is the sha256 of the definition the seed last wrote to a shipped copy
+	// (nil for copies made before it was recorded and for workflows the seed never wrote).
+	SeededHash *string    `db:"seeded_hash" json:"-"`
+	CreatedAt  time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt  time.Time  `db:"updated_at" json:"updated_at"`
+	DeletedAt  *time.Time `db:"deleted_at" json:"deleted_at,omitempty"`
 }
 
 type Run struct {

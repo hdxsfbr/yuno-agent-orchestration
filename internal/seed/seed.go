@@ -2,15 +2,17 @@
 // (DESIGN 5.6 rule 9) and the Chief of Staff who coordinates them (DESIGN 5.15 rules 12
 // to 14): `yuno seed` is idempotent and never overwrites an agent an operator has
 // edited, so it only creates the ones whose name is missing; it instantiates each
-// shipped template once, and binds the Chief of Staff to Telegram only while nothing is
+// shipped template once and upgrades the copies nobody edited, and binds the Chief of Staff to Telegram only while nothing is
 // bound.
 package seed
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -56,8 +58,8 @@ var Chief = store.Agent{
 	MemoryPolicy:  store.MemoryPolicy{Enabled: true},
 }
 
-// TemplateKeys are the shipped templates the seed instantiates once each (DESIGN 5.28
-// rules 2 and 3, 5.29 rule 13): the plan, wave and ship pipelines.
+// TemplateKeys are the shipped templates the seed instantiates once each and keeps the
+// untouched copies of current (DESIGN 5.28 rules 2 and 3, 5.29 rule 13): the plan, wave and ship pipelines.
 var TemplateKeys = []string{"plan_pipeline", "wave_pipeline", "ship_pipeline"}
 
 // RetiredTemplateKeys are the templates the delivery process replaced (DESIGN 5.28 rule
@@ -313,8 +315,8 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger, opts Options)
 	log.Info("seed: retired agents deleted", "agents", strings.Join(retired, ","))
 
 	// Each failing template was logged by Templates; the ones that worked are reported.
-	made, _ := Templates(ctx, pool, sh, log)
-	log.Info("seed: workflows from templates", "created", strings.Join(made, ","))
+	made, upgraded, _ := Templates(ctx, pool, sh, log)
+	log.Info("seed: workflows from templates", "created", strings.Join(made, ","), "upgraded", strings.Join(upgraded, ","))
 
 	// The skills library (DESIGN 5.27 rule 10): skills not yet present, none overwritten.
 	if _, err := skillbundle.ImportLibrary(ctx, pool, cfg.SkillsLibraryDir, log); err != nil {
@@ -406,6 +408,8 @@ type Instantiator interface {
 type Resetter interface {
 	Instantiator
 	ResetFromTemplate(ctx context.Context, workflowID string) error
+	// ResolvedTemplate is the definition ResetFromTemplate would store.
+	ResolvedTemplate(ctx context.Context, workflowID string) (json.RawMessage, error)
 }
 
 // ResetShipped restores the shipped agents (by name) to their shipped role, prompt and
@@ -453,17 +457,24 @@ type Binder interface {
 	BindTelegram(ctx context.Context, agentID string) error
 }
 
-// Templates instantiates each of TemplateKeys that no live workflow was made from yet
-// (DESIGN 5.15 rule 13), so delegate_task has workflows to name, and returns the names
-// of the workflows it created. A live workflow (not a template) with the template's
-// name counts as made from it: copies made before workflows recorded their template. A
-// template the api has not loaded yet is skipped with a warning (templates load at api
-// start). Every key is tried; the error lists each one that failed.
-func Templates(ctx context.Context, q store.Querier, in Instantiator, log *slog.Logger) ([]string, error) {
-	var made []string
+// Templates keeps the shipped workflows current (DESIGN 5.15 rule 13). It instantiates
+// each of TemplateKeys that no live workflow was made from yet, so delegate_task has
+// workflows to name, and upgrades every copy still untouched (its seeded_hash matches
+// its definition; a copy from before the hash was recorded counts when its version is 1)
+// to the template's current definition. A copy the operator edited is kept and logged.
+// It returns the names created and the names upgraded. A live workflow (not a template)
+// with the template's name counts as made from it: copies made before workflows recorded
+// their template. A template the api has not loaded yet is skipped with a warning
+// (templates load at api start). Every key is tried; the error lists each one that failed.
+func Templates(ctx context.Context, q store.Querier, r Resetter, log *slog.Logger) (made, upgraded []string, err error) {
 	var errs []error
 	for _, key := range TemplateKeys {
-		name, err := instantiateOnce(ctx, q, in, key, log)
+		name, err := instantiateOnce(ctx, q, r, key, log)
+		if err == nil && name == "" {
+			var names []string
+			names, err = upgradeCopies(ctx, q, r, key, log)
+			upgraded = append(upgraded, names...)
+		}
 		if err != nil {
 			log.Warn("seed: template not instantiated", "key", key, "error", err)
 			errs = append(errs, fmt.Errorf("template %s: %w", key, err))
@@ -473,12 +484,80 @@ func Templates(ctx context.Context, q store.Querier, in Instantiator, log *slog.
 			made = append(made, name)
 		}
 	}
-	return made, errors.Join(errs...)
+	return made, upgraded, errors.Join(errs...)
+}
+
+// recordSeeded stores the hash of the definition now held by the workflow, read back
+// from the database (the form a later seed compares).
+func recordSeeded(ctx context.Context, q store.Querier, id string) error {
+	wf, err := store.GetWorkflow(ctx, q, id)
+	if err != nil {
+		return err
+	}
+	return store.SetWorkflowSeededHash(ctx, q, id, store.DefinitionHash(wf.Definition))
+}
+
+// sameJSON reports whether two JSON documents are equal whatever their key order and spacing.
+func sameJSON(a, b json.RawMessage) bool {
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
+}
+
+// upgradeCopies applies the template to each untouched copy made from it that differs
+// from it, and returns the names of those it upgraded.
+func upgradeCopies(ctx context.Context, q store.Querier, r Resetter, key string, log *slog.Logger) ([]string, error) {
+	all, err := store.ListWorkflows(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	var done []string
+	for _, wf := range all {
+		if wf.FromTemplate == nil || *wf.FromTemplate != key {
+			continue
+		}
+		hash := store.DefinitionHash(wf.Definition)
+		matches := wf.SeededHash != nil && *wf.SeededHash == hash
+		if !matches && (wf.SeededHash != nil || wf.Version != 1) {
+			log.Info("seed: kept: edited since seeded; use seed-reset to restore", "workflow", wf.Name, "id", wf.ID, "version", wf.Version)
+			continue
+		}
+		want, err := r.ResolvedTemplate(ctx, wf.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			log.Warn("seed: template not loaded yet; start the api, then seed again", "key", key)
+			return done, nil
+		}
+		if err != nil {
+			return done, fmt.Errorf("workflow %s: %w", wf.Name, err)
+		}
+		if sameJSON(want, wf.Definition) {
+			if !matches { // already current: track it from now on
+				if err := store.SetWorkflowSeededHash(ctx, q, wf.ID, hash); err != nil {
+					return done, err
+				}
+			}
+			continue
+		}
+		if err := r.ResetFromTemplate(ctx, wf.ID); err != nil {
+			return done, fmt.Errorf("workflow %s: %w", wf.Name, err)
+		}
+		if err := recordSeeded(ctx, q, wf.ID); err != nil {
+			return done, err
+		}
+		done = append(done, wf.Name)
+	}
+	if len(done) > 0 {
+		log.Info("seed: workflows upgraded to their template", "key", key, "workflows", strings.Join(done, ","))
+	}
+	return done, nil
 }
 
 // instantiateOnce creates the workflow of one template unless one exists, and returns
 // its name ("" when nothing was created).
 func instantiateOnce(ctx context.Context, q store.Querier, in Instantiator, key string, log *slog.Logger) (string, error) {
+	// A template with a live copy is not created again; Templates upgrades the copy.
 	done, err := store.WorkflowFromTemplateExists(ctx, q, key)
 	if err != nil || done {
 		return "", err
@@ -502,6 +581,10 @@ func instantiateOnce(ctx context.Context, q store.Querier, in Instantiator, key 
 	}
 	wf, err := in.InstantiateTemplate(ctx, key, "")
 	if err != nil {
+		return "", err
+	}
+	// The hash is of the definition as stored, not of the one InstantiateTemplate returns.
+	if err := recordSeeded(ctx, q, wf.ID); err != nil {
 		return "", err
 	}
 	return wf.Name, nil

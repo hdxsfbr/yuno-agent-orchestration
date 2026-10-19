@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"time"
@@ -10,7 +12,7 @@ import (
 )
 
 const workflowColumns = `id, name, description, definition, version, template_key, created_at, updated_at, deleted_at,
-	from_template`
+	from_template, seeded_hash`
 
 func CreateWorkflow(ctx context.Context, q Querier, w *Workflow) error {
 	if w.ID == "" {
@@ -24,8 +26,8 @@ func CreateWorkflow(ctx context.Context, q Querier, w *Workflow) error {
 	}
 	now := time.Now().UTC()
 	w.CreatedAt, w.UpdatedAt = now, now
-	_, err := q.Exec(ctx, `INSERT INTO workflows (`+workflowColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9)`,
-		w.ID, w.Name, w.Description, w.Definition, w.Version, w.TemplateKey, w.CreatedAt, w.UpdatedAt, w.FromTemplate)
+	_, err := q.Exec(ctx, `INSERT INTO workflows (`+workflowColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10)`,
+		w.ID, w.Name, w.Description, w.Definition, w.Version, w.TemplateKey, w.CreatedAt, w.UpdatedAt, w.FromTemplate, w.SeededHash)
 	return err
 }
 
@@ -230,4 +232,24 @@ func GetWorkflowByFromTemplate(ctx context.Context, q Querier, key string) (*Wor
 		return nil, ErrNotFound
 	}
 	return w, err
+}
+
+// DefinitionHash is the sha256 (hex) the seed records for a workflow definition. Hash the
+// definition as read back from the database, which is what a later seed compares.
+func DefinitionHash(def json.RawMessage) string {
+	sum := sha256.Sum256(def)
+	return hex.EncodeToString(sum[:])
+}
+
+// SetWorkflowSeededHash records the hash of the definition the seed last wrote to the
+// workflow, without touching its version. It does not change the workflow's definition.
+func SetWorkflowSeededHash(ctx context.Context, q Querier, id, hash string) error {
+	tag, err := q.Exec(ctx, `UPDATE workflows SET seeded_hash=$2 WHERE id=$1 AND deleted_at IS NULL`, id, hash)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

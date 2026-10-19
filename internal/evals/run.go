@@ -53,6 +53,9 @@ func runSuite(ctx context.Context, cfg config.Config, log *slog.Logger, out io.W
 	if err != nil {
 		return err
 	}
+	if cases = FilterCases(cases, cfg.EvalCases); len(cases) == 0 {
+		return fmt.Errorf("no case of split %s matches EVAL_CASES %q", cfg.EvalSplit, cfg.EvalCases)
+	}
 	log.Info("eval start", "split", cfg.EvalSplit, "cases", len(cases), "api", cfg.EvalAPIURL, "provider", provider)
 
 	runner := NewRunner(cfg, log)
@@ -86,4 +89,28 @@ func runSuite(ctx context.Context, cfg config.Config, log *slog.Logger, out io.W
 		return fmt.Errorf("%w after %d of %d cases: %v", errInterrupted, len(results), len(cases), runErr)
 	}
 	return report.PublicGate()
+}
+
+// FilterCases keeps the cases whose id starts with one of the comma-separated prefixes in
+// only ("028" or "028-wave"), so one case can be rerun after a fix; empty keeps them all.
+func FilterCases(cases []Case, only string) []Case {
+	var prefixes []string
+	for _, p := range strings.Split(only, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			prefixes = append(prefixes, p)
+		}
+	}
+	if len(prefixes) == 0 {
+		return cases
+	}
+	var kept []Case
+	for _, c := range cases {
+		for _, p := range prefixes {
+			if strings.HasPrefix(c.ID, p) {
+				kept = append(kept, c)
+				break
+			}
+		}
+	}
+	return kept
 }

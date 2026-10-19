@@ -12,6 +12,7 @@ the rubric is graded by `claude-opus-5-5` through the api's model proxy (see "Ru
 ```
 make eval                      # EVAL_SPLIT=public by default
 EVAL_SPLIT=all make eval       # every split
+EVAL_CASES=028 make eval       # only the cases whose id starts with 028
 EVAL_SPLIT=all EVAL_PROVIDER=anthropic make eval   # every split, rubrics graded by the model
 make eval-baseline             # make eval, then copy the report to evals/reports/baseline.md
 make eval-final                # make eval, then copy the report to evals/reports/final.md
@@ -21,6 +22,7 @@ make eval-final                # make eval, then copy the report to evals/report
 |---|---|---|
 | `EVAL_API_URL` | `http://127.0.0.1:8080` | api to test; in model mode its `/model-proxy/anthropic` is called too |
 | `EVAL_SPLIT` | `public` | `public`, `private` or `all` |
+| `EVAL_CASES` | empty | comma-separated case id prefixes; only those cases run |
 | `EVAL_CASES_DIR` | `evals/cases` | searched recursively for `*.yaml` / `*.yml` |
 | `EVAL_REPORTS_DIR` | `evals/reports` | where `<timestamp>.md` and `.json` are written |
 | `EVAL_PROVIDER` | `scripted` | `scripted`: rubrics graded by their local checks. `anthropic`: rubrics graded by `claude-opus-5-5`. Runs are replayed from the scripts either way |

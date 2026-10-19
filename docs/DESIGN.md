@@ -1141,6 +1141,9 @@ The full design with inputs, edge cases, failure handling and tests is
     exec) carries the coordinator prompt from the brief, extended by 5.17 rule 8 and,
     since 5.24, by the answering sentence of 5.24 rule 9.
 13. Seeding instantiates every shipped template when no workflow carries its template key.
+    Each later seed also upgrades the copies nobody edited to the template's current
+    definition (the copy's `seeded_hash` matches its definition, or it has none and is at
+    version 1) and keeps the edited ones, logged by name (D-080).
 14. Seeding binds the Chief of Staff when Telegram is enabled and nothing is bound; it
     never changes an existing binding.
 15. The materialiser writes a `## Chatting` section into `AGENTS.md` only for agents whose

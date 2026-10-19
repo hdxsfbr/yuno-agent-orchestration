@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -43,6 +44,44 @@ func (sh *Shared) InstantiateTemplate(ctx context.Context, key, name string) (*s
 	return wf, nil
 }
 
+// ResolvedTemplate returns the definition ResetFromTemplate would store for the
+// workflow: its template's definition with the agent names resolved and checked.
+func (sh *Shared) ResolvedTemplate(ctx context.Context, workflowID string) (json.RawMessage, error) {
+	wf, err := store.GetWorkflow(ctx, sh.s.pool, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	return sh.resolvedTemplate(ctx, wf)
+}
+
+func (sh *Shared) resolvedTemplate(ctx context.Context, wf *store.Workflow) (json.RawMessage, error) {
+	if wf.FromTemplate == nil {
+		return nil, fmt.Errorf("workflow %s was not made from a template", wf.ID)
+	}
+	tpl, err := store.GetWorkflowByTemplateKey(ctx, sh.s.pool, *wf.FromTemplate)
+	if err != nil {
+		return nil, fmt.Errorf("template %s: %w", *wf.FromTemplate, err)
+	}
+	def, fe, err := sh.s.resolveAgentNames(ctx, tpl.Definition)
+	if err != nil {
+		return nil, err
+	}
+	if len(fe) == 0 {
+		fe, err = sh.s.checkDefinition(ctx, def, definitionRules{agents: true})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(fe) > 0 {
+		msgs := make([]string, len(fe))
+		for i, f := range fe {
+			msgs[i] = f.Path + ": " + f.Message
+		}
+		return nil, fmt.Errorf("template %s cannot be applied: %s", *wf.FromTemplate, strings.Join(msgs, "; "))
+	}
+	return def, nil
+}
+
 // ResetFromTemplate rewrites an instantiated workflow's definition from the template
 // it came from, resolving agent names as "Create copy" does, keeping the workflow's id,
 // name and description (DESIGN 5.16 rule 14).
@@ -54,26 +93,9 @@ func (sh *Shared) ResetFromTemplate(ctx context.Context, workflowID string) erro
 	if wf.FromTemplate == nil {
 		return fmt.Errorf("workflow %s was not made from a template", workflowID)
 	}
-	tpl, err := store.GetWorkflowByTemplateKey(ctx, sh.s.pool, *wf.FromTemplate)
-	if err != nil {
-		return fmt.Errorf("template %s: %w", *wf.FromTemplate, err)
-	}
-	def, fe, err := sh.s.resolveAgentNames(ctx, tpl.Definition)
+	def, err := sh.resolvedTemplate(ctx, wf)
 	if err != nil {
 		return err
-	}
-	if len(fe) == 0 {
-		fe, err = sh.s.checkDefinition(ctx, def, definitionRules{agents: true})
-		if err != nil {
-			return err
-		}
-	}
-	if len(fe) > 0 {
-		msgs := make([]string, len(fe))
-		for i, f := range fe {
-			msgs[i] = f.Path + ": " + f.Message
-		}
-		return fmt.Errorf("template %s cannot be applied: %s", *wf.FromTemplate, strings.Join(msgs, "; "))
 	}
 	wf.Definition = def
 	return store.UpdateWorkflow(ctx, sh.s.pool, wf)

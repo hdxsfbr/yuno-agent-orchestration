@@ -6,6 +6,16 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-19
 
+**D-080 Shipped workflow copies follow their template until the operator edits them.**
+(Coordinator) The seed used to instantiate each shipped template once and never touch the
+copy again, so a template that gained nodes in a later release never reached a running
+stack. `workflows.seeded_hash` now holds the sha256 of the definition the seed last wrote;
+every seed run applies the template (`ResetFromTemplate`, which bumps the version; runs pin
+versions) to each copy whose definition still hashes to it, or that has no hash and is at
+version 1 (the rule `retire.go` uses), unless the resolved definition already equals the
+template's. An edited copy is kept and logged; `seed-reset` still restores it.
+Alternative rejected: always resetting, which would overwrite operator edits.
+
 **D-079 Wave evals run against a fake forge.** (Coordinator, within D-071 to D-078's
 plan, WAVES T3.5) Eval 028 needs issues, labels, merge requests, merges and a default
 branch pipeline; a real GitLab project would make the suite slow, flaky and dependent on a

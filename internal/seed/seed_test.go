@@ -427,16 +427,16 @@ func TestSeedInstantiatesTemplatesOnce(t *testing.T) {
 	must(t, err)
 	sh := httpapi.NewShared(httpapi.Deps{Pool: pool, Log: log})
 
-	made, err := Templates(ctx, pool, sh, log)
+	made, _, err := Templates(ctx, pool, sh, log)
 	if err != nil || len(made) != 0 {
 		t.Fatalf("without templates: %v %v", made, err)
 	}
 	sh = loadStubTemplates(t, pool)
-	made, err = Templates(ctx, pool, sh, log)
+	made, _, err = Templates(ctx, pool, sh, log)
 	if err != nil || !slices.Equal(made, []string{"Plan pipeline", "Wave pipeline", "Ship pipeline"}) {
 		t.Fatalf("first: %v %v", made, err)
 	}
-	made, err = Templates(ctx, pool, sh, log)
+	made, _, err = Templates(ctx, pool, sh, log)
 	if err != nil || len(made) != 0 {
 		t.Fatalf("second: %v %v", made, err)
 	}
@@ -460,7 +460,7 @@ func TestSeedInstantiatesTemplatesOnce(t *testing.T) {
 			must(t, store.DeleteWorkflow(ctx, pool, wf.ID))
 		}
 	}
-	made, err = Templates(ctx, pool, sh, log)
+	made, _, err = Templates(ctx, pool, sh, log)
 	if err != nil || !slices.Equal(made, []string{"Wave pipeline"}) {
 		t.Fatalf("after a delete: %v %v", made, err)
 	}
@@ -521,6 +521,7 @@ func TestBindChief(t *testing.T) {
 
 // failingInstantiator fails the keys it names and records every key it was asked for.
 type failingInstantiator struct {
+	Resetter
 	in    Instantiator
 	fail  map[string]bool
 	asked []string
@@ -546,16 +547,16 @@ func TestSeedTemplatesUpgradeAndFailures(t *testing.T) {
 	sh := loadStubTemplates(t, pool)
 
 	must(t, store.CreateWorkflow(ctx, pool, &store.Workflow{Name: "Plan pipeline", Definition: []byte(`{"nodes":[],"edges":[]}`)}))
-	both := &failingInstantiator{in: sh, fail: map[string]bool{"plan_pipeline": true, "wave_pipeline": true, "ship_pipeline": true}}
-	made, err := Templates(ctx, pool, both, log)
+	both := &failingInstantiator{Resetter: sh, in: sh, fail: map[string]bool{"plan_pipeline": true, "wave_pipeline": true, "ship_pipeline": true}}
+	made, _, err := Templates(ctx, pool, both, log)
 	if len(made) != 0 || err == nil || !strings.Contains(err.Error(), "template wave_pipeline: agent missing") ||
 		strings.Contains(err.Error(), "plan_pipeline") || !slices.Equal(both.asked, []string{"wave_pipeline", "ship_pipeline"}) {
 		t.Fatalf("old copy and a failure: %v %v, asked %v", made, err, both.asked)
 	}
 
 	must(t, store.DeleteWorkflow(ctx, pool, mustWorkflowNamed(t, pool, "Plan pipeline")))
-	one := &failingInstantiator{in: sh, fail: map[string]bool{"plan_pipeline": true}}
-	made, err = Templates(ctx, pool, one, log)
+	one := &failingInstantiator{Resetter: sh, in: sh, fail: map[string]bool{"plan_pipeline": true}}
+	made, _, err = Templates(ctx, pool, one, log)
 	if !slices.Equal(made, []string{"Wave pipeline", "Ship pipeline"}) || err == nil || !strings.Contains(err.Error(), "plan_pipeline") || len(one.asked) != 3 {
 		t.Fatalf("first fails, the other works: %v %v", made, err)
 	}
@@ -585,7 +586,7 @@ func TestResetShipped(t *testing.T) {
 	_, _, err := Seed(ctx, pool)
 	must(t, err)
 	sh := loadStubTemplates(t, pool)
-	_, err = Templates(ctx, pool, sh, log)
+	_, _, err = Templates(ctx, pool, sh, log)
 	must(t, err)
 
 	// An operator edited the Integrator (an older prompt, no open_merge_request, a model
@@ -801,5 +802,188 @@ func TestDeleteWorkflowIfIdle(t *testing.T) {
 	}
 	if ok, err := store.DeleteWorkflowIfIdle(ctx, pool, wf.ID, 1); err != nil || !ok {
 		t.Fatalf("idle: %v %v", ok, err)
+	}
+}
+
+// templateServer loads the stub templates from a directory the test can rewrite.
+type templateServer struct {
+	dir string
+	srv *httpapi.Server
+	sh  *httpapi.Shared
+}
+
+func newTemplateServer(t *testing.T, pool *pgxpool.Pool) *templateServer {
+	t.Helper()
+	log := slog.New(slog.DiscardHandler)
+	dir := stubTemplates(t)
+	srv, err := httpapi.New(httpapi.Deps{Cfg: config.Config{AnthropicBaseURL: "http://127.0.0.1:1"}, Pool: pool, Log: log, TemplatesDir: dir})
+	must(t, err)
+	must(t, srv.LoadTemplates(context.Background()))
+	return &templateServer{dir: dir, srv: srv, sh: httpapi.NewShared(httpapi.Deps{Pool: pool, Log: log})}
+}
+
+// change gives the template one more node, as a later release would, and reloads it.
+func (ts *templateServer) change(t *testing.T, key string) {
+	t.Helper()
+	path := filepath.Join(ts.dir, key+".json")
+	raw, err := os.ReadFile(path)
+	must(t, err)
+	next := strings.Replace(string(raw), `{"id":"end","kind":"end"}`, `{"id":"extra","kind":"agent","agent_name":"Analyst","task":"more","output_schema":{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]},"input_from":["work"]},{"id":"end","kind":"end"}`, 1)
+	next = strings.Replace(next, `{"from":"work","to":"end"}`, `{"from":"work","to":"extra"},{"from":"extra","to":"end"}`, 1)
+	if next == string(raw) {
+		t.Fatal("template not changed")
+	}
+	must(t, os.WriteFile(path, []byte(next), 0o644))
+	must(t, ts.srv.LoadTemplates(context.Background()))
+}
+
+// countingResetter counts the resets Templates asks for.
+type countingResetter struct {
+	Resetter
+	resets []string
+}
+
+func (c *countingResetter) ResetFromTemplate(ctx context.Context, id string) error {
+	c.resets = append(c.resets, id)
+	return c.Resetter.ResetFromTemplate(ctx, id)
+}
+
+func copyOf(t *testing.T, pool *pgxpool.Pool, name string) *store.Workflow {
+	t.Helper()
+	wf, err := store.GetWorkflow(context.Background(), pool, mustWorkflowNamed(t, pool, name))
+	must(t, err)
+	return wf
+}
+
+// A newly instantiated copy records the hash of the definition as stored, and an unchanged
+// template makes later seed runs no-ops: no reset, no version bump.
+func TestSeedTemplatesRecordHashAndStayQuiet(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.DiscardHandler)
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	ts := newTemplateServer(t, pool)
+	cr := &countingResetter{Resetter: ts.sh}
+
+	made, upgraded, err := Templates(ctx, pool, cr, log)
+	if err != nil || len(made) != 3 || len(upgraded) != 0 {
+		t.Fatalf("first: %v %v %v", made, upgraded, err)
+	}
+	for _, name := range made {
+		wf := copyOf(t, pool, name)
+		if wf.SeededHash == nil || *wf.SeededHash != store.DefinitionHash(wf.Definition) || wf.Version != 1 {
+			t.Fatalf("%s: seeded_hash %v version %d", name, wf.SeededHash, wf.Version)
+		}
+	}
+	for range 2 {
+		made, upgraded, err = Templates(ctx, pool, cr, log)
+		if err != nil || len(made) != 0 || len(upgraded) != 0 || len(cr.resets) != 0 {
+			t.Fatalf("repeat: %v %v %v resets %v", made, upgraded, err, cr.resets)
+		}
+	}
+	if wf := copyOf(t, pool, "Wave pipeline"); wf.Version != 1 {
+		t.Fatalf("version = %d", wf.Version)
+	}
+}
+
+// A copy whose hash matches is upgraded when the template changed; the run after is a no-op.
+func TestSeedTemplatesUpgradeMatchingHash(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.DiscardHandler)
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	ts := newTemplateServer(t, pool)
+	_, _, err = Templates(ctx, pool, ts.sh, log)
+	must(t, err)
+
+	ts.change(t, "wave_pipeline")
+	cr := &countingResetter{Resetter: ts.sh}
+	made, upgraded, err := Templates(ctx, pool, cr, log)
+	if err != nil || len(made) != 0 || !slices.Equal(upgraded, []string{"Wave pipeline"}) || len(cr.resets) != 1 {
+		t.Fatalf("upgrade: %v %v %v resets %v", made, upgraded, err, cr.resets)
+	}
+	wf := copyOf(t, pool, "Wave pipeline")
+	if wf.Version != 2 || !strings.Contains(string(wf.Definition), `"extra"`) || wf.SeededHash == nil || *wf.SeededHash != store.DefinitionHash(wf.Definition) {
+		t.Fatalf("after upgrade: version %d hash %v def %s", wf.Version, wf.SeededHash, wf.Definition)
+	}
+	_, upgraded, err = Templates(ctx, pool, cr, log)
+	if err != nil || len(upgraded) != 0 || len(cr.resets) != 1 || copyOf(t, pool, "Wave pipeline").Version != 2 {
+		t.Fatalf("after: %v %v resets %v", upgraded, err, cr.resets)
+	}
+}
+
+// A version-1 copy with no hash (made before the hash existed) is upgraded; a NULL-hash
+// copy at a later version is kept.
+func TestSeedTemplatesUpgradeNullHashVersionOne(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.DiscardHandler)
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	ts := newTemplateServer(t, pool)
+	_, _, err = Templates(ctx, pool, ts.sh, log)
+	must(t, err)
+	_, err = pool.Exec(ctx, `UPDATE workflows SET seeded_hash = NULL`)
+	must(t, err)
+
+	ts.change(t, "wave_pipeline")
+	ts.change(t, "ship_pipeline")
+	ship := copyOf(t, pool, "Ship pipeline")
+	must(t, store.UpdateWorkflow(ctx, pool, ship)) // version 2, same definition: touched
+	var logs bytes.Buffer
+	made, upgraded, err := Templates(ctx, pool, ts.sh, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil || len(made) != 0 || !slices.Equal(upgraded, []string{"Wave pipeline"}) {
+		t.Fatalf("upgrade: %v %v %v", made, upgraded, err)
+	}
+	if wf := copyOf(t, pool, "Wave pipeline"); wf.Version != 2 || !strings.Contains(string(wf.Definition), `"extra"`) || wf.SeededHash == nil {
+		t.Fatalf("wave: version %d hash %v", wf.Version, wf.SeededHash)
+	}
+	if wf := copyOf(t, pool, "Ship pipeline"); wf.Version != 2 || strings.Contains(string(wf.Definition), `"extra"`) {
+		t.Fatalf("ship: version %d def %s", wf.Version, wf.Definition)
+	}
+	// The plan pipeline was current: it only gained its hash.
+	if wf := copyOf(t, pool, "Plan pipeline"); wf.Version != 1 || wf.SeededHash == nil {
+		t.Fatalf("plan: version %d hash %v", wf.Version, wf.SeededHash)
+	}
+	if !strings.Contains(logs.String(), "Ship pipeline") {
+		t.Fatalf("no kept line: %s", logs.String())
+	}
+}
+
+// A copy edited after it was seeded (hash mismatch) is kept, logged by name, and never reset.
+func TestSeedTemplatesKeepEditedCopy(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	ts := newTemplateServer(t, pool)
+	quiet := slog.New(slog.DiscardHandler)
+	_, _, err = Templates(ctx, pool, ts.sh, quiet)
+	must(t, err)
+
+	wf := copyOf(t, pool, "Wave pipeline")
+	var def map[string]any
+	must(t, json.Unmarshal(wf.Definition, &def))
+	def["project"] = true
+	wf.Definition, _ = json.Marshal(def)
+	must(t, store.UpdateWorkflow(ctx, pool, wf))
+	edited := copyOf(t, pool, "Wave pipeline")
+
+	ts.change(t, "wave_pipeline")
+	var logs bytes.Buffer
+	cr := &countingResetter{Resetter: ts.sh}
+	made, upgraded, err := Templates(ctx, pool, cr, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil || len(made) != 0 || len(upgraded) != 0 || len(cr.resets) != 0 {
+		t.Fatalf("edited: %v %v %v resets %v", made, upgraded, err, cr.resets)
+	}
+	after := copyOf(t, pool, "Wave pipeline")
+	if after.Version != edited.Version || string(after.Definition) != string(edited.Definition) {
+		t.Fatalf("copy changed: version %d", after.Version)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "kept: edited since seeded; use seed-reset to restore") || !strings.Contains(out, `workflow="Wave pipeline"`) {
+		t.Fatalf("log = %s", out)
 	}
 }

@@ -72,6 +72,7 @@ x-api-env: &api-env
   EVAL_API_URL: ${EVAL_API_URL:-http://127.0.0.1:8080}
   EVAL_PROVIDER: ${EVAL_PROVIDER:-scripted}
   EVAL_SPLIT: ${EVAL_SPLIT:-public}
+  EVAL_CASES: ${EVAL_CASES:-}
   EVAL_CASES_DIR: ${EVAL_CASES_DIR:-evals/cases}
   EVAL_REPORTS_DIR: ${EVAL_REPORTS_DIR:-evals/reports}
   # The one http host a project's repository URL may name (DESIGN 5.29 rule 17): the fake

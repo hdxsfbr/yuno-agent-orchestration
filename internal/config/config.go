@@ -99,6 +99,7 @@ type Config struct {
 	EvalAPIURL     string
 	EvalProvider   string // scripted | anthropic
 	EvalSplit      string // public | private | all
+	EvalCases      string // comma-separated case id prefixes; empty runs the whole split
 	EvalCasesDir   string
 	EvalReportsDir string
 
@@ -173,6 +174,7 @@ func FromEnv() Config {
 		EvalAPIURL:     strings.TrimRight(env("EVAL_API_URL", "http://127.0.0.1:8080"), "/"),
 		EvalProvider:   env("EVAL_PROVIDER", "scripted"),
 		EvalSplit:      env("EVAL_SPLIT", "public"),
+		EvalCases:      env("EVAL_CASES", ""),
 		EvalCasesDir:   env("EVAL_CASES_DIR", "evals/cases"),
 		EvalReportsDir: env("EVAL_REPORTS_DIR", "evals/reports"),
 
