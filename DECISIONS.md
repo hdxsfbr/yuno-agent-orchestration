@@ -6,6 +6,31 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-18
 
+**D-064 The review panel ships with three new seeded reviewer agents and the Reviewer
+as lead.** (Andre, 2026-10-18, the recommended answer of DESIGN 5.26's third open
+line) `make seed` creates Security Reviewer, Performance Reviewer and Maintainability
+Reviewer (Sonnet, read-only tools); the `review_panel` template runs them in parallel on
+the Coder's change and the existing Reviewer merges their verdicts before the gate and
+the Deployer. Why: three focused reviews are what a panel is for, and D-062 needs
+distinct agents in the branches. Alternative: a two-reviewer panel with Reviewer and
+Critic and no new agents. Design: DESIGN 5.26 rule 14.
+
+**D-063 A branch's wait does not stop the run's clock, and approval nodes cannot be
+inside a branch.** (Andre, 2026-10-18, the recommended answer of DESIGN 5.26's second
+open line) An approval or question inside a branch pauses that node only; the run stays
+`running` and the time limit keeps counting while the siblings work; the human gate
+goes after the join. Why: the run is working while one branch waits, so excluding the
+wait would be wrong, and a gate that releases the worker cannot sit inside a region
+whose siblings still need it. Alternative: stop the clock while every live branch waits
+(a paused-visit count on the run row). Design: DESIGN 5.26 rules 2 and 7.
+
+**D-062 One agent, one branch: a fork whose branches share an agent is refused at
+save.** (Andre, 2026-10-18, the recommended answer of DESIGN 5.26's first open line)
+Every agent has one OpenClaw workspace, so two visits of it at once would write the same
+`runs/<run id>/` and the same checkout; the validation message names both branches. The
+same agent before the fork and inside one branch is fine. Alternative: a workspace per
+visit (5.14 rule 5, 5.6 rule 13), out of this wave's size. Design: DESIGN 5.26 rule 2.
+
 **D-061 Past a join, the checkout flows only from the branch the join names, and the
 generated diff comes only from that branch.** (Claude, coordinator, 2026-10-18) The
 copy-forward of 5.6 rule 13 leaves `runs/<run id>/repo/` out of every branch visit's

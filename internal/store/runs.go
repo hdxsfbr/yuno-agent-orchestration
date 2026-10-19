@@ -294,7 +294,7 @@ func RequeueStaleRuns(ctx context.Context, q Querier, staleAfter time.Duration) 
 // ---- run nodes --------------------------------------------------------------------
 
 const runNodeColumns = `id, run_id, node_id, agent_id, visit, iteration, status, messages, pending_tool_results, output,
-	failure_reason, session_key, openclaw_run_id, started_at, finished_at, question_id, parked_at`
+	failure_reason, session_key, openclaw_run_id, started_at, finished_at, question_id, parked_at, branch_id`
 
 func CreateRunNode(ctx context.Context, q Querier, n *RunNode) error {
 	if n.ID == "" {
@@ -315,9 +315,9 @@ func CreateRunNode(ctx context.Context, q Querier, n *RunNode) error {
 	if len(n.Output) == 0 {
 		n.Output = json.RawMessage(`null`)
 	}
-	_, err := q.Exec(ctx, `INSERT INTO run_nodes (`+runNodeColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+	_, err := q.Exec(ctx, `INSERT INTO run_nodes (`+runNodeColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		n.ID, n.RunID, n.NodeID, n.AgentID, n.Visit, n.Iteration, n.Status, n.Messages, n.PendingToolResults, n.Output,
-		n.FailureReason, n.SessionKey, n.OpenClawRunID, n.StartedAt, n.FinishedAt, n.QuestionID, n.ParkedAt)
+		n.FailureReason, n.SessionKey, n.OpenClawRunID, n.StartedAt, n.FinishedAt, n.QuestionID, n.ParkedAt, n.BranchID)
 	return err
 }
 
@@ -620,6 +620,9 @@ func GetTrace(ctx context.Context, q Querier, runID string) (*Trace, error) {
 		return nil, err
 	}
 	if t.Approvals, err = ListApprovals(ctx, q, "", runID, 500); err != nil {
+		return nil, err
+	}
+	if t.Branches, err = ListRunBranches(ctx, q, runID); err != nil {
 		return nil, err
 	}
 	return t, nil

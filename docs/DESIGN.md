@@ -3320,7 +3320,8 @@ run's caps are fixed).
 Purpose: a workflow runs several agents at once and continues when all of them are done:
 a panel of reviewers on one change, or a task split across coders. Decision D-048
 (explicit `fork` and `join` nodes; a failed branch fails the run; the review panel
-template is the example) and D-060 to D-064. Roadmap: `docs/ROADMAP.md` 5.26.
+template is the example), D-060 and D-061 (coordinator) and D-062 to D-064 (Andre,
+2026-10-18). Roadmap: `docs/ROADMAP.md` 5.26.
 
 Inputs: the definition (nodes of kind `fork` with `join`, nodes of kind `join` with an
 optional `checkout`); the run's state, limits and counters; the branch rows
@@ -3616,7 +3617,8 @@ case with parallel branches (the scripted provider serves a script's steps in or
 concurrent turns would interleave; a per-node script is a later change), the Dev
 pipeline with a parallel review.
 
-Open lines (answer before the wave runs; the recommended answer stands until then):
+Decisions (settled 2026-10-18 by Andre with the recommended answer on every line;
+recorded as D-062 to D-064):
 
 1. **One agent, one branch (D-062).** Recommended: a fork whose branches share an agent
    is refused at save, since every agent has one workspace and two visits of it at once

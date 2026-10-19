@@ -452,6 +452,7 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
    coordinator builds the prerequisites and the engine itself (the stronger model, as
    this item planned), two Sonnet 5.5 agents build the frontend and the template with
    its agents in parallel.
-10. Next: Andre's answers to 5.26's three lines and the briefs' approval; then the wave.
+10. Done 2026-10-18: Andre answered the three lines with the recommended answers (D-062
+   to D-064) and approved the briefs. Next: the wave.
    The demo recording with projects is still pending, and the Telegram relay of an
    answer through the Chief has not been tried live (the unit tests cover it).

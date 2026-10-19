@@ -281,7 +281,35 @@ type RunNode struct {
 	// ParkedAt is when the visit parked on its pending question and released its worker
 	// (DESIGN 5.24 rule 5); nil for a visit that never parked. Not part of the contract.
 	ParkedAt *time.Time `db:"parked_at" json:"-"`
+	// BranchID is the branch of a fork visit this visit was made in (DESIGN 5.26 rule 4);
+	// nil for a visit outside any fork.
+	BranchID *string `db:"branch_id" json:"branch_id,omitempty"`
 }
+
+// RunBranch is one branch of a fork visit (DESIGN 5.26 rule 3): the part of the run that
+// started at one outgoing edge of the fork and runs at the same time as its siblings
+// until the join. Head, the fork edge's target, names it; CurrentNode is where it is.
+type RunBranch struct {
+	ID            string     `db:"id" json:"id"`
+	RunID         string     `db:"run_id" json:"run_id"`
+	ForkVisitID   string     `db:"fork_visit_id" json:"fork_visit_id"`
+	ForkID        string     `db:"fork_id" json:"fork_id"`
+	Head          string     `db:"head" json:"head"`
+	Status        string     `db:"status" json:"status"`
+	CurrentNode   string     `db:"current_node" json:"current_node"`
+	FailureReason *string    `db:"failure_reason" json:"failure_reason,omitempty"`
+	StartedAt     time.Time  `db:"started_at" json:"started_at"`
+	FinishedAt    *time.Time `db:"finished_at" json:"finished_at,omitempty"`
+}
+
+// Branch statuses (DESIGN 5.26 rule 12).
+const (
+	BranchRunning         = "running"
+	BranchWaitingApproval = "waiting_approval" // the branch's newest visit parked on a question
+	BranchSucceeded       = "succeeded"
+	BranchFailed          = "failed"
+	BranchCancelled       = "cancelled"
+)
 
 type ModelCall struct {
 	ID               string     `db:"id" json:"id"`
@@ -356,6 +384,9 @@ type Trace struct {
 	Approvals     []Approval     `json:"approvals"`
 	// SideEffects are the run's idempotency records (DESIGN 5.4), filled from wave 2.
 	SideEffects []SideEffect `json:"side_effects,omitempty"`
+	// Branches are the rows of every fork visit of the run (DESIGN 5.26 rule 12), by
+	// started_at; empty, not null, for a run without forks.
+	Branches []RunBranch `json:"branches"`
 }
 
 // Approval kinds (DESIGN 5.3, section 4) and statuses.

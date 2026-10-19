@@ -14,6 +14,8 @@ const (
 	KindStart    = "start"
 	KindAgent    = "agent"
 	KindApproval = "approval"
+	KindFork     = "fork" // DESIGN 5.26: starts one branch per true edge
+	KindJoin     = "join" // DESIGN 5.26: where a fork's branches meet
 	KindEnd      = "end"
 )
 
@@ -38,7 +40,17 @@ type Node struct {
 	Message      string          `json:"message,omitempty"`   // approval nodes
 	OnReject     string          `json:"on_reject,omitempty"` // approval nodes: edge target
 	OnFailure    string          `json:"on_failure,omitempty"`
+	// Join is the join node every branch of a fork ends at (DESIGN 5.26 rule 1); fork
+	// nodes only.
+	Join string `json:"join,omitempty"`
+	// Checkout is the head of the branch whose project checkout continues past a join
+	// (DESIGN 5.26 rule 10); join nodes of a project workflow only.
+	Checkout string `json:"checkout,omitempty"`
 }
+
+// IsFork and IsJoin name the two kinds of DESIGN 5.26.
+func (n *Node) IsFork() bool { return n.Kind == KindFork }
+func (n *Node) IsJoin() bool { return n.Kind == KindJoin }
 
 // Condition is {path, op, value} or {all: []} / {any: []} (DESIGN 5.6 rule 3).
 type Condition struct {
@@ -145,6 +157,11 @@ func (d *Definition) ValidateStructure() error {
 				msgs = append(msgs, fmt.Sprintf("nodes[%d].task: required for agent nodes", i))
 			}
 		case KindApproval:
+		case KindFork:
+			if n.Join == "" {
+				msgs = append(msgs, fmt.Sprintf("nodes[%d].join: required for fork nodes", i))
+			}
+		case KindJoin:
 		default:
 			msgs = append(msgs, fmt.Sprintf("nodes[%d].kind: unknown kind '%s'", i, n.Kind))
 		}
@@ -215,6 +232,7 @@ func (d *Definition) ValidateStructure() error {
 			}
 		}
 	}
+	msgs = append(msgs, d.validateForks(ids)...)
 	if len(msgs) > 0 {
 		return &ValidationError{Messages: msgs}
 	}
