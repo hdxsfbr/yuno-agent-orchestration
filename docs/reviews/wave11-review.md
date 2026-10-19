@@ -56,8 +56,9 @@ and the first pipeline on `main` failed two new tests there: the step-limit test
 one branch stopped by the fork, but on the slow host both branches saw the summed limit
 themselves and were recorded as they ended (what rule 6 allows; the test now accepts
 either), and a park test read the branch's park log line as soon as the branch row showed
-it parked, a moment before the line was written (it now waits for the line). No code
-changed.
+it parked, a moment before the line was written (it now waits for the line). The second
+pipeline failed on staticcheck (`SA4006`, a value assigned and overwritten in the
+`run_status` test, which the development runs had not checked). No code changed.
 
 ## Coverage reported by the reviewers
 

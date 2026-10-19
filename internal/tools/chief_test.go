@@ -991,7 +991,7 @@ func TestRunStatusBranches(t *testing.T) {
 	moveTo("panel")
 	out, raw := status()
 	if got := branchesOf(out); len(got) != 0 {
-		t.Fatalf("a fork without rows: %v", got)
+		t.Fatalf("a fork without rows: %v\n%s", got, raw)
 	}
 
 	// The first visit: three branches, one done, one working on its node, one parked.
