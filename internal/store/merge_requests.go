@@ -241,6 +241,8 @@ type MergeRequestSync struct {
 	LastSyncError     *string
 	SyncedAt          time.Time
 	ClosedAt          *time.Time
+	// MergeSHA is the commit the provider says the merge made, when it merged and says.
+	MergeSHA *string
 }
 
 // UpdateMergeRequestSync writes a refresh in one statement conditional on state = 'open':
@@ -285,9 +287,20 @@ func UpdateMergeRequestSyncError(ctx context.Context, q Querier, id, message str
 // merged, closed_at at, merged_by by. Conditional on state = 'open', so a merge that
 // races a sync takes effect once: false means the other side won and the caller re-reads.
 func MarkMergeRequestMerged(ctx context.Context, q Querier, id, by string, at time.Time) (bool, error) {
-	tag, err := q.Exec(ctx, `UPDATE merge_requests SET state = $2, closed_at = $3, merged_by = $4, synced_at = $3,
-			last_sync_error = NULL, updated_at = $3
-		WHERE id = $1 AND state = $5`, id, MergeRequestMerged, at.UTC(), by, MergeRequestOpen)
+	return MarkMergeRequestMergedAs(ctx, q, id, by, at, nil, nil)
+}
+
+// MarkMergeRequestMergedAs is MarkMergeRequestMerged with the provider's own account of the
+// merge (DESIGN 5.29 rule 11): closed_at is the provider's merged_at when it gave one (at,
+// the platform's time, is the fallback and always the sync time), merge_sha its merge commit.
+func MarkMergeRequestMergedAs(ctx context.Context, q Querier, id, by string, at time.Time, mergedAt *time.Time, mergeSHA *string) (bool, error) {
+	closed := at.UTC()
+	if mergedAt != nil {
+		closed = mergedAt.UTC()
+	}
+	tag, err := q.Exec(ctx, `UPDATE merge_requests SET state = $2, closed_at = $6, merged_by = $4, synced_at = $3,
+			last_sync_error = NULL, updated_at = $3, merge_sha = $7
+		WHERE id = $1 AND state = $5`, id, MergeRequestMerged, at.UTC(), by, MergeRequestOpen, closed, mergeSHA)
 	if err != nil {
 		return false, err
 	}

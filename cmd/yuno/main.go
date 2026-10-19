@@ -9,6 +9,8 @@
 //	yuno openclaw-init  write the baseline openclaw.json into the state directory and exit
 //	yuno deploytarget   local release store the deploy tool publishes to
 //	yuno eval           run the evaluation suite and write a report
+//	yuno forgefake      the fake forge the evals run against (FORGEFAKE_TOKEN, FORGEFAKE_ADDR;
+//	                    compose profile eval only, DESIGN 5.29 rule 17)
 package main
 
 import (
@@ -22,6 +24,7 @@ import (
 	"yuno/internal/config"
 	"yuno/internal/deploytarget"
 	"yuno/internal/evals"
+	"yuno/internal/forgefake"
 	"yuno/internal/httpapi"
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
@@ -79,6 +82,8 @@ func main() {
 		err = seed.Run(ctx, cfg, log, opts)
 	case "eval":
 		err = evals.Run(ctx, cfg, log)
+	case "forgefake":
+		err = forgefake.Run(ctx, os.Getenv("FORGEFAKE_ADDR"), log)
 	case "version":
 		fmt.Println(config.Version)
 	default:
@@ -92,5 +97,5 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: yuno <api|migrate|seed|openclaw-init|deploytarget|eval|version>")
+	fmt.Fprintln(os.Stderr, "usage: yuno <api|migrate|seed|openclaw-init|deploytarget|eval|forgefake|version>")
 }

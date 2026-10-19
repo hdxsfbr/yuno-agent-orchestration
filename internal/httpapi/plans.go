@@ -15,11 +15,15 @@ import (
 // wavesPauseReasonMax is WavesPauseInput.reason's cap in characters.
 const wavesPauseReasonMax = 500
 
-// planDetail is PlanDetail: the plan, its tickets by wave and its newest events.
+// planDetail is PlanDetail: the plan, its tickets by wave, its newest events, the wave
+// watcher's last read of the default branch (null before the first) and the ship runs of
+// its waves (DESIGN 5.29 rules 11 and 12).
 type planDetail struct {
-	Plan    *store.Plan        `json:"plan"`
-	Tickets []store.PlanTicket `json:"tickets"`
-	Events  []store.PlanEvent  `json:"events"`
+	Plan     *store.Plan        `json:"plan"`
+	Tickets  []store.PlanTicket `json:"tickets"`
+	Events   []store.PlanEvent  `json:"events"`
+	Main     *store.PlanMain    `json:"main"`
+	ShipRuns []store.ShipRun    `json:"ship_runs"`
 }
 
 // listPlans: GET /api/projects/{id}/plans, newest first, finished plans included.
@@ -56,7 +60,17 @@ func (s *Server) getPlan(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "list plan events", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, planDetail{Plan: plan, Tickets: tickets, Events: evs})
+	main, err := store.GetPlanMain(ctx, s.pool, plan.ID)
+	if err != nil {
+		s.internalError(w, r, "read the plan's main status", err)
+		return
+	}
+	ships, err := store.ListShipRuns(ctx, s.pool, plan.ID)
+	if err != nil {
+		s.internalError(w, r, "list the plan's ship runs", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, planDetail{Plan: plan, Tickets: tickets, Events: evs, Main: main, ShipRuns: ships})
 }
 
 // cancelPlan: POST /api/plans/{id}/cancel. An open plan becomes cancelled with the reason

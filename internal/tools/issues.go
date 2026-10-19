@@ -85,7 +85,19 @@ type IssueProvider interface {
 	// first, page after page up to max issues (DESIGN 5.29 rule 2); publish_tickets matches
 	// its markers on the answer.
 	ListAll(ctx context.Context, label string, max int) ([]Issue, error)
+	// Close closes the issue (DESIGN 5.29 rule 14); closing a closed issue is fine.
+	Close(ctx context.Context, number int64) error
+	// IssueState reads the one issue, whatever its labels or confidentiality, and returns
+	// IssueStateOpen or IssueStateClosed (DESIGN 5.29 rule 12: the watcher's look at a
+	// released ticket's issue). An issue that is not there is an error for which IssueGone is true.
+	IssueState(ctx context.Context, number int64) (string, error)
 }
+
+// The states IssueState returns.
+const (
+	IssueStateOpen   = "open"
+	IssueStateClosed = "closed"
+)
 
 // IssueColorTicket is the colour of the labels publish_tickets puts on an issue (wave:<n>,
 // feature:<name>).
@@ -265,6 +277,26 @@ func (g *gitlabIssues) Comment(ctx context.Context, number int64, body string) e
 	return err
 }
 
+// Close is PUT issues/<iid> {state_event: close} (DESIGN 5.29 rule 14).
+func (g *gitlabIssues) Close(ctx context.Context, number int64) error {
+	_, err := g.api.do(ctx, http.MethodPut, fmt.Sprintf("%s/issues/%d", g.base, number), map[string]any{"state_event": "close"}, nil)
+	return err
+}
+
+// IssueState is GET issues/<iid> (DESIGN 5.29 rule 12): "opened" is open, any other state closed.
+func (g *gitlabIssues) IssueState(ctx context.Context, number int64) (string, error) {
+	var i struct {
+		State string `json:"state"`
+	}
+	if _, err := g.api.do(ctx, http.MethodGet, fmt.Sprintf("%s/issues/%d", g.base, number), nil, &i); err != nil {
+		return "", err
+	}
+	if i.State == "opened" {
+		return IssueStateOpen, nil
+	}
+	return IssueStateClosed, nil
+}
+
 // Create ensures the labels, then POST issues {title, description, labels: "a,b"} (rule 3).
 func (g *gitlabIssues) Create(ctx context.Context, title, body string, labels []string) (Issue, error) {
 	if err := g.ensured.ensure(ctx, g, labels); err != nil {
@@ -423,6 +455,26 @@ func (g *githubIssues) SwapLabels(ctx context.Context, number int64, add, remove
 func (g *githubIssues) Comment(ctx context.Context, number int64, body string) error {
 	_, err := g.api.do(ctx, http.MethodPost, fmt.Sprintf("%s/issues/%d/comments", g.base, number), map[string]any{"body": body}, nil)
 	return err
+}
+
+// Close is PATCH issues/<n> {state: closed} (DESIGN 5.29 rule 14).
+func (g *githubIssues) Close(ctx context.Context, number int64) error {
+	_, err := g.api.do(ctx, http.MethodPatch, fmt.Sprintf("%s/issues/%d", g.base, number), map[string]any{"state": "closed"}, nil)
+	return err
+}
+
+// IssueState is GET issues/<n> (DESIGN 5.29 rule 12).
+func (g *githubIssues) IssueState(ctx context.Context, number int64) (string, error) {
+	var i struct {
+		State string `json:"state"`
+	}
+	if _, err := g.api.do(ctx, http.MethodGet, fmt.Sprintf("%s/issues/%d", g.base, number), nil, &i); err != nil {
+		return "", err
+	}
+	if i.State == "open" {
+		return IssueStateOpen, nil
+	}
+	return IssueStateClosed, nil
 }
 
 // Create ensures the labels, then POST issues {title, body, labels} (rule 3).

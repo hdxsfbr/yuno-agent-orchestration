@@ -6,6 +6,14 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-19
 
+**D-079 Wave evals run against a fake forge.** (Coordinator, within D-071 to D-078's
+plan, WAVES T3.5) Eval 028 needs issues, labels, merge requests, merges and a default
+branch pipeline; a real GitLab project would make the suite slow, flaky and dependent on a
+token. `forgefake` implements the GitLab subset in memory with real Git pushes through
+`git http-backend`, only under the compose profile `eval` (DESIGN 5.29 rule 17).
+Alternative rejected: mocking at the provider interface inside the api, which would skip
+the HTTP and Git paths the evals exist to exercise.
+
 **D-071 to D-078 The delivery process (the HDX Factory diagram).** (Andre, 2026-10-19:
 "take the recommended answer to D1 to D8") D-071: the old templates (`dev_pipeline`,
 `research_pipeline`, `review_panel`) and their nine agents are retired (kept under

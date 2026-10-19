@@ -1,12 +1,16 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
+	"strings"
 
 	"yuno/internal/model"
 	"yuno/internal/runtoken"
+	"yuno/internal/store"
 )
 
 const maxScriptBody = 4 << 20
@@ -26,7 +30,19 @@ func validScriptID(id string) bool {
 type scriptRegistration struct {
 	ScriptID string             `json:"script_id"`
 	Steps    []model.ScriptStep `json:"steps"`
+	// Bind makes the script the one the next run of Trigger that the platform starts on the
+	// project uses (an issue's run from intake, a ship run from the wave watcher), which has
+	// no request of its own to name a script in. Optional.
+	Bind *scriptBinding `json:"bind"`
 }
+
+type scriptBinding struct {
+	ProjectID string `json:"project_id"`
+	Trigger   string `json:"trigger"`
+}
+
+// bindableTriggers are the triggers whose runs the platform starts without a request.
+var bindableTriggers = []string{store.TriggerIssue, store.TriggerPlan}
 
 // registerScript stores (or replaces) a script for the scripted provider. The store drops
 // it once its last step was served or model.ScriptTTL after registration.
@@ -49,11 +65,31 @@ func (s *Server) registerScript(w http.ResponseWriter, r *http.Request) {
 			fe.add(fmt.Sprintf("steps[%d]", i), "%s", err.Error())
 		}
 	}
+	var binder model.ScriptBinder
+	if b := in.Bind; b != nil {
+		var ok bool
+		if binder, ok = s.scripts.(model.ScriptBinder); !ok {
+			fe.add("bind", "is not supported by this script store")
+		}
+		if !slices.Contains(bindableTriggers, b.Trigger) {
+			fe.add("bind.trigger", "must be one of %s", strings.Join(bindableTriggers, ", "))
+		}
+		if _, err := store.GetProject(r.Context(), s.pool, b.ProjectID); err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				s.internalError(w, r, "read the project", err)
+				return
+			}
+			fe.add("bind.project_id", "no project with this id")
+		}
+	}
 	if len(fe) > 0 {
 		writeValidation(w, "invalid script", fe)
 		return
 	}
 	s.scripts.Register(in.ScriptID, in.Steps)
+	if binder != nil {
+		binder.Bind(in.Bind.ProjectID, in.Bind.Trigger, in.ScriptID)
+	}
 	s.log.Info("script registered", "script_id", in.ScriptID, "steps", len(in.Steps))
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -34,7 +34,7 @@ type approvalState struct {
 // ctx ends; out.last is always the last run seen.
 func (r *Runner) await(ctx context.Context, c Case, run *store.Run) (out awaitOutcome, err error) {
 	out.last = run
-	deadline := time.NewTimer(r.caseTimeout)
+	deadline := time.NewTimer(r.timeoutFor(c))
 	defer deadline.Stop()
 
 	cancelled := false
@@ -125,6 +125,10 @@ func (r *Runner) applyApprovals(ctx context.Context, c Case, runID string, st *a
 			return ""
 		}
 		if st.next >= len(c.Actions.Approvals) {
+			if c.hasApproveStep() {
+				// The case's approve steps decide the rest.
+				return ""
+			}
 			return fmt.Sprintf("approval %s (%s) is pending and the case has no action left for it", ap.ID, describeApproval(ap))
 		}
 		act := c.Actions.Approvals[st.next]

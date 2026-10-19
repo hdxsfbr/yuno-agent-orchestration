@@ -394,3 +394,36 @@ describe("a question that was dealt with", () => {
     expect(card.getByText(/by api · go/)).not.toBeNull();
   });
 });
+
+describe("an approval of a ship run", () => {
+  const smoke = (over: Partial<Approval> = {}) => question({ kind: "node", node_id: "smoke_test", message: "Test the wave", options: undefined, run_id: "ship1", ...over });
+
+  it("names the feature and wave, linking to the project's plans", async () => {
+    api.on("GET", "/api/runs/ship1", () => ({ id: "ship1", trigger: "plan", trigger_ref: "plan:pl1:wave:1", project_id: "p1" }));
+    api.on("GET", "/api/plans/pl1", () => ({ plan: { id: "pl1", project_id: "p1", feature: "Health endpoint" }, tickets: [], events: [] }));
+    renderCard(smoke(), { showRun: true });
+    const link = await screen.findByRole("link", { name: "Feature Health endpoint, wave 1" });
+    expect(link.getAttribute("href")).toBe("/projects/p1#project-plans");
+    expect(api.made("GET", /^\/api\/runs/).map((c) => c.url)).toEqual(["/api/runs/ship1"]);
+  });
+
+  it("names the acceptance of the last wave the same way", async () => {
+    api.on("GET", "/api/runs/ship1", () => ({ id: "ship1", trigger: "plan", trigger_ref: "plan:pl1:wave:2", project_id: "p1" }));
+    api.on("GET", "/api/plans/pl1", () => ({ plan: { id: "pl1", project_id: "p1", feature: "Health endpoint" }, tickets: [], events: [] }));
+    renderCard(smoke({ node_id: "accept_feature" }), { showRun: true });
+    expect(await screen.findByRole("link", { name: "Feature Health endpoint, wave 2" })).not.toBeNull();
+  });
+
+  it("shows no plan for a run that no plan started", async () => {
+    api.on("GET", "/api/runs/ship1", () => ({ id: "ship1", trigger: "manual", trigger_ref: "plan:pl1:wave:1" }));
+    renderCard(smoke(), { showRun: true });
+    await waitFor(() => expect(api.made("GET", "/api/runs/ship1")).toHaveLength(1));
+    expect(screen.queryByText("Plan")).toBeNull();
+  });
+
+  it("asks for nothing extra on other approvals", async () => {
+    renderCard(question(), { showRun: true });
+    expect(screen.queryByText("Plan")).toBeNull();
+    expect(api.made("GET", /^\/api\/runs/)).toHaveLength(0);
+  });
+});

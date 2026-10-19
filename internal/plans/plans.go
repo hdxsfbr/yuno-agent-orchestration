@@ -218,6 +218,12 @@ func (s *Service) OnRunTerminal(ctx context.Context, run *store.Run) {
 	if s == nil || run == nil {
 		return
 	}
+	if run.Trigger == store.TriggerPlan && run.TriggerRef != nil {
+		if planID, wave, ok := store.ParseShipRef(*run.TriggerRef); ok {
+			s.onShipRunTerminal(ctx, run, planID, wave)
+			return
+		}
+	}
 	switch run.Status {
 	case store.RunFailed, store.RunTimedOut, store.RunCancelled:
 	default:
@@ -308,6 +314,15 @@ func escalationText(plan *store.Plan, t *store.PlanTicket, kind, reason string) 
 	}
 	return fmt.Sprintf("[platform] Feature %s, ticket %s (%s) %s: %s. The waves of the project are paused; resume them from the project page once it is sorted out.",
 		plan.Feature, t.TicketID, t.Title, how, sentenceEnd(reason))
+}
+
+// NotifyEvent tells the operator of a plan event in the words the resend sweep would use
+// (rule 8); see Notify.
+func (s *Service) NotifyEvent(ctx context.Context, plan *store.Plan, ev *store.PlanEvent) {
+	if s == nil || ev == nil {
+		return
+	}
+	s.Notify(ctx, plan, ev, s.noticeText(ctx, plan, ev))
 }
 
 // Notify delivers text to the conversation of the agent bound to Telegram, as the budget
@@ -433,6 +448,9 @@ func (s *Service) noticeText(ctx context.Context, plan *store.Plan, ev *store.Pl
 	}
 	switch ev.Kind {
 	case store.PlanEventEscalated:
+		if ev.TicketID == nil {
+			return shipEndText(plan, wave, d.Reason)
+		}
 		t := &store.PlanTicket{TicketID: "?"}
 		if ev.TicketID != nil {
 			t.TicketID = *ev.TicketID
@@ -565,4 +583,163 @@ func cut(s string, max int) string {
 		s = s[:len(s)-1]
 	}
 	return s + "…"
+}
+
+// Stages of a ship run, as the plan events name them.
+const (
+	stageSmokeTest = "smoke_test"
+	stageAccept    = "accept_feature"
+)
+
+// onShipRunTerminal applies rules 14 and 15 to a ship run that ended (DESIGN 5.29): one
+// that succeeded after the operator approved `accept_feature` finishes the plan (`done`,
+// `feature_done`); one that ended any other way pauses the project's waves with the reason
+// and records an `escalated` event without a ticket. The operator's rejection of the smoke
+// test reads "smoke test rejected: <reason>", of the acceptance "feature not accepted:
+// <reason>", any other ending the run's own reason. Both steps run once per ending
+// of a run: the event carries the run id and its retry count, so a run retried after an
+// escalation escalates again when it ends badly again. A run that succeeded without its
+// wave closed (no `wave_done`) or, on the last wave, without the acceptance approved, is
+// escalated as well: "ship run for wave N finished without closing the wave".
+func (s *Service) onShipRunTerminal(ctx context.Context, run *store.Run, planID string, wave int) {
+	plan, err := store.GetPlan(ctx, s.Pool, planID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.log().Warn("plans: read the plan of a finished ship run failed", "run_id", run.ID, "error", err)
+		}
+		return
+	}
+	if plan.Status == store.PlanDone || plan.Status == store.PlanCancelled {
+		return
+	}
+	approvals, err := store.ListApprovals(ctx, s.Pool, "", run.ID, 500)
+	if err != nil {
+		s.log().Warn("plans: read the approvals of a finished ship run failed", "run_id", run.ID, "error", err)
+		return
+	}
+	stranded := ""
+	if run.Status == store.RunSucceeded {
+		for _, a := range approvals {
+			if a.Kind == store.ApprovalKindNode && a.NodeID == stageAccept && a.Status == store.ApprovalApproved {
+				s.finishPlan(ctx, plan, wave, run.ID)
+				return
+			}
+		}
+		// Otherwise the wave must be closed, which advance_wave records (`wave_done`), and a
+		// plan that is accepting must have had its acceptance approved; a run that ended
+		// well without either left the plan stranded, and the operator is told (rule 14).
+		_, err := store.FindPlanEvent(ctx, s.Pool, plan.ID, store.PlanEventWaveDone, wave, "")
+		switch {
+		case err != nil && !errors.Is(err, store.ErrNotFound):
+			s.log().Warn("plans: read the wave's record failed", "run_id", run.ID, "error", err)
+			return
+		case err == nil && plan.Status != store.PlanAccepting:
+			return // advance_wave moved the plan on
+		case err == nil:
+			stranded = fmt.Sprintf("ship run for wave %d finished without the feature being accepted", wave)
+		default:
+			stranded = fmt.Sprintf("ship run for wave %d finished without closing the wave", wave)
+		}
+	}
+	stage, reason := "", ""
+	for _, a := range approvals {
+		if stranded != "" {
+			break
+		}
+		if a.Kind != store.ApprovalKindNode || a.Status != store.ApprovalRejected || (a.NodeID != stageSmokeTest && a.NodeID != stageAccept) {
+			continue
+		}
+		why := "no reason given"
+		if a.Reason != nil && strings.TrimSpace(*a.Reason) != "" {
+			why = strings.TrimSpace(*a.Reason)
+		}
+		stage = a.NodeID
+		if stage == stageSmokeTest {
+			reason = "smoke test rejected: " + why
+		} else {
+			reason = "feature not accepted: " + why
+		}
+	}
+	if stage == "" && stranded == "" && run.FailureReason != nil {
+		// The engine fails a run at an approval node without on_reject as "rejected at
+		// <node>: <operator's reason>".
+		for _, n := range []string{stageSmokeTest, stageAccept} {
+			if why, ok := strings.CutPrefix(strings.TrimSpace(*run.FailureReason), "rejected at "+n); ok {
+				why = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(why), ":"))
+				if why == "" {
+					why = "no reason given"
+				}
+				stage = n
+				reason = "smoke test rejected: " + why
+				if n == stageAccept {
+					reason = "feature not accepted: " + why
+				}
+			}
+		}
+	}
+	if stranded != "" {
+		stage, reason = "ship", stranded
+	}
+	if stage == "" {
+		stage, reason = "ship", "ship run "+run.Status
+		if run.FailureReason != nil && strings.TrimSpace(*run.FailureReason) != "" {
+			reason = strings.TrimSpace(*run.FailureReason)
+		}
+	}
+	reason = cut(obs.Redact(reason), ReasonMax)
+	raw, _ := json.Marshal(map[string]any{"reason": reason, "run_id": run.ID, "retries": run.Retries, "stage": stage})
+	ev := &store.PlanEvent{PlanID: plan.ID, Kind: store.PlanEventEscalated, Wave: &wave, Detail: raw}
+	recorded := false
+	err = s.inTx(ctx, func(q store.Querier) error {
+		if _, err := store.FindPlanEventRetry(ctx, q, plan.ID, store.PlanEventEscalated, wave, run.ID, run.Retries); err == nil {
+			return nil // this ending of the run is recorded already (a retry ends anew)
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if err := store.SetWavesPaused(ctx, q, plan.ProjectID, true, reason); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("pause the waves: %w", err)
+		}
+		if err := store.AddPlanEvent(ctx, q, ev); err != nil {
+			return fmt.Errorf("record the ship run's ending: %w", err)
+		}
+		recorded = true
+		return nil
+	})
+	if err != nil {
+		s.log().Warn("plans: pausing for a finished ship run failed", "run_id", run.ID, "error", err)
+		return
+	}
+	if !recorded {
+		return
+	}
+	s.Publish(plan.ID, plan.ProjectID)
+	s.Notify(ctx, plan, ev, shipEndText(plan, wave, reason))
+}
+
+// finishPlan sets an accepting plan done and records `feature_done` (rule 15).
+func (s *Service) finishPlan(ctx context.Context, plan *store.Plan, wave int, runID string) {
+	raw, _ := json.Marshal(map[string]any{"run_id": runID})
+	ev := &store.PlanEvent{PlanID: plan.ID, Kind: store.PlanEventFeatureDone, Wave: &wave, Detail: raw}
+	moved := false
+	err := s.inTx(ctx, func(q store.Querier) error {
+		var err error
+		if moved, err = store.MovePlan(ctx, q, plan.ID, store.PlanDone, plan.CurrentWave, store.PlanAccepting); err != nil || !moved {
+			return err
+		}
+		return store.AddPlanEvent(ctx, q, ev)
+	})
+	if err != nil {
+		s.log().Warn("plans: finishing the plan failed", "plan_id", plan.ID, "run_id", runID, "error", err)
+		return
+	}
+	if !moved {
+		return
+	}
+	s.Publish(plan.ID, plan.ProjectID)
+	s.NotifyEvent(ctx, plan, ev)
+}
+
+func shipEndText(plan *store.Plan, wave int, reason string) string {
+	return fmt.Sprintf("[platform] Feature %s, wave %d: %s. The waves of the project are paused; resume them from the project page once it is sorted out.",
+		plan.Feature, wave, sentenceEnd(reason))
 }

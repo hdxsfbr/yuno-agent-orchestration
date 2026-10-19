@@ -34,7 +34,7 @@ const PlatformToolPrefix = "yuno__"
 // name is an OpenClaw built-in and keeps its name.
 var PlatformTools = []string{"finish", "http_fetch", "memory_save", "memory_recall", "deploy_release", "gitlab_create_mr",
 	"open_merge_request", "list_agents", "list_workflows", "list_projects", "delegate_task", "run_status", "read_merge_request",
-	"ask_operator", "answer_question", "publish_tickets", "escalate"}
+	"ask_operator", "answer_question", "publish_tickets", "escalate", "advance_wave"}
 
 // FinishTool is the platform tool every managed agent must be able to call.
 const FinishTool = PlatformToolPrefix + "finish"

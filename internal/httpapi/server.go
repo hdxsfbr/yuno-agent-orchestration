@@ -32,6 +32,7 @@ import (
 	"yuno/internal/sched"
 	"yuno/internal/store"
 	"yuno/internal/tools"
+	"yuno/internal/waves"
 )
 
 // Deps are the server's collaborators. Engine, Gateway and Scripts may be nil (tests):
@@ -75,6 +76,8 @@ type Server struct {
 	projects *project.Resolver
 	// plans keeps plan tickets and the wave pause (DESIGN 5.29).
 	plans *plans.Service
+	// waves watches the open plans and advances shipped waves (DESIGN 5.29 rules 12 and 14).
+	waves *waves.Service
 	// checkClient talks to the providers for POST /api/projects/{id}/check.
 	checkClient *http.Client
 	rec         *events.Recorder
@@ -163,6 +166,9 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		Effects:  s.effects,
 		Plans:    s.plans,
 	}
+	if b, ok := s.scripts.(engine.ScriptBinder); ok {
+		engineDeps.Scripts = b
+	}
 	collector, err := artifacts.New(cfg.ArtifactDir, pool, log, nil, nil, cfg.ArtifactTTLDays)
 	if err != nil {
 		log.Warn("artifacts: " + cfg.ArtifactDir + ": " + err.Error() + "; artifacts are disabled")
@@ -209,6 +215,10 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		log.Info("merge requests backfilled from the trace", "count", n)
 	}
 	go mr.Run(ctx)
+	// The wave watcher (DESIGN 5.29 rule 12) releases and ships the waves of the open plans.
+	s.waves = &waves.Service{Pool: pool, Plans: s.plans, Projects: s.projects, Client: s.checkClient, Engine: eng,
+		Interval: cfg.WaveWatchInterval, Log: log}
+	go s.waves.Run(ctx)
 	// Issue intake (DESIGN 5.23 rule 2): projects with intake enabled are polled for
 	// labelled issues and their finished issue runs are posted back on the issue.
 	go (&intake.Loop{Pool: pool, Projects: s.projects, Client: s.checkClient, Engine: eng, Plans: s.plans,
@@ -609,6 +619,13 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 				return errEngineUnavailable
 			}
 			return e.EscalateRun(ctx, runID, kind, reason)
+		},
+		// advance_wave reaches the wave service at call time: Run sets s.waves after this registry is built.
+		AdvanceWave: func(ctx context.Context, runID string) (tools.AdvanceResult, error) {
+			if s.waves == nil {
+				return tools.AdvanceResult{}, errEngineUnavailable
+			}
+			return s.waves.Advance(ctx, runID)
 		},
 		RunIDForToken: func(token string) (string, bool) {
 			if s.engine == nil {

@@ -13,7 +13,8 @@ import (
 )
 
 // ErrDuplicateTrigger is CreateRun's answer when a run with the same schedule
-// occurrence already exists (runs_schedule_occurrence_idx, DESIGN 5.9 rule 2).
+// occurrence already exists (runs_schedule_occurrence_idx, DESIGN 5.9 rule 2) or the same
+// ship run of a plan's wave (runs_plan_wave_idx, DESIGN 5.29 rule 12).
 var ErrDuplicateTrigger = errors.New("a run for this trigger already exists")
 
 const runColumns = `id, workflow_id, workflow_version, workflow_snapshot, trigger, trigger_ref, status, input, state,
@@ -84,7 +85,7 @@ func CreateRun(ctx context.Context, q Querier, r *Run) error {
 		r.Status, r.Input, r.State, r.Limits, r.Attempt, r.CreatedAt, r.UpdatedAt, r.ProjectID, r.Project,
 		r.MergeRequestID, r.CheckoutSHA)
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "runs_schedule_occurrence_idx" {
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && (pgErr.ConstraintName == "runs_schedule_occurrence_idx" || pgErr.ConstraintName == "runs_plan_wave_idx") {
 		return ErrDuplicateTrigger
 	}
 	return liveIndexError(err)

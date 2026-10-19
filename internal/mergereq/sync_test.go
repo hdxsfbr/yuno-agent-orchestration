@@ -101,6 +101,7 @@ func (f *fakeProvider) request(n int, state, sha, pipeline string, unresolved in
 	mr := map[string]any{"state": state, "sha": sha}
 	if state == "merged" {
 		mr["merged_at"] = epoch.Add(-time.Minute).Format(time.RFC3339)
+		mr["merge_commit_sha"] = fmt.Sprintf("mergesha%d", n)
 	}
 	f.set(fmt.Sprintf("GET /merge_requests/%d", n), 200, mr)
 	disc := []map[string]any{}
@@ -614,9 +615,16 @@ func TestConfirmMerged(t *testing.T) {
 	rec := e.record(p, run, 1, time.Hour)
 	e.fake.request(1, "merged", "sha", "success", 0)
 	got := confirm(run, rec)
-	if got.State != store.MergeRequestMerged || got.MergedBy == nil || *got.MergedBy != "operator" || got.ClosedAt == nil || !got.ClosedAt.Equal(epoch) ||
-		got.ReportedState == nil || got.LastSyncError != nil || len(e.rep.messages()) != 1 {
+	// DESIGN 5.29 rule 11: the merge is stamped with the provider's merged_at and merge
+	// commit, not the platform's clock (epoch), so a wave compares like with like.
+	if got.State != store.MergeRequestMerged || got.MergedBy == nil || *got.MergedBy != "operator" || got.ClosedAt == nil ||
+		!got.ClosedAt.Equal(epoch.Add(-time.Minute)) || got.ReportedState == nil || got.LastSyncError != nil || len(e.rep.messages()) != 1 {
 		t.Fatalf("provider says merged = %+v, %d messages", got, len(e.rep.messages()))
+	}
+	var sha *string
+	must(t, e.pool.QueryRow(ctx, `SELECT merge_sha FROM merge_requests WHERE id=$1`, rec.ID).Scan(&sha))
+	if sha == nil || *sha != "mergesha1" {
+		t.Fatalf("merge_sha = %v, want the provider's merge commit", sha)
 	}
 
 	open := func(number int64, script func(), want string) {

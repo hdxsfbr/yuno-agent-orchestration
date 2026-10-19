@@ -3915,7 +3915,7 @@ good as the agents' prompts; nothing checks that `TASKS.md` slices are really en
 Purpose: a plan's tickets become tracker issues grouped in waves; each wave builds in
 parallel, ships behind the operator's smoke test, and releases the next wave by itself.
 Decisions D-071 to D-078 (Andre, 2026-10-19). Built in waves 2 (rules 1 to 9) and 3
-(rules 10 to 16) of `docs/briefs/delivery-process/WAVES.md`.
+(rules 10 to 15 and 17; rule 16 in wave 4) of `docs/briefs/delivery-process/WAVES.md`.
 
 Inputs: the plan run's state (`slicer.tickets`, `waves.waves`, the input `feature`); the
 project and its tracker (GitLab or GitHub, 5.16, 5.23); merge request records (5.20);
@@ -3997,14 +3997,33 @@ Rules:
 11. **Main is green (D-074).** `RequestProvider.DefaultBranchStatus` returns the newest
     pipeline (GitLab) or the combined check state (GitHub) on the default branch with its
     commit sha and time. A wave is shippable when every ticket of it is `merged` and the
-    default branch status is `passed` for a pipeline created at or after the newest merge.
+    default branch status is `passed` for the pipeline of the newest merge's commit or one
+    created at or after that merge, both times the provider's (a merge's `merged_at` is
+    stored from the provider, also for a merge made with the platform's Merge button; the
+    platform's clock stands in only when the provider gives none, and the merge commit's
+    sha is stored when it does).
 12. **The wave watcher** (a loop every `WAVE_WATCH_INTERVAL`, default 60 s, one plan per
     project): `waiting_plan_merge` and the plan MR merged → release wave 1; `building`,
     the current wave shippable and the project not paused → start one `ship_pipeline`
     run for the wave (unique per plan and wave, `trigger_ref plan:<id>:wave:<n>`),
     status `shipping`, event `smoke_test_waiting`. Releasing a wave adds the project's
     intake label to each of its tickets' issues and sets them `released` (event
-    `wave_released`). Nothing is released or started while paused.
+    `wave_released`). Nothing is released or started while paused. The pause is read
+    again inside the transaction of a release (also `advance_wave`'s), under the plan lock and
+    with the project's row held to the commit, before the tracker is written, so a pause
+    that landed meanwhile stops the release and a tracker failure commits nothing; the one
+    window left is a commit that fails after the labels were written, which a retry
+    repeats. Choices: the "newest merge" is the merged records' `closed_at` (else
+    `updated_at`), a branch status without a
+    time never ships, and a wave of any number of tickets is shipped only when every one
+    is `merged`; the watcher reads the plan merge request's record (kept by the sync), not
+    the tracker; the ship run's workflow is the oldest live workflow instantiated from
+    `ship_pipeline` (the template itself when none is); `current_wave` of a plan released
+    from `waiting_plan_merge` is its lowest wave, and the next wave after a shipped one is
+    the next higher wave that has tickets. The ship run's `trigger_ref` is unique (index
+    `runs_plan_wave_idx`); a watcher that finds the run records it instead of starting
+    another, and the plan's `main_state`, `main_sha`, `main_at`, `main_url` hold its last
+    read of the default branch (plan detail `main`, `ship_runs`).
 13. **`ship_pipeline`** (template; trigger only by the watcher): approval `smoke_test`
     (message: the wave, its merged MRs, main's pipeline) → `integrator` (lessons: project
     notes, and a small MR appending them to the repository's `CLAUDE.md`, D-075; then
@@ -4015,12 +4034,35 @@ Rules:
     `auto_after: smoke_test`): closes the wave's issues still open, sets its tickets
     `closed`, records `wave_done`, then releases the next wave (rule 12) or returns
     `{last: true}`; refuses while paused; idempotent per plan and wave (a second call
-    returns the first result).
+    returns the first result). Choices: the tracker is written first (close, then label the
+    next wave, each safe to repeat) and the database last in one transaction, so a failed
+    call is retried whole; the first result is the `wave_done` event's detail; a call is
+    refused unless the plan is `shipping` that wave; after the last wave the plan is
+    `accepting` and `accept_waiting` is recorded in the same transaction.
 15. **Done.** Approving `accept_feature` sets the plan `done` and records `feature_done`;
-    rejecting it pauses with the reason (the operator revises the plan, D-076).
+    rejecting it pauses with the reason (the operator revises the plan, D-076). Choices: a ship run
+    that ends other than succeeded pauses the waves and records `escalated` (no ticket, `detail`
+    `{reason, run_id, stage}`) once per run, with the reason "smoke test rejected: <reason>"
+    or "feature not accepted: <reason>" (read from the run's approvals, else from the
+    failure reason `rejected at <node>: <reason>`) or the run's own failure reason; the
+    plan keeps its status (`shipping` or `accepting`) and the operator cancels or revises
+    it; a run that succeeds finishes the plan only when it was `accepting` and
+    `accept_feature` was approved; a run that succeeds without the wave's `wave_done`, or
+    on an `accepting` plan without that approval, escalates ("ship run for wave N finished
+    without closing the wave"), and an ending is told once per run and retry count, so a
+    retried run that ends badly again is told again.
 16. **Revising a plan** (wave 4): `plan_pipeline` with input `revise_plan` amends the
     documents and `publish_tickets` adds or updates issues by marker; the plan resumes at
     its current wave.
+17. **The fake forge (D-079).** Evals that need a tracker run against `forgefake`, a role
+    of the one binary started only under the compose profile `eval`: an in-memory GitLab
+    REST subset (the issue, label, merge request and pipeline endpoints the platform
+    calls) plus Git smart HTTP served by `git http-backend` over bare repositories in a
+    temporary directory, so pushes from `open_merge_request` are real. It accepts one
+    fixed eval token, listens only on the compose network, and has control endpoints
+    under `/_forge/` (create a repository, merge open MRs, set the default branch's
+    pipeline state, list issues) that only the eval runner calls. It is never part of
+    `make run` or the public deployment.
 
 Wave 2 review amendments (2026-10-19): the slicer outputs `slice` and `tests`, which the
 issue body carries; a retried ticket run moves its ticket back to `building` (or
@@ -4033,7 +4075,9 @@ last line.
 
 Edge cases: an issue closed or relabelled by hand (a released ticket whose issue is
 closed without a merged MR is `failed` and escalates); a ticket MR closed unmerged
-(`failed`, escalates); main red after a wave's merges (the watcher waits; nothing
+(`failed`, escalates; an issue counts as closed when the tracker says so when the issue
+itself is read, a confidential one being open, and only a released ticket without a merge
+request record is judged so, as the sync settles the others); main red after a wave's merges (the watcher waits; nothing
 escalates, the project page shows main's status); a pause during a running wave (runs in
 flight finish; only the next release and the ship run wait); two waves' worth of tickets
 labelled early by a person with tracker rights (intake takes them, the watcher still

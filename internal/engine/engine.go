@@ -492,6 +492,13 @@ func ProjectForRequest(ctx context.Context, q store.Querier, id string, optsIn b
 // *project.BudgetError (DESIGN 5.19 rule 3).
 func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow.Definition, input json.RawMessage, req TriggerRequest, agents []*store.Agent, proj *store.Project, logAttrs ...any) (*store.Run, error) {
 	snap := runSnapshot{Definition: *def}
+	if req.Model == "" && req.ScriptID == "" && proj != nil && e.deps.Scripts != nil &&
+		(req.Trigger == store.TriggerIssue || req.Trigger == store.TriggerPlan) {
+		// A run the platform starts for an eval project takes the script bound to it.
+		if id, ok := e.deps.Scripts.TakeBound(proj.ID, req.Trigger); ok {
+			req.Model, req.ScriptID = ScriptedRunModel, id
+		}
+	}
 	if req.Model != "" || req.ScriptID != "" {
 		snap.RunOverrides = &runOverrides{Model: req.Model, ScriptID: req.ScriptID}
 	}

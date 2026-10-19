@@ -74,6 +74,9 @@ x-api-env: &api-env
   EVAL_SPLIT: ${EVAL_SPLIT:-public}
   EVAL_CASES_DIR: ${EVAL_CASES_DIR:-evals/cases}
   EVAL_REPORTS_DIR: ${EVAL_REPORTS_DIR:-evals/reports}
+  # The one http host a project's repository URL may name (DESIGN 5.29 rule 17): the fake
+  # forge of the eval profile. Empty outside make eval, where only https is accepted.
+  EVAL_FORGE_URL: ${EVAL_FORGE_URL:-}
 
 services:
   postgres:
@@ -234,6 +237,29 @@ services:
       timeout: 3s
       retries: 20
 
+  # The fake forge the evals run against (DESIGN 5.29 rule 17): an in-memory GitLab REST
+  # subset plus Git smart HTTP. Eval profile only, so make run never starts it; no published
+  # port, reachable as http://forgefake:8090 on the compose network. The token is a fixed
+  # eval value, not a secret.
+  forgefake:
+    profiles: ["eval"]
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+      args: *version-arg
+    command: ["forgefake"]
+    environment:
+      FORGEFAKE_TOKEN: ${FORGEFAKE_TOKEN:-forgefake-eval-token}
+      FORGEFAKE_ADDR: ":8090"
+    expose:
+      - "8090"
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   # Build-only: produces the image OpenClaw uses for agent sandboxes. Never runs.
   sandbox-image:
     build:
@@ -363,6 +389,7 @@ services:
       <<: *api-env
       EVAL_PROVIDER: ${EVAL_PROVIDER:-scripted}
       EVAL_SPLIT: ${EVAL_SPLIT:-public}
+      FORGEFAKE_TOKEN: ${FORGEFAKE_TOKEN:-forgefake-eval-token}
       LISTEN_ADDR: ":8081"
     volumes:
       - ./evals:/src/evals

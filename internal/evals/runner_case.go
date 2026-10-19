@@ -15,10 +15,14 @@ type caseResources struct {
 	caseID     string
 	scheduleID string
 	workflowID string
+	projectID  string
 	agentIDs   []string
 }
 
 func (cr *caseResources) release() {
+	if cr.projectID != "" {
+		cr.r.deleteProject(cr.caseID, cr.projectID)
+	}
 	if cr.scheduleID != "" {
 		cr.r.deleteSchedule(cr.caseID, cr.scheduleID)
 	}
@@ -48,6 +52,13 @@ func (r *Runner) execCase(ctx context.Context, c Case, res *CaseResult) (*store.
 	defer cr.release()
 
 	req := RunRequest{Limits: c.RunLimits()}
+	var pf *projectFixture
+	if c.Project != nil {
+		if pf, err = r.setupProject(ctx, c, suffix, cr); err != nil {
+			return nil, err
+		}
+		req.ProjectID = pf.id
+	}
 	if c.RunsModel() {
 		req.Model = ScriptedModel
 	}
@@ -93,7 +104,17 @@ func (r *Runner) execCase(ctx context.Context, c Case, res *CaseResult) (*store.
 		}
 	}()
 
+	var bg *stepsRun
+	if pf != nil && len(c.Steps) > 0 {
+		bg = r.startSteps(ctx, c, pf, run.ID)
+	}
 	out, err := r.await(ctx, c, run)
+	var stepErr error
+	if bg != nil {
+		// Steps still waiting once the run is over are given their own timeouts, unless the
+		// run did not finish: then nothing they wait for can come.
+		stepErr = bg.finish(err != nil || out.timedOut || out.stalled != "")
+	}
 	if err != nil {
 		res.Status = out.last.Status
 		return nil, err
@@ -111,6 +132,8 @@ func (r *Runner) execCase(ctx context.Context, c Case, res *CaseResult) (*store.
 		res.Error = timeoutReason
 	case out.stalled != "":
 		res.Error = out.stalled
+	case stepErr != nil:
+		res.Error = stepErr.Error()
 	}
 	if traceErr != nil {
 		res.Status = out.last.Status

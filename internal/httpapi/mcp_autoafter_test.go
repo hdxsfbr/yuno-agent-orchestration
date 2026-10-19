@@ -17,13 +17,15 @@ type autoFixture struct {
 	*gateFixture
 	execs   int
 	project *store.Project
+	// approvalNode is the node decide adds visits of.
+	approvalNode string
 }
 
 func newAutoFixture(t *testing.T, autoAfter string) *autoFixture {
 	t.Helper()
-	g := newGateFixture(t, []string{"open_merge_request", "deploy_release"}, nil, 200*time.Millisecond)
+	g := newGateFixture(t, []string{"open_merge_request", "deploy_release", "advance_wave"}, nil, 200*time.Millisecond)
 	ctx := context.Background()
-	f := &autoFixture{gateFixture: g}
+	f := &autoFixture{gateFixture: g, approvalNode: "manual_test"}
 	def, _ := json.Marshal(map[string]any{
 		"nodes": []map[string]any{{"id": "start", "kind": "start"},
 			{"id": "manual_test", "kind": "approval"},
@@ -66,9 +68,9 @@ func (f *autoFixture) decide(t *testing.T, visit int, status string) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.Now().UTC()
-	rn := &store.RunNode{RunID: f.run.ID, NodeID: "manual_test", Visit: visit, Status: store.NodeSucceeded, StartedAt: &now}
+	rn := &store.RunNode{RunID: f.run.ID, NodeID: f.approvalNode, Visit: visit, Status: store.NodeSucceeded, StartedAt: &now}
 	mustDo(t, store.CreateRunNode(ctx, testPool, rn))
-	a := &store.Approval{RunID: f.run.ID, RunNodeID: rn.ID, Kind: store.ApprovalKindNode, NodeID: "manual_test", Message: "test it",
+	a := &store.Approval{RunID: f.run.ID, RunNodeID: rn.ID, Kind: store.ApprovalKindNode, NodeID: f.approvalNode, Message: "test it",
 		Status: status, RequestedAt: now.Add(time.Duration(visit) * time.Second), ExpiresAt: now.Add(time.Hour)}
 	if status != store.ApprovalPending {
 		by := "operator"
@@ -190,4 +192,95 @@ func agentNodeJSON(agentID, autoAfter string) map[string]any {
 		n["auto_after"] = autoAfter
 	}
 	return n
+}
+
+// newShipFixture is the gate fixture of a ship run: trigger plan, the ref the watcher
+// writes, the smoke_test approval and an integrator node covered by it. advance_wave is
+// stubbed and counted in execs.
+func newShipFixture(t *testing.T, trigger, ref string) *autoFixture {
+	t.Helper()
+	f := newAutoFixture(t, "smoke_test")
+	f.approvalNode = "smoke_test"
+	def, _ := json.Marshal(map[string]any{
+		"nodes": []map[string]any{{"id": "start", "kind": "start"}, {"id": "smoke_test", "kind": "approval"},
+			agentNodeJSON(f.agent.ID, "smoke_test"), {"id": "end", "kind": "end"}},
+		"edges": []map[string]any{{"from": "start", "to": "smoke_test"}, {"from": "smoke_test", "to": "integrator_ready"},
+			{"from": "integrator_ready", "to": "end"}},
+	})
+	var refArg *string
+	if ref != "" {
+		refArg = &ref
+	}
+	_, err := testPool.Exec(context.Background(), `UPDATE runs SET workflow_snapshot = $2, trigger = $3, trigger_ref = $4 WHERE id = $1`,
+		f.run.ID, def, trigger, refArg)
+	mustDo(t, err)
+	aw, ok := f.s.tools.Get(tools.AdvanceWaveName)
+	if !ok {
+		t.Fatal("advance_wave is not registered")
+	}
+	orig := aw.Exec
+	aw.Exec = func(ctx context.Context, call tools.Call) (tools.Result, error) {
+		f.execs++
+		return tools.JSONResult(map[string]any{"plan_id": "p1", "wave": 1}), nil
+	}
+	t.Cleanup(func() { aw.Exec = orig })
+	return f
+}
+
+// DESIGN 5.29 rule 14, review L6: advance_wave needs its own approval until the ship
+// run's smoke test is approved, goes through after it, and never passes in a run that is
+// not a ship run, whatever approval covers its node.
+func TestGateAdvanceWave(t *testing.T) {
+	args := func(f *autoFixture) map[string]any { return map[string]any{"run_token": f.token} }
+	shipRef := func() string { return store.ShipRef("plan-"+uniqueSuffix(), 2) }
+	gated := func(t *testing.T, f *autoFixture) {
+		t.Helper()
+		text, _ := f.call(t, "advance_wave", args(f))
+		if !strings.Contains(text, "pending_approval") || len(f.fe.approvalReqs) != 1 || f.execs != 0 {
+			t.Fatalf("advance_wave: %s (approvals requested %d, execs %d)", text, len(f.fe.approvalReqs), f.execs)
+		}
+	}
+	t.Run("before the smoke test is approved", func(t *testing.T) {
+		f := newShipFixture(t, store.TriggerPlan, shipRef())
+		gated(t, f)
+	})
+	t.Run("smoke test pending", func(t *testing.T) {
+		f := newShipFixture(t, store.TriggerPlan, shipRef())
+		f.decide(t, 1, store.ApprovalPending)
+		gated(t, f)
+	})
+	t.Run("smoke test approved", func(t *testing.T) {
+		f := newShipFixture(t, store.TriggerPlan, shipRef())
+		f.decide(t, 1, store.ApprovalApproved)
+		text, isErr := f.call(t, "advance_wave", args(f))
+		if isErr || !strings.Contains(text, `"policy":"auto_after:smoke_test"`) || f.execs != 1 || len(f.fe.approvalReqs) != 0 {
+			t.Fatalf("advance_wave: err %v %s (execs %d, approvals requested %d)", isErr, text, f.execs, len(f.fe.approvalReqs))
+		}
+	})
+	t.Run("ticket run after a manual_test approval", func(t *testing.T) {
+		f := newAutoFixture(t, "manual_test")
+		aw, _ := f.s.tools.Get(tools.AdvanceWaveName)
+		orig := aw.Exec
+		aw.Exec = func(ctx context.Context, call tools.Call) (tools.Result, error) {
+			f.execs++
+			return tools.JSONResult(map[string]any{}), nil
+		}
+		t.Cleanup(func() { aw.Exec = orig })
+		f.decide(t, 1, store.ApprovalApproved)
+		gated(t, f)
+	})
+	t.Run("approved smoke test in a run that is not a ship run", func(t *testing.T) {
+		for name, tc := range map[string]struct{ trigger, ref string }{
+			"manual":        {store.TriggerManual, ""},
+			"schedule":      {store.TriggerSchedule, "sched-" + uniqueSuffix()},
+			"plan, bad ref": {store.TriggerPlan, "plan:no-wave-" + uniqueSuffix()},
+			"plan, no ref":  {store.TriggerPlan, ""},
+		} {
+			t.Run(name, func(t *testing.T) {
+				f := newShipFixture(t, tc.trigger, tc.ref)
+				f.decide(t, 1, store.ApprovalApproved)
+				gated(t, f)
+			})
+		}
+	})
 }

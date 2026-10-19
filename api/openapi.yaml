@@ -236,7 +236,7 @@ paths:
       parameters:
         - { name: status, in: query, schema: { type: string } }
         - { name: project_id, in: query, description: "only the runs that work on this project (runs.project_id, kept by a deleted project's runs); an unknown id lists none", schema: { type: string } }
-        - { name: trigger, in: query, description: "DESIGN 5.23 rule 8: only the runs started this way; another value is 422", schema: { type: string, enum: [manual, schedule, channel, eval, issue] } }
+        - { name: trigger, in: query, description: "DESIGN 5.23 rule 8: only the runs started this way; another value is 422", schema: { type: string, enum: [manual, schedule, channel, eval, issue, plan] } }
         - { name: merge_request_id, in: query, description: "DESIGN 5.22 rule 11: only the runs that named this merge request record (runs.merge_request_id); an unknown id lists none", schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
       responses:
@@ -1385,11 +1385,33 @@ components:
     PlanDetail:
       type: object
       description: "A plan with its tickets and events (DESIGN 5.29 rule 9)."
-      required: [plan, tickets, events]
+      required: [plan, tickets, events, main, ship_runs]
       properties:
         plan: { $ref: "#/components/schemas/Plan" }
         tickets: { type: array, items: { $ref: "#/components/schemas/PlanTicket" } }
         events: { type: array, items: { $ref: "#/components/schemas/PlanEvent" }, description: "newest first, at most 100" }
+        main:
+          description: "DESIGN 5.29 rule 11: the default branch's status as the wave watcher last read it; null before the first read."
+          oneOf:
+            - $ref: "#/components/schemas/PlanMain"
+            - type: "null"
+        ship_runs: { type: array, items: { $ref: "#/components/schemas/PlanShipRun" }, description: "the ship run of each wave that has one, by wave" }
+    PlanMain:
+      type: object
+      required: [state, sha, url]
+      properties:
+        state: { type: string, enum: [passed, failed, running, pending, none], description: "the newest pipeline (GitLab) or the combined check state (GitHub) of the default branch" }
+        sha: { type: string, description: "the commit behind the state; empty for none" }
+        at: { type: string, format: date-time, description: "when that pipeline or check was created; absent for none" }
+        url: { type: string, description: "the pipeline's or check's page; empty for none" }
+    PlanShipRun:
+      type: object
+      description: "The ship run of one wave (DESIGN 5.29 rule 12); its trigger_ref is plan:<plan id>:wave:<n>."
+      required: [wave, run_id, status]
+      properties:
+        wave: { type: integer, minimum: 1 }
+        run_id: { type: string }
+        status: { type: string, description: "the run's status" }
     WavesPauseInput:
       type: object
       description: "The body of a pause."
@@ -1539,6 +1561,13 @@ components:
       properties:
         script_id: { type: string, pattern: "^[a-zA-Z0-9._-]{1,80}$" }
         steps: { type: array, items: { $ref: "#/components/schemas/ScriptStep" } }
+        bind:
+          type: object
+          description: "Makes the script the one the next run of `trigger` that the platform starts on the project uses (the issue intake's run, the wave watcher's ship run), which have no request to name a script in. Scripts bound to one project and trigger are used in the order they were registered. For evals (DESIGN 5.29 rule 17)."
+          required: [project_id, trigger]
+          properties:
+            project_id: { type: string }
+            trigger: { type: string, enum: [issue, plan] }
     Run:
       type: object
       required: [id, workflow_id, workflow_version, trigger, status, input, state, limits, step_count, tool_call_count, cost_usd_micros, created_at]
@@ -1546,8 +1575,8 @@ components:
         id: { type: string }
         workflow_id: { type: string }
         workflow_version: { type: integer }
-        trigger: { type: string, enum: [manual, schedule, channel, eval, issue], description: "issue: a run the issue intake created (DESIGN 5.23)" }
-        trigger_ref: { type: string, description: "schedule: the occurrence fired, <schedule id>@<occurrence time, RFC 3339 UTC>; channel: conversation:<conversation id> for a run an agent delegated while chatting (absent when it had no conversation); eval: the case id; issue: <project id>#<issue number>" }
+        trigger: { type: string, enum: [manual, schedule, channel, eval, issue, plan], description: "issue: a run the issue intake created (DESIGN 5.23); plan: the ship run of a plan's wave (DESIGN 5.29 rule 12)" }
+        trigger_ref: { type: string, description: "schedule: the occurrence fired, <schedule id>@<occurrence time, RFC 3339 UTC>; channel: conversation:<conversation id> for a run an agent delegated while chatting (absent when it had no conversation); eval: the case id; issue: <project id>#<issue number>; plan: plan:<plan id>:wave:<n>" }
         status: { type: string, enum: [queued, running, waiting_approval, succeeded, failed, cancelled, timed_out] }
         input: { type: object }
         state: { type: object }

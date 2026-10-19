@@ -14,6 +14,7 @@ import {
 } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, humanize, shortId } from "@/lib/format";
 import { requestNoun, requestRef } from "@/lib/mergeRequest";
+import { shipRunRef } from "@/lib/plan";
 import { useNow } from "@/lib/useNow";
 import { useRefreshOnEvents } from "@/lib/useRefreshOnEvents";
 import { Badge, RunStatusBadge } from "@/components/Badge";
@@ -21,6 +22,7 @@ import Button from "@/components/Button";
 import { cardClass, PageHeader } from "@/components/Card";
 import ConnectionIndicator from "@/components/ConnectionIndicator";
 import { control } from "@/components/fields";
+import PlanWaveLink from "@/components/project/PlanWaveLink";
 import ProjectLink, { hasProject } from "@/components/project/ProjectLink";
 import { EmptyState, Loading, QueryError } from "@/components/QueryState";
 
@@ -49,6 +51,7 @@ function TriggerCell({ run }: { run: Run }) {
       <>issue #{issue.number}</>
     );
   }
+  if (shipRunRef(run)) return <PlanWaveLink run={run} />;
   if (!isDelegatedRun(run)) {
     return (
       <>

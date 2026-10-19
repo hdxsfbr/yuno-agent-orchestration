@@ -267,12 +267,12 @@ describe("RunsPage trigger filter", () => {
     api.on("GET", /^\/api\/runs\?/, () => listed);
   });
 
-  it("sits next to the status filter with All and the five triggers, All chosen", async () => {
+  it("sits next to the status filter with All and the six triggers, All chosen", async () => {
     renderPage();
     await screen.findByTitle(DONE);
     const select = triggerSelect();
-    expect(Array.from(select.options).map((o) => o.textContent)).toEqual(["All", "Manual", "Schedule", "Channel", "Eval", "Issue"]);
-    expect(Array.from(select.options).map((o) => o.value)).toEqual(["", "manual", "schedule", "channel", "eval", "issue"]);
+    expect(Array.from(select.options).map((o) => o.textContent)).toEqual(["All", "Manual", "Schedule", "Channel", "Eval", "Issue", "Plan"]);
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(["", "manual", "schedule", "channel", "eval", "issue", "plan"]);
     expect(select.value).toBe("");
     expect(screen.getByLabelText("Status").parentElement?.parentElement).toBe(select.parentElement?.parentElement);
     expect(runUrls()).toEqual(["/api/runs?limit=100"]);

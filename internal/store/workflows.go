@@ -216,3 +216,18 @@ func DeleteSkill(ctx context.Context, q Querier, id string) error {
 	}
 	return nil
 }
+
+// GetWorkflowByFromTemplate returns the oldest live workflow instantiated from the template
+// key (the seed's copy of a shipped template), ErrNotFound when there is none.
+func GetWorkflowByFromTemplate(ctx context.Context, q Querier, key string) (*Workflow, error) {
+	rows, err := q.Query(ctx, `SELECT `+workflowColumns+` FROM workflows WHERE from_template=$1 AND deleted_at IS NULL
+		ORDER BY created_at, id LIMIT 1`, key)
+	if err != nil {
+		return nil, err
+	}
+	w, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Workflow])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return w, err
+}

@@ -67,6 +67,22 @@ const cancelButton = () => screen.getByRole("button", { name: /^Cancel (run|requ
 const retryButton = () => screen.queryByRole("button", { name: "Retry" }) as HTMLButtonElement | null;
 const header = () => within(screen.getByRole("region", { name: "Run summary" }));
 
+describe("a ship run's trigger", () => {
+  it("names the feature and wave and links to the project's plans", async () => {
+    api.on("GET", "/api/plans/pl1", () => ({ plan: { id: "pl1", project_id: "p1", feature: "Health endpoint" }, tickets: [], events: [] }));
+    renderHeader(run({ trigger: "plan", trigger_ref: "plan:pl1:wave:2", project_id: "p1" }));
+    const link = await screen.findByRole("link", { name: "Feature Health endpoint, wave 2" });
+    expect(link.getAttribute("href")).toBe("/projects/p1#project-plans");
+  });
+
+  it("shows the wave while the plan is not read", async () => {
+    api.on("GET", "/api/plans/pl1", () => apiError(404, "not_found", "no such plan"));
+    renderHeader(run({ trigger: "plan", trigger_ref: "plan:pl1:wave:2", project_id: "p1" }));
+    const link = await screen.findByRole("link", { name: "Plan wave 2" });
+    expect(link.getAttribute("href")).toBe("/projects/p1#project-plans");
+  });
+});
+
 describe("the Retry button", () => {
   it.each<RunStatus>(["failed", "timed_out", "cancelled"])("is offered for a %s run that knows its step", (status) => {
     renderHeader(run({ status }));

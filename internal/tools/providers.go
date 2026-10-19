@@ -143,7 +143,9 @@ type RequestStatus struct {
 	HeadSHA           string
 	UnresolvedThreads *int
 	ClosedAt          *time.Time
-	Err               string
+	// MergeSHA is the commit a merged request made, "" when the provider gave none.
+	MergeSHA string
+	Err      string
 }
 
 // ErrRequestNotFound is a provider's 404 for the request itself (DESIGN 5.20 rule 3): the
@@ -193,6 +195,29 @@ type RequestProvider interface {
 	// values, by the mapping tables of Status. headSHA is the request's head commit
 	// (Details gives it); GitLab reads the request's own pipelines and ignores it.
 	CIStatus(ctx context.Context, number int64, headSHA string) (string, error)
+	// DefaultBranchStatus is the pipeline state of the project's default branch now (DESIGN
+	// 5.29 rule 12): GitLab's newest pipeline of that ref, GitHub's check runs and combined
+	// status of its head commit.
+	DefaultBranchStatus(ctx context.Context) (BranchStatus, error)
+}
+
+// The states of a BranchStatus (DESIGN 5.29 rule 12).
+const (
+	BranchPassed  = "passed"
+	BranchFailed  = "failed"
+	BranchRunning = "running"
+	BranchPending = "pending"
+	BranchNone    = "none"
+)
+
+// BranchStatus is the pipeline state of a branch head: State is one of passed, failed,
+// running, pending or none (no pipeline or check at all); SHA, At and URL describe the
+// pipeline or check behind it and are empty for none.
+type BranchStatus struct {
+	State string
+	SHA   string
+	At    time.Time
+	URL   string
 }
 
 // RequestUpdate is a change to an open request (DESIGN 5.29 rule 4): nil members stay.
@@ -443,6 +468,9 @@ func (g *gitlabProvider) Status(ctx context.Context, number int64) (RequestStatu
 		SHA      string  `json:"sha"`
 		MergedAt *string `json:"merged_at"`
 		ClosedAt *string `json:"closed_at"`
+		// MergeCommit and SquashCommit name the merge's commit on the target branch.
+		MergeCommit  string `json:"merge_commit_sha"`
+		SquashCommit string `json:"squash_commit_sha"`
 	}
 	if status, err := g.api.do(ctx, http.MethodGet, base, nil, &mr); err != nil {
 		return RequestStatus{}, notFoundOr(status, err)
@@ -452,6 +480,12 @@ func (g *gitlabProvider) Status(ctx context.Context, number int64) (RequestStatu
 		return RequestStatus{}, fmt.Errorf("gitlab: unknown merge request state %q", mr.State)
 	}
 	st := RequestStatus{State: state, HeadSHA: mr.SHA, ClosedAt: firstTime(parseProviderTime(mr.MergedAt), parseProviderTime(mr.ClosedAt))}
+	if state == store.MergeRequestMerged {
+		st.MergeSHA = mr.MergeCommit
+		if st.MergeSHA == "" {
+			st.MergeSHA = mr.SquashCommit
+		}
+	}
 
 	var discussions []struct {
 		Notes []struct {
@@ -771,6 +805,7 @@ func (g *githubProvider) Status(ctx context.Context, number int64) (RequestStatu
 		Merged   bool    `json:"merged"`
 		MergedAt *string `json:"merged_at"`
 		ClosedAt *string `json:"closed_at"`
+		MergeSHA string  `json:"merge_commit_sha"`
 		Head     struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
@@ -782,6 +817,7 @@ func (g *githubProvider) Status(ctx context.Context, number int64) (RequestStatu
 	switch {
 	case pr.Merged:
 		st.State = store.MergeRequestMerged
+		st.MergeSHA = pr.MergeSHA
 	case pr.State == "closed":
 		st.State = store.MergeRequestClosed
 	case pr.State == "open":
@@ -977,4 +1013,147 @@ func (g *githubProvider) Threads(ctx context.Context, number int64) ([]Thread, e
 // Status (an empty head is none).
 func (g *githubProvider) CIStatus(ctx context.Context, _ int64, headSHA string) (string, error) {
 	return g.ciStatus(ctx, headSHA)
+}
+
+// gitlabBranchStates maps a GitLab pipeline status to a BranchStatus state; a status not
+// listed is pending (created, waiting_for_resource, scheduled, manual, preparing); skipped
+// ran nothing, as in gitlabPipelines.
+var gitlabBranchStates = map[string]string{
+	"success":   BranchPassed,
+	"failed":    BranchFailed,
+	"canceled":  BranchFailed,
+	"canceling": BranchFailed,
+	"skipped":   BranchNone,
+	"running":   BranchRunning,
+}
+
+// DefaultBranchStatus is GET projects/<id> for the default branch, then GET
+// pipelines?ref=<branch>&order_by=id&sort=desc&per_page=1 (DESIGN 5.29 rule 12); no
+// pipeline is none.
+func (g *gitlabProvider) DefaultBranchStatus(ctx context.Context) (BranchStatus, error) {
+	var proj struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if _, err := g.api.do(ctx, http.MethodGet, g.base, nil, &proj); err != nil {
+		return BranchStatus{}, err
+	}
+	if proj.DefaultBranch == "" {
+		return BranchStatus{State: BranchNone}, nil
+	}
+	var pipelines []struct {
+		Status    string  `json:"status"`
+		SHA       string  `json:"sha"`
+		WebURL    string  `json:"web_url"`
+		CreatedAt *string `json:"created_at"`
+	}
+	q := url.Values{"ref": {proj.DefaultBranch}, "order_by": {"id"}, "sort": {"desc"}, "per_page": {"1"}}
+	if _, err := g.api.do(ctx, http.MethodGet, g.base+"/pipelines?"+q.Encode(), nil, &pipelines); err != nil {
+		return BranchStatus{}, err
+	}
+	if len(pipelines) == 0 {
+		return BranchStatus{State: BranchNone}, nil
+	}
+	pl := pipelines[0]
+	state, ok := gitlabBranchStates[pl.Status]
+	if !ok {
+		state = BranchPending
+	}
+	if state == BranchNone {
+		return BranchStatus{State: BranchNone}, nil
+	}
+	st := BranchStatus{State: state, SHA: pl.SHA, URL: pl.WebURL}
+	if t := parseProviderTime(pl.CreatedAt); t != nil {
+		st.At = *t
+	}
+	return st, nil
+}
+
+// DefaultBranchStatus reads the repository's default branch, its head commit, and the
+// combined status and check runs of that commit (DESIGN 5.29 rule 12): any failure is
+// failed, else any check or status still going is running, else passed; nothing at all is
+// none. At is the newest check or status time.
+func (g *githubProvider) DefaultBranchStatus(ctx context.Context) (BranchStatus, error) {
+	var repo struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if _, err := g.api.do(ctx, http.MethodGet, g.base, nil, &repo); err != nil {
+		return BranchStatus{}, err
+	}
+	if repo.DefaultBranch == "" {
+		return BranchStatus{State: BranchNone}, nil
+	}
+	var head struct {
+		SHA string `json:"sha"`
+	}
+	if _, err := g.api.do(ctx, http.MethodGet, g.base+"/commits/"+url.PathEscape(repo.DefaultBranch), nil, &head); err != nil {
+		return BranchStatus{}, err
+	}
+	if head.SHA == "" {
+		return BranchStatus{State: BranchNone}, nil
+	}
+	var checks struct {
+		CheckRuns []struct {
+			Status      string  `json:"status"`
+			Conclusion  string  `json:"conclusion"`
+			HTMLURL     string  `json:"html_url"`
+			StartedAt   *string `json:"started_at"`
+			CompletedAt *string `json:"completed_at"`
+		} `json:"check_runs"`
+	}
+	if _, err := g.api.do(ctx, http.MethodGet, g.base+"/commits/"+url.PathEscape(head.SHA)+"/check-runs?per_page=100", nil, &checks); err != nil {
+		return BranchStatus{}, err
+	}
+	var combined struct {
+		State      string `json:"state"`
+		TotalCount int    `json:"total_count"`
+		Statuses   []struct {
+			State     string  `json:"state"`
+			TargetURL string  `json:"target_url"`
+			UpdatedAt *string `json:"updated_at"`
+			CreatedAt *string `json:"created_at"`
+		} `json:"statuses"`
+	}
+	if _, err := g.api.do(ctx, http.MethodGet, g.base+"/commits/"+url.PathEscape(head.SHA)+"/status", nil, &combined); err != nil {
+		return BranchStatus{}, err
+	}
+	st := BranchStatus{SHA: head.SHA}
+	var failed, running bool
+	newest := func(t *time.Time, u string) {
+		if t != nil && t.After(st.At) {
+			st.At, st.URL = *t, u
+		}
+	}
+	for _, c := range checks.CheckRuns {
+		switch c.Conclusion {
+		case "failure", "timed_out", "cancelled", "action_required":
+			failed = true
+		}
+		if c.Status != "" && c.Status != "completed" {
+			running = true
+		}
+		newest(firstTime(parseProviderTime(c.CompletedAt), parseProviderTime(c.StartedAt)), c.HTMLURL)
+	}
+	for _, s := range combined.Statuses {
+		switch s.State {
+		case "failure", "error":
+			failed = true
+		case "pending":
+			running = true
+		}
+		newest(firstTime(parseProviderTime(s.UpdatedAt), parseProviderTime(s.CreatedAt)), s.TargetURL)
+	}
+	if combined.State == "failure" || combined.State == "error" {
+		failed = true
+	}
+	switch {
+	case len(checks.CheckRuns) == 0 && max(combined.TotalCount, len(combined.Statuses)) == 0:
+		return BranchStatus{State: BranchNone}, nil
+	case failed:
+		st.State = BranchFailed
+	case running:
+		st.State = BranchRunning
+	default:
+		st.State = BranchPassed
+	}
+	return st, nil
 }

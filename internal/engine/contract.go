@@ -220,7 +220,20 @@ type Deps struct {
 	Artifacts ArtifactCollector
 	// Plans keeps plan tickets true to their runs (DESIGN 5.29 rules 6 and 7); nil skips it.
 	Plans PlanTracker
+	// Scripts, when set, gives a run the platform starts itself (trigger issue or plan) the
+	// script an eval bound to its project, so those runs can be scripted too; nil leaves
+	// every such run as it is.
+	Scripts ScriptBinder
 }
+
+// ScriptBinder is model.ScriptBinder: TakeBound removes and returns the script id queued
+// for the next run of the trigger on the project.
+type ScriptBinder interface {
+	TakeBound(projectID, trigger string) (scriptID string, ok bool)
+}
+
+// ScriptedRunModel is the model override of a run that takes a bound script.
+const ScriptedRunModel = "scripted/scripted-1"
 
 // PlanTracker is the part of the plans service the engine calls: OnRunTerminal for every
 // run that reaches a terminal status (an escalated run included, 5.29 rule 6), and OnRunRetried.

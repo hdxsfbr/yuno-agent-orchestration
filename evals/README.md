@@ -25,6 +25,8 @@ make eval-final                # make eval, then copy the report to evals/report
 | `EVAL_REPORTS_DIR` | `evals/reports` | where `<timestamp>.md` and `.json` are written |
 | `EVAL_PROVIDER` | `scripted` | `scripted`: rubrics graded by their local checks. `anthropic`: rubrics graded by `claude-opus-5-5`. Runs are replayed from the scripts either way |
 | `API_TOKEN` | empty | sent as a bearer token when set |
+| `EVAL_FORGE_URL` | empty | base URL of the fake forge (`http://forgefake:8090`); only a case with a `project` block needs it. `make eval` sets it and starts the forge |
+| `FORGEFAKE_TOKEN` | `forgefake-eval-token` | the forge's one token, a fixed eval value |
 
 ## Case format
 
@@ -225,6 +227,86 @@ cannot carry the scripted model, so the workflow of such a case must have no age
 or its agents would call the real model. `schedule` cannot be combined with `retrigger`.
 Case 018.
 
+### Project and steps
+
+A case can run on a project whose repository is on the **fake forge** (DESIGN 5.29 rule 17),
+an in-memory GitLab REST subset plus Git smart HTTP that the `eval` compose profile starts
+as `http://forgefake:8090`. It is for cases about issues, merge requests and pipelines
+that a scripted model cannot stand in for. The case's own run is the usual one (a quick run
+or a workflow); `project` makes it a run on that project (`project_id`), and `steps` act on
+the forge and wait for the platform beside it.
+
+```yaml
+project:
+  default_branch: main            # optional, main by default
+  max_cost_usd_per_day: 5         # the project's cap; intake cannot be on without one
+  intake:                         # optional; absent or enabled: false leaves intake off
+    enabled: true
+    label: yuno                   # optional, yuno by default
+    workflow: feature_pipeline    # an existing workflow, by name; required when enabled
+  issues:                         # opened on the forge before the project is created
+    - {title: Add a login page, body: ..., labels: [yuno]}
+  timeout_seconds: 900            # replaces the 180 s wait for the case's run (up to 3600)
+steps:                            # in order, beside the run; the first failure fails the case
+  - poll_intake: true             # POST /api/projects/{id}/intake/poll now
+  - forge: {create_issue: {title: ..., body: ..., labels: [yuno]}}
+  - forge: {expect_issues: [{title_contains: login, labels: [yuno:running], state: opened}]}
+  - wait: {plan_status: building}                 # a plan of the project has this status
+  - wait: {plan_event: wave_done, wave: 1}        # a plan has an event of this kind (of this wave)
+  - forge: {merge_open: {count: 2}}               # merge the open, non-draft merge requests
+  - forge: {pipeline: passed}                     # passed | failed | running | pending
+  - approve: {decision: approve, node: smoke_test, reason: ok, count: 1}
+  - wait: {ticket_status: merged, wave: 2}        # every ticket of wave 2 of some plan is merged
+  - pause_waves: Holding wave 2.                  # POST /api/projects/{id}/waves/pause
+  - hold: {no_ship_run: 2, seconds: 30}           # fails if the plan starts a ship run for wave 2
+  - resume_waves: true
+```
+
+`project.platform_runs` scripts the runs the platform starts by itself, which no request of
+the runner can name a script in: the runs the issue intake creates (`trigger: issue`) and the
+wave watcher's ship runs (`trigger: plan`). Each entry has a `script` like the case's own; the
+runner registers it with `POST /api/evals/scripts` and a `bind` of the project and trigger,
+and the api gives the next run of that trigger on the project the oldest bound script, with
+the scripted model. Entries are used in the order listed per trigger, so a two-wave plan lists
+two `issue` scripts and two `plan` scripts. The agents of those runs are the workflows' own
+(the seeded Builder, Integrator and the rest), so each script plays their turns, limited to
+their allowlists.
+
+The runner creates the repository `eval/<id>-<random>` (with a README commit on the default
+branch), opens the `project.issues`, and registers the project with `POST /api/projects`:
+provider `gitlab`, the repository URL on the forge, the forge's token, the intake settings
+(`workflow` resolved by name through `GET /api/workflows`). The api accepts an `http://`
+repository URL only for the host `EVAL_FORGE_URL` names, and only while that variable is set
+for the api (`make eval` recreates the api with it; `make run` without). At the end it
+cancels the project's runs that have not ended and its open plans, then deletes the project;
+the forge keeps nothing between runs of the forge container.
+
+Each step sets exactly one thing:
+
+- `forge.create_issue` opens an issue; `forge.pipeline` records a pipeline of that state on
+  the default branch's head, stamped now.
+- `forge.merge_open` merges the open, non-draft merge requests (a fast-forward, else a merge
+  commit) and repeats every poll until `count` (1 by default) have been merged, because the
+  platform opens its merge requests while the step waits. A conflict fails the step.
+- `forge.expect_issues` waits until every expectation is met by some issue: the title
+  contains `title_contains` (any case), the issue carries every label of `labels`, and its
+  state is `state` (`opened` or `closed`). The failure message lists the forge's issues.
+- `wait.plan_status` and `wait.plan_event` poll `GET /api/projects/{id}/plans` (and
+  `GET /api/plans/{id}` for the events): some plan has that status, or some plan has an event
+  of that kind, of wave `wave` when it is set.
+- `approve` decides, oldest first, pending approvals (not questions) of the project's runs,
+  those of runs the platform started included, only at `node` when that is set. A case
+  whose steps include `approve` does not stall on a pending approval of its own run that
+  `actions.approvals` has no entry left for.
+- `poll_intake` asks the api to poll the project's issues now instead of at the interval.
+
+`forge` and `wait` steps and `approve` wait at most `timeout_seconds` (60 by default, up to
+1800) and fail with what was missing. A failed step cancels the case's run and the result
+carries the step's number and message. The forge's merge request sync, intake and wave
+watcher run at the api's own intervals (`MERGE_REQUEST_SYNC_INTERVAL`, `INTAKE_POLL_INTERVAL`,
+`WAVE_WATCH_INTERVAL`); `make eval` recreates the api with all three at 5 s, so a case that
+depends on one waits seconds, not minutes.
+
 ### Expect
 
 ```yaml
@@ -328,6 +410,9 @@ not met.
    policy. A workflow case then `POST /api/workflows` with the definition.
 2. `POST /api/evals/scripts` registers the script as `<id>-<random>` (the same random
    suffix); a workflow without agent nodes has no script.
+2a. A case with a `project` block first creates its repository on the forge and its project
+   (see Project and steps), and the run is created with that `project_id`; its `steps` then
+   run beside the run.
 3. `POST /api/runs` triggers the run with model `scripted/scripted-1`, that script id and
    the case's limits: `{agent_id, task}` for a quick run, `{workflow_id, input}` for a
    workflow case. With `actions.schedule` the run is created by a one-shot schedule instead
@@ -340,7 +425,8 @@ not met.
 5. Once the run has ended: the extra trigger of `actions.retrigger`, the schedule read
    back, and `GET /api/tools` when the case lists `tools_present` or `tools_absent`.
 6. `GET /api/runs/{id}/trace`, then the evaluators and the rubric.
-7. `DELETE /api/schedules/{id}`, `DELETE /api/workflows/{id}` and `DELETE /api/agents/{id}`,
+7. `DELETE /api/projects/{id}` (after cancelling its runs and plans), `DELETE
+   /api/schedules/{id}`, `DELETE /api/workflows/{id}` and `DELETE /api/agents/{id}`,
    whatever happened.
 
 Cases run one at a time. An api error, a panic or a timeout in one case marks that case
@@ -396,7 +482,7 @@ api never becomes ready, or the run is interrupted before every case ran.
 
 ## Cases
 
-Seventeen public and seven private. A case under the gate of the default `make eval`
+Eighteen public and seven private. A case under the gate of the default `make eval`
 (public) needs nothing from the outside world; the private ones add a dependency each, noted
 below.
 
@@ -429,6 +515,7 @@ below.
 | `025-plan-pipeline-happy` | public | the plan pipeline without a project: the analyst asks one question with `ask_operator` and the case answers it, then scout, architect, the design gate, planner (tickets, waves), the plan gate, and an integrator that publishes the four documents with `deploy_release` | succeeded, four approvals `approved` (the question, both gates, the deploy), `deploy_release` `executed` after its approval, the question answered in the `ask_operator` output; rubric of 4. It runs an inline copy of `plan_pipeline` without a project (`deploy_release` instead of `open_merge_request`), with the `waves_partition` check on the waves node |
 | `026-review-loop-limit-escalation` | public | the ticket pipeline's builder and reviewer, where the reviewer asks for changes every time and `max_loop_visits` is 3; the platform, not an agent, ends the run | failed, reason `loop limit 3 exceeded for builder`, no `deploy_release` row, no approval; rubric of 3 |
 | `027-prd-gap-escalation` | public | the ticket pipeline's documentation audit finds a requirement the PRD leaves undefined and calls `escalate` with kind `prd_gap` instead of finishing; the script ends at that call | failed, reason `escalated (prd_gap): R4 says exports are for authorised users`, the builder's result kept in the state, no `deploy_release` row, no approval |
+| `028-wave-auto-advance-pause` | public | a plan of two waves, one ticket each, on the fake forge with every agent turn scripted (the plan run's own and the runs the platform starts, see Project and steps): `publish_tickets` creates the issues, the plan merge request merges and the wave watcher releases wave 1, intake takes the issue, the wave pipeline builds the ticket to a ready merge request, the forge merges it and main goes green, the watcher starts the ship run, the smoke test is approved and `advance_wave` closes wave 1 and releases wave 2. The waves are then paused: wave 2 is built and merged with main green and no ship run starts for 30 s; resumed, wave 2 ships, the feature is accepted and the plan is `done` | the plan run succeeded with two approvals; the steps are the proof of the rest. About 6 to 10 minutes with the loops at 5 s (`make eval` sets them); needs the seeded `Wave pipeline` and `Ship pipeline` workflows |
 
 The channel-triggered reply of DESIGN 5.13 rule 6 is not a case: it needs a real message on
 a real Telegram chat. What can be asserted without one, that a session message is mirrored

@@ -31,7 +31,7 @@ var runStatuses = []string{
 
 // runTriggers are the values of runs.trigger, the ones GET /api/runs?trigger= takes
 // (DESIGN 5.22 rule 11, 5.23 rule 8).
-var runTriggers = []string{store.TriggerManual, store.TriggerSchedule, store.TriggerChannel, store.TriggerEval, store.TriggerIssue}
+var runTriggers = []string{store.TriggerManual, store.TriggerSchedule, store.TriggerChannel, store.TriggerEval, store.TriggerIssue, store.TriggerPlan}
 
 // runCreate is RunCreate.
 type runCreate struct {

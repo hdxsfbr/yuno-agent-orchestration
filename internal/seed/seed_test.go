@@ -140,13 +140,13 @@ func TestSeedCreatesChief(t *testing.T) {
 	}
 }
 
-// stubTemplates writes the two shipped templates' keys and names with one-node
+// stubTemplates writes the three shipped templates' keys and names with one-node
 // definitions into a directory, so these tests do not depend on the template files'
 // content (T5.28.3 covers those).
 func stubTemplates(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	for key, tpl := range map[string][2]string{"plan_pipeline": {"Plan pipeline", "Analyst"}, "wave_pipeline": {"Wave pipeline", "Builder"}} {
+	for key, tpl := range map[string][2]string{"plan_pipeline": {"Plan pipeline", "Analyst"}, "wave_pipeline": {"Wave pipeline", "Builder"}, "ship_pipeline": {"Ship pipeline", "Integrator"}} {
 		def := `{"input_schema":{"type":"object","properties":{"task":{"type":"string"}},"required":["task"]},` +
 			`"state_schema":{"type":"object"},"nodes":[{"id":"start","kind":"start"},` +
 			`{"id":"work","kind":"agent","agent_name":"` + tpl[1] + `","task":"{{.input.task}}","output_schema":{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]},"input_from":["start"]},` +
@@ -188,7 +188,7 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 		"Builder":       {"claude-sonnet-5-5", []string{"read", "ls", "write", "edit", "exec", "ask_operator", "memory_save", "memory_recall", "escalate", "finish"}, true},
 		"Code Reviewer": {"claude-opus-5-5", []string{"read", "ls", "exec", "read_merge_request", "escalate", "finish"}, false},
 		"Doc Auditor":   {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "exec", "escalate", "finish"}, false},
-		"Integrator":    {"claude-sonnet-5-5", []string{"open_merge_request", "publish_tickets", "read", "ls", "memory_save", "escalate", "finish"}, true},
+		"Integrator":    {"claude-sonnet-5-5", []string{"open_merge_request", "publish_tickets", "advance_wave", "read", "ls", "memory_save", "escalate", "finish"}, true},
 	}
 	if len(created) != len(want)+1 {
 		t.Fatalf("created %v", created)
@@ -241,6 +241,9 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 		if slices.Contains(a.ToolAllowlist, "publish_tickets") != (name == "Integrator") {
 			t.Errorf("%s: publish_tickets granted wrongly", name)
 		}
+		if slices.Contains(a.ToolAllowlist, "advance_wave") != (name == "Integrator") {
+			t.Errorf("%s: advance_wave granted wrongly", name)
+		}
 		if !strings.Contains(a.SystemPrompt, "escalate") {
 			t.Errorf("%s prompt does not say when to escalate", name)
 		}
@@ -249,6 +252,9 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 	if !strings.Contains(integrator.SystemPrompt, "publish_tickets") || !strings.Contains(integrator.SystemPrompt, "draft true") ||
 		!strings.Contains(integrator.SystemPrompt, "draft false") {
 		t.Error("the Integrator prompt lost its publish or draft steps")
+	}
+	if !strings.Contains(integrator.SystemPrompt, "advance_wave exactly once") || !strings.Contains(integrator.SystemPrompt, "after the smoke test passed") {
+		t.Error("the Integrator prompt does not say when to advance the wave")
 	}
 	if !strings.Contains(builder.SystemPrompt, "failing test") || !strings.Contains(reviewer.SystemPrompt, "never rewrite") ||
 		!strings.Contains(auditor.SystemPrompt, "never patch around an unmet requirement") {
@@ -427,7 +433,7 @@ func TestSeedInstantiatesTemplatesOnce(t *testing.T) {
 	}
 	sh = loadStubTemplates(t, pool)
 	made, err = Templates(ctx, pool, sh, log)
-	if err != nil || !slices.Equal(made, []string{"Plan pipeline", "Wave pipeline"}) {
+	if err != nil || !slices.Equal(made, []string{"Plan pipeline", "Wave pipeline", "Ship pipeline"}) {
 		t.Fatalf("first: %v %v", made, err)
 	}
 	made, err = Templates(ctx, pool, sh, log)
@@ -446,7 +452,7 @@ func TestSeedInstantiatesTemplatesOnce(t *testing.T) {
 			t.Fatalf("instance %s = %s", wf.Name, wf.Definition)
 		}
 	}
-	if instances != 2 {
+	if instances != 3 {
 		t.Fatalf("instances = %d", instances)
 	}
 	for _, wf := range all {
@@ -540,17 +546,17 @@ func TestSeedTemplatesUpgradeAndFailures(t *testing.T) {
 	sh := loadStubTemplates(t, pool)
 
 	must(t, store.CreateWorkflow(ctx, pool, &store.Workflow{Name: "Plan pipeline", Definition: []byte(`{"nodes":[],"edges":[]}`)}))
-	both := &failingInstantiator{in: sh, fail: map[string]bool{"plan_pipeline": true, "wave_pipeline": true}}
+	both := &failingInstantiator{in: sh, fail: map[string]bool{"plan_pipeline": true, "wave_pipeline": true, "ship_pipeline": true}}
 	made, err := Templates(ctx, pool, both, log)
 	if len(made) != 0 || err == nil || !strings.Contains(err.Error(), "template wave_pipeline: agent missing") ||
-		strings.Contains(err.Error(), "plan_pipeline") || !slices.Equal(both.asked, []string{"wave_pipeline"}) {
+		strings.Contains(err.Error(), "plan_pipeline") || !slices.Equal(both.asked, []string{"wave_pipeline", "ship_pipeline"}) {
 		t.Fatalf("old copy and a failure: %v %v, asked %v", made, err, both.asked)
 	}
 
 	must(t, store.DeleteWorkflow(ctx, pool, mustWorkflowNamed(t, pool, "Plan pipeline")))
 	one := &failingInstantiator{in: sh, fail: map[string]bool{"plan_pipeline": true}}
 	made, err = Templates(ctx, pool, one, log)
-	if !slices.Equal(made, []string{"Wave pipeline"}) || err == nil || !strings.Contains(err.Error(), "plan_pipeline") || len(one.asked) != 2 {
+	if !slices.Equal(made, []string{"Wave pipeline", "Ship pipeline"}) || err == nil || !strings.Contains(err.Error(), "plan_pipeline") || len(one.asked) != 3 {
 		t.Fatalf("first fails, the other works: %v %v", made, err)
 	}
 }
@@ -603,7 +609,7 @@ func TestResetShipped(t *testing.T) {
 
 	agents, workflows, err := ResetShipped(ctx, pool, sh)
 	must(t, err)
-	if !slices.Equal(agents, []string{"Integrator"}) || !slices.Equal(workflows, []string{"Plan pipeline (ours)", "Wave pipeline"}) {
+	if !slices.Equal(agents, []string{"Integrator"}) || !slices.Equal(workflows, []string{"Plan pipeline (ours)", "Wave pipeline", "Ship pipeline"}) {
 		t.Fatalf("reset %v %v", agents, workflows)
 	}
 	integrator, err = findAgent(ctx, pool, "Integrator")
@@ -629,7 +635,7 @@ func TestResetShipped(t *testing.T) {
 	// version each), which is what a deploy does on purpose.
 	agents, workflows, err = ResetShipped(ctx, pool, sh)
 	must(t, err)
-	if len(agents) != 0 || len(workflows) != 2 {
+	if len(agents) != 0 || len(workflows) != 3 {
 		t.Fatalf("second reset %v %v", agents, workflows)
 	}
 }

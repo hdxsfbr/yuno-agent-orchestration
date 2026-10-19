@@ -297,8 +297,8 @@ export type Tool = {
 
 export const RUN_STATUSES = ["queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "timed_out"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
-/** Where a run came from; "issue" is a run the issue intake created for a labelled issue (DESIGN 5.23). */
-export const RUN_TRIGGERS = ["manual", "schedule", "channel", "eval", "issue"] as const;
+/** Where a run came from; "issue" is a run the issue intake created for a labelled issue (DESIGN 5.23), "plan" a wave's ship run (DESIGN 5.29 rule 9). */
+export const RUN_TRIGGERS = ["manual", "schedule", "channel", "eval", "issue", "plan"] as const;
 export type RunTrigger = (typeof RUN_TRIGGERS)[number];
 
 const CONVERSATION_REF = "conversation:";
@@ -560,7 +560,15 @@ export type PlanEvent = {
   detail: Record<string, unknown> | null;
 };
 
-export type PlanDetail = { plan: Plan; tickets: PlanTicket[]; events: PlanEvent[] };
+/** How main's pipeline stood at the watcher's last read; `none` is no pipeline or check on the default branch. */
+export type MainState = "passed" | "failed" | "running" | "pending" | "none";
+export type PlanMain = { state: MainState; sha?: string; at?: string; url?: string };
+
+/** The ship run of one wave. */
+export type PlanShipRun = { wave: number; run_id: string; status: RunStatus };
+
+/** `main` is null until the watcher has read the default branch; `ship_runs` is empty until a wave ships (DESIGN 5.29 rule 9). */
+export type PlanDetail = { plan: Plan; tickets: PlanTicket[]; events: PlanEvent[]; main?: PlanMain | null; ship_runs?: PlanShipRun[] | null };
 
 export type MergeRequestState = "open" | "merged" | "closed";
 export type CIStatus = "none" | "pending" | "passed" | "failed";
@@ -919,6 +927,8 @@ export async function listRuns(opts: { status?: RunStatus; project_id?: string; 
   q.set("limit", String(opts.limit ?? 100));
   return (await api<Run[] | null>(`/api/runs?${q}`)) ?? [];
 }
+/** One run by id; the cheap read for a run a page already has the id of. */
+export const getRun = (id: string) => api<Run>(`/api/runs/${seg(id)}`);
 export const createRun = (body: RunCreate) => api<Run>("/api/runs", withBody("POST", body));
 export const cancelRun = (id: string) => api<Run>(`/api/runs/${seg(id)}/cancel`, withBody("POST"));
 /**

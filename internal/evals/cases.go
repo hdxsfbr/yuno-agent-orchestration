@@ -54,6 +54,10 @@ type Case struct {
 	Input    map[string]any       `yaml:"input"`
 	Agents   map[string]AgentSpec `yaml:"agents"`
 
+	// Project and Steps give the case a project on the fake forge (DESIGN 5.29 rule 17).
+	Project *ProjectSpec `yaml:"project"`
+	Steps   []CaseStep   `yaml:"steps"`
+
 	Script  []ScriptStep      `yaml:"script"`
 	Actions Actions           `yaml:"actions"`
 	Expect  Expect            `yaml:"expect"`

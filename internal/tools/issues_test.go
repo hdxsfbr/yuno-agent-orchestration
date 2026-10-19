@@ -792,3 +792,64 @@ func TestGitHubIssuesListAll(t *testing.T) {
 		}
 	}
 }
+
+// T5.29.14: Close closes the issue on either provider, and a refusal names the provider
+// and the status without the token.
+func TestIssueProviderClose(t *testing.T) {
+	f, p := gitlabIssueFixture(t)
+	f.on("PUT /issues/12", 200, map[string]any{"iid": 12, "state": "closed"})
+	if err := p.Close(context.Background(), 12); err != nil {
+		t.Fatal(err)
+	}
+	c := f.call(t, 0)
+	if c.Method != "PUT" || c.Path != "/issues/12" || c.Body["state_event"] != "close" || c.Auth != issueTestToken {
+		t.Fatalf("gitlab close = %+v", c)
+	}
+
+	f, p = githubIssueFixture(t)
+	f.on("PATCH /issues/12", 200, map[string]any{"number": 12, "state": "closed"})
+	if err := p.Close(context.Background(), 12); err != nil {
+		t.Fatal(err)
+	}
+	c = f.call(t, 0)
+	if c.Method != "PATCH" || c.Path != "/issues/12" || c.Body["state"] != "closed" || c.Auth != "Bearer "+issueTestToken {
+		t.Fatalf("github close = %+v", c)
+	}
+
+	f.on("PATCH /issues/12", 403, map[string]any{"message": "Resource not accessible"})
+	err := p.Close(context.Background(), 12)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || strings.Contains(err.Error(), issueTestToken) {
+		t.Fatalf("refusal = %v", err)
+	}
+}
+
+// IssueState reads the one issue on either provider, confidential or not: open for the
+// provider's open state, closed for any other, and a missing issue is IssueGone.
+func TestIssueProviderIssueState(t *testing.T) {
+	ctx := context.Background()
+	f, p := gitlabIssueFixture(t)
+	f.on("GET /issues/12", 200, map[string]any{"iid": 12, "state": "opened", "confidential": true})
+	f.on("GET /issues/13", 200, map[string]any{"iid": 13, "state": "closed"})
+	if st, err := p.IssueState(ctx, 12); err != nil || st != IssueStateOpen {
+		t.Fatalf("gitlab open = %q %v", st, err)
+	}
+	if st, err := p.IssueState(ctx, 13); err != nil || st != IssueStateClosed {
+		t.Fatalf("gitlab closed = %q %v", st, err)
+	}
+	if _, err := p.IssueState(ctx, 14); !IssueGone(err) {
+		t.Fatalf("gitlab missing = %v", err)
+	}
+
+	f, p = githubIssueFixture(t)
+	f.on("GET /issues/12", 200, map[string]any{"number": 12, "state": "open"})
+	f.on("GET /issues/13", 200, map[string]any{"number": 13, "state": "closed"})
+	if st, err := p.IssueState(ctx, 12); err != nil || st != IssueStateOpen {
+		t.Fatalf("github open = %q %v", st, err)
+	}
+	if st, err := p.IssueState(ctx, 13); err != nil || st != IssueStateClosed {
+		t.Fatalf("github closed = %q %v", st, err)
+	}
+	if c := f.call(t, 0); c.Method != "GET" || c.Auth != "Bearer "+issueTestToken {
+		t.Fatalf("github call = %+v", c)
+	}
+}

@@ -45,7 +45,23 @@ const ScriptTTL = time.Hour
 type MemoryScriptStore struct {
 	mu      sync.Mutex
 	scripts map[string]*storedScript
+	bound   map[string][]boundScript // by project id and trigger
 	now     func() time.Time
+}
+
+// ScriptBinder hands a run the platform starts itself (an issue's run from intake, a wave's
+// ship run from the watcher) the script an eval registered for it: Bind queues a script id
+// for the next run of trigger on the project, TakeBound removes and returns the oldest one.
+// Only the eval runner binds, through POST /api/evals/scripts; without a binding a run is
+// started as it always was.
+type ScriptBinder interface {
+	Bind(projectID, trigger, scriptID string)
+	TakeBound(projectID, trigger string) (scriptID string, ok bool)
+}
+
+type boundScript struct {
+	id      string
+	expires time.Time
 }
 
 type storedScript struct {
@@ -55,7 +71,34 @@ type storedScript struct {
 }
 
 func NewMemoryScriptStore() *MemoryScriptStore {
-	return &MemoryScriptStore{scripts: map[string]*storedScript{}, now: time.Now}
+	return &MemoryScriptStore{scripts: map[string]*storedScript{}, bound: map[string][]boundScript{}, now: time.Now}
+}
+
+// Bind queues scriptID for the next run of trigger on the project (ScriptBinder). A binding
+// is dropped ScriptTTL after it was made if no run took it.
+func (s *MemoryScriptStore) Bind(projectID, trigger, scriptID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := projectID + "\x00" + trigger
+	s.bound[key] = append(s.bound[key], boundScript{id: scriptID, expires: s.now().Add(ScriptTTL)})
+}
+
+// TakeBound removes and returns the oldest live binding of the project and trigger.
+func (s *MemoryScriptStore) TakeBound(projectID, trigger string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := projectID + "\x00" + trigger
+	q := s.bound[key]
+	for len(q) > 0 {
+		head := q[0]
+		q = q[1:]
+		if s.now().Before(head.expires) {
+			s.bound[key] = q
+			return head.id, true
+		}
+	}
+	delete(s.bound, key)
+	return "", false
 }
 
 func (s *MemoryScriptStore) Register(scriptID string, steps []ScriptStep) {

@@ -247,9 +247,36 @@ changed after the test, is gated as usual.
 **Escalation.** `escalate` can only end the run its token belongs to; it pauses the
 project's waves, which only an operator resumes.
 
+**Waves that advance themselves.** The wave watcher starts ship runs and releases waves
+without an operator's click. Mitigation: a ship run starts only when every ticket of the
+wave is merged and the default branch's pipeline passed after the newest merge, at most
+once per plan and wave (a unique index), and never while the project is paused; the run
+itself stops at the smoke-test approval. `advance_wave` closes issues and labels the next
+wave's issues for intake; it passes on `auto_after: smoke_test` only inside a ship run
+whose smoke test was approved, refuses while paused or for a wave that is not current,
+and a second call returns the first result. A person with label rights who labels a later
+wave's issues early still starts builds for them (bounded as above); the watcher still
+ships wave by wave.
+
+**The eval forge.** `forgefake` runs only under the compose profile `eval` and accepts one
+fixed, non-secret token. The api accepts an `http` repository URL only for the exact host
+and port `EVAL_FORGE_URL` names, and only while that variable is set; `make eval` sets it on
+the local api and `make run` clears it. The public deployment never sets it.
+
+**Scripts bound to a project.** An API client can bind a registered eval script to the next
+intake or ship run of a project, which then runs on the scripted model instead of the
+agents' own. This needs the bearer token, which can already start scripted runs; bindings
+live in memory and are lost on restart.
+
 ## Known limitations
 
 - Single operator, no authentication beyond the optional bearer token.
+- After `make eval` the local api keeps accepting the eval forge's `http` address, and the
+  forge keeps running, until the next `make run`.
+- A ticket the watcher escalates because its merge request closed unmerged or its issue
+  closed has no recovery short of cancelling the plan until plans can be revised (wave 4).
+- Lessons go to project notes only; the small merge request that appends them to the
+  repository's `CLAUDE.md` (D-075) comes in wave 4.
 - The Docker socket is mounted into the gateway container (needed for sibling sandboxes).
 - Exec guardrail patterns cover host exec and approvals, not commands inside the sandbox.
 - Approvals can be answered from the web UI; a reply to the prompt the bot sends in

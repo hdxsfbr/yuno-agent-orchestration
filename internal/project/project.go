@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"unicode"
 
@@ -38,15 +39,33 @@ type Config struct {
 // ErrNotConfigured is Parse's answer when no repository URL is set.
 var ErrNotConfigured = errors.New("no project repository configured")
 
+// EvalForgeEnv names the setting that lets an eval project use the fake forge (DESIGN 5.29
+// rule 17): the forge's base URL, set only for the eval profile.
+const EvalForgeEnv = "EVAL_FORGE_URL"
+
+// evalForgeHost is the host (with port) of EVAL_FORGE_URL when it is a plain http URL, ""
+// otherwise. It is the one host a clone URL may reach over http; nothing else is allowed
+// to, and an unset variable allows none.
+func evalForgeHost() string {
+	u, err := url.Parse(strings.TrimSpace(os.Getenv(EvalForgeEnv)))
+	if err != nil || u.Scheme != "http" || u.Host == "" {
+		return ""
+	}
+	return strings.ToLower(u.Host)
+}
+
 // ValidateRepoURL checks a clone URL (rule 1): https, no user information, a repository
-// path. It returns the trimmed URL; the error says what to fix, without a field name.
+// path. It returns the trimmed URL; the error says what to fix, without a field name. The
+// one exception is http to exactly the host EVAL_FORGE_URL names (the eval profile's fake
+// forge, DESIGN 5.29 rule 17).
 func ValidateRepoURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", err
 	}
-	if u.Scheme != "https" || u.Host == "" {
+	evalForge := u.Scheme == "http" && u.Host != "" && strings.ToLower(u.Host) == evalForgeHost()
+	if (u.Scheme != "https" && !evalForge) || u.Host == "" {
 		return "", errors.New("must be an https URL")
 	}
 	if u.User != nil {

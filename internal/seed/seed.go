@@ -57,8 +57,8 @@ var Chief = store.Agent{
 }
 
 // TemplateKeys are the shipped templates the seed instantiates once each (DESIGN 5.28
-// rules 2 and 3): the plan pipeline and the wave pipeline.
-var TemplateKeys = []string{"plan_pipeline", "wave_pipeline"}
+// rules 2 and 3, 5.29 rule 13): the plan, wave and ship pipelines.
+var TemplateKeys = []string{"plan_pipeline", "wave_pipeline", "ship_pipeline"}
 
 // RetiredTemplateKeys are the templates the delivery process replaced (DESIGN 5.28 rule
 // 2, D-071). Their files live in templates/legacy, which is not loaded.
@@ -249,8 +249,13 @@ var Agents = []store.Agent{
 			"no approval of its own once the manual test was approved, provided it passes the paths your task names " +
 			"(the plan documents only). If the provider refuses to mark the request ready, or the work cannot be " +
 			"shipped for a reason the plan caused, call escalate with the reason instead of retrying in a loop; " +
-			"escalate ends the run, so do not finish afterwards." + factoryFinish,
-		ToolAllowlist: []string{"open_merge_request", "publish_tickets", "read", "ls", "memory_save", "escalate", "finish"},
+			"escalate ends the run, so do not finish afterwards. In a ship run (your task names a plan and a wave " +
+			"to ship, after the smoke test passed), call advance_wave exactly once with only your run_token: it " +
+			"closes the wave's tickets and releases the next wave, and its answer has the wave, how many tickets " +
+			"it closed and released, and whether it was the last wave. Never call it in any other run, and never " +
+			"twice. Then save the lessons worth keeping with memory_save and finish with the wave and last from " +
+			"that answer, and the lessons as a list." + factoryFinish,
+		ToolAllowlist: []string{"open_merge_request", "publish_tickets", "advance_wave", "read", "ls", "memory_save", "escalate", "finish"},
 		MemoryPolicy:  store.MemoryPolicy{Enabled: true},
 	},
 	Chief,

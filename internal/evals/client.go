@@ -93,6 +93,7 @@ type RunRequest struct {
 	Input      json.RawMessage `json:"input,omitempty"`
 	Model      string          `json:"model,omitempty"`
 	ScriptID   string          `json:"script_id,omitempty"`
+	ProjectID  string          `json:"project_id,omitempty"`
 	Limits     store.Limits    `json:"limits"`
 	// Trigger is "eval" for every run the runner creates (CreateRun sets it), so eval
 	// runs can be told apart from an operator's in the run list.
@@ -127,6 +128,14 @@ type answerRequest struct {
 type scriptRegistration struct {
 	ScriptID string             `json:"script_id"`
 	Steps    []model.ScriptStep `json:"steps"`
+	Bind     *scriptBind        `json:"bind,omitempty"`
+}
+
+// scriptBind makes a script the one the next run of the trigger that the platform starts
+// on the project takes.
+type scriptBind struct {
+	ProjectID string `json:"project_id"`
+	Trigger   string `json:"trigger"`
 }
 
 // WaitReady polls GET /readyz every interval until it answers 200 or ctx ends.
@@ -233,6 +242,13 @@ func (c *Client) AnswerApproval(ctx context.Context, id, answer string) (*store.
 // RegisterScript registers (or replaces) a script for the scripted provider.
 func (c *Client) RegisterScript(ctx context.Context, scriptID string, steps []model.ScriptStep) error {
 	return c.do(ctx, http.MethodPost, "/api/evals/scripts", scriptRegistration{ScriptID: scriptID, Steps: steps}, nil)
+}
+
+// RegisterBoundScript registers a script that the next run of trigger the platform starts on
+// the project takes (an issue's run, a ship run).
+func (c *Client) RegisterBoundScript(ctx context.Context, scriptID string, steps []model.ScriptStep, projectID, trigger string) error {
+	return c.do(ctx, http.MethodPost, "/api/evals/scripts",
+		scriptRegistration{ScriptID: scriptID, Steps: steps, Bind: &scriptBind{ProjectID: projectID, Trigger: trigger}}, nil)
 }
 
 // CreateRun triggers a run, tagged with trigger eval.

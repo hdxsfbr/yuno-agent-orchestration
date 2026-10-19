@@ -44,12 +44,20 @@ type Runner struct {
 	evaluate     func(Case, store.Trace, Observed) []EvalResult
 	rubric       func(context.Context, Case, store.Trace) RubricResult
 	now          func() time.Time
+
+	// forge is the fake forge a project case runs against (DESIGN 5.29 rule 17) and
+	// forgeURL where the api reaches it; nil and "" when EVAL_FORGE_URL is not set.
+	forge    *forgeClient
+	forgeURL string
 }
 
 // NewRunner builds a runner for cfg with the DESIGN 5.13 defaults: 500 ms polling and a
 // 180 s per-case timeout.
 func NewRunner(cfg config.Config, log *slog.Logger) *Runner {
+	forge, forgeURL := forgeFromEnv()
 	return &Runner{
+		forge:        forge,
+		forgeURL:     forgeURL,
 		cfg:          cfg,
 		api:          NewClient(cfg.EvalAPIURL, cfg.APIToken),
 		log:          log,

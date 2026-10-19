@@ -14,7 +14,10 @@ import (
 
 // autoAfterTools is the whole set of tools a node's auto_after can let through without
 // an approval of their own (DESIGN 5.29 rules 5 and 14). Nothing else is ever covered.
-var autoAfterTools = []string{tools.OpenMergeRequestName, "advance_wave"}
+var autoAfterTools = []string{tools.OpenMergeRequestName, tools.AdvanceWaveName}
+
+// shipSmokeTestNode is the approval node of the ship pipeline that covers advance_wave.
+const shipSmokeTestNode = "smoke_test"
 
 // autoApprover is the decided_by and policy text of a call an earlier approval covered.
 func autoApprover(approvalNode string) string { return "auto_after:" + approvalNode }
@@ -26,7 +29,9 @@ func autoApprover(approvalNode string) string { return "auto_after:" + approvalN
 // update (a call that would create one stays gated) and the call names paths, every one
 // under docs/ (a call that would push the whole checkout, or code, stays gated; review
 // M1). Any doubt, including a database
-// error, leaves the call gated.
+// error, leaves the call gated. advance_wave passes only in a ship run (trigger plan, a
+// trigger_ref of the form plan:<id>:wave:<n>) whose calling node is covered by the
+// smoke_test approval (review L6).
 func (g *gateCall) autoAfter(ctx context.Context) string {
 	if g.s.pool == nil || g.rc.RunID == "" || g.t.Risk != tools.RiskSideEffecting {
 		return ""
@@ -60,6 +65,14 @@ func (g *gateCall) autoAfter(ctx context.Context) string {
 	appr, err := store.GetApprovalForRunNode(ctx, g.s.pool, visit.ID, store.ApprovalKindNode)
 	if err != nil || appr.Status != store.ApprovalApproved {
 		return ""
+	}
+	if g.t.Name == tools.AdvanceWaveName {
+		if node.AutoAfter != shipSmokeTestNode || run.Trigger != store.TriggerPlan || run.TriggerRef == nil {
+			return ""
+		}
+		if _, _, ok := store.ParseShipRef(*run.TriggerRef); !ok {
+			return ""
+		}
 	}
 	if g.t.Name == tools.OpenMergeRequestName {
 		if !docsOnlyPaths(g.args) {

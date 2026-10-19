@@ -1,0 +1,192 @@
+{
+  "key": "ship_pipeline",
+  "name": "Ship pipeline",
+  "description": "Ships one wave of a feature after its tickets merged and the default branch passed: the operator smoke tests the deployed app, the Integrator saves the lessons of the wave as project notes and advances the plan to the next wave, and after the last wave the operator checks the live app against the feature's PRD. Started by the wave watcher, never by hand.",
+  "definition": {
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "plan_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "feature": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]{1,40}$"
+        },
+        "wave": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "last_wave": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "merge_requests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "main_url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "plan_id",
+        "feature",
+        "wave",
+        "last_wave"
+      ],
+      "additionalProperties": true
+    },
+    "state_schema": {
+      "type": "object",
+      "properties": {
+        "smoke_test": {
+          "type": "object",
+          "properties": {
+            "decision": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [],
+          "additionalProperties": true
+        },
+        "integrator": {
+          "type": "object",
+          "properties": {
+            "wave": {
+              "type": "integer"
+            },
+            "last": {
+              "type": "boolean"
+            },
+            "lessons": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "wave",
+            "last",
+            "lessons"
+          ],
+          "additionalProperties": true
+        }
+      }
+    },
+    "nodes": [
+      {
+        "id": "start",
+        "kind": "start"
+      },
+      {
+        "id": "smoke_test",
+        "kind": "approval",
+        "message": "Wave {{.input.wave}} of {{.input.feature}} is merged and the pipeline on the default branch passed.{{with .input.merge_requests}}\n\nMerged in this wave:{{range .}}\n- {{.title}}{{if .url}} ({{.url}}){{end}}{{end}}{{end}}{{with .input.main_url}}\n\nPipeline on the default branch: {{.}}{{end}}\n\nSmoke test the deployed app now.\nApprove when it works. Reject with what broke: the feature's waves pause until you resume them."
+      },
+      {
+        "id": "integrator",
+        "kind": "agent",
+        "agent_name": "Integrator",
+        "auto_after": "smoke_test",
+        "input_from": [
+          "start"
+        ],
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "wave": {
+              "type": "integer"
+            },
+            "last": {
+              "type": "boolean"
+            },
+            "lessons": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "wave",
+            "last",
+            "lessons"
+          ],
+          "additionalProperties": true
+        },
+        "task": "Wave {{.input.wave}} of the feature {{.input.feature}} is shipped: its tickets are merged, the default branch passed and the operator smoke tested the deployed app. Close it out in this order:\n\n1. Save one to three lessons from this wave as project notes, one memory_save call each with scope \"project\", a short key (start it with \"{{.input.feature}} wave {{.input.wave}}\") and the lesson as the value: what to do again, avoid or check next time, specific to this project. Base them on what you can see in the checkout (git log, the plan documents in docs/plans/{{.input.feature}}/) and on the project notes you already have.\n2. Call advance_wave exactly once, with only your run_token. It closes the wave's issues and tickets and releases the next wave.\n3. Finish with wave (the wave you shipped), last (taken from the advance_wave result: true when this was the last wave) and lessons (the lessons you saved, as plain strings).\n\nIf advance_wave refuses, call the escalate tool with kind other and the refusal as the reason. After escalate the run ends: do not finish."
+      },
+      {
+        "id": "accept_feature",
+        "kind": "approval",
+        "message": "All {{.input.last_wave}} waves of {{.input.feature}} are shipped. Check the live app against the feature's PRD (docs/plans/{{.input.feature}}/PRD.md on the default branch).\nApprove to finish the feature. Reject with what is missing: the waves pause so you can revise the plan."
+      },
+      {
+        "id": "end",
+        "kind": "end"
+      }
+    ],
+    "edges": [
+      {
+        "from": "start",
+        "to": "smoke_test"
+      },
+      {
+        "from": "smoke_test",
+        "to": "integrator"
+      },
+      {
+        "from": "integrator",
+        "to": "accept_feature",
+        "when": {
+          "path": "/integrator/last",
+          "op": "eq",
+          "value": true
+        }
+      },
+      {
+        "from": "integrator",
+        "to": "end",
+        "when": {
+          "path": "/integrator/last",
+          "op": "eq",
+          "value": false
+        }
+      },
+      {
+        "from": "accept_feature",
+        "to": "end"
+      }
+    ],
+    "limits": {
+      "max_steps": 40,
+      "max_duration_seconds": 3600,
+      "max_node_iterations": 10,
+      "max_loop_visits": 3,
+      "max_cost_usd": 2,
+      "max_tool_calls": 60,
+      "approval_timeout_seconds": 86400
+    },
+    "project": true
+  }
+}

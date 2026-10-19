@@ -271,6 +271,7 @@ var shippedSplits = map[string]string{
 	"025-plan-pipeline-happy":           SplitPublic,
 	"026-review-loop-limit-escalation":  SplitPublic,
 	"027-prd-gap-escalation":            SplitPublic,
+	"028-wave-auto-advance-pause":       SplitPublic,
 }
 
 func TestShippedCasesAreValid(t *testing.T) {

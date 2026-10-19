@@ -1,13 +1,15 @@
 import { useId, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { ApiError, answerApproval, approveApproval, rejectApproval, type Approval, type ToolCall } from "@/lib/api";
+import { ApiError, answerApproval, approveApproval, getRun, rejectApproval, type Approval, type ToolCall } from "@/lib/api";
 import { errorsFor, parseFieldErrors } from "@/lib/agentForm";
 import { formatDateTime, shortId } from "@/lib/format";
+import { shipRunRef } from "@/lib/plan";
 import { questionOutcome } from "@/lib/question";
 import { Badge, StatusBadge } from "../Badge";
 import Button from "../Button";
 import JsonView from "../JsonView";
+import PlanWaveLink from "../project/PlanWaveLink";
 import { InlineError, errorText } from "../QueryState";
 import { FieldErrors, control } from "../fields";
 
@@ -47,6 +49,23 @@ type Props = {
   /** Called after a decision attempt that changed nothing here, such as a 409. */
   onStale?: () => void;
 };
+
+/** The smoke test and the acceptance a ship run waits on (DESIGN 5.29 rule 13). */
+const SHIP_NODES = ["smoke_test", "accept_feature"];
+
+/** For an approval of a ship run: the feature and wave it belongs to. The run is read by id, once per run, and cached. */
+function ShipRunPlan({ runId }: { runId: string }) {
+  const run = useQuery({ queryKey: ["runs", "detail", runId], queryFn: () => getRun(runId), staleTime: 30_000 });
+  if (!run.data || !shipRunRef(run.data)) return null;
+  return (
+    <div className="flex gap-1.5">
+      <dt>Plan</dt>
+      <dd className="text-zinc-900 dark:text-zinc-100">
+        <PlanWaveLink run={run.data} />
+      </dd>
+    </div>
+  );
+}
 
 /** One request for a decision: what it is about, who it concerns, and the buttons to answer it. */
 export default function ApprovalCard({ approval, toolCall, showRun = false, runEnded = false, onDecided, onStale }: Props) {
@@ -115,6 +134,7 @@ export default function ApprovalCard({ approval, toolCall, showRun = false, runE
             </dd>
           </div>
         ) : null}
+        {showRun && approval.run_id && SHIP_NODES.includes(approval.node_id) ? <ShipRunPlan runId={approval.run_id} /> : null}
         <div className="flex gap-1.5">
           <dt>Node</dt>
           <dd className="font-mono text-zinc-900 dark:text-zinc-100">{approval.node_id || "—"}</dd>

@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { cancelPlan, getPlan, listMergeRequests, listProjectPlans, pauseWaves, resumeWaves, type PlanEvent, type PlanTicket, type Project } from "@/lib/api";
-import { formatDateTime, shortId } from "@/lib/format";
-import { eventText, isOpenPlan, PLAN_STATUS_LABEL, PLAN_STATUS_TONE, TICKET_STATUS_LABEL, TICKET_STATUS_TONE, ticketsByWave } from "@/lib/plan";
+import { cancelPlan, getPlan, listApprovals, listMergeRequests, listProjectPlans, pauseWaves, resumeWaves, type PlanEvent, type PlanMain, type PlanTicket, type Project } from "@/lib/api";
+import { formatAgo, formatDateTime, shortId } from "@/lib/format";
+import { eventText, isOpenPlan, MAIN_STATE_LABEL, MAIN_STATE_TONE, PLAN_STATUS_LABEL, PLAN_STATUS_TONE, planWaves, TICKET_STATUS_LABEL, TICKET_STATUS_TONE, waitingLabel, WAVE_STATE_LABEL, WAVE_STATE_TONE, type WaveView } from "@/lib/plan";
 import { requestRef } from "@/lib/mergeRequest";
 import { REFRESH_DELAY_MS } from "@/lib/useRefreshOnEvents";
 import { useEventStream } from "@/lib/useEventStream";
 import { projectMergeRequestsKey, projectsKey } from "@/lib/useProjects";
-import { Badge } from "../Badge";
+import { Badge, RunStatusBadge } from "../Badge";
 import Button from "../Button";
 import { Card, cardClass } from "../Card";
 import ConnectionIndicator from "../ConnectionIndicator";
@@ -145,6 +145,56 @@ function TicketRow({ t, mr }: { t: PlanTicket; mr?: { url: string; ref: string; 
   );
 }
 
+/** How main's pipeline stands: its state, the commit it was read at and when, linked to the pipeline when the provider gave an address. */
+function MainStatus({ main }: { main: PlanMain | null | undefined }) {
+  if (!main) return <p className="text-sm text-zinc-500">Main has not been checked yet.</p>;
+  const label = (
+    <>
+      {main.sha ? <span className="font-mono text-xs">{main.sha.slice(0, 8)}</span> : null}
+      {main.at ? <span className="text-xs text-zinc-500">{formatAgo(main.at)}</span> : null}
+    </>
+  );
+  return (
+    <p className="flex flex-wrap items-center gap-2 text-sm">
+      <span className="font-medium">Main</span>
+      <Badge tone={MAIN_STATE_TONE[main.state] ?? "zinc"} pulse={main.state === "running"}>
+        {MAIN_STATE_LABEL[main.state] ?? main.state}
+      </Badge>
+      {main.url ? (
+        <a href={main.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 underline" title="Open the pipeline on the provider">
+          {label}
+        </a>
+      ) : (
+        label
+      )}
+    </p>
+  );
+}
+
+/** A wave's ship run, linked to the run where the operator answers; when the run waits, the approval it waits on; when it ended without shipping, why the wave is held. */
+function ShipRun({ w, pausedReason }: { w: WaveView; pausedReason?: string }) {
+  const runId = w.shipRun?.run_id ?? "";
+  // Which approval the run waits on: its pending one, read only while the run waits and cached.
+  const pending = useQuery({ queryKey: ["approvals", "pending", "run", runId], queryFn: () => listApprovals({ status: "pending", runId }), enabled: !!w.waiting, staleTime: 15_000 });
+  if (!w.shipRun) return null;
+  const href = `/runs/${encodeURIComponent(w.shipRun.run_id)}`;
+  return (
+    <p className="mb-1.5 flex flex-wrap items-center gap-2 text-sm">
+      <span className="text-zinc-500">Ship run</span>
+      <Link to={href} className="font-mono hover:underline" title={w.shipRun.run_id}>
+        {shortId(w.shipRun.run_id)}
+      </Link>
+      <RunStatusBadge status={w.shipRun.status} />
+      {w.waiting ? (
+        <Link to={href} className="font-medium text-amber-800 underline dark:text-amber-300">
+          {waitingLabel(pending.data?.[0]?.node_id)}
+        </Link>
+      ) : null}
+      {w.state === "held" && pausedReason ? <span className="text-amber-800 dark:text-amber-300">{pausedReason}</span> : null}
+    </p>
+  );
+}
+
 function EventList({ events }: { events: PlanEvent[] }) {
   if (events.length === 0) return <p className="text-sm text-zinc-500">Nothing has happened yet.</p>;
   return (
@@ -270,12 +320,17 @@ export default function ProjectPlans({ project }: { project: Project }) {
           {detail.error ? <QueryError what="the plan" error={detail.error} onRetry={() => void detail.refetch()} /> : null}
           {detail.data ? (
             <>
-              {ticketsByWave(detail.data.tickets).map((g) => (
+              <MainStatus main={detail.data.main} />
+              {planWaves(detail.data).map((g) => (
                 <div key={g.wave}>
-                  <h4 className="mb-1 text-xs font-medium uppercase tracking-wide text-zinc-500">
-                    {`Wave ${g.wave}`}
-                    {g.wave === open.current_wave ? " · current" : ""}
+                  <h4 className="mb-1 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    <span>
+                      {`Wave ${g.wave}`}
+                      {g.wave === open.current_wave ? " · current" : ""}
+                    </span>
+                    <Badge tone={WAVE_STATE_TONE[g.state]}>{WAVE_STATE_LABEL[g.state]}</Badge>
                   </h4>
+                  <ShipRun w={g} pausedReason={paused ? reason : undefined} />
                   <div className="overflow-x-auto rounded-md border border-zinc-200 dark:border-zinc-800">
                     <table className="w-full min-w-[40rem] text-left text-sm">
                       <thead className="border-b border-zinc-200 text-xs uppercase tracking-wide text-zinc-500 dark:border-zinc-800">

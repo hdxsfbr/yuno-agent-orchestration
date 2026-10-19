@@ -13,7 +13,7 @@ import (
 	"yuno/internal/workflow"
 )
 
-// T5.28.3: the shipped plan and wave pipelines load, list, validate and instantiate over
+// T5.28.3: the shipped plan, wave and ship pipelines load, list, validate and instantiate over
 // the factory agents their nodes name (renamed per test so other tests' agents do not
 // interfere); the instance works on a project and keeps its checks, edges and gates.
 func TestDeliveryTemplatesInstantiate(t *testing.T) {
@@ -21,7 +21,8 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 	ctx := context.Background()
 	sfx := uniqueSuffix()
 	dir := t.TempDir()
-	keys := map[string]string{"plan_pipeline": "Plan pipeline", "wave_pipeline": "Wave pipeline"}
+	keys := map[string]string{"plan_pipeline": "Plan pipeline", "wave_pipeline": "Wave pipeline", "ship_pipeline": "Ship pipeline"}
+	wantCost := map[string]float64{"plan_pipeline": 5, "wave_pipeline": 5, "ship_pipeline": 2}
 	agentIDs := map[string]string{} // renamed agent name → id
 	for key := range keys {
 		raw, err := os.ReadFile("../../templates/" + key + ".json")
@@ -59,7 +60,11 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 		if !def.Project {
 			t.Errorf("%s does not work on a project", key)
 		}
-		if msgs := def.ValidateTemplates(json.RawMessage(`{"task":"x","feature":"x"}`)); len(msgs) > 0 {
+		sample := `{"task":"x","feature":"x"}`
+		if key == "ship_pipeline" {
+			sample = `{"plan_id":"p1","feature":"x","wave":1,"last_wave":2}`
+		}
+		if msgs := def.ValidateTemplates(json.RawMessage(sample)); len(msgs) > 0 {
 			t.Errorf("%s templates: %v", key, msgs)
 		}
 		for _, n := range def.Nodes {
@@ -67,7 +72,7 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 				t.Errorf("%s node %s = %+v", key, n.ID, n)
 			}
 		}
-		if def.Limits.MaxLoopVisits != 3 || def.Limits.MaxCostUSD != 5 || def.Limits.MaxDurationSeconds != 3600 || def.Limits.ApprovalTimeoutSeconds != 86400 {
+		if def.Limits.MaxLoopVisits != 3 || def.Limits.MaxCostUSD != wantCost[key] || def.Limits.MaxDurationSeconds != 3600 || def.Limits.ApprovalTimeoutSeconds != 86400 {
 			t.Errorf("%s limits = %+v", key, def.Limits)
 		}
 		if key == "wave_pipeline" {
@@ -77,6 +82,18 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 			if _, gap := def.Node("gap_found"); gap || r == nil || r.AutoAfter != "manual_test" || m == nil || m.OnReject != "builder" ||
 				d == nil || d.AutoAfter != "" {
 				t.Errorf("wave wiring: integrator_ready %+v manual_test %+v integrator_draft %+v", r, m, d)
+			}
+		}
+		if key == "ship_pipeline" {
+			i, _ := def.Node("integrator")
+			s, _ := def.Node("smoke_test")
+			a, _ := def.Node("accept_feature")
+			if i == nil || i.AutoAfter != "smoke_test" || s == nil || s.Kind != workflow.KindApproval || s.OnReject != "" ||
+				a == nil || a.Kind != workflow.KindApproval || a.OnReject != "" {
+				t.Errorf("ship wiring: integrator %+v smoke_test %+v accept_feature %+v", i, s, a)
+			}
+			if !strings.Contains(string(i.OutputSchema), "lessons") || !strings.Contains(i.Task, "advance_wave") || !strings.Contains(i.Task, "memory_save") {
+				t.Errorf("ship integrator = %+v", i)
 			}
 		}
 		if key == "plan_pipeline" {

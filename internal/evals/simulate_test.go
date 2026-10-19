@@ -35,6 +35,7 @@ const (
 var platformTools = map[string]bool{
 	"finish": true, "http_fetch": true, "memory_save": true, "memory_recall": true,
 	"deploy_release": true, "gitlab_create_mr": true, "ask_operator": true, "escalate": true,
+	"open_merge_request": true, "publish_tickets": true, "advance_wave": true,
 }
 
 type simulator struct {
@@ -487,13 +488,17 @@ func (s *simulator) builtin(n *workflow.Node, name string, args map[string]any) 
 // sideEffect plays a side-effecting call: the approval gate of DESIGN 5.3 rule 5 unless
 // the rule is auto, then the idempotent execution of DESIGN 5.4.
 func (s *simulator) sideEffect(row *store.ToolCall, n *workflow.Node, visit int, rule string, tool *ScriptTool) {
-	paths, _ := tool.Args["paths"].([]any)
-	if len(paths) == 0 {
-		s.problem("node %s: %s needs paths", n.ID, tool.Name)
-	}
-	for _, p := range paths {
-		if rel, _ := p.(string); !s.written[s.label(n)][rel] {
-			s.problem("node %s: %s names %v, which this agent has not written under runs/$RUN_ID/ (each agent has a workspace of its own)", n.ID, tool.Name, p)
+	// open_merge_request names paths of the shared project checkout, and publish_tickets
+	// none; the other tools publish files this agent wrote itself.
+	if tool.Name != platformPrefix+"open_merge_request" && tool.Name != platformPrefix+"publish_tickets" {
+		paths, _ := tool.Args["paths"].([]any)
+		if len(paths) == 0 {
+			s.problem("node %s: %s needs paths", n.ID, tool.Name)
+		}
+		for _, p := range paths {
+			if rel, _ := p.(string); !s.written[s.label(n)][rel] {
+				s.problem("node %s: %s names %v, which this agent has not written under runs/$RUN_ID/ (each agent has a workspace of its own)", n.ID, tool.Name, p)
+			}
 		}
 	}
 	in := canonicalJSON(row.Input)

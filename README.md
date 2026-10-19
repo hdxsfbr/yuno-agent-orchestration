@@ -144,8 +144,17 @@ Integrator; the Chief of Staff stays the one agent on Telegram.
   wrong calls `escalate`; that, or any ticket run that fails (the review loop's limit, a
   rejection), stops the ticket with its reason, pauses the project's waves and tells you
   on Telegram. Pause, resume and cancel a plan from its project page.
-- **Ship**: waves still advance by hand until the next wave of this work (the watcher
-  that releases the next wave once a wave is merged, deployed and smoke-tested).
+- **Waves**: when the plan's merge request merges, Yuno labels wave 1's issues for intake.
+  Once every ticket of a wave is merged and the default branch's pipeline passed after the
+  last merge, it starts the `Ship pipeline` for that wave (never while the project is
+  paused). The project page shows each wave with its tickets, its ship run and main's
+  status.
+- **Ship** (`Ship pipeline`, one run per wave): you smoke test the deployed app (the
+  smoke-test approval lists the wave's merge requests and main's pipeline); the
+  Integrator saves the wave's lessons as project notes and calls `advance_wave`, which
+  closes the wave's issues and releases the next wave. After the last wave you check the
+  live app against `PRD.md` and accept the feature, which finishes the plan. Rejecting
+  either approval pauses the waves with your reason.
 
 The earlier templates (`dev_pipeline`, `research_pipeline`, `review_panel`) and their
 agents were retired with this change; their definitions are kept in `templates/legacy/`
@@ -261,7 +270,7 @@ approved`); edges are tried in order and the first true one is taken, so a feedb
 is just an edge back, bounded by `max_loop_visits`. Each agent node's task is a template over the
 run input and the state so far; the agent's `finish` result is validated against the
 node's output schema and becomes `state[<node>]`. The shipped templates live in
-`templates/` (`plan_pipeline` and `wave_pipeline`, the delivery process; the former
+`templates/` (`plan_pipeline`, `wave_pipeline` and `ship_pipeline`, the delivery process; the former
 `dev_pipeline`, `research_pipeline` and `review_panel` are kept as examples in
 `templates/legacy/`, which is not loaded). To add one, drop a JSON
 file there with `key`, `name`, `description` and `definition`, naming agents by

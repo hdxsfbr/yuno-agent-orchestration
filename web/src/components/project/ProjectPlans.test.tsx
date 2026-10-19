@@ -13,6 +13,7 @@ let current: Project;
 let plans: Plan[];
 let detail: PlanDetail;
 let requests: MergeRequest[];
+let pendingApprovals: Record<string, { id: string; node_id: string }[]>;
 
 const plan = (over: Partial<Plan> = {}): Plan => ({
   id: "pl1",
@@ -42,6 +43,7 @@ beforeEach(() => {
   current = project();
   plans = [plan()];
   requests = [];
+  pendingApprovals = {};
   detail = {
     plan: plan(),
     tickets: [
@@ -54,6 +56,7 @@ beforeEach(() => {
   api.on("GET", "/api/projects/p1/plans", () => plans);
   api.on("GET", "/api/plans/pl1", () => detail);
   api.on("GET", /^\/api\/merge-requests\?/, () => requests);
+  api.on("GET", /^\/api\/approvals\?status=pending&run_id=/, ({ url }) => pendingApprovals[new URL(url, "http://x").searchParams.get("run_id") ?? ""] ?? []);
   api.on("POST", "/api/projects/p1/waves/pause", ({ body }) => {
     current = { ...current, waves_paused: true, waves_paused_reason: (body as { reason: string }).reason };
     return current;
@@ -86,7 +89,7 @@ describe("the open plan", () => {
   it("shows the feature, status and current wave, with its tickets grouped by wave", async () => {
     renderPlans();
     expect(await screen.findByText("Health endpoint")).not.toBeNull();
-    expect(screen.getByText("Building")).not.toBeNull();
+    expect(screen.getAllByText("Building").length).toBeGreaterThan(0);
     expect(screen.getByText(/Current wave 2/)).not.toBeNull();
     expect(await screen.findByText("Wave 1")).not.toBeNull();
     expect(screen.getByText("Wave 2 · current")).not.toBeNull();
@@ -115,13 +118,136 @@ describe("the open plan", () => {
     renderPlans();
     expect(await screen.findByText("Login page")).not.toBeNull();
     expect(screen.getByText("Older plans")).not.toBeNull();
-    expect(screen.getByText("Done")).not.toBeNull();
+    expect(screen.getAllByText("Done").length).toBeGreaterThan(0);
   });
 
   it("says so when no plan is open", async () => {
     plans = [];
     renderPlans();
     expect(await screen.findByText(/No plan is open/)).not.toBeNull();
+  });
+});
+
+describe("the wave timeline", () => {
+  const waveHeading = async (text: string) => (await screen.findByText(text)).parentElement as HTMLElement;
+
+  it("shows each wave with its state, in order", async () => {
+    detail.tickets = [
+      ticket({ ticket_id: "T3", wave: 3, title: "Docs", status: "pending" }),
+      ticket({ ticket_id: "T2", wave: 2, title: "Add the test", status: "released" }),
+      ticket({ ticket_id: "T1", wave: 1, status: "merged" }),
+    ];
+    detail.ship_runs = [{ wave: 1, run_id: "ship-0001abcd", status: "succeeded" }];
+    renderPlans();
+    expect(within(await waveHeading("Wave 1")).getByText("Done")).not.toBeNull();
+    expect(within(await waveHeading("Wave 2 · current")).getByText("Released")).not.toBeNull();
+    expect(within(await waveHeading("Wave 3")).getByText("Pending")).not.toBeNull();
+    const headings = screen.getAllByRole("heading", { level: 4 }).map((h) => h.textContent);
+    expect(headings.slice(0, 3)).toEqual(["Wave 1Done", "Wave 2 · currentReleased", "Wave 3Pending"]);
+  });
+
+  it("calls a wave building once a ticket is being worked on", async () => {
+    plans = [plan({ current_wave: 1 })];
+    detail.plan = plan({ current_wave: 1 });
+    detail.tickets = [ticket({ status: "building" })];
+    renderPlans();
+    expect(within(await waveHeading("Wave 1 · current")).getByText("Building")).not.toBeNull();
+  });
+
+  it("shows the ship run of a wave as shipping, with a link", async () => {
+    plans = [plan({ status: "shipping", current_wave: 2 })];
+    detail.plan = plan({ status: "shipping", current_wave: 2 });
+    detail.ship_runs = [{ wave: 2, run_id: "ship-0002abcd", status: "running" }];
+    renderPlans();
+    expect(within(await waveHeading("Wave 2 · current")).getByText("Shipping")).not.toBeNull();
+    expect(screen.getByRole("link", { name: "0002abcd" }).getAttribute("href")).toBe("/runs/ship-0002abcd");
+    expect(screen.getByText("running")).not.toBeNull();
+  });
+
+  it("links the smoke test that is waiting to the ship run", async () => {
+    plans = [plan({ status: "shipping", current_wave: 1 })];
+    detail.plan = plan({ status: "shipping", current_wave: 1 });
+    detail.tickets = [ticket(), ticket({ ticket_id: "T2", wave: 2, status: "pending" })];
+    detail.ship_runs = [{ wave: 1, run_id: "ship-0001abcd", status: "waiting_approval" }];
+    pendingApprovals["ship-0001abcd"] = [{ id: "a1", node_id: "smoke_test" }];
+    renderPlans();
+    const link = await screen.findByRole("link", { name: "Waiting for your smoke test" });
+    expect(link.getAttribute("href")).toBe("/runs/ship-0001abcd");
+    expect(api.made("GET", /^\/api\/approvals\?status=pending&run_id=ship-0001abcd$/)).toHaveLength(1);
+  });
+
+  it("does not call a tool approval of the ship run a smoke test", async () => {
+    plans = [plan({ status: "shipping", current_wave: 1 })];
+    detail.plan = plan({ status: "shipping", current_wave: 1 });
+    detail.ship_runs = [{ wave: 1, run_id: "ship-0001abcd", status: "waiting_approval" }];
+    pendingApprovals["ship-0001abcd"] = [{ id: "a1", node_id: "integrator" }];
+    renderPlans();
+    expect(await screen.findByRole("link", { name: "Waiting for your approval" })).not.toBeNull();
+    expect(screen.queryByText("Waiting for your smoke test")).toBeNull();
+  });
+
+  it("asks for nothing while no ship run waits", async () => {
+    plans = [plan({ status: "shipping", current_wave: 2 })];
+    detail.plan = plan({ status: "shipping", current_wave: 2 });
+    detail.ship_runs = [{ wave: 2, run_id: "ship-0002abcd", status: "running" }];
+    renderPlans();
+    await screen.findByText("Shipping");
+    expect(api.made("GET", /^\/api\/approvals/)).toHaveLength(0);
+  });
+
+  it.each(["failed", "cancelled", "timed_out"] as const)("calls a wave held when its ship run %s, with the pause reason", async (status) => {
+    plans = [plan({ status: "shipping", current_wave: 1 })];
+    detail.plan = plan({ status: "shipping", current_wave: 1 });
+    detail.ship_runs = [{ wave: 1, run_id: "ship-0001abcd", status }];
+    current = project({ waves_paused: true, waves_paused_reason: "Smoke test failed" });
+    renderPlans();
+    expect(within(await waveHeading("Wave 1 · current")).getByText("Held")).not.toBeNull();
+    expect(within(await waveHeading("Wave 1 · current")).queryByText("Shipping")).toBeNull();
+    expect(screen.getByRole("link", { name: "0001abcd" }).getAttribute("href")).toBe("/runs/ship-0001abcd");
+    expect(screen.getAllByText("Smoke test failed").length).toBeGreaterThan(0);
+  });
+
+  it("links the acceptance that is waiting after the last wave", async () => {
+    plans = [plan({ status: "accepting", current_wave: 2 })];
+    detail.plan = plan({ status: "accepting", current_wave: 2 });
+    detail.ship_runs = [
+      { wave: 1, run_id: "ship-0001abcd", status: "succeeded" },
+      { wave: 2, run_id: "ship-0002abcd", status: "waiting_approval" },
+    ];
+    pendingApprovals["ship-0002abcd"] = [{ id: "a2", node_id: "accept_feature" }];
+    renderPlans();
+    const link = await screen.findByRole("link", { name: "Waiting for your acceptance" });
+    expect(link.getAttribute("href")).toBe("/runs/ship-0002abcd");
+    expect(screen.queryByText("Waiting for your smoke test")).toBeNull();
+  });
+
+  it.each([
+    ["passed", "Passing"],
+    ["failed", "Failing"],
+    ["running", "Running"],
+    ["pending", "Pending"],
+    ["none", "No checks"],
+  ] as const)("shows main as %s", async (state, label) => {
+    detail.main = { state, sha: "0123456789abcdef", at: new Date(Date.now() - 5 * 60_000).toISOString(), url: "https://gitlab.com/x/y/-/pipelines/9" };
+    renderPlans();
+    const main = (await screen.findByText("Main")).parentElement as HTMLElement;
+    expect(within(main).getByText(label)).not.toBeNull();
+    expect(within(main).getByText("01234567")).not.toBeNull();
+    expect(within(main).getByText("5 min ago")).not.toBeNull();
+    expect(within(main).getByRole("link").getAttribute("href")).toBe("https://gitlab.com/x/y/-/pipelines/9");
+  });
+
+  it("shows main without a link when the provider gave no address", async () => {
+    detail.main = { state: "passed", sha: "0123456789abcdef", at: "2026-10-19T10:00:00Z" };
+    renderPlans();
+    const main = (await screen.findByText("Main")).parentElement as HTMLElement;
+    expect(within(main).queryByRole("link")).toBeNull();
+  });
+
+  it("says main has not been checked when there is no reading", async () => {
+    detail.main = null;
+    renderPlans();
+    expect(await screen.findByText("Main has not been checked yet.")).not.toBeNull();
   });
 });
 
@@ -143,6 +269,12 @@ describe("the events", () => {
       "Wave 1 is waiting for your smoke test",
       "Waves resumed",
     ]);
+  });
+
+  it("reads a released wave", async () => {
+    detail.events = [event({ id: "e1", kind: "wave_released", wave: 3 })];
+    renderPlans();
+    expect(await screen.findByText("Wave 3 released")).not.toBeNull();
   });
 
   it("shows the reason of an escalation", async () => {

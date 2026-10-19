@@ -141,9 +141,22 @@ seed: ## Create the demo agents, the Chief of Staff, both template workflows, an
 seed-reset: ## seed, then restore the shipped agents' prompts and allowlists and the template workflows to the shipped versions (keeps everything else)
 	$(COMPOSE) run --rm api seed --reset-shipped
 
+# The fake forge (DESIGN 5.29 rule 17): started for the eval targets only. The api accepts its
+# http URL as a project's repository only while EVAL_FORGE_URL names it, so the api is
+# recreated with the setting here; make run recreates it without.
+eval: export EVAL_FORGE_URL ?= http://forgefake:8090
+# The wave loop (case 028) waits on three of the api's own loops: the merge request sync, the
+# issue intake and the wave watcher. Their defaults (120, 120 and 60 s) would stretch the case
+# to many minutes, so the eval run sets them to 5 s when it recreates the api; make run restores
+# the defaults.
+eval: export MERGE_REQUEST_SYNC_INTERVAL ?= 5s
+eval: export INTAKE_POLL_INTERVAL ?= 5s
+eval: export WAVE_WATCH_INTERVAL ?= 5s
 eval: env ## Run the evaluation suite against the running stack (offline by default: EVAL_PROVIDER=scripted)
 	@curl -fsS -m 3 http://localhost:$(WEB_PORT)/readyz >/dev/null 2>&1 || { echo 'the stack is not running: run `make run` first'; exit 1; }
-	$(COMPOSE) --profile eval build eval
+	$(COMPOSE) --profile eval build eval forgefake
+	$(COMPOSE) --profile eval up -d --wait forgefake
+	$(COMPOSE) --profile eval up -d --wait --no-deps api
 	$(COMPOSE) --profile eval run --rm --no-deps eval
 
 eval-baseline: eval ## Run evals and store the report as the baseline

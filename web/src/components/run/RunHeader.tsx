@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import { ApiError, cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, issueRef, retryRun, type Approval, type Run, type RunBranch, type ToolCall } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, shortId } from "@/lib/format";
 import { requestNoun, requestRef } from "@/lib/mergeRequest";
+import { shipRunRef } from "@/lib/plan";
 import { pendingQuestion, questionLine } from "@/lib/question";
 import { toolchainLabel } from "@/lib/project";
 import { canRetry, repeatsSideEffects } from "@/lib/runRetry";
@@ -13,6 +14,7 @@ import Button from "../Button";
 import { Card } from "../Card";
 import ConnectionIndicator from "../ConnectionIndicator";
 import { Badge, RunStatusBadge } from "../Badge";
+import PlanWaveLink from "../project/PlanWaveLink";
 import ProjectLink, { hasProject } from "../project/ProjectLink";
 import { InlineError, errorText } from "../QueryState";
 import RetryDialog from "./RetryDialog";
@@ -48,6 +50,7 @@ function TriggerValue({ run }: { run: Run }) {
       <>Delegated</>
     );
   }
+  if (shipRunRef(run)) return <PlanWaveLink run={run} />;
   return (
     <>
       {run.trigger}

@@ -59,6 +59,9 @@ type PlatformDeps struct {
 	// Escalate ends a run with the agent's reason and, for a plan ticket, pauses the
 	// project's waves (DESIGN 5.29 rule 6); nil leaves escalate unable to run.
 	Escalate EscalateFunc
+	// AdvanceWave closes the run's wave and releases the next one (DESIGN 5.29 rule 14);
+	// late-bound like Escalate, nil leaves advance_wave unable to run.
+	AdvanceWave AdvanceWaveFunc
 	// RunIDForToken resolves a run token for publish_tickets' approval sentence (5.29
 	// rule 2); nil gives the generic sentence.
 	RunIDForToken func(token string) (runID string, ok bool)
@@ -91,6 +94,7 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 	}
 	r.Register(NewPublishTickets(pt))
 	r.Register(NewEscalate(EscalateDeps{Escalate: d.Escalate}))
+	r.Register(NewAdvanceWave(AdvanceWaveDeps{AdvanceWave: d.AdvanceWave, RunIDForToken: d.RunIDForToken}))
 	return r
 }
 

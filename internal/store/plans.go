@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -362,6 +364,25 @@ func SetWavesPaused(ctx context.Context, q Querier, projectID string, paused boo
 		WHERE id=$1 AND deleted_at IS NULL`, projectID, paused, r)
 }
 
+// ProjectPause is a project's wave pause as LockProjectPause reads it.
+type ProjectPause struct {
+	WavesPaused       bool
+	WavesPausedReason *string
+}
+
+// LockProjectPause reads the project's wave pause and holds its row shared until the
+// transaction ends, so a pause set meanwhile waits for the commit (rule 12). ErrNotFound for
+// an unknown project.
+func LockProjectPause(ctx context.Context, q Querier, projectID string) (ProjectPause, error) {
+	var p ProjectPause
+	err := q.QueryRow(ctx, `SELECT waves_paused, waves_paused_reason FROM projects WHERE id=$1 FOR SHARE`, projectID).
+		Scan(&p.WavesPaused, &p.WavesPausedReason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return p, ErrNotFound
+	}
+	return p, err
+}
+
 // TicketByRun returns the plan ticket the run builds, ErrNotFound for a run that builds none.
 func TicketByRun(ctx context.Context, q Querier, runID string) (*PlanTicket, error) {
 	rows, err := q.Query(ctx, `SELECT `+planTicketColumns+` FROM plan_tickets WHERE run_id=$1
@@ -551,6 +572,211 @@ func PlansWithTicketsInReviewSince(ctx context.Context, q Querier, since time.Ti
 			return nil, err
 		}
 		out = append(out, ids)
+	}
+	return out, rows.Err()
+}
+
+// ShipRef is the trigger_ref of the ship run of a plan's wave (DESIGN 5.29 rule 12).
+func ShipRef(planID string, wave int) string {
+	return "plan:" + planID + ":wave:" + strconv.Itoa(wave)
+}
+
+// ParseShipRef splits a ship run's trigger_ref; ok is false for any other text.
+func ParseShipRef(ref string) (planID string, wave int, ok bool) {
+	rest, found := strings.CutPrefix(ref, "plan:")
+	if !found {
+		return "", 0, false
+	}
+	i := strings.LastIndex(rest, ":wave:")
+	if i <= 0 {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(rest[i+len(":wave:"):])
+	if err != nil || n < 1 {
+		return "", 0, false
+	}
+	return rest[:i], n, true
+}
+
+// PlanMain is the default branch's status as the wave watcher last read it (rule 11).
+type PlanMain struct {
+	State string     `json:"state"`
+	SHA   string     `json:"sha"`
+	At    *time.Time `json:"at,omitempty"`
+	URL   string     `json:"url"`
+}
+
+// SetPlanMain records the watcher's read of the default branch. It reports whether the
+// state, sha or time changed from what was recorded.
+func SetPlanMain(ctx context.Context, q Querier, planID string, m PlanMain) (changed bool, err error) {
+	var at *time.Time
+	if m.At != nil && !m.At.IsZero() {
+		t := m.At.UTC()
+		at = &t
+	}
+	prev, err := GetPlanMain(ctx, q, planID)
+	if err != nil {
+		return false, err
+	}
+	if err := execPlanUpdate(ctx, q, `UPDATE plans SET main_state=$2, main_sha=$3, main_at=$4, main_url=$5 WHERE id=$1`,
+		planID, m.State, m.SHA, at, m.URL); err != nil {
+		return false, err
+	}
+	return prev == nil || prev.State != m.State || prev.SHA != m.SHA || prev.URL != m.URL ||
+		(prev.At == nil) != (at == nil) || (at != nil && !prev.At.Equal(*at)), nil
+}
+
+// GetPlanMain returns the recorded status of the default branch, nil before the first read.
+func GetPlanMain(ctx context.Context, q Querier, planID string) (*PlanMain, error) {
+	var state, sha, url *string
+	var at *time.Time
+	err := q.QueryRow(ctx, `SELECT main_state, main_sha, main_at, main_url FROM plans WHERE id=$1`, planID).Scan(&state, &sha, &at, &url)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil || state == nil {
+		return nil, err
+	}
+	m := &PlanMain{State: *state, At: at}
+	if sha != nil {
+		m.SHA = *sha
+	}
+	if url != nil {
+		m.URL = *url
+	}
+	return m, nil
+}
+
+// ShipRun is the ship run of one wave of a plan.
+type ShipRun struct {
+	Wave   int    `json:"wave"`
+	RunID  string `json:"run_id"`
+	Status string `json:"status"`
+}
+
+// ListShipRuns returns the plan's ship runs by wave (never nil).
+func ListShipRuns(ctx context.Context, q Querier, planID string) ([]ShipRun, error) {
+	rows, err := q.Query(ctx, `SELECT id, status, trigger_ref FROM runs WHERE trigger=$1 AND trigger_ref LIKE $2
+		ORDER BY created_at, id`, TriggerPlan, "plan:"+escapeLike(planID)+":wave:%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ShipRun{}
+	for rows.Next() {
+		var id, status, ref string
+		if err := rows.Scan(&id, &status, &ref); err != nil {
+			return nil, err
+		}
+		if pid, wave, ok := ParseShipRef(ref); ok && pid == planID {
+			out = append(out, ShipRun{Wave: wave, RunID: id, Status: status})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Wave < out[j].Wave })
+	return out, nil
+}
+
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+// LockPlan reads a plan and locks its row until the transaction ends, so the checks and
+// the writes that follow are one step (q must be a transaction). ErrNotFound for an unknown plan.
+func LockPlan(ctx context.Context, q Querier, id string) (*Plan, error) {
+	rows, err := q.Query(ctx, `SELECT `+planColumns+` FROM plans WHERE id=$1 FOR UPDATE`, id)
+	if err != nil {
+		return nil, err
+	}
+	p, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Plan])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return p, err
+}
+
+// MovePlan sets a plan's status and current wave only when its status is one of from, and
+// reports whether it did.
+func MovePlan(ctx context.Context, q Querier, id, to string, wave int, from ...string) (bool, error) {
+	tag, err := q.Exec(ctx, `UPDATE plans SET status=$2, current_wave=$3, updated_at=now()
+		WHERE id=$1 AND status = ANY($4)`, id, to, wave, from)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// FindPlanEvent returns the plan's oldest event of the kind, for the wave when wave > 0 and
+// for the run named in its detail when runID is not empty; ErrNotFound when there is none.
+func FindPlanEvent(ctx context.Context, q Querier, planID, kind string, wave int, runID string) (*PlanEvent, error) {
+	rows, err := q.Query(ctx, `SELECT `+planEventColumns+` FROM plan_events
+		WHERE plan_id=$1 AND kind=$2 AND ($3 = 0 OR wave=$3) AND ($4 = '' OR detail->>'run_id' = $4)
+		ORDER BY at, id LIMIT 1`, planID, kind, wave, runID)
+	if err != nil {
+		return nil, err
+	}
+	e, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[PlanEvent])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return e, err
+}
+
+// FindPlanEventRetry is FindPlanEvent for the event of one ending of a run: runID's event
+// whose detail carries retries (events written before the count existed read as 0).
+func FindPlanEventRetry(ctx context.Context, q Querier, planID, kind string, wave int, runID string, retries int) (*PlanEvent, error) {
+	rows, err := q.Query(ctx, `SELECT `+planEventColumns+` FROM plan_events
+		WHERE plan_id=$1 AND kind=$2 AND ($3 = 0 OR wave=$3) AND detail->>'run_id' = $4
+			AND COALESCE((detail->>'retries')::int, 0) = $5
+		ORDER BY at, id LIMIT 1`, planID, kind, wave, runID, retries)
+	if err != nil {
+		return nil, err
+	}
+	e, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[PlanEvent])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return e, err
+}
+
+// WaveTicketMerge is a ticket of a wave with what its merge request record says.
+type WaveTicketMerge struct {
+	PlanTicket
+	// MRState and MRNumber are those of the ticket's record; "" and 0 without one.
+	MRState  string
+	MRNumber int64
+	// MergedAt is when a merged record merged (closed_at, else updated_at); nil otherwise.
+	MergedAt *time.Time
+	// MRTitle and MRURL are the record's, "" without one; MergeSHA is the commit the
+	// provider says the merge made, "" when it said none.
+	MRTitle  string
+	MRURL    string
+	MergeSHA string
+}
+
+// ListWaveTickets returns the tickets of one wave of a plan with their merge request
+// records (rule 11), by ticket id.
+func ListWaveTickets(ctx context.Context, q Querier, planID string, wave int) ([]WaveTicketMerge, error) {
+	rows, err := q.Query(ctx, `SELECT `+qualify("t", planTicketColumns)+`, COALESCE(m.state, ''), COALESCE(m.number, 0),
+			CASE WHEN m.state = 'merged' THEN COALESCE(m.closed_at, m.updated_at) END,
+			COALESCE(m.title, ''), COALESCE(m.url, ''), COALESCE(m.merge_sha, '')
+		FROM plan_tickets t LEFT JOIN merge_requests m ON m.id = t.merge_request_id
+		WHERE t.plan_id=$1 AND t.wave=$2 ORDER BY length(t.ticket_id), t.ticket_id`, planID, wave)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []WaveTicketMerge{}
+	for rows.Next() {
+		var w WaveTicketMerge
+		t := &w.PlanTicket
+		if err := rows.Scan(&t.PlanID, &t.TicketID, &t.Wave, &t.Title, &t.IssueNumber, &t.IssueURL, &t.RunID, &t.MergeRequestID,
+			&t.Status, &t.UpdatedAt, &w.MRState, &w.MRNumber, &w.MergedAt, &w.MRTitle, &w.MRURL, &w.MergeSHA); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
 	}
 	return out, rows.Err()
 }

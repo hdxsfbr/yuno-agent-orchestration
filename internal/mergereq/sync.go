@@ -159,7 +159,18 @@ func (s *Sync) SyncOne(ctx context.Context, id string) (*store.MergeRequest, err
 // record that left open meanwhile (a sync saw the merge first) is returned as it is,
 // reported by whoever won. The error is a database one.
 func (s *Sync) MarkMerged(ctx context.Context, id, by string) (*store.MergeRequest, error) {
-	won, err := store.MarkMergeRequestMerged(ctx, s.Pool, id, by, s.now())
+	return s.markMerged(ctx, id, by, nil, "")
+}
+
+// markMerged is MarkMerged with the provider's merged_at and merge commit, which decide
+// whether a pipeline ran after the merge (rule 11): closed_at is the provider's clock when it
+// gave a time, the platform's only otherwise.
+func (s *Sync) markMerged(ctx context.Context, id, by string, mergedAt *time.Time, mergeSHA string) (*store.MergeRequest, error) {
+	var sha *string
+	if mergeSHA != "" {
+		sha = &mergeSHA
+	}
+	won, err := store.MarkMergeRequestMergedAs(ctx, s.Pool, id, by, s.now(), mergedAt, sha)
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +202,7 @@ func (s *Sync) ConfirmMerged(ctx context.Context, rec *store.MergeRequest, pc *p
 	var text string
 	switch {
 	case err == nil && st.State == store.MergeRequestMerged:
-		return s.MarkMerged(ctx, rec.ID, by)
+		return s.markMerged(ctx, rec.ID, by, st.ClosedAt, st.MergeSHA)
 	case err == nil:
 		text = "the provider accepted the merge but reports the request as " + st.State
 	case ctx.Err() != nil:
@@ -253,6 +264,9 @@ func (s *Sync) refresh(ctx context.Context, rec *store.MergeRequest) (cur *store
 	}
 	u := store.MergeRequestSync{State: st.State, CIStatus: st.CIStatus, UnresolvedThreads: st.UnresolvedThreads,
 		SyncedAt: now, ClosedAt: st.ClosedAt}
+	if st.MergeSHA != "" && st.State == store.MergeRequestMerged {
+		u.MergeSHA = &st.MergeSHA
+	}
 	if st.HeadSHA != "" {
 		u.HeadSHA = &st.HeadSHA
 	}

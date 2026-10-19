@@ -32,6 +32,27 @@ func TestShippedSuiteSizeAndSplit(t *testing.T) {
 	}
 }
 
+// projectCaseBudget bounds the sum of the step timeouts of a case on the fake forge, in seconds.
+const projectCaseBudget = 6000
+
+// projectStepBudget is the longest the steps of a project case can wait, in seconds.
+func projectStepBudget(c Case) int {
+	sum := 0
+	for _, st := range c.Steps {
+		switch {
+		case st.Forge != nil:
+			sum += stepTimeoutSeconds(st.Forge.TimeoutSeconds)
+		case st.Wait != nil:
+			sum += stepTimeoutSeconds(st.Wait.TimeoutSeconds)
+		case st.Approve != nil:
+			sum += stepTimeoutSeconds(st.Approve.TimeoutSeconds)
+		case st.Hold != nil:
+			sum += st.Hold.Seconds
+		}
+	}
+	return sum
+}
+
 // Every shipped case finishes inside 45 s when the platform behaves: the estimate adds
 // what the case makes the runner or the engine wait for.
 func TestEveryShippedCaseFitsTheTimeBudget(t *testing.T) {
@@ -61,6 +82,14 @@ func TestEveryShippedCaseFitsTheTimeBudget(t *testing.T) {
 					}
 				}
 			}
+		}
+		if c.Project != nil {
+			// A case on the fake forge waits for the platform's own loops and for runs the
+			// platform starts: its budget is the sum of its steps' timeouts, bounded apart.
+			if sum := projectStepBudget(c); sum > projectCaseBudget {
+				t.Errorf("%s: its steps may wait %d s in all, over the %d s budget of a project case", c.ID, sum, projectCaseBudget)
+			}
+			continue
 		}
 		if est > budget {
 			t.Errorf("%s is estimated at %d s, over the %d s budget", c.ID, est, budget)

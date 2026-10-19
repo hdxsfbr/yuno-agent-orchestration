@@ -76,6 +76,28 @@ func TestPlansAPI(t *testing.T) {
 		d.Tickets[0].TicketID != tickets[0].TicketID || d.Tickets[2].Wave != 2 {
 		t.Fatalf("detail: %d %s", code, body)
 	}
+	if !strings.Contains(string(body), `"main":null`) || !strings.Contains(string(body), `"ship_runs":[]`) {
+		t.Fatalf("a plan the watcher has not read has main null and no ship runs: %s", body)
+	}
+	// Rule 11 and 12: the watcher's last read of the default branch and the wave's ship run.
+	at := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.SetPlanMain(ctx, testPool, open.ID, store.PlanMain{State: "passed", SHA: "abc", At: &at, URL: "https://ci.test/9"}); err != nil {
+		t.Fatal(err)
+	}
+	shipWF := &store.Workflow{Name: "ship " + store.NewID(), Definition: json.RawMessage(`{"nodes":[],"edges":[]}`)}
+	mustDo(t, store.CreateWorkflow(ctx, testPool, shipWF))
+	ref := store.ShipRef(open.ID, 1)
+	ship := &store.Run{WorkflowID: shipWF.ID, WorkflowVersion: 1, WorkflowSnapshot: shipWF.Definition, Trigger: store.TriggerPlan, TriggerRef: &ref}
+	mustDo(t, store.CreateRun(ctx, testPool, ship))
+	code, body = call(http.MethodGet, "/api/plans/"+open.ID, "", true)
+	var d2 struct {
+		Main     *store.PlanMain `json:"main"`
+		ShipRuns []store.ShipRun `json:"ship_runs"`
+	}
+	if code != http.StatusOK || json.Unmarshal(body, &d2) != nil || d2.Main == nil || d2.Main.State != "passed" || d2.Main.SHA != "abc" ||
+		d2.Main.At == nil || !d2.Main.At.Equal(at) || len(d2.ShipRuns) != 1 || d2.ShipRuns[0].Wave != 1 || d2.ShipRuns[0].RunID != ship.ID {
+		t.Fatalf("detail with main and ship runs: %d %s", code, body)
+	}
 	if code, _ := call(http.MethodGet, "/api/plans/no-such", "", true); code != http.StatusNotFound {
 		t.Fatalf("unknown plan: %d", code)
 	}

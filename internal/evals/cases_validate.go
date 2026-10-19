@@ -61,6 +61,7 @@ func (c Case) Validate(dirVersion string) error {
 	}
 	c.validateScript(add)
 	c.validateActions(add)
+	c.validateProject(add)
 	c.validateExpect(add)
 	c.validateRubric(add)
 
@@ -156,24 +157,28 @@ func (c Case) validateScript(add func(string, ...any)) {
 		add("script has steps but the workflow has no agent node to play them")
 	}
 	for i, s := range c.Script {
-		n := i + 1
-		hasText := strings.TrimSpace(s.Text) != ""
-		switch {
-		case s.Tool != nil && hasText:
-			add("script step %d has both text and tool", n)
-		case s.Tool == nil && !hasText:
-			add("script step %d has neither text nor tool", n)
-		case s.Tool != nil && strings.TrimSpace(s.Tool.Name) == "":
-			add("script step %d: tool name is required", n)
+		checkScriptStep(fmt.Sprintf("script step %d", i+1), s, add)
+	}
+}
+
+// checkScriptStep checks one scripted model response: exactly one of text or tool.
+func checkScriptStep(at string, s ScriptStep, add func(string, ...any)) {
+	hasText := strings.TrimSpace(s.Text) != ""
+	switch {
+	case s.Tool != nil && hasText:
+		add("%s has both text and tool", at)
+	case s.Tool == nil && !hasText:
+		add("%s has neither text nor tool", at)
+	case s.Tool != nil && strings.TrimSpace(s.Tool.Name) == "":
+		add("%s: tool name is required", at)
+	}
+	if s.Tool != nil {
+		if _, err := json.Marshal(s.Tool.Args); err != nil {
+			add("%s: tool args are not JSON-encodable: %v", at, err)
 		}
-		if s.Tool != nil {
-			if _, err := json.Marshal(s.Tool.Args); err != nil {
-				add("script step %d: tool args are not JSON-encodable: %v", n, err)
-			}
-		}
-		if s.Usage != nil && (s.Usage.Prompt < 0 || s.Usage.Completion < 0) {
-			add("script step %d: usage must not be negative", n)
-		}
+	}
+	if s.Usage != nil && (s.Usage.Prompt < 0 || s.Usage.Completion < 0) {
+		add("%s: usage must not be negative", at)
 	}
 }
 

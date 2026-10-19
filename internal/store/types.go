@@ -49,6 +49,9 @@ const (
 	// TriggerIssue marks a run the intake loop created for a labelled issue; its
 	// trigger_ref is "<project id>#<n>" (DESIGN 5.23 units).
 	TriggerIssue = "issue"
+	// TriggerPlan marks a ship run the wave watcher started; its trigger_ref is
+	// "plan:<plan id>:wave:<n>" (DESIGN 5.29 rule 12), unique by runs_plan_wave_idx.
+	TriggerPlan = "plan"
 )
 
 // ErrMergeRequestBusy is CreateRun's and RetryRun's answer when another live run already

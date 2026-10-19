@@ -1,0 +1,444 @@
+id: 028-wave-auto-advance-pause
+version: v1
+split: public
+description: A plan of two waves, one ticket each, runs to the end on the fake forge with every agent turn scripted. The plan run writes the plan and publishes its tickets as issues (publish_tickets), the plan merge request merges and the watcher releases wave 1, intake takes the issue and the wave pipeline builds the ticket to a ready merge request, the forge merges it and main goes green, the watcher starts the ship run, the operator's smoke test is approved and advance_wave closes wave 1 and releases wave 2. The operator then pauses the project's waves; wave 2 is built and merged with main green, and no ship run starts for it until the waves are resumed. The same follows for wave 2, the operator accepts the feature and the plan is done.
+workflow:
+  project: true
+  input_schema:
+    type: object
+    properties:
+      task: { type: string, description: The feature to plan }
+      feature: { type: string, description: "Feature slug, lowercase letters, digits and dashes" }
+    required: [task, feature]
+    additionalProperties: true
+  nodes:
+    - { id: start, kind: start }
+    - id: slicer
+      kind: agent
+      agent_name: planner
+      task: |
+        Slice the feature {{.input.feature}} into tickets. Write the documents PRD.md, ARCHITECTURE.md and TASKS.md to docs/plans/{{.input.feature}}/ in the checkout and finish with the tickets.
+
+        {{.input.task}}
+      output_schema:
+        type: object
+        properties:
+          tickets:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              properties:
+                id: { type: string, pattern: "^T[0-9]+$" }
+                title: { type: string }
+                slice: { type: string, minLength: 1 }
+                files: { type: array, items: { type: string }, minItems: 1 }
+                tests: { type: array, items: { type: string }, minItems: 1 }
+              required: [id, title, slice, files, tests]
+              additionalProperties: true
+        required: [tickets]
+        additionalProperties: true
+      input_from: [start]
+    - id: waves
+      kind: agent
+      agent_name: planner
+      task: |
+        Group the tickets of {{.input.feature}} into waves and write docs/plans/{{.input.feature}}/WAVES.md in the checkout. Tickets: {{range .state.slicer.tickets}}{{.id}} {{.title}}; {{end}}Finish with the waves.
+      output_schema:
+        type: object
+        properties:
+          waves:
+            type: array
+            minItems: 1
+            items:
+              type: object
+              properties:
+                n: { type: integer, minimum: 1 }
+                tickets: { type: array, items: { type: string }, minItems: 1, uniqueItems: true }
+              required: [n, tickets]
+        required: [waves]
+        additionalProperties: true
+      input_from: [slicer]
+      checks: [waves_partition]
+    - id: integrator
+      kind: agent
+      agent_name: publisher
+      task: |
+        Publish the plan of {{.input.feature}} in two steps. First open one merge request with open_merge_request and paths ["docs/plans/{{.input.feature}}"], titled "Plan: {{.input.feature}}". Then call publish_tickets with only your run_token. Waves: {{range .state.waves.waves}}wave {{.n}}: {{range .tickets}}{{.}} {{end}}{{end}}Finish with status "published".
+      output_schema:
+        type: object
+        properties:
+          status: { type: string }
+        required: [status]
+        additionalProperties: true
+      input_from: [slicer, waves]
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: slicer }
+    - { from: slicer, to: waves }
+    - { from: waves, to: integrator }
+    - { from: integrator, to: end }
+  limits:
+    max_steps: 60
+    max_duration_seconds: 600
+    max_node_iterations: 12
+    max_loop_visits: 3
+    max_cost_usd: 2
+    max_tool_calls: 80
+input:
+  task: >-
+    Add a greeting feature to a small Python library: greet(name) returns "Hello, <name>!" and
+    "Hello, stranger!" for a blank name, and a command line prints it.
+  feature: greeting
+agents:
+  planner:
+    name: Planner
+    system_prompt: |
+      You slice a feature into tickets and group them into waves. Write the plan documents inside the
+      project checkout where the task says, then call yuno__finish with the result.
+    tool_allowlist: [write, ls, finish]
+  publisher:
+    name: Publisher
+    system_prompt: |
+      You publish an approved plan: one merge request with the plan documents, then the tickets as
+      tracker issues. Never create issues another way. If a tool answers that the action was rejected,
+      report that status and stop.
+    tool_allowlist: [open_merge_request, publish_tickets, finish]
+project:
+  # Intake takes a released issue within one poll; the wave pipeline and the ship pipeline are the
+  # shipped templates as the seed instantiated them.
+  max_cost_usd_per_day: 5
+  intake:
+    enabled: true
+    label: yuno
+    workflow: Wave pipeline
+  timeout_seconds: 600
+  # The runs the platform starts by itself, scripted in the order it starts them: the two tickets'
+  # runs (issue) and the two waves' ship runs (plan).
+  platform_runs:
+    - trigger: issue
+      script:
+          - tool:
+              name: write
+              args:
+                path: "runs/$RUN_ID/repo/greet.py"
+                content: "def greet(name):\n    name = (name or \"\").strip()\n    return \"Hello, %s!\" % (name or \"stranger\")\n"
+          - tool:
+              name: write
+              args:
+                path: "runs/$RUN_ID/repo/test_greet.py"
+                content: "from greet import greet\n\n\ndef test_greet():\n    assert greet(\"Ada\") == \"Hello, Ada!\"\n    assert greet(\" \") == \"Hello, stranger!\"\n"
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  summary: "Greet a name and a blank name: the failing tests first, then the code, and the whole suite passes."
+                  files: ["greet.py", "test_greet.py"]
+                  tests_passed: true
+          - text: The ticket is built and the result has been submitted.
+          # code_review
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  verdict: approved
+                  comments: The change does what the ticket asks, nothing else, and its tests pass.
+          - text: The review is done and the result has been submitted.
+          # integrator_draft
+          - tool:
+              name: yuno__open_merge_request
+              args:
+                run_token: "$RUN_TOKEN"
+                title: "Greet a name and a blank name"
+                description: "Ticket T1 of the greeting feature, opened as a draft for the manual test."
+                draft: true
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  merge_request_url: the draft merge request of this run
+                  branch: the branch of the draft merge request
+          - text: The draft merge request is open and the result has been submitted.
+          # doc_audit, after the manual test
+          - tool:
+              name: write
+              args:
+                path: "runs/$RUN_ID/repo/docs/plans/greeting/tickets/T1.md"
+                content: "# T1 trace\n\nGreet a name and a blank name: implemented in greet.py and proved by its tests.\n"
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  verdict: ok
+                  trace_path: docs/plans/greeting/tickets/T1.md
+                  feature: greeting
+          - text: The audit is done and the result has been submitted.
+          # integrator_ready
+          - tool:
+              name: yuno__open_merge_request
+              args:
+                run_token: "$RUN_TOKEN"
+                title: "Greet a name and a blank name"
+                description: "Ticket T1 with its requirement trace, manually tested."
+                draft: false
+                paths: [docs/plans/greeting]
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  merge_request_url: the merge request of this run, ready for review
+          - text: The merge request is ready and the result has been submitted.
+    - trigger: plan
+      script:
+          - tool:
+              name: yuno__advance_wave
+              args:
+                run_token: "$RUN_TOKEN"
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  wave: 1
+                  last: false
+                  lessons: ["Wave 1 of the greeting feature shipped; keep each ticket to its own files."]
+          - text: The wave is closed out and the result has been submitted.
+    - trigger: issue
+      script:
+          - tool:
+              name: write
+              args:
+                path: "runs/$RUN_ID/repo/cli.py"
+                content: "import sys\n\nfrom greet import greet\n\nif __name__ == \"__main__\":\n    print(greet(\" \".join(sys.argv[1:])))\n"
+          - tool:
+              name: write
+              args:
+                path: "runs/$RUN_ID/repo/test_cli.py"
+                content: "import subprocess\nimport sys\n\n\ndef test_cli():\n    out = subprocess.run([sys.executable, \"cli.py\", \"Ada\"], capture_output=True, text=True).stdout\n    assert out.strip() == \"Hello, Ada!\"\n"
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  summary: "Print the greeting from the command line: the failing tests first, then the code, and the whole suite passes."
+                  files: ["cli.py", "test_cli.py"]
+                  tests_passed: true
+          - text: The ticket is built and the result has been submitted.
+          # code_review
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  verdict: approved
+                  comments: The change does what the ticket asks, nothing else, and its tests pass.
+          - text: The review is done and the result has been submitted.
+          # integrator_draft
+          - tool:
+              name: yuno__open_merge_request
+              args:
+                run_token: "$RUN_TOKEN"
+                title: "Print the greeting from the command line"
+                description: "Ticket T2 of the greeting feature, opened as a draft for the manual test."
+                draft: true
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  merge_request_url: the draft merge request of this run
+                  branch: the branch of the draft merge request
+          - text: The draft merge request is open and the result has been submitted.
+          # doc_audit, after the manual test
+          - tool:
+              name: write
+              args:
+                path: "runs/$RUN_ID/repo/docs/plans/greeting/tickets/T2.md"
+                content: "# T2 trace\n\nPrint the greeting from the command line: implemented in cli.py and proved by its tests.\n"
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  verdict: ok
+                  trace_path: docs/plans/greeting/tickets/T2.md
+                  feature: greeting
+          - text: The audit is done and the result has been submitted.
+          # integrator_ready
+          - tool:
+              name: yuno__open_merge_request
+              args:
+                run_token: "$RUN_TOKEN"
+                title: "Print the greeting from the command line"
+                description: "Ticket T2 with its requirement trace, manually tested."
+                draft: false
+                paths: [docs/plans/greeting]
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  merge_request_url: the merge request of this run, ready for review
+          - text: The merge request is ready and the result has been submitted.
+    - trigger: plan
+      script:
+          - tool:
+              name: yuno__advance_wave
+              args:
+                run_token: "$RUN_TOKEN"
+          - tool:
+              name: yuno__finish
+              args:
+                run_token: "$RUN_TOKEN"
+                result:
+                  wave: 2
+                  last: true
+                  lessons: ["Wave 2 of the greeting feature shipped; keep each ticket to its own files."]
+          - text: The wave is closed out and the result has been submitted.
+steps:
+  # The plan run publishes the plan: the issues exist, the plan waits for its merge request.
+  - wait: { plan_status: waiting_plan_merge, timeout_seconds: 300 }
+  - forge:
+      expect_issues:
+        - { title_contains: "[greeting T1]", labels: ["wave:1", "feature:greeting"], state: opened }
+        - { title_contains: "[greeting T2]", labels: ["wave:2", "feature:greeting"], state: opened }
+      timeout_seconds: 60
+  # Merging the plan merge request releases wave 1: its issue gets the intake label, intake takes it.
+  - forge: { merge_open: { count: 1 }, timeout_seconds: 120 }
+  - wait: { plan_event: wave_released, wave: 1, timeout_seconds: 300 }
+  - forge:
+      expect_issues:
+        - { title_contains: "[greeting T1]", labels: ["yuno:running"], state: opened }
+      timeout_seconds: 300
+  # Wave 1's ticket run: the draft merge request, the operator's manual test, the ready merge request.
+  - approve: { decision: approve, node: integrator_draft, reason: Open the draft merge request., timeout_seconds: 300 }
+  - approve: { decision: approve, node: manual_test, reason: The branch works., timeout_seconds: 300 }
+  # The forge merges it and main goes green; the watcher then starts the ship run.
+  - forge: { merge_open: { count: 1 }, timeout_seconds: 300 }
+  - forge: { pipeline: passed }
+  - wait: { ticket_status: merged, wave: 1, timeout_seconds: 300 }
+  - approve: { decision: approve, node: smoke_test, reason: The deployed app works., timeout_seconds: 300 }
+  # advance_wave closes wave 1 and releases wave 2.
+  - wait: { plan_event: wave_done, wave: 1, timeout_seconds: 300 }
+  - wait: { plan_event: wave_released, wave: 2, timeout_seconds: 60 }
+  - forge:
+      expect_issues:
+        - { title_contains: "[greeting T1]", state: closed }
+      timeout_seconds: 60
+  # The operator pauses the waves. Wave 2 is built and merged, main is green, and no ship run starts.
+  - pause_waves: Holding wave 2 for a check before it ships.
+  - approve: { decision: approve, node: integrator_draft, reason: Open the draft merge request., timeout_seconds: 300 }
+  - approve: { decision: approve, node: manual_test, reason: The branch works., timeout_seconds: 300 }
+  - forge: { merge_open: { count: 1 }, timeout_seconds: 300 }
+  - forge: { pipeline: passed }
+  - wait: { ticket_status: merged, wave: 2, timeout_seconds: 300 }
+  - hold: { no_ship_run: 2, seconds: 30 }
+  # Resumed, the watcher ships wave 2.
+  - resume_waves: true
+  - approve: { decision: approve, node: smoke_test, reason: The deployed app works., timeout_seconds: 300 }
+  - wait: { plan_event: wave_done, wave: 2, timeout_seconds: 300 }
+  - approve: { decision: approve, node: accept_feature, reason: The live app matches the PRD., timeout_seconds: 300 }
+  - wait: { plan_status: done, timeout_seconds: 120 }
+  - wait: { plan_event: feature_done, timeout_seconds: 60 }
+script:
+  # slicer
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/repo/docs/plans/greeting/PRD.md"
+        content: |
+          # Greeting
+
+          greet(name) returns "Hello, <name>!" and "Hello, stranger!" for a blank name; a command line prints it.
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/repo/docs/plans/greeting/ARCHITECTURE.md"
+        content: |
+          # Architecture
+
+          greet.py holds the pure function greet(name); cli.py prints greet(argument).
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/repo/docs/plans/greeting/TASKS.md"
+        content: |
+          # Tasks
+
+          - T1 Greet a name and a blank name. Files: greet.py, test_greet.py. Tests: test_greet.
+          - T2 Print the greeting from the command line. Files: cli.py, test_cli.py. Tests: test_cli.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          tickets:
+            - { id: T1, title: Greet a name and a blank name, slice: A pure greet function that greets a name and a stranger for a blank one., files: [greet.py, test_greet.py], tests: [test_greet] }
+            - { id: T2, title: Print the greeting from the command line, slice: A command line that prints the greeting for the name it is given., files: [cli.py, test_cli.py], tests: [test_cli] }
+  - text: The tickets are written and the result has been submitted.
+  # waves
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/repo/docs/plans/greeting/WAVES.md"
+        content: |
+          # Waves
+
+          - Wave 1: T1
+          - Wave 2: T2 (needs greet from T1)
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          waves:
+            - { n: 1, tickets: [T1] }
+            - { n: 2, tickets: [T2] }
+  - text: The waves are written and the result has been submitted.
+  # integrator: the plan merge request, then the issues
+  - tool:
+      name: yuno__open_merge_request
+      args:
+        run_token: "$RUN_TOKEN"
+        title: "Plan: greeting"
+        description: The plan documents of the greeting feature, two waves of one ticket each.
+        paths: [docs/plans/greeting]
+  - tool:
+      name: yuno__publish_tickets
+      args:
+        run_token: "$RUN_TOKEN"
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          status: published
+  - text: The plan is published and the result has been submitted.
+actions:
+  approvals:
+    # The two side effects of the plan run: the plan merge request, then the issues.
+    - { decision: approve, reason: Open the plan merge request. }
+    - { decision: approve, reason: Publish the tickets as issues. }
+expect:
+  status: succeeded
+  min_model_calls: 12
+  min_tool_calls: 9
+  min_agent_messages: 3
+  state:
+    "/integrator/status": published
+  tool_statuses:
+    open_merge_request: [executed]
+    publish_tickets: [executed]
+  approval_statuses: [approved, approved]
+rubric:
+  - criterion: The planner sliced the feature into two tickets, T1 and T2.
+    check: { path: /slicer/tickets/1/id, json_path_eq: T2 }
+  - criterion: The waves put T1 in wave 1 and T2 in wave 2, so each wave has one ticket.
+    check: { path: /waves/waves/1/tickets/0, json_path_eq: T2 }
+  - criterion: The integrator opened the plan merge request and published the tickets with publish_tickets.
+    check: { path: /integrator/status, json_path_eq: published }

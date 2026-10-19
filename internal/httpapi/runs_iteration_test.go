@@ -76,6 +76,24 @@ func runIDs(t *testing.T, body []byte) []string {
 	return ids
 }
 
+// DESIGN 5.29 rule 12 (wave 3 review M2): GET /api/runs?trigger=plan lists the ship runs.
+func TestRunsListFiltersOnPlanTrigger(t *testing.T) {
+	pool := needDB(t)
+	_, ts := newTestServer(t, pool, &fakeEngine{pool: pool}, nil)
+	p := seedProject(t, nil, "plan-list-"+uniqueSuffix(), "")
+	ref := store.ShipRef(store.NewID(), 1)
+	plain := projectRun(t, p)
+	setRunStatus(t, plain.ID, store.RunSucceeded)
+	ship := *plain
+	ship.ID, ship.Trigger, ship.TriggerRef, ship.Status = "", store.TriggerPlan, &ref, store.RunQueued
+	mustDo(t, store.CreateRun(context.Background(), testPool, &ship))
+
+	code, body := do(t, ts, http.MethodGet, "/api/runs?trigger=plan&project_id="+p.ID, "")
+	if got := runIDs(t, body); code != http.StatusOK || !slices.Equal(got, []string{ship.ID}) || slices.Contains(got, plain.ID) {
+		t.Fatalf("GET /api/runs?trigger=plan: %d %v, want only %s", code, got, ship.ID)
+	}
+}
+
 // T5.22.11, DESIGN 5.22 rules 1 and 11: GET /api/runs filters on trigger and on the merge
 // request the run names (newest first, with the older filters); an unknown trigger is a
 // 422 detail; Run carries merge_request_id, checkout_sha and the named record as
@@ -135,7 +153,7 @@ func TestRunsListFiltersOnTriggerAndMergeRequest(t *testing.T) {
 		var fe []fieldError
 		mustDo(t, json.Unmarshal(decodeError(t, body).Error.Details, &fe))
 		if code != http.StatusUnprocessableEntity || len(fe) != 1 || fe[0].Path != "trigger" ||
-			fe[0].Message != "must be one of manual, schedule, channel, eval, issue" {
+			fe[0].Message != "must be one of manual, schedule, channel, eval, issue, plan" {
 			t.Errorf("GET /api/runs?%s: %d %s", q, code, body)
 		}
 	}

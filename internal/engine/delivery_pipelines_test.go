@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"yuno/internal/openclaw"
@@ -478,5 +480,256 @@ func TestStrictStateSchemaIgnoresGateEntries(t *testing.T) {
 	}
 	if r.Status != store.RunSucceeded {
 		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+}
+
+const shipInput = `{"plan_id":"p1","feature":"x","wave":1,"last_wave":2}`
+
+// shipRun starts a ship pipeline run whose integrator calls advance_wave once, through the
+// real tool with a fake AdvanceWave that reports last, and finishes with the tool's answer.
+// The tool-call gate (auto_after) is httpapi's and has its own tests (T5.29.4); here the
+// call is made directly, as the escalate test does. It returns the run waiting at
+// smoke_test, the count of advance calls and the scripted sender.
+func shipRun(t *testing.T, env *testEnv, last bool) (*store.Run, *int32, *scripted) {
+	t.Helper()
+	ctx := context.Background()
+	wf := templatePipeline(t, env, "ship_pipeline.json")
+	sc := env.script(map[string][]string{})
+	var calls int32
+	var runID atomic.Value
+	tool := tools.NewAdvanceWave(tools.AdvanceWaveDeps{
+		AdvanceWave: func(_ context.Context, id string) (tools.AdvanceResult, error) {
+			atomic.AddInt32(&calls, 1)
+			return tools.AdvanceResult{PlanID: "p1", Wave: 1, Closed: 2, Released: 1, Last: last}, nil
+		},
+		RunIDForToken: func(string) (string, bool) { id, _ := runID.Load().(string); return id, id != "" },
+	})
+	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
+		node, _ := visitOf(p.SessionKey)
+		sc.mu.Lock()
+		sc.messages[node] = append(sc.messages[node], p.Message)
+		sc.mu.Unlock()
+		if node != "integrator" {
+			t.Errorf("unexpected visit of %s", node)
+			return startedTurn(p)
+		}
+		go func() {
+			res, err := tool.Exec(ctx, tools.Call{RunID: runID.Load().(string), Input: json.RawMessage(`{"run_token":"` + tokenIn(p.Message) + `"}`)})
+			if err != nil || !strings.Contains(string(res.Output), `"plan_id":"p1"`) {
+				t.Errorf("advance_wave: %v %+v", err, res)
+			}
+			finishThenFinal(t, env, p, `{"wave":1,"last":`+strconv.FormatBool(last)+`,"lessons":["pin the migration order","smoke test the export"]}`)
+		}()
+		return startedTurn(p)
+	}
+	run, err := env.e.Trigger(ctx, TriggerRequest{WorkflowID: wf.ID, Input: json.RawMessage(shipInput)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID.Store(run.ID)
+	r := env.resume(env.e, run.ID)
+	if r.Status != store.RunWaitingApproval || deref(r.CurrentNode) != "smoke_test" {
+		t.Fatalf("run = %s at %s %q", r.Status, deref(r.CurrentNode), deref(r.FailureReason))
+	}
+	return r, &calls, sc
+}
+
+// DESIGN 5.29 rule 13: a wave that is not the last ends after the integrator. The smoke
+// test message names the wave and the feature; the integrator's task asks for project
+// notes and one advance_wave; the call needs no approval of its own (auto_after).
+func TestShipPipelineWaveNotLast(t *testing.T) {
+	ctx := context.Background()
+	env := newEnv(t)
+	r, calls, sc := shipRun(t, env, false)
+	a := pendingApproval(t, env, r.ID)
+	for _, want := range []string{"Wave 1 of x", "Smoke test the deployed app", "passed"} {
+		if !strings.Contains(a.Message, want) {
+			t.Fatalf("smoke_test message lacks %q:\n%s", want, a.Message)
+		}
+	}
+	if m := sc.message("integrator", 1); m != "" {
+		t.Fatalf("the integrator ran before the smoke test:\n%s", m)
+	}
+	if _, err := env.e.DecideApproval(ctx, a.ID, DecisionApprove, "andre", ""); err != nil {
+		t.Fatal(err)
+	}
+	r = env.resume(env.e, r.ID)
+	if r.Status != store.RunSucceeded {
+		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+	if got := visitsOf(runNodes(t, env, r.ID)); !slices.Equal(got, []string{"smoke_test#1:succeeded", "integrator#1:succeeded"}) {
+		t.Fatalf("visits = %v", got)
+	}
+	if n := atomic.LoadInt32(calls); n != 1 {
+		t.Fatalf("advance_wave calls = %d", n)
+	}
+	if m := sc.message("integrator", 1); !strings.Contains(m, "memory_save") || !strings.Contains(m, `scope "project"`) ||
+		!strings.Contains(m, "advance_wave exactly once") || !strings.Contains(m, "kind other") || !strings.Contains(m, "wave 1") {
+		t.Fatalf("integrator task:\n%s", m)
+	}
+	if st := stateOf(t, r); st["integrator"] == nil {
+		t.Fatalf("state = %v", st)
+	}
+}
+
+// DESIGN 5.29 rules 13 and 15: after the last wave the operator checks the live app
+// against the PRD; approving ends the run, rejecting fails it with the operator's reason
+// (the plan side turns that into a pause).
+func TestShipPipelineLastWaveAccepts(t *testing.T) {
+	ctx := context.Background()
+	for _, decision := range []string{DecisionApprove, DecisionReject} {
+		env := newEnv(t)
+		r, calls, _ := shipRun(t, env, true)
+		a := pendingApproval(t, env, r.ID)
+		if _, err := env.e.DecideApproval(ctx, a.ID, DecisionApprove, "andre", ""); err != nil {
+			t.Fatal(err)
+		}
+		r = env.resume(env.e, r.ID)
+		if r.Status != store.RunWaitingApproval || deref(r.CurrentNode) != "accept_feature" {
+			t.Fatalf("run = %s at %s %q", r.Status, deref(r.CurrentNode), deref(r.FailureReason))
+		}
+		a = pendingApproval(t, env, r.ID)
+		for _, want := range []string{"docs/plans/x/PRD.md", "live app", "Approve to finish", "Reject with what is missing"} {
+			if !strings.Contains(a.Message, want) {
+				t.Fatalf("accept_feature message lacks %q:\n%s", want, a.Message)
+			}
+		}
+		if _, err := env.e.DecideApproval(ctx, a.ID, decision, "andre", "the export is missing"); err != nil {
+			t.Fatal(err)
+		}
+		r = env.resume(env.e, r.ID)
+		if decision == DecisionApprove {
+			want := []string{"smoke_test#1:succeeded", "integrator#1:succeeded", "accept_feature#1:succeeded"}
+			if got := visitsOf(runNodes(t, env, r.ID)); r.Status != store.RunSucceeded || !slices.Equal(got, want) {
+				t.Fatalf("approved: run = %s %q visits %v", r.Status, deref(r.FailureReason), got)
+			}
+		} else if r.Status != store.RunFailed || deref(r.FailureReason) != "rejected at accept_feature: the export is missing" {
+			t.Fatalf("rejected: run = %s %q", r.Status, deref(r.FailureReason))
+		}
+		if n := atomic.LoadInt32(calls); n != 1 {
+			t.Fatalf("advance_wave calls = %d", n)
+		}
+	}
+}
+
+// DESIGN 5.29 rule 13: a rejected smoke test ends the run without the integrator, so
+// nothing is advanced (no on_reject; the plan side pauses the waves with the reason).
+func TestShipPipelineSmokeTestRejected(t *testing.T) {
+	ctx := context.Background()
+	env := newEnv(t)
+	r, calls, sc := shipRun(t, env, false)
+	a := pendingApproval(t, env, r.ID)
+	if _, err := env.e.DecideApproval(ctx, a.ID, DecisionReject, "andre", "login is broken"); err != nil {
+		t.Fatal(err)
+	}
+	r = env.resume(env.e, r.ID)
+	if r.Status != store.RunFailed || deref(r.FailureReason) != "rejected at smoke_test: login is broken" {
+		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+	if m := sc.message("integrator", 1); m != "" || atomic.LoadInt32(calls) != 0 {
+		t.Fatalf("the integrator ran after a rejection (calls %d):\n%s", atomic.LoadInt32(calls), m)
+	}
+}
+
+// DESIGN 5.29 rule 13 (review L4): the smoke test message lists the wave's merged merge
+// requests and links main's pipeline when the input carries them, and reads cleanly when
+// it carries neither.
+func TestShipPipelineSmokeTestMessage(t *testing.T) {
+	raw, err := os.ReadFile("../../templates/ship_pipeline.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tpl struct {
+		Definition workflow.Definition `json:"definition"`
+	}
+	if err := json.Unmarshal(raw, &tpl); err != nil {
+		t.Fatal(err)
+	}
+	node, ok := tpl.Definition.Node("smoke_test")
+	if !ok {
+		t.Fatal("no smoke_test node")
+	}
+	render := func(input string) string {
+		t.Helper()
+		out, err := workflow.Render(node.Message, json.RawMessage(input), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	full := render(`{"plan_id":"p1","feature":"x","wave":1,"last_wave":2,"main_url":"https://gitlab.test/g/d/-/pipelines/9",` +
+		`"merge_requests":[{"title":"Add login","url":"https://gitlab.test/g/d/-/merge_requests/3"},{"title":"Add logout"}]}`)
+	for _, want := range []string{"Merged in this wave:\n- Add login (https://gitlab.test/g/d/-/merge_requests/3)\n- Add logout\n",
+		"Pipeline on the default branch: https://gitlab.test/g/d/-/pipelines/9\n", "Smoke test the deployed app now."} {
+		if !strings.Contains(full, want) {
+			t.Errorf("message lacks %q:\n%s", want, full)
+		}
+	}
+	bare := render(shipInput)
+	want := "Wave 1 of x is merged and the pipeline on the default branch passed.\n\nSmoke test the deployed app now."
+	if !strings.HasPrefix(bare, want) || strings.Contains(bare, "Merged in this wave") || strings.Contains(bare, "Pipeline on the default branch:") ||
+		strings.Contains(bare, "<no value>") {
+		t.Errorf("message without the fields:\n%s", bare)
+	}
+}
+
+// DESIGN 5.29 rules 13 and 14: auto_after sits on the integrator only and names the smoke
+// test; the edges route on state.integrator.last; the template validates and a misplaced
+// auto_after is refused.
+func TestShipPipelineStructure(t *testing.T) {
+	raw, err := os.ReadFile("../../templates/ship_pipeline.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tpl struct {
+		Name       string              `json:"name"`
+		Definition workflow.Definition `json:"definition"`
+	}
+	if err := json.Unmarshal(raw, &tpl); err != nil {
+		t.Fatal(err)
+	}
+	def := &tpl.Definition
+	if tpl.Name != "Ship pipeline" || !def.Project {
+		t.Fatalf("name %q project %v", tpl.Name, def.Project)
+	}
+	for _, n := range def.Nodes {
+		if (n.AutoAfter != "") != (n.ID == "integrator") {
+			t.Errorf("node %s: auto_after = %q", n.ID, n.AutoAfter)
+		}
+		if n.Kind == workflow.KindApproval && n.OnReject != "" {
+			t.Errorf("approval %s has on_reject %q", n.ID, n.OnReject)
+		}
+	}
+	if n, _ := def.Node("integrator"); n == nil || n.AutoAfter != "smoke_test" || n.AgentName != "Integrator" {
+		t.Fatalf("integrator = %+v", n)
+	}
+	if err := def.ValidateStructure(); err != nil {
+		t.Fatalf("template invalid: %v", err)
+	}
+	if msgs := def.ValidateTemplates(json.RawMessage(shipInput)); len(msgs) > 0 {
+		t.Fatalf("templates: %v", msgs)
+	}
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
+	}
+	if err := json.Unmarshal(def.InputSchema, &schema); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"merge_requests", "main_url"} {
+		if _, ok := schema.Properties[k]; !ok || slices.Contains(schema.Required, k) {
+			t.Errorf("input %s: declared %v, required %v", k, ok, slices.Contains(schema.Required, k))
+		}
+	}
+	if def.Limits.MaxSteps > 60 {
+		t.Fatalf("limits = %+v", def.Limits)
+	}
+	for i := range def.Nodes {
+		if def.Nodes[i].ID == "integrator" {
+			def.Nodes[i].AutoAfter = "accept_feature" // an approval that comes after the integrator
+		}
+	}
+	if err := def.ValidateStructure(); err == nil {
+		t.Fatal("a misplaced auto_after was accepted")
 	}
 }
