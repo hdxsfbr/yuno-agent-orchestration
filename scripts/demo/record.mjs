@@ -21,9 +21,9 @@ const require = createRequire(path.join(process.env.PW_DIR || path.join(HERE, ".
 const { chromium } = require("playwright-core");
 
 /** Scenes that open the app (the others render files). */
-const NEEDS_APP = new Set(["02", "03", "04", "05", "07", "08"]);
+const NEEDS_APP = new Set(["02", "03", "04", "05", "06", "08", "09"]);
 /** The seeded agents the scenes name. */
-const DEMO_AGENTS = ["Coder", "Reviewer", "Deployer", "Researcher", "Critic", "Writer"];
+const DEMO_AGENTS = ["Coder", "Reviewer", "Deployer", "Researcher", "Critic", "Writer", "Chief of Staff"];
 
 function selectScenes() {
   const known = Object.keys(SCENES);

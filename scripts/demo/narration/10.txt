@@ -1,0 +1,1 @@
+The README has the architecture, why OpenClaw, the threat model and how to add a template or a channel; make run, make test and make eval are the whole interface. Thanks for watching.

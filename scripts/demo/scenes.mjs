@@ -1,4 +1,4 @@
-// The scenes of docs/demo-script.md that are recorded in a browser (2 to 8). Each is a function of a
+// The scenes of docs/demo-script.md that are recorded in a browser (2 to 9). Each is a function of a
 // page that already has a recording bound to it. Scenes that spend money or change state stop before
 // the state-changing click unless LIVE=1.
 //
@@ -66,12 +66,16 @@ export async function scene02(page) {
 
 // ---- scene 03, first part: the project the pipeline works on ---------------------------------------
 
-/** Whether the workflow scene 3 runs works on a project (its definition's `project` flag, DESIGN 5.17). */
-async function pipelineNeedsProject(page) {
-  const named = (list, name) => (list ?? []).find((w) => w.name === name);
-  // A new copy (LIVE=1) is made from the template; otherwise the existing copy decides, or the template when there is none.
-  const copy = cfg.live && process.env.NEW_COPY !== "0" ? undefined : named(await apiGet(page, "/api/workflows"), cfg.pipelineWorkflow);
-  const workflow = copy ?? named(await apiGet(page, "/api/workflow-templates"), cfg.pipelineTemplate);
+const named = (list, name) => (list ?? []).find((w) => w.name === name);
+
+/**
+ * Whether a workflow works on a project (its definition's `project` flag, DESIGN 5.17). `fresh` means a new copy
+ * is about to be made from the template, so the template decides; otherwise the existing copy does, or the
+ * template when there is none.
+ */
+async function workflowNeedsProject(page, workflowName, templateName, fresh) {
+  const copy = fresh ? undefined : named(await apiGet(page, "/api/workflows"), workflowName);
+  const workflow = copy ?? named(await apiGet(page, "/api/workflow-templates"), templateName);
   return !!workflow?.definition?.project;
 }
 
@@ -195,6 +199,35 @@ async function openExistingWorkflow(page, name) {
   return "none";
 }
 
+/**
+ * The Run dialog of the workflow open in the builder: the project (when the workflow asks for one), the task,
+ * and, with LIVE=1, Start run; the run id is then saved to state.json under `stateKey`. A dry run cancels the
+ * dialog and returns false. Shared by the dev pipeline and the review panel.
+ */
+async function startRun(page, name, { project, needsProject, task, stateKey }) {
+  await clickOn(page, page.getByRole("button", { name: "Run", exact: true }));
+  const dialog = page.getByRole("dialog", { name: rx(`Run ${name}`) });
+  await dialog.waitFor();
+  // The project the run works on comes first, when the workflow asks for one.
+  const picked = await pickProject(page, dialog, project);
+  // The input is "task"; another workflow (a dry run against one) may name its field differently.
+  const taskField = (await dialog.getByLabel("task").count()) ? dialog.getByLabel("task") : dialog.locator("textarea, input:not([type=checkbox])").first();
+  await typeInto(page, taskField, task);
+  await pause(page, 1500);
+  if (!cfg.live) {
+    // Dry run: everything up to, not including, the click that costs money.
+    await clickOn(page, dialog.getByRole("button", { name: "Cancel", exact: true }));
+    return false;
+  }
+  if (needsProject && !picked) throw new Error("the run form offers no project to run on");
+  await clickOn(page, dialog.getByRole("button", { name: "Start run", exact: true }));
+  await page.waitForURL(/\/runs\/[^/]+$/);
+  writeState({ [stateKey]: runIdFromUrl(page), recorded_at: new Date().toISOString() });
+  await runHeader(page).waitFor();
+  await pause(page, 3000);
+  return true;
+}
+
 export async function scene03(page) {
   let name = cfg.pipelineWorkflow; // the editable copy the builder shows
   const template = cfg.pipelineTemplate;
@@ -204,7 +237,7 @@ export async function scene03(page) {
   // A workflow that works on a project (the dev pipeline does) names one when its run starts, so the
   // scene registers the project first; another workflow stays on the Workflows page.
   let project = "";
-  const needsProject = await pipelineNeedsProject(page);
+  const needsProject = await workflowNeedsProject(page, cfg.pipelineWorkflow, cfg.pipelineTemplate, cfg.live && process.env.NEW_COPY !== "0");
   if (needsProject) {
     await clickOn(page, nav(page, "Projects"), { before: 0, after: 0 });
     await heading(page, "Projects").waitFor();
@@ -271,26 +304,7 @@ export async function scene03(page) {
   });
 
   if (!runnable) return;
-  await clickOn(page, page.getByRole("button", { name: "Run", exact: true }));
-  const dialog = page.getByRole("dialog", { name: rx(`Run ${name}`) });
-  await dialog.waitFor();
-  // The project the run works on comes first, when the workflow asks for one.
-  const picked = await pickProject(page, dialog, project);
-  // The dev pipeline's input is "task"; another workflow (a dry run against one) may name its field differently.
-  const taskField = (await dialog.getByLabel("task").count()) ? dialog.getByLabel("task") : dialog.locator("textarea, input:not([type=checkbox])").first();
-  await typeInto(page, taskField, cfg.pipelineTask);
-  await pause(page, 1500);
-  if (!cfg.live) {
-    // Dry run: everything up to, not including, the click that costs money.
-    await clickOn(page, dialog.getByRole("button", { name: "Cancel", exact: true }));
-    return;
-  }
-  if (needsProject && !picked) throw new Error("the run form offers no project to run on");
-  await clickOn(page, dialog.getByRole("button", { name: "Start run", exact: true }));
-  await page.waitForURL(/\/runs\/[^/]+$/);
-  writeState({ run_id: runIdFromUrl(page), recorded_at: new Date().toISOString() });
-  await runHeader(page).waitFor();
-  await pause(page, 3000);
+  await startRun(page, name, { project, needsProject, task: cfg.pipelineTask, stateKey: "run_id" });
 }
 
 // ---- scene 04: a successful run, live -------------------------------------------------------------
@@ -313,6 +327,56 @@ async function decide(page, card, button, reason) {
   await clickOn(page, card.getByRole("button", { name: button, exact: true }));
 }
 
+/**
+ * From a run that has reached its human gate: the inbox badge, the gate's approval, then the Deployer's
+ * side-effecting call (a merge request on a project, a release otherwise) and its approval, and the wait
+ * for the run to succeed. Returns the tool the Deployer called. Shared by the dev pipeline and the review panel.
+ */
+async function approveGateAndDeploy(page, runId, patience) {
+  await scrollTop(page, 2500);
+
+  // The inbox: the badge, the card, the decision.
+  await soft(page, "inbox badge", () => pointAt(page, nav(page, "Approvals"), 2500));
+  await clickOn(page, nav(page, "Approvals"));
+  await heading(page, "Approvals").waitFor();
+  const gate = page.locator("article").filter({ has: page.locator(`a[href="/runs/${runId}"]`) }).first();
+  await gate.waitFor({ timeout: 30_000 });
+  await pause(page, 3000);
+  await decide(page, gate, "Approve", "looks good");
+  await pause(page, 2500);
+  await page.goBack();
+  await runHeader(page).waitFor();
+
+  // Deployer asks to run a side-effecting tool: the call itself blocks. On a project it opens a merge
+  // request; a run without one publishes a release.
+  const pendingDeploy = page.locator("article").filter({ hasText: /open_merge_request|deploy_release/ }).filter({ has: page.getByRole("button", { name: "Approve", exact: true }) });
+  await waitCut(page, "deployer calls its side-effecting tool, which waits for approval", () => pendingDeploy.first().waitFor(patience));
+  const deploy = pendingDeploy.first();
+  const tool = /open_merge_request/.test((await deploy.textContent()) ?? "") ? "open_merge_request" : "deploy_release";
+  const opensRequest = tool === "open_merge_request";
+  await scrollTo(page, deploy, { offset: 120, dwell: 4500 });
+  await decide(page, deploy, "Approve", opensRequest ? "merge request looks right" : "release looks right");
+  await waitCut(page, opensRequest ? "the merge request is opened and the run finishes" : "release is published and the run finishes", () =>
+    runStatus(page).filter({ hasText: /succeeded/i }).waitFor(patience));
+  await soft(page, "failed or cancelled run", async () => {
+    if (!/succeeded/i.test((await runStatus(page).textContent()) ?? "")) throw new Error("the run did not succeed");
+  });
+  await pause(page, 2000);
+  return tool;
+}
+
+/** The merge request's address (or the release URL) is in the Deployer's tool call output. */
+async function showToolOutput(page, tool) {
+  await soft(page, `${tool} output`, async () => {
+    const node = nodeCard(page, "deployer");
+    await scrollTo(page, node, { dwell: 1500 });
+    // The Output of the side-effecting call itself (not of an earlier call in the same node).
+    const call = node.locator("li").filter({ hasText: new RegExp(`Tool call\\s*${tool}`) }).first();
+    await clickOn(page, call.locator("summary").filter({ hasText: /^Output/ }).first());
+    await pause(page, 4500);
+  });
+}
+
 export async function scene04(page) {
   await open(page, "/runs", heading(page, "Runs"));
   trimLoad(page);
@@ -333,45 +397,9 @@ export async function scene04(page) {
     await waitCut(page, "coder finishes, reviewer reviews", () => nodeCard(page, "reviewer").waitFor(patience));
     await soft(page, "agent message to the reviewer", () => scrollTo(page, countHeading(page, "Agent messages"), { dwell: 4500 }));
     await waitCut(page, "reviewer approves, run reaches the human gate", () => pendingNote(page).waitFor(patience));
-    await scrollTop(page, 2500);
 
-    // The inbox: the badge, the card, the decision.
-    await soft(page, "inbox badge", () => pointAt(page, nav(page, "Approvals"), 2500));
-    await clickOn(page, nav(page, "Approvals"));
-    await heading(page, "Approvals").waitFor();
-    const gate = page.locator("article").filter({ has: page.locator(`a[href="/runs/${runId}"]`) }).first();
-    await gate.waitFor({ timeout: 30_000 });
-    await pause(page, 3000);
-    await decide(page, gate, "Approve", "looks good");
-    await pause(page, 2500);
-    await page.goBack();
-    await runHeader(page).waitFor();
-
-    // Deployer asks to run a side-effecting tool: the call itself blocks. On a project it opens a merge
-    // request; a run without one publishes a release.
-    const pendingDeploy = page.locator("article").filter({ hasText: /open_merge_request|deploy_release/ }).filter({ has: page.getByRole("button", { name: "Approve", exact: true }) });
-    await waitCut(page, "deployer calls its side-effecting tool, which waits for approval", () => pendingDeploy.first().waitFor(patience));
-    const deploy = pendingDeploy.first();
-    const tool = /open_merge_request/.test((await deploy.textContent()) ?? "") ? "open_merge_request" : "deploy_release";
-    const opensRequest = tool === "open_merge_request";
-    await scrollTo(page, deploy, { offset: 120, dwell: 4500 });
-    await decide(page, deploy, "Approve", opensRequest ? "merge request looks right" : "release looks right");
-    await waitCut(page, opensRequest ? "the merge request is opened and the run finishes" : "release is published and the run finishes", () =>
-      runStatus(page).filter({ hasText: /succeeded/i }).waitFor(patience));
-    await soft(page, "failed or cancelled run", async () => {
-      if (!/succeeded/i.test((await runStatus(page).textContent()) ?? "")) throw new Error("the run did not succeed");
-    });
-    await pause(page, 2000);
-
-    // The merge request's address (or the release URL) is in the tool call's output.
-    await soft(page, `${tool} output`, async () => {
-      const node = nodeCard(page, "deployer");
-      await scrollTo(page, node, { dwell: 1500 });
-      // The Output of the side-effecting call itself (not of an earlier call in the same node).
-      const call = node.locator("li").filter({ hasText: new RegExp(`Tool call\\s*${tool}`) }).first();
-      await clickOn(page, call.locator("summary").filter({ hasText: /^Output/ }).first());
-      await pause(page, 4500);
-    });
+    const tool = await approveGateAndDeploy(page, runId, patience);
+    await showToolOutput(page, tool);
   }
 
   // The trace: counters and cost, the timeline, the state, the messages, the logs.
@@ -393,7 +421,140 @@ export async function scene04(page) {
   await soft(page, "logs", () => scrollTo(page, countHeading(page, "Logs"), { dwell: 4500 }));
 }
 
-// ---- scene 05: a handled failure -----------------------------------------------------------------
+// ---- scene 05: a review panel, three reviewers at once ---------------------------------------------------------
+
+const forkCard = (page) => page.locator('section[aria-label^="Fork "]').first();
+const joinCard = (page) => page.locator('section[aria-label^="Join "]').first();
+const branchColumns = (page) => forkCard(page).locator('section[aria-label^="Branch "]');
+
+/** Selects a node in the builder's outline and lets the settings panel be read. */
+async function showNode(page, id, dwell = 2600) {
+  await soft(page, `node ${id}`, async () => {
+    await clickOn(page, page.getByRole("button", { name: `Node ${id}`, exact: true }));
+    await page.getByRole("region", { name: "Node settings" }).waitFor({ timeout: 5000 });
+    await pause(page, dwell);
+  });
+}
+
+/** The builder for the Review panel: Coder, the fork, three reviewers, the join, the lead, the gate, Deployer. */
+async function reviewPanelBuilder(page, name) {
+  const fromTemplate = page.getByRole("button", { name: "From template", exact: true });
+  await fromTemplate.waitFor();
+  await pause(page, 1500);
+
+  const copy = named(await apiGet(page, "/api/workflows"), name);
+  let runnable = !!copy;
+  if (!copy && cfg.live && process.env.NEW_COPY !== "0") {
+    // No editable copy yet: make one from the template drawer.
+    await clickOn(page, fromTemplate);
+    const drawer = page.getByRole("dialog", { name: "Start from a template" });
+    await drawer.waitFor();
+    const card = drawer.locator("li").filter({ has: heading(page, cfg.panelTemplate, 3) }).first();
+    await pointAt(page, card, 2500);
+    await clickOn(page, card.getByRole("button", { name: `Use ${cfg.panelTemplate}` }));
+    await page.waitForURL(/\/workflows\/[^/]+$/);
+    runnable = true;
+  } else {
+    const opened = await openExistingWorkflow(page, name);
+    if (opened === "none") return { shown: false, runnable: false };
+    runnable = opened === "copy";
+  }
+
+  await heading(page, name).waitFor();
+  const canvas = page.getByRole("group", { name: "Workflow canvas" });
+  await canvas.waitFor();
+  await pause(page, 4500);
+
+  await showNode(page, "panel");
+  await soft(page, "canvas again", () => scrollTo(page, canvas, { offset: 60, dwell: 1500 }));
+  await showNode(page, "merge", 2200);
+  await showNode(page, "lead", 2200);
+  await soft(page, "canvas again", () => scrollTo(page, canvas, { offset: 60, dwell: 1200 }));
+  await showNode(page, "gate", 2000);
+  await scrollTop(page, 1200);
+  return { shown: true, runnable };
+}
+
+/** The tour of a finished panel run: the fork card with its three columns, the join, the lead's verdict. */
+async function tourPanelRun(page, runId) {
+  await page.goto(cfg.baseUrl + `/runs/${runId}`, { waitUntil: "domcontentloaded" });
+  await runHeader(page).waitFor({ timeout: 30_000 });
+  await pause(page, 2500);
+  await soft(page, "project and merge request", async () => {
+    const header = runHeader(page);
+    const request = header.getByRole("link", { name: /^(Merge|Pull) request/ });
+    if (await request.count()) await pointAt(page, request, 2500);
+  });
+  await soft(page, "fork card", () => scrollTo(page, forkCard(page), { offset: 60, dwell: 3500 }));
+  await soft(page, "the three branches", async () => {
+    const n = await branchColumns(page).count();
+    for (let i = 0; i < n; i++) await pointAt(page, branchColumns(page).nth(i).locator("h4"), 1800);
+  });
+  await soft(page, "join card", () => scrollTo(page, joinCard(page), { offset: 260, dwell: 3500 }));
+  await soft(page, "lead's verdict", () => scrollTo(page, nodeCard(page, "lead"), { offset: 80, dwell: 4500 }));
+  await soft(page, "state panel", () => scrollTo(page, heading(page, "State", 2), { dwell: 3500 }));
+}
+
+/** Resolves when the fork card shows exactly its three branch columns, all of them running. */
+const allBranchesRunning = (page, timeout) =>
+  page.waitForFunction(
+    () => {
+      const fork = document.querySelector('section[aria-label^="Fork "]');
+      if (!fork) return false;
+      const columns = [...fork.querySelectorAll('section[aria-label^="Branch "]')];
+      return columns.length === 3 && columns.every((c) => /running/i.test(c.querySelector("header")?.textContent ?? ""));
+    },
+    null,
+    { timeout },
+  );
+
+export async function scene05(page) {
+  const name = cfg.panelWorkflow;
+  await open(page, "/workflows", heading(page, "Workflows"));
+  trimLoad(page);
+  const needsProject = await workflowNeedsProject(page, name, cfg.panelTemplate, false);
+  const { shown, runnable } = await reviewPanelBuilder(page, name);
+
+  if (!cfg.live) {
+    // Dry run: the builder, the run dialog cancelled, then an existing finished run.
+    if (shown && runnable) await startRun(page, name, { project: cfg.panelProject, needsProject, task: cfg.panelTask, stateKey: "panel_run_id" });
+    await tourPanelRun(page, cfg.panelRunId);
+    return;
+  }
+  if (!shown || !runnable) throw new Error(`no editable copy of ${name}: make one from the template drawer first`);
+
+  await startRun(page, name, { project: cfg.panelProject, needsProject, task: cfg.panelTask, stateKey: "panel_run_id" });
+  const runId = runIdFromUrl(page);
+  const patience = { timeout: cfg.runTimeoutMs };
+
+  // The fork: all three reviewers work at once; the header counts them.
+  await waitCut(page, "coder finishes and the three reviewers start together", () => allBranchesRunning(page, cfg.runTimeoutMs));
+  await soft(page, "header branch count", async () => {
+    await scrollTop(page, 600);
+    await pointAt(page, runHeader(page), 3000);
+  });
+  await soft(page, "fork card, three branches running", () => scrollTo(page, forkCard(page), { offset: 60, dwell: 6000 }));
+
+  // The join, then the lead's verdict and the human gate.
+  await waitCut(page, "the three reviewers finish and the branches join", () => joinCard(page).waitFor(patience));
+  await soft(page, "join card", () => scrollTo(page, joinCard(page), { offset: 260, dwell: 4000 }));
+  await waitCut(page, "the lead merges the verdicts, the run reaches the human gate", () => pendingNote(page).waitFor(patience));
+  await soft(page, "lead's verdict", () => scrollTo(page, nodeCard(page, "lead"), { offset: 80, dwell: 4000 }));
+
+  const tool = await approveGateAndDeploy(page, runId, patience);
+  await showToolOutput(page, tool);
+
+  // The summary: the merge request the panel's work ended in.
+  await scrollTop(page, 1500);
+  await soft(page, "merge request in the summary", async () => {
+    const request = page.getByRole("link", { name: /^(Merge|Pull) request/ }).first();
+    await request.waitFor({ timeout: 10_000 });
+    await pointAt(page, request, 4000);
+  });
+  await pause(page, 1500);
+}
+
+// ---- scene 06: a handled failure -----------------------------------------------------------------
 
 /** Sets the Max steps limit on Coder's form and saves it. Used to set 2 and to put the old value back. */
 async function setCoderMaxSteps(page, value, { pace = true } = {}) {
@@ -413,7 +574,7 @@ async function setCoderMaxSteps(page, value, { pace = true } = {}) {
   return previous;
 }
 
-export async function scene05(page, rec, tools) {
+export async function scene06(page, rec, tools) {
   await open(page, "/agents", heading(page, "Agents"));
   trimLoad(page);
   await pause(page, 1500);
@@ -477,46 +638,49 @@ export async function scene05(page, rec, tools) {
       const plain = await tools.plainPage();
       try {
         await setCoderMaxSteps(plain.page, previous, { pace: false });
-        log("05", `Coder's Max steps restored to ${previous === "" ? "its default (empty)" : previous}`);
+        log("06", `Coder's Max steps restored to ${previous === "" ? "its default (empty)" : previous}`);
       } finally {
         await plain.close();
       }
     }
   }
 
-  // Part 2: a rejected approval is a result the agent can act on. Deployer asks; the answer is no.
-  await clickOn(page, nav(page, "Agents"));
-  await heading(page, "Agents").waitFor();
-  const row = page.locator("tr").filter({ has: page.getByRole("link", { name: "Deployer", exact: true }) });
-  await clickOn(page, row.getByRole("button", { name: "Run", exact: true }));
-  const dialog = page.getByRole("dialog", { name: "Run Deployer" });
-  await dialog.waitFor();
-  await typeInto(page, dialog.getByLabel("Task"), cfg.rejectTask);
-  await clickOn(page, dialog.getByRole("button", { name: "Start run", exact: true }));
-  await page.waitForURL(/\/runs\/[^/]+$/);
+  // Part 2: a rejected approval is a result the agent can act on. The dev pipeline reaches its Deployer, whose
+  // merge request waits for a person; the answer is no.
+  const name = cfg.pipelineWorkflow;
+  await open(page, "/workflows", heading(page, "Workflows"));
+  trimLoad(page);
+  const needsProject = await workflowNeedsProject(page, name, cfg.pipelineTemplate, false);
+  if ((await openExistingWorkflow(page, name)) !== "copy") throw new Error(`no editable copy of ${name} to run`);
+  await page.getByRole("button", { name: "Validate", exact: true }).waitFor();
+  await startRun(page, name, { project: cfg.panelProject, needsProject, task: cfg.rejectTask, stateKey: "reject_run_id" });
   const runId = runIdFromUrl(page);
-  await runHeader(page).waitFor();
-  await waitCut(page, "deployer asks for approval", () => pendingNote(page).waitFor({ timeout: cfg.runTimeoutMs }));
+  const patience = { timeout: cfg.runTimeoutMs };
+  await waitCut(page, "the pipeline reaches the human gate", () => pendingNote(page).waitFor(patience));
   await clickOn(page, nav(page, "Approvals"));
   await heading(page, "Approvals").waitFor();
-  const card = page.locator("article").filter({ has: page.locator(`a[href="/runs/${runId}"]`) }).first();
-  await card.waitFor({ timeout: 30_000 });
-  await pause(page, 2500);
-  await decide(page, card, "Reject", "not approved for release");
+  const gate = page.locator("article").filter({ has: page.locator(`a[href="/runs/${runId}"]`) }).first();
+  await gate.waitFor({ timeout: 30_000 });
+  await pause(page, 2000);
+  await decide(page, gate, "Approve", "looks good");
   await pause(page, 2000);
   await page.goBack();
   await runHeader(page).waitFor();
+  const pendingDeploy = page.locator("article").filter({ hasText: /open_merge_request/ }).filter({ has: page.getByRole("button", { name: "Reject", exact: true }) });
+  await waitCut(page, "deployer asks to open a merge request", () => pendingDeploy.first().waitFor(patience));
+  await scrollTo(page, pendingDeploy.first(), { offset: 120, dwell: 3500 });
+  await decide(page, pendingDeploy.first(), "Reject", "not approved for a merge request");
   await waitCut(page, "deployer finishes after the rejection", () =>
-    runStatus(page).filter({ hasText: /succeeded|failed|cancelled|timed out/i }).waitFor({ timeout: cfg.runTimeoutMs }));
+    runStatus(page).filter({ hasText: /succeeded|failed|cancelled|timed out/i }).waitFor(patience));
   await pause(page, 2500);
   await soft(page, "state shows the rejection", () => scrollTo(page, heading(page, "State", 2), { dwell: 5000 }));
 }
 
-// ---- scene 06: evaluations -------------------------------------------------------------------
+// ---- scene 07: evaluations -------------------------------------------------------------------
 
 const firstReadable = (...files) => files.filter(Boolean).find((f) => fs.existsSync(f));
 
-export async function scene06(page) {
+export async function scene07(page) {
   const reportFile = firstReadable(cfg.evalReport, "/reports/baseline.md", path.join(HERE, "..", "..", "evals", "reports", "baseline.md"));
   if (!reportFile) throw new Error("evals/reports/baseline.md not found (mount ./evals/reports at /reports or set EVAL_REPORT)");
   const markdown = fs.readFileSync(reportFile, "utf8");
@@ -547,11 +711,18 @@ export async function scene06(page) {
   await scrollTop(page, 2500);
 }
 
-// ---- scene 07: a live Telegram conversation --------------------------------------------------------
+// ---- scene 08: the Chief of Staff on Telegram --------------------------------------------------------
+
+/** What Andre sends the Chief from his phone: it makes the Chief look the review panel run up with run_status. */
+/** The message to send from the phone. The Chief looks runs up by id, so it names the panel run scene 05 recorded. */
+const chiefMessage = () => {
+  const id = readState().panel_run_id;
+  return id ? `How did run ${id} go? Tell me what each reviewer found.` : "How did the review panel run go? Tell me what each reviewer found.";
+};
 
 const bubbles = (page) => page.locator('section[aria-label^="Conversation with"] li[data-direction]');
 
-export async function scene07(page) {
+export async function scene08(page) {
   await open(page, "/channels", heading(page, "Channels"));
   const telegram = heading(page, "Telegram", 2);
   await telegram.waitFor();
@@ -566,7 +737,7 @@ export async function scene07(page) {
 
   // The bound agent's conversation.
   const agentName = await soft(page, "bound agent name", async () => {
-    // The card's unbind button is named after the agent: "Unbind Coder".
+    // The card's unbind button is named after the agent: "Unbind Chief of Staff".
     const unbind = page.getByRole("button", { name: /^Unbind / });
     await unbind.waitFor({ timeout: 3000 });
     return ((await unbind.getAttribute("aria-label")) ?? "").replace(/^Unbind /, "");
@@ -585,7 +756,7 @@ export async function scene07(page) {
 
   // A person sends a message from the phone; it must appear here, followed by the agent's reply.
   const before = await bubbles(page).count();
-  log("07", "WAITING: send the bot a Telegram message from the phone now");
+  log("08", `WAITING: send the bot a Telegram message from the phone now. Suggested: "${chiefMessage()}"`);
   await waitCut(page, "message arrives from the phone", () =>
     page.waitForFunction(
       ([sel, n]) => document.querySelectorAll(sel).length > n,
@@ -600,17 +771,28 @@ export async function scene07(page) {
       { timeout: cfg.runTimeoutMs },
     ));
   await pause(page, 4000);
+  // The reply may name the panel run (by its short id); then the run it talks about is worth a look.
+  const replyText = await soft(page, "read the reply", async () => (await bubbles(page).last().textContent()) ?? "");
   await soft(page, "the reply's run", async () => {
     const link = bubbles(page).last().getByRole("link", { name: /^Run / });
     await clickOn(page, link);
     await runHeader(page).waitFor();
     await pause(page, 4000);
   });
+  const panelRun = readState().panel_run_id;
+  if (panelRun && replyText?.includes(panelRun.slice(0, 8))) {
+    await soft(page, "the panel run the reply talks about", async () => {
+      await page.goto(cfg.baseUrl + `/runs/${panelRun}`, { waitUntil: "domcontentloaded" });
+      await runHeader(page).waitFor({ timeout: 30_000 });
+      await pause(page, 2000);
+      await scrollTo(page, forkCard(page), { offset: 60, dwell: 5000 });
+    });
+  }
 }
 
-// ---- scene 08: schedules and status ---------------------------------------------------------------------
+// ---- scene 09: schedules and status ---------------------------------------------------------------------
 
-export async function scene08(page) {
+export async function scene09(page) {
   await open(page, "/schedules", heading(page, "Schedules"));
   await page.getByRole("button", { name: "New schedule", exact: true }).waitFor();
   trimLoad(page);
@@ -710,8 +892,8 @@ export async function scene01(browser) {
   await still(browser, { id: "thumbnail", card: "thumbnail.html", data: { shot: dataUrl(path.join(cfg.outDir, "shots", "agents.png")) }, out: "thumbnail-src.png" });
 }
 
-export async function scene09(browser) {
-  await still(browser, { id: "09", card: "closing.html", data: { repo: cfg.repo }, seconds: 10 });
+export async function scene10(browser) {
+  await still(browser, { id: "10", card: "closing.html", data: { repo: cfg.repo }, seconds: 10 });
 }
 
 // ---- registry -----------------------------------------------------------------------------------------------
@@ -722,9 +904,10 @@ export const SCENES = {
   "02": { kind: "video", title: "Configuring an agent", run: scene02, timeout: 5 * 60_000 },
   "03": { kind: "video", title: "Building a workflow from a template", run: scene03, timeout: 5 * 60_000 },
   "04": { kind: "video", title: "A successful run, live", run: scene04, timeout: 40 * 60_000 },
-  "05": { kind: "video", title: "A handled failure", run: scene05, timeout: 30 * 60_000 },
-  "06": { kind: "video", title: "Evaluations", run: scene06, timeout: 5 * 60_000 },
-  "07": { kind: "video", title: "A live Telegram conversation", run: scene07, timeout: 30 * 60_000 },
-  "08": { kind: "video", title: "Schedules and status", run: scene08, timeout: 20 * 60_000 },
-  "09": { kind: "still", title: "Closing", run: scene09 },
+  "05": { kind: "video", title: "A review panel, three reviewers at once", run: scene05, timeout: 40 * 60_000 },
+  "06": { kind: "video", title: "A handled failure", run: scene06, timeout: 30 * 60_000 },
+  "07": { kind: "video", title: "Evaluations", run: scene07, timeout: 5 * 60_000 },
+  "08": { kind: "video", title: "A live Telegram conversation", run: scene08, timeout: 30 * 60_000 },
+  "09": { kind: "video", title: "Schedules and status", run: scene09, timeout: 20 * 60_000 },
+  "10": { kind: "still", title: "Closing", run: scene10 },
 };

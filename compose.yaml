@@ -424,6 +424,11 @@ services:
       EVAL_CONSOLE: ${DEMO_EVAL_CONSOLE:-}
       RUN_TIMEOUT_MS: ${DEMO_RUN_TIMEOUT_MS:-}
       PHONE_TIMEOUT_MS: ${DEMO_PHONE_TIMEOUT_MS:-}
+      PANEL_RUN_ID: ${DEMO_PANEL_RUN_ID:-}
+      PANEL_TASK: ${DEMO_PANEL_TASK:-}
+      PANEL_PROJECT: ${DEMO_PANEL_PROJECT:-}
+      PANEL_WORKFLOW: ${DEMO_PANEL_WORKFLOW:-}
+      PANEL_TEMPLATE: ${DEMO_PANEL_TEMPLATE:-}
     volumes:
       - ./scripts/demo:/demo
       - ./scripts/demo/out:/out

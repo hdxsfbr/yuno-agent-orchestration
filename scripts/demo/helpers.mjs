@@ -43,12 +43,19 @@ export const cfg = {
     "Write a Python module with three string helpers (slugify, truncate, title_case), write tests for each, run the tests, and fix anything that fails.",
   rejectTask:
     process.env.REJECT_TASK ||
-    "Create a file hello.txt that says hello in runs/demo/ of your workspace, then publish it as release 0.0.1 with the deploy_release tool and report the result.",
+    "Add a one-line description of the project at the top of README.md.",
   scheduleTopic: process.env.SCHEDULE_TOPIC || "How Python projects choose a packaging tool",
   scheduleWorkflow: process.env.SCHEDULE_WORKFLOW || "Research pipeline",
   // The template the drawer offers, and the name of the editable copy the builder scene opens.
   pipelineTemplate: process.env.PIPELINE_TEMPLATE || "Dev pipeline",
   pipelineWorkflow: process.env.PIPELINE_WORKFLOW || process.env.PIPELINE_TEMPLATE || "Dev pipeline",
+  // Scene 5, the review panel: its template and editable copy, a finished run to tour in a dry run, the project
+  // and the task a live run is started with.
+  panelTemplate: process.env.PANEL_TEMPLATE || "Review panel",
+  panelWorkflow: process.env.PANEL_WORKFLOW || process.env.PANEL_TEMPLATE || "Review panel",
+  panelRunId: process.env.PANEL_RUN_ID || "01a1522c-b937-7367-9cf3-6f803e97368f",
+  panelTask: process.env.PANEL_TASK || "write slugify(text): lowercase, spaces to hyphens, strip punctuation, with tests",
+  panelProject: (process.env.PANEL_PROJECT || "").trim() || (process.env.PROJECT_NAME || "").trim() || repoName(process.env.PROJECT_REPO_URL),
   // The project a workflow that opts in (the dev pipeline) works on: the repository and a token that can push,
   // read from .env as the api's bootstrap reads them. The token only ever goes into the form's password field;
   // it is never printed. The project is named after the repository path, as the bootstrap names it.

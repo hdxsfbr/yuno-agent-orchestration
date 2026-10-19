@@ -7,7 +7,7 @@ the model, the gateway or a person are recorded in `cuts.json` and stripped in p
 
 ```
 make demo-record                      # dry run of every scene: read-only, stops before state-changing clicks
-make demo-record SCENES=04,06         # only those scenes (re-record one without touching the others)
+make demo-record SCENES=04,07         # only those scenes (re-record one without touching the others)
 make demo-record LIVE=1               # the real thing: spends model budget and changes state
 make demo-stitch                      # scripts/demo/out/demo.mp4, title.png, thumbnail.png
 make demo-clean                       # delete scripts/demo/out
@@ -18,10 +18,10 @@ make demo-clean                       # delete scripts/demo/out
 | Path | What it is |
 |---|---|
 | `record.mjs` | Entry point: scene filter, pre-flight, one browser context and one video per scene, `cuts.json`. |
-| `scenes.mjs` | Scenes 2 to 8 as functions, and the title and closing stills. |
+| `scenes.mjs` | Scenes 2 to 9 as functions, and the title and closing stills. |
 | `helpers.mjs` | `waitCut`, pacing, the pointer overlay, auth injection, page helpers. |
 | `entrypoint.sh` | Installs `playwright-core` into `.pw/` (git-ignored) once, then runs `record.mjs`. |
-| `cards/` | `title.html`, `closing.html`, `thumbnail.html` (stills), `report.html` (scene 6), `terminal.html`, vendored `marked`. |
+| `cards/` | `title.html`, `closing.html`, `thumbnail.html` (stills), `report.html` (scene 7), `terminal.html`, vendored `marked`. |
 | `narration/NN.txt` | Narration per scene, copied from the demo script. Put `NN.mp3` or `NN.wav` next to it. |
 | `stitch.sh` | Cuts, uniform re-encode, narration mux, concat. Runs ffmpeg in a container. |
 | `fonts.conf` | Maps the CSS generic families to Liberation Sans in the browser container. |
@@ -37,24 +37,25 @@ The recorder checks the first three and prints what it finds; the rest is yours.
 
 1. The stack is up at the commit you are recording (`make ps`; `make smoke`). The title card shows `git rev-parse --short HEAD`.
 2. `API_TOKEN` in `.env` matches the api's (the browser attaches it to `/api/*` requests; it is not shown or written anywhere).
-3. The six seeded agents exist (`make seed`).
-4. A **fresh editable copy of the research pipeline** exists (scene 8 schedules it; shipped templates cannot be scheduled).
+3. The seeded agents exist, the Chief of Staff and the three panel reviewers included (`make seed`).
+4. A **fresh editable copy of the research pipeline** exists (scene 9 schedules it; shipped templates cannot be scheduled).
 5. For scene 3 either let it create a fresh copy of the dev pipeline (`LIVE=1`, the default) or have exactly the copy you want and pass `DEMO_NEW_COPY=0`.
 6. The dev pipeline works on a project, so scene 3 registers one on the Projects page before the run: `PROJECT_REPO_URL`
    and `PROJECT_GIT_TOKEN` in `.env` (the api's bootstrap inputs) name the repository and a token that can push. `LIVE=1`
    creates the project, named after the repository path (`DEMO_PROJECT_NAME` to choose), or shows the one that already
    has that name, and clicks Check. The token is typed into a password field, so the footage shows dots, and nothing
    prints it. A workflow that does not opt in (`DEMO_PIPELINE_WORKFLOW`) needs none of this.
-7. The Runs list shows what you want a viewer to see on scenes 5 and 8 (the eval suite leaves its runs there).
-8. Telegram bound to Coder, the phone in hand, for scene 7 (`LIVE=1` waits up to 10 minutes for your message).
-9. For scene 6's terminal segment, capture a real `make eval` console first (see below).
-10. Record the time-free scenes first; scene 8 is time-bound (the schedule fires about two minutes after it is created).
+7. The Runs list shows what you want a viewer to see on scenes 6 and 9 (the eval suite leaves its runs there).
+8. An editable copy of the **Review panel** exists (scene 5 opens it; with `LIVE=1` and no copy it makes one from the template), and a finished panel run to tour in a dry run (`DEMO_PANEL_RUN_ID`; default the run that opened !8).
+9. Telegram bound to the Chief of Staff, the phone in hand, for scene 8 (`LIVE=1` waits up to 10 minutes for your message; the suggested one is printed with WAITING and is in `docs/demo-script.md`). The panel run of scene 5 should be recorded first, so the Chief has a run to talk about.
+10. For scene 7's terminal segment, capture a real `make eval` console first (see below).
+11. Record the time-free scenes first; scene 9 is time-bound (the schedule fires about two minutes after it is created).
 
 ## Dry run
 
 ```
 make demo-record                          # all scenes, read-only
-make demo-record SCENES=02,03,06 DEMO_PACE=0.4   # faster, for checking selectors
+make demo-record SCENES=02,03,07 DEMO_PACE=0.4   # faster, for checking selectors
 make demo-stitch
 ```
 
@@ -65,12 +66,13 @@ Without `LIVE=1` every scene stops before its state-changing click and nothing i
 | 02 | tours Coder's form, read-only | same |
 | 03 | fills the New project form and cancels (when the workflow works on a project), opens the template drawer, tours an existing editable copy, fills the run form with a project that exists, cancels | creates the project (or reuses the one with its name) and clicks Check, creates a copy from the template, picks the project, clicks **Start run**, saves the run id to `out/state.json` |
 | 04 | tours the trace of `RUN_ID`, or of an existing finished run | follows the run scene 3 started; approves the gate and the `open_merge_request` call (`deploy_release` for a run without a project) |
-| 05 | shows Coder's Max steps field, failed runs, rejected approvals | sets Max steps 2, runs Coder, restores the limit afterwards; runs Deployer and rejects its approval |
-| 06 | renders `evals/reports/baseline.md` (no stack needed) | same |
-| 07 | Channels page and the bound agent's conversation | waits for a message from the phone and for the reply |
-| 08 | fills the schedule form, cancels; shows Status | creates the once-schedule, waits for it to fire, shows the run and Status |
+| 05 | opens the Review panel in the builder (Coder, fork `panel`, three reviewers, join `merge`, lead Reviewer, gate, Deployer), fills the run form and cancels, then tours a finished panel run: header, fork card with its three columns, join card, the lead's verdict | picks the project, starts the run, waits until the fork card shows all three branches running, then the join, approves the gate and the `open_merge_request` call as scene 4 does, shows the merge request in the summary, saves `panel_run_id` to `out/state.json` |
+| 06 | shows Coder's Max steps field, failed runs, rejected approvals | sets Max steps 2, runs Coder, restores the limit afterwards; runs Deployer and rejects its approval |
+| 07 | renders `evals/reports/baseline.md` (no stack needed) | same |
+| 08 | Channels page with the Telegram card (the Chief of Staff) and its conversation | waits for the message from the phone and for the Chief's reply, follows the reply's run link, and opens the panel run when the reply names it |
+| 09 | fills the schedule form, cancels; shows Status | creates the once-schedule, waits for it to fire, shows the run and Status |
 
-Output goes to `scripts/demo/out/`: `NN.webm` per scene, `01.png`/`09.png` with `.seconds`, `cuts.json`,
+Output goes to `scripts/demo/out/`: `NN.webm` per scene, `01.png`/`10.png` with `.seconds`, `cuts.json`,
 `state.json`, `thumbnail-src.png`, `shots/`. A scene that fails is saved as `NN.failed.webm` and
 `NN-failure.png`; the last good `NN.webm` and its cuts are kept. A scene prints `SKIPPED ...` for a flourish
 (a scroll, a pointer move) whose element it could not find; load-bearing steps fail the scene.
@@ -80,10 +82,11 @@ Output goes to `scripts/demo/out/`: `NN.webm` per scene, `01.png`/`09.png` with 
 ```
 make demo-record SCENES=02,03 LIVE=1      # 03 registers the project and starts the dev-pipeline run
 make demo-record SCENES=04 LIVE=1         # follows that run (or: DEMO_RUN_ID=<id>)
-make demo-record SCENES=05,06 LIVE=1
-make demo-record SCENES=08 LIVE=1
-make demo-record SCENES=07 LIVE=1         # send the bot a message when it prints WAITING
-make demo-record SCENES=01,09             # stills, last, so the commit is final
+make demo-record SCENES=05 LIVE=1         # the review panel run (DEMO_PANEL_TASK, DEMO_PANEL_PROJECT)
+make demo-record SCENES=06,07 LIVE=1
+make demo-record SCENES=09 LIVE=1
+make demo-record SCENES=08 LIVE=1         # send the bot a message when it prints WAITING
+make demo-record SCENES=01,10             # stills, last, so the commit is final
 make demo-stitch
 ```
 
@@ -94,22 +97,22 @@ finished run also works: the waits are then instant and nothing is cut).
 re-take finds it and shows its row instead (delete it on the Projects page first to record its creation again). The
 run then clones the repository, and the Deployer ends by opening a merge request on it, which scene 4 approves and shows.
 
-`LIVE=1` for scene 5 saves Coder's agent form with Max steps 2 and puts the previous value back in a
+`LIVE=1` for scene 6 saves Coder's agent form with Max steps 2 and puts the previous value back in a
 non-recorded session when the scene ends, also when it fails.
 
 ### Narration
 
-Write the audio with whatever you use for speech; one clip per scene named by scene number, next to its text:
-`narration/01.mp3` ... `narration/09.mp3` (`wav`, `m4a`, `ogg`, `flac` also work). `make demo-stitch` picks
+`make demo-narrate` voices every `narration/NN.txt` with Chatterbox and the operator's reference voice (`narrate-chatterbox.sh`, the local GPU setup in `~/code/chatterbox-play`, one sentence per generation); `narrate.sh` is the piper fallback. Or write the audio with whatever you use for speech; one clip per scene named by scene number, next to its text:
+`narration/01.mp3` ... `narration/10.mp3` (`wav`, `m4a`, `ogg`, `flac` also work). `make demo-stitch` picks
 them up; scenes without a clip keep their footage length and are silent.
 
-### The eval console (scene 6)
+### The eval console (scene 7)
 
-Scene 6 shows the report from `evals/reports/baseline.md`. To open it with a real `make eval` console first:
+Scene 7 shows the report from `evals/reports/baseline.md`. To open it with a real `make eval` console first:
 
 ```
 make eval 2>&1 | tee scripts/demo/out/eval-console.log
-make demo-record SCENES=06
+make demo-record SCENES=07
 ```
 
 (Do this after `make demo-clean`, since that deletes `out/`. Set `DEMO_EVAL_CONSOLE` for another path inside the container.)
@@ -151,7 +154,7 @@ the scene unless `DEMO_PROJECT_NAME` names a project that already exists.
 
 Environment variables of `make demo-record` (all optional): `SCENES`, `LIVE`, `DEMO_PACE` (multiplies the
 deliberate pauses), `DEMO_RUN_ID`, `DEMO_NEW_COPY=0`, `DEMO_PIPELINE_TASK`, `DEMO_STEP_LIMIT_TASK`,
-`DEMO_REJECT_TASK`, `DEMO_SCHEDULE_TOPIC`, `DEMO_EVAL_CONSOLE`, `DEMO_RUN_TIMEOUT_MS`, `DEMO_PHONE_TIMEOUT_MS`,
+`DEMO_REJECT_TASK`, `DEMO_SCHEDULE_TOPIC`, `DEMO_EVAL_CONSOLE`, `DEMO_RUN_TIMEOUT_MS`, `DEMO_PHONE_TIMEOUT_MS`, `DEMO_PANEL_RUN_ID` (the finished panel run toured in a dry run, default the run that opened !8), `DEMO_PANEL_TASK` (default `write slugify(text): lowercase, spaces to hyphens, strip punctuation, with tests`), `DEMO_PANEL_PROJECT` (default the project of `DEMO_PROJECT_NAME`), `DEMO_PANEL_WORKFLOW`, `DEMO_PANEL_TEMPLATE` (default `Review panel`),
 `DEMO_BASE_URL`, `DEMO_MASK_IDS=1` (blurs long numeric ids such as a Telegram user id), `DEMO_PIPELINE_TEMPLATE`, `DEMO_PIPELINE_WORKFLOW`, `DEMO_SCHEDULE_WORKFLOW`,
 `DEMO_PROJECT_NAME` (the project scene 3 registers or reuses; default: the last segment of the repository path),
 `DEMO_PROJECT_DESCRIPTION` (typed into the project form when set). Stitch: `OUT_DIR`, `FFMPEG_IMAGE`, `FPS`, `WIDTH`, `HEIGHT`, `CRF`, `CUT_HEAD_MS`,

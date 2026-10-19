@@ -194,7 +194,7 @@ DEMO_DIR := scripts/demo
 demo-record: ## Record the demo scenes in a browser container (SCENES=04,06 to pick; LIVE=1 changes state)
 	@mkdir -p $(DEMO_DIR)/out
 	HOST_UID=$$(id -u) HOST_GID=$$(id -g) \
-	DEMO_COMMIT="$$(git rev-parse --short HEAD)" \
+	DEMO_COMMIT="$${DEMO_COMMIT:-$$(git rev-parse --short HEAD)}" \
 	DEMO_REPO_URL="$$(git remote get-url origin 2>/dev/null | sed -E 's#^(https?://)[^@/]*@#\1#; s#\.git$$##')" \
 	$(COMPOSE) --profile tools run --rm -T --no-deps demo
 
@@ -204,8 +204,8 @@ demo-stitch: ## Cut the recorded waits, mux narration, write scripts/demo/out/de
 demo-clean: ## Delete recorded footage, stills and cuts (scripts/demo/out); the cards and narration stay
 	rm -rf $(DEMO_DIR)/out
 
-demo-narrate: ## Voice the demo narration (scripts/demo/narration/*.txt) with local text-to-speech
-	./scripts/demo/narrate.sh
+demo-narrate: ## Voice the demo narration (scripts/demo/narration/*.txt) with Chatterbox and the operator's reference voice (GPU, ~/code/chatterbox-play)
+	./scripts/demo/narrate-chatterbox.sh
 
 omm-view: ## Serve the architecture diagrams under .omm/ at http://<host>:$${OMM_PORT:-3030} (oh-my-mermaid viewer, in a container)
 	HOST_UID=$$(id -u) HOST_GID=$$(id -g) $(COMPOSE) --profile tools run --rm --no-deps --service-ports omm view
