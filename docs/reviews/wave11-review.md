@@ -58,7 +58,10 @@ themselves and were recorded as they ended (what rule 6 allows; the test now acc
 either), and a park test read the branch's park log line as soon as the branch row showed
 it parked, a moment before the line was written (it now waits for the line). The second
 pipeline failed on staticcheck (`SA4006`, a value assigned and overwritten in the
-`run_status` test, which the development runs had not checked). No code changed.
+`run_status` test, which the development runs had not checked), and the third on a web
+test that waited the testing-library default of one second for the "Workflow created."
+toast on a runner where that file takes 46 s: the web suite now sets an eight-second
+asynchronous deadline for every test (`web/src/test/setup.ts`). No product code changed.
 
 ## Coverage reported by the reviewers
 
