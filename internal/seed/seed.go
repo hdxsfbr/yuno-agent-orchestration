@@ -483,6 +483,10 @@ func ResetShipped(ctx context.Context, q store.Querier, r Resetter) (agents, wor
 		if err := r.ResetFromTemplate(ctx, wf.ID); err != nil {
 			return agents, workflows, fmt.Errorf("seed: reset workflow %s: %w", wf.Name, err)
 		}
+		// A reset copy is the shipped one again, so later seeds keep it current (D-080).
+		if err := recordSeeded(ctx, q, wf.ID); err != nil {
+			return agents, workflows, fmt.Errorf("seed: record workflow %s: %w", wf.Name, err)
+		}
 		workflows = append(workflows, wf.Name)
 	}
 	return agents, workflows, nil

@@ -645,6 +645,11 @@ func TestResetShipped(t *testing.T) {
 	if plan.Name != "Plan pipeline (ours)" || plan.Version != 3 || strings.Contains(string(plan.Definition), "agent_name") {
 		t.Fatalf("plan pipeline after the reset: name %q version %d", plan.Name, plan.Version)
 	}
+	// The reset copy is the shipped one again: its seeded hash matches, so later seeds keep
+	// it current (D-080) instead of keeping it as an operator's edit.
+	if plan.SeededHash == nil || *plan.SeededHash != store.DefinitionHash(plan.Definition) {
+		t.Fatalf("reset copy's seeded hash %v does not match its definition", plan.SeededHash)
+	}
 	// A second reset changes nothing on the agents and rewrites the workflows (a new
 	// version each), which is what a deploy does on purpose.
 	agents, workflows, err = ResetShipped(ctx, pool, sh)
