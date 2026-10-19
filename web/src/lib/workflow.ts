@@ -11,6 +11,8 @@ export const KIND_LABEL: Record<NodeKind, string> = {
   start: "Start",
   agent: "Agent",
   approval: "Approval",
+  fork: "Fork",
+  join: "Join",
   end: "End",
 };
 
@@ -61,7 +63,7 @@ export function nextNodeId(def: WorkflowDefinition, kind: NodeKind): string {
 
 export function addNode(def: WorkflowDefinition, kind: NodeKind, position?: Position): { def: WorkflowDefinition; id: string } {
   const id = nextNodeId(def, kind);
-  const node: WorkflowNode = kind === "agent" ? { id, kind, task: "" } : { id, kind };
+  const node: WorkflowNode = kind === "agent" ? { id, kind, task: "" } : kind === "fork" ? { id, kind, join: "" } : { id, kind };
   const positions = position ? { ...def.ui?.positions, [id]: position } : def.ui?.positions;
   return {
     id,
@@ -73,7 +75,7 @@ export function updateNode(def: WorkflowDefinition, id: string, patch: Partial<W
   return { ...def, nodes: def.nodes.map((n) => (n.id === id ? patched(n, patch) : n)) };
 }
 
-/** Deletes a node, its edges and every reference other nodes hold to it. */
+/** Deletes a node, its edges and every reference other nodes hold to it (a fork's join, a join's checkout). */
 export function removeNode(def: WorkflowDefinition, id: string): WorkflowDefinition {
   const positions = def.ui?.positions;
   const rest = positions ? Object.fromEntries(Object.entries(positions).filter(([k]) => k !== id)) : undefined;
@@ -89,6 +91,8 @@ export function removeNode(def: WorkflowDefinition, id: string): WorkflowDefinit
         }
         if (n.on_reject === id) patch.on_reject = undefined;
         if (n.on_failure === id) patch.on_failure = undefined;
+        if (n.join === id) patch.join = n.kind === "fork" ? "" : undefined;
+        if (n.checkout === id) patch.checkout = undefined;
         return Object.keys(patch).length > 0 ? patched(n, patch) : n;
       }),
     edges: def.edges.filter((e) => e.from !== id && e.to !== id),
@@ -135,7 +139,7 @@ export function stateReferences(def: WorkflowDefinition, id: string): number {
 
 /**
  * Renames a node and everything that points at it: edges, input_from, on_reject,
- * on_failure, positions, condition paths into its output and `.state.<id>` references in
+ * on_failure, a fork's join, a join's checkout, positions, condition paths into its output and `.state.<id>` references in
  * task and message templates. The caller checks the new id first.
  */
 export function renameNode(def: WorkflowDefinition, from: string, to: string): WorkflowDefinition {
@@ -154,6 +158,8 @@ export function renameNode(def: WorkflowDefinition, from: string, to: string): W
       if (n.input_from) next.input_from = n.input_from.map((x) => (x === from ? to : x));
       if (n.on_reject) next.on_reject = swap(n.on_reject);
       if (n.on_failure) next.on_failure = swap(n.on_failure);
+      if (n.join) next.join = swap(n.join);
+      if (n.checkout) next.checkout = swap(n.checkout);
       if (n.task) next.task = n.task.replace(ref, `.state.${to}`);
       if (n.message) next.message = n.message.replace(ref, `.state.${to}`);
       return next;
@@ -194,6 +200,18 @@ export function outgoing(def: WorkflowDefinition, from: string): { edge: Workflo
     if (edge.from === from) out.push({ edge, index });
   });
   return out;
+}
+
+/** The fork nodes that name `joinId` as the join their branches end at (DESIGN 5.26 rule 1). */
+export function forksJoiningAt(def: WorkflowDefinition, joinId: string): WorkflowNode[] {
+  return def.nodes.filter((n) => n.kind === "fork" && n.join === joinId);
+}
+
+/** The heads of a fork's branches: the targets of its outgoing edges in edge order, each once (DESIGN 5.26 rule 2). */
+export function forkHeads(def: WorkflowDefinition, forkId: string): string[] {
+  const heads: string[] = [];
+  for (const { edge } of outgoing(def, forkId)) if (!heads.includes(edge.to)) heads.push(edge.to);
+  return heads;
 }
 
 /**

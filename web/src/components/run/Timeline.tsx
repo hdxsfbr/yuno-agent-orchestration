@@ -2,39 +2,70 @@ import type { ReactNode } from "react";
 import type { Approval, ModelCall, RunNode, ToolCall } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros } from "@/lib/format";
 import { isQuestion, questionOutcome } from "@/lib/question";
-import { buildTimelineEntries, type RetryMark, type RunView, type TimelineItem } from "@/lib/trace";
+import { buildTimelineEntries, type RetryMark, type RunView, type TimelineBranch, type TimelineEntry, type TimelineItem, type TimelineNode } from "@/lib/trace";
 import { Badge, StatusBadge } from "../Badge";
 import { EmptyState } from "../QueryState";
 import JsonView from "../JsonView";
 
 type Props = { view: RunView; active: boolean; now: number };
 
+/** Every node visit the entries show, the ones inside a fork's branches included. */
+function visitGroups(entry: TimelineEntry): TimelineNode[] {
+  switch (entry.kind) {
+    case "node":
+    case "join":
+      return [entry.group];
+    case "fork":
+      return [entry.group, ...entry.branches.flatMap((b) => b.groups)];
+    case "retry":
+      return [];
+  }
+}
+
 export default function Timeline({ view, active, now }: Props) {
   const entries = buildTimelineEntries(view);
-  const groups = entries.flatMap((e) => (e.kind === "node" ? [e.group] : []));
+  const groups = entries.flatMap(visitGroups);
   // A node that ran more than once (a loop) says which visit each card is.
   const visits = new Map<string, number>();
   for (const g of groups) if (g.node) visits.set(g.node.node_id, (visits.get(g.node.node_id) ?? 0) + 1);
+  const repeated = (node: RunNode) => (visits.get(node.node_id) ?? 0) > 1;
   if (groups.length === 0) {
     return <EmptyState>{active ? "Waiting for the first step…" : "This run recorded no steps."}</EmptyState>;
   }
   return (
     <ol className="space-y-3">
-      {entries.map((entry) =>
-        entry.kind === "retry" ? (
-          <li key={`retry-${entry.mark.retries}`}>
-            <RetryRow mark={entry.mark} />
-          </li>
-        ) : (
-          <li key={entry.group.node?.id ?? "other"}>
-            {entry.group.node ? (
-              <NodeCard node={entry.group.node} items={entry.group.items} now={now} repeated={(visits.get(entry.group.node.node_id) ?? 0) > 1} />
-            ) : (
-              <OtherActivity items={entry.group.items} />
-            )}
-          </li>
-        ),
-      )}
+      {entries.map((entry) => {
+        switch (entry.kind) {
+          case "retry":
+            return (
+              <li key={`retry-${entry.mark.retries}`}>
+                <RetryRow mark={entry.mark} />
+              </li>
+            );
+          case "fork":
+            return (
+              <li key={entry.group.node?.id ?? "fork"}>
+                {entry.group.node ? <ForkCard node={entry.group.node} branches={entry.branches} now={now} repeated={repeated} /> : null}
+              </li>
+            );
+          case "join":
+            return (
+              <li key={entry.group.node?.id ?? "join"}>
+                {entry.group.node ? <JoinCard node={entry.group.node} branches={entry.branches} /> : null}
+              </li>
+            );
+          case "node":
+            return (
+              <li key={entry.group.node?.id ?? "other"}>
+                {entry.group.node ? (
+                  <NodeCard node={entry.group.node} items={entry.group.items} now={now} repeated={repeated(entry.group.node)} />
+                ) : (
+                  <OtherActivity items={entry.group.items} />
+                )}
+              </li>
+            );
+        }
+      })}
     </ol>
   );
 }
@@ -52,11 +83,38 @@ function RetryRow({ mark }: { mark: RetryMark }) {
   );
 }
 
-function NodeCard({ node, items, now, repeated }: { node: RunNode; items: TimelineItem[]; now: number; repeated: boolean }) {
+/** How long a visit took, or has taken so far while it works. */
+function visitDuration(node: RunNode, now: number): number | undefined {
   const running = node.status === "running" || node.status === "waiting_approval";
-  const duration = node.finished_at ? elapsedMs(node.started_at, node.finished_at) : running ? elapsedMs(node.started_at, undefined, now) : undefined;
+  return node.finished_at ? elapsedMs(node.started_at, node.finished_at) : running ? elapsedMs(node.started_at, undefined, now) : undefined;
+}
+
+/** `Started … · Finished … · 3.2s`: the time line of a node card and of a fork card. */
+function VisitTimes({ node, now }: { node: RunNode; now: number }) {
+  const duration = visitDuration(node, now);
   return (
-    <section className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" aria-label={repeated ? `Node ${node.node_id}, visit ${node.visit}` : `Node ${node.node_id}`}>
+    <span className="ml-auto text-xs text-zinc-500">
+      {node.started_at ? `Started ${formatDateTime(node.started_at)}` : "Not started"}
+      {node.finished_at ? ` · Finished ${formatDateTime(node.finished_at)}` : ""}
+      {node.started_at && duration !== undefined ? ` · ${formatDuration(duration)}` : ""}
+    </span>
+  );
+}
+
+type CardProps = {
+  node: RunNode;
+  items: TimelineItem[];
+  now: number;
+  repeated: boolean;
+  /** The head of the branch the visit was made in; the card is then narrow and says which branch it belongs to. */
+  branch?: string;
+};
+
+function NodeCard({ node, items, now, repeated, branch }: CardProps) {
+  const running = node.status === "running" || node.status === "waiting_approval";
+  const label = `Node ${node.node_id}${repeated ? `, visit ${node.visit}` : ""}${branch ? `, branch ${branch}` : ""}`;
+  return (
+    <section className="rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900" aria-label={label}>
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-zinc-200 px-4 py-2.5 dark:border-zinc-800">
         <h3 className="font-mono text-sm font-semibold">{node.node_id}</h3>
         <StatusBadge kind="node" status={node.status} />
@@ -69,11 +127,7 @@ function NodeCard({ node, items, now, repeated }: { node: RunNode; items: Timeli
             {formatCount(node.iteration)} {node.iteration === 1 ? "turn" : "turns"}
           </span>
         ) : null}
-        <span className="ml-auto text-xs text-zinc-500">
-          {node.started_at ? `Started ${formatDateTime(node.started_at)}` : "Not started"}
-          {node.finished_at ? ` · Finished ${formatDateTime(node.finished_at)}` : ""}
-          {node.started_at && duration !== undefined ? ` · ${formatDuration(duration)}` : ""}
-        </span>
+        <VisitTimes node={node} now={now} />
       </header>
       <div className="space-y-3 p-4">
         {node.failure_reason ? (
@@ -85,7 +139,7 @@ function NodeCard({ node, items, now, repeated }: { node: RunNode; items: Timeli
           <ul className="space-y-2">
             {items.map((item) => (
               <li key={item.key}>
-                <ItemRow item={item} />
+                <ItemRow item={item} compact={!!branch} />
               </li>
             ))}
           </ul>
@@ -95,6 +149,77 @@ function NodeCard({ node, items, now, repeated }: { node: RunNode; items: Timeli
           <p className="text-sm text-zinc-500">{node.status === "waiting_approval" ? "Waiting for an approval." : running ? "Working…" : "No activity recorded."}</p>
         ) : null}
       </div>
+    </section>
+  );
+}
+
+/** Columns of a fork card by branch count: they stack on a narrow screen, and four or five need the wider breakpoint. */
+const columns = (n: number) => (n <= 1 ? "" : n === 2 ? "md:grid-cols-2" : n === 3 ? "md:grid-cols-3" : n === 4 ? "lg:grid-cols-4" : "lg:grid-cols-5");
+
+/** A fork visit: the fork's own times, then one column per branch with the node visits made inside it. */
+function ForkCard({ node, branches, now, repeated }: { node: RunNode; branches: TimelineBranch[]; now: number; repeated: (n: RunNode) => boolean }) {
+  const label = `Fork ${node.node_id}${repeated(node) || node.visit > 1 ? `, visit ${node.visit}` : ""}`;
+  return (
+    <section className="rounded-lg border border-violet-200 bg-white dark:border-violet-900 dark:bg-zinc-900" aria-label={label}>
+      <header className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-violet-200 px-4 py-2.5 dark:border-violet-900">
+        <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">Fork</span>
+        <h3 className="font-mono text-sm font-semibold">{node.node_id}</h3>
+        <StatusBadge kind="node" status={node.status} />
+        {repeated(node) || node.visit > 1 ? <span className="text-xs text-zinc-500">visit {node.visit}</span> : null}
+        <VisitTimes node={node} now={now} />
+      </header>
+      <div className={`grid gap-3 p-4 ${columns(branches.length)}`}>
+        {branches.map((b) => (
+          <BranchColumn key={b.branch.id} item={b} now={now} repeated={repeated} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function BranchColumn({ item, now, repeated }: { item: TimelineBranch; now: number; repeated: (n: RunNode) => boolean }) {
+  const { branch, groups } = item;
+  const ended = branch.status !== "running" && branch.status !== "waiting_approval";
+  return (
+    <section className="min-w-0 space-y-3 rounded-md border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-950" aria-label={`Branch ${branch.head}`}>
+      <header className="flex flex-wrap items-center gap-2">
+        <h4 className="font-mono text-sm font-semibold">{branch.head}</h4>
+        <StatusBadge kind="branch" status={branch.status} />
+      </header>
+      {branch.failure_reason ? (
+        <p role="alert" className="rounded-md border border-red-200 bg-red-50 p-2.5 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
+          {branch.failure_reason}
+        </p>
+      ) : null}
+      {groups.length > 0 ? (
+        <ol className="space-y-3">
+          {groups.map((g) =>
+            g.node ? (
+              <li key={g.node.id}>
+                <NodeCard node={g.node} items={g.items} now={now} repeated={repeated(g.node)} branch={branch.head} />
+              </li>
+            ) : null,
+          )}
+        </ol>
+      ) : !branch.failure_reason ? (
+        <p className="text-sm text-zinc-500">{ended ? "No activity recorded." : "Starting…"}</p>
+      ) : null}
+    </section>
+  );
+}
+
+/** The short card where the branches of a fork visit meet. */
+function JoinCard({ node, branches }: { node: RunNode; branches: number }) {
+  const at = node.finished_at ?? node.started_at;
+  return (
+    <section
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-violet-200 bg-white px-4 py-2.5 dark:border-violet-900 dark:bg-zinc-900"
+      aria-label={`Join ${node.node_id}`}
+    >
+      <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">Join</span>
+      <h3 className="font-mono text-sm font-semibold">{node.node_id}</h3>
+      <span className="text-sm">{`Joined ${branches} ${branches === 1 ? "branch" : "branches"}`}</span>
+      {at ? <span className="ml-auto text-xs text-zinc-500">{formatDateTime(at)}</span> : null}
     </section>
   );
 }
@@ -116,12 +241,12 @@ function OtherActivity({ items }: { items: TimelineItem[] }) {
   );
 }
 
-function ItemRow({ item }: { item: TimelineItem }) {
+function ItemRow({ item, compact = false }: { item: TimelineItem; compact?: boolean }) {
   switch (item.kind) {
     case "model_call":
-      return <ModelCallRow call={item.call} />;
+      return <ModelCallRow call={item.call} compact={compact} />;
     case "tool_call":
-      return <ToolCallRow call={item.call} />;
+      return <ToolCallRow call={item.call} compact={compact} />;
     case "approval":
       return <ApprovalRow approval={item.approval} />;
   }
@@ -148,7 +273,7 @@ function Metric({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function ModelCallRow({ call }: { call: ModelCall }) {
+function ModelCallRow({ call, compact }: { call: ModelCall; compact: boolean }) {
   return (
     <Row
       accent="border-l-violet-400 dark:border-l-violet-600"
@@ -161,7 +286,7 @@ function ModelCallRow({ call }: { call: ModelCall }) {
       }
       right={formatDateTime(call.started_at)}
     >
-      <dl className="mt-2 grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3 lg:grid-cols-6">
+      <dl className={`mt-2 grid grid-cols-2 gap-x-6 gap-y-2 ${compact ? "" : "sm:grid-cols-3 lg:grid-cols-6"}`}>
         <Metric label="Tokens in" value={formatCount(call.input_tokens)} />
         <Metric label="Tokens out" value={formatCount(call.output_tokens)} />
         <Metric label="Cache read / write" value={`${formatCount(call.cache_read_tokens)} / ${formatCount(call.cache_write_tokens)}`} />
@@ -178,7 +303,7 @@ function ModelCallRow({ call }: { call: ModelCall }) {
   );
 }
 
-function ToolCallRow({ call }: { call: ToolCall }) {
+function ToolCallRow({ call, compact }: { call: ToolCall; compact: boolean }) {
   return (
     <Row
       accent="border-l-sky-400 dark:border-l-sky-600"
@@ -193,7 +318,7 @@ function ToolCallRow({ call }: { call: ToolCall }) {
       }
       right={`${call.started_at ? formatDateTime(call.started_at) + " · " : ""}${formatDuration(call.duration_ms)}`}
     >
-      <div className="mt-2 grid gap-2 lg:grid-cols-2">
+      <div className={`mt-2 grid gap-2 ${compact ? "" : "lg:grid-cols-2"}`}>
         <JsonView label="Input" value={call.input} />
         <JsonView label="Output" value={call.output} />
       </div>

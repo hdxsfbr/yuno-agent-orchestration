@@ -372,6 +372,12 @@ export default function Builder({ workflow }: { workflow?: Workflow }) {
               <Button size="sm" onClick={() => addNodeOfKind("approval")}>
                 Add approval
               </Button>
+              <Button size="sm" onClick={() => addNodeOfKind("fork")}>
+                Add fork
+              </Button>
+              <Button size="sm" onClick={() => addNodeOfKind("join")}>
+                Add join
+              </Button>
               <Button size="sm" onClick={() => addNodeOfKind("end")}>
                 Add end
               </Button>

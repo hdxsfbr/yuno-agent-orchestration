@@ -56,7 +56,9 @@ export default function Canvas({ def, agentNames, selected, errors, layoutVersio
             ? (n.agent_id && agentNames[n.agent_id]) || n.agent_name || (n.agent_id ? "Unknown agent" : "No agent chosen")
             : n.kind === "approval"
               ? n.message
-              : undefined,
+              : n.kind === "fork" && n.join
+                ? `→ ${n.join}`
+                : undefined,
         problems: countFor(errors.nodes[i]),
       },
     }));

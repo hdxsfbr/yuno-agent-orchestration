@@ -74,8 +74,14 @@ type visit struct {
 	early    *outcome // set when the visit cannot start
 	task     string   // the rendered task; the protocol block is added per message
 	// carryFrom are the workspaces (OpenClaw agent ids) whose runs/<run_id>/ is copied
-	// into this agent's before the turn, oldest first (DESIGN 5.6 rule 13).
-	carryFrom []string
+	// into this agent's before the turn, oldest first (DESIGN 5.6 rule 13), each with
+	// whether its checkout stays behind (5.26 rule 10).
+	carryFrom []carrySource
+	// branch is the parallel branch this visit runs in (DESIGN 5.26 rule 4); nil outside a
+	// fork. A branch visit pauses its node, never the run (rule 7), parks through its
+	// branch (rule 8), and skipDiff says its generated diff.patch is not produced (rule 11).
+	branch   *store.RunBranch
+	skipDiff bool
 	// project is the repository this visit works on (DESIGN 5.16): nil unless the run
 	// opted in and one is configured. toolchain is read from the checkout before the
 	// turn; sandboxHeld says the agent's sandbox block is this visit's to release.
@@ -158,10 +164,10 @@ func SessionKey(openclawAgentID, runID, nodeID string, visitN int) string {
 
 // newVisit creates the run_nodes row and the node span. It returns a nil visit only
 // when the row cannot be written.
-func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.Node, over runOverrides, rootSpan string, stale []store.RunNode) (*visit, outcome) {
+func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.Node, over runOverrides, rootSpan string, stale []store.RunNode, branch *store.RunBranch) (*visit, outcome) {
 	now := e.clock.Now()
 	v := &visit{
-		e: e, run: run, node: node, over: over, limits: run.Limits, rootSpan: rootSpan, stale: stale,
+		e: e, run: run, node: node, over: over, limits: run.Limits, rootSpan: rootSpan, stale: stale, branch: branch,
 		log:    e.log.With("run_id", run.ID, "node_id", node.ID),
 		signal: make(chan struct{}, 1),
 		runIDs: map[string]bool{}, seenMsgs: map[string]bool{}, tools: map[string]*toolState{},
@@ -178,6 +184,10 @@ func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.No
 	}
 	agentID := node.AgentID
 	v.rn = &store.RunNode{RunID: run.ID, NodeID: node.ID, AgentID: &agentID, Visit: prior + 1, Status: store.NodeRunning, StartedAt: &now}
+	if branch != nil {
+		id := branch.ID
+		v.rn.BranchID = &id
+	}
 	// A visit created because a parked question was decided names it (DESIGN 5.24 rule 5);
 	// a loop revisit or a retry continues nothing.
 	switch q, err := store.ContinuationQuestion(ctx, e.deps.Pool, run.ID, node.ID); {
@@ -379,17 +389,29 @@ func (v *visit) prepareRunDir() error {
 	if err := openclaw.EnsureRunDir(v.e.deps.StateDir, v.ocID, v.run.ID); err != nil {
 		v.log.Warn("create run directory failed", "error", err)
 	}
-	for _, from := range v.carryFrom {
-		if from == v.ocID {
+	for _, src := range v.carryFrom {
+		if src.ocID == v.ocID {
 			continue
 		}
-		n, err := openclaw.CopyRunDir(v.e.deps.StateDir, from, v.ocID, v.run.ID)
-		if err != nil {
-			return fmt.Errorf("copy from %s: %w", from, err)
+		var skip []string
+		if src.skipRepo {
+			skip = []string{project.RepoDir}
 		}
-		v.log.Info("run directory copied forward", "from", from, "files", n)
+		n, err := openclaw.CopyRunDirExcept(v.e.deps.StateDir, src.ocID, v.ocID, v.run.ID, skip)
+		if err != nil {
+			return fmt.Errorf("copy from %s: %w", src.ocID, err)
+		}
+		v.log.Info("run directory copied forward", "from", src.ocID, "files", n, "checkout_left_behind", src.skipRepo)
 	}
 	return nil
+}
+
+// carrySource is one workspace the run directory is copied from before a visit: the
+// OpenClaw agent id, and whether its checkout (repo/) stays behind because the agent's
+// last visit was in a parallel branch the join does not name (DESIGN 5.26 rule 10).
+type carrySource struct {
+	ocID     string
+	skipRepo bool
 }
 
 // prepareProject clones the project repository into this agent's run directory when
@@ -1371,9 +1393,13 @@ func (v *visit) pause(ctx context.Context) {
 		return
 	}
 	e := v.e
-	if run, err := store.PauseRunAt(ctx, e.deps.Pool, v.run.ID, v.rn.ID, e.clock.Now()); err == nil {
-		v.run = run
-		e.emit(ctx, v.run.ID, "run.status", map[string]any{"run": run})
+	// Inside a parallel branch only the node pauses: the siblings keep working and the
+	// run's clock keeps counting (DESIGN 5.26 rule 7, D-063).
+	if v.branch == nil {
+		if run, err := store.PauseRunAt(ctx, e.deps.Pool, v.run.ID, v.rn.ID, e.clock.Now()); err == nil {
+			v.run = run
+			e.emit(ctx, v.run.ID, "run.status", map[string]any{"run": run})
+		}
 	}
 	v.rn.Status = store.NodeWaitingApproval
 	v.saveNode(ctx)
@@ -1392,9 +1418,11 @@ func (v *visit) resumeIfClear(ctx context.Context) {
 		return
 	}
 	e := v.e
-	if run, err := store.ResumeRunAt(ctx, e.deps.Pool, v.run.ID, e.clock.Now()); err == nil {
-		v.run = run
-		e.emit(ctx, v.run.ID, "run.status", map[string]any{"run": run})
+	if v.branch == nil {
+		if run, err := store.ResumeRunAt(ctx, e.deps.Pool, v.run.ID, e.clock.Now()); err == nil {
+			v.run = run
+			e.emit(ctx, v.run.ID, "run.status", map[string]any{"run": run})
+		}
 	}
 	v.rn.Status = store.NodeRunning
 	v.saveNode(ctx)
@@ -1932,7 +1960,7 @@ func (v *visit) finish(ctx context.Context, res outcome) {
 	// result no turn can use the call's answer any more, so a later grant is executed
 	// by the engine (DESIGN 5.3 rule 5); after a failure the call stays attached, so an
 	// expiry when the run ends still answers it.
-	if v.rn.Status == store.NodeWaitingApproval {
+	if v.rn.Status == store.NodeWaitingApproval && v.branch == nil {
 		if run, err := store.ResumeRunAt(ctx, e.deps.Pool, v.run.ID, now); err == nil {
 			v.run = run
 		}

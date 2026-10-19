@@ -319,7 +319,7 @@ func ParkVisit(ctx context.Context, db interface {
 // RequeueParkedRun, read without changing anything (DESIGN 5.24 rule 8).
 func IsParkedOn(ctx context.Context, q Querier, runID, runNodeID string) (bool, error) {
 	var parked bool
-	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs r WHERE r.id=$1 AND r.status=$3 AND r.resume_node_visit_id=$2
+	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE runs.id=$1 AND runs.status=$3 AND `+parkedResumeSQL+`
 		AND EXISTS (SELECT 1 FROM run_nodes n WHERE n.id=$2 AND n.parked_at IS NOT NULL))`,
 		runID, runNodeID, RunWaitingApproval).Scan(&parked)
 	return parked, err
@@ -332,16 +332,23 @@ func IsParkedOn(ctx context.Context, q Querier, runID, runNodeID string) (bool, 
 // succeeded without output, so a worker that claims the run at once never finds it open.
 // It returns ErrNotFound when the predicate does not hold (nothing parked, or already
 // re-queued), which makes every call after the first idempotent.
+//
+// Since DESIGN 5.26 rule 8 the predicate also holds when the run waits on the fork visit
+// whose branch the parked visit belongs to (parkedResumeSQL); the branch row goes back to
+// running in the same statement, so the fork's re-entry runs it.
 func RequeueParkedRun(ctx context.Context, q Querier, runID, runNodeID string, at time.Time) (*Run, error) {
 	return collectRun(q.Query(ctx, `WITH parked AS (
 			UPDATE run_nodes SET status=$5, finished_at=$3
 			WHERE id=$2 AND run_id=$1 AND parked_at IS NOT NULL AND status IN ($6, $7, $8)
-			  AND EXISTS (SELECT 1 FROM runs WHERE id=$1 AND status=$4 AND resume_node_visit_id=$2)
+			  AND EXISTS (SELECT 1 FROM runs WHERE runs.id=$1 AND runs.status=$4 AND `+parkedResumeSQL+`)
+			RETURNING id, branch_id),
+		branch AS (
+			UPDATE run_branches SET status=$7 WHERE id IN (SELECT branch_id FROM parked WHERE branch_id IS NOT NULL) AND status=$8
 			RETURNING id)
 		UPDATE runs SET status=$9,
 			paused_total_ms = paused_total_ms + GREATEST(0, COALESCE(EXTRACT(EPOCH FROM ($3::timestamptz - paused_at)) * 1000, 0))::bigint,
 			paused_at=NULL, updated_at=now()
-		WHERE id=$1 AND status=$4 AND resume_node_visit_id=$2
+		WHERE runs.id=$1 AND runs.status=$4 AND `+parkedResumeSQL+`
 		  AND EXISTS (SELECT 1 FROM run_nodes WHERE id=$2 AND parked_at IS NOT NULL)
 		RETURNING `+runColumns,
 		runID, runNodeID, at.UTC(), RunWaitingApproval, NodeSucceeded, NodePending, NodeRunning, NodeWaitingApproval, RunQueued))

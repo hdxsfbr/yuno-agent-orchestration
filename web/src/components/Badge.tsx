@@ -21,7 +21,7 @@ export function Badge({ tone = "zinc", pulse = false, children, title }: { tone?
   );
 }
 
-type Kind = "run" | "node" | "tool" | "approval";
+type Kind = "run" | "node" | "tool" | "approval" | "branch";
 
 const statusTones: Record<Kind, Record<string, Tone>> = {
   run: {
@@ -44,6 +44,12 @@ const statusTones: Record<Kind, Record<string, Tone>> = {
     failed: "red",
   },
   approval: { pending: "amber", approved: "green", rejected: "red", expired: "orange" },
+  branch: { running: "blue", waiting_approval: "amber", succeeded: "green", failed: "red", cancelled: "zinc" },
+};
+
+/** Words that replace the plain status for a kind of object: a branch parked on a question is waiting for the operator's answer. */
+const statusLabels: Partial<Record<Kind, Record<string, string>>> = {
+  branch: { waiting_approval: "Waiting for an answer" },
 };
 
 /** Status pill: the colour comes from the kind of object and its status. */
@@ -51,7 +57,7 @@ export function StatusBadge({ kind, status }: { kind: Kind; status: string }) {
   const tone = statusTones[kind][status] ?? "zinc";
   return (
     <Badge tone={tone} pulse={status === "running"}>
-      {humanize(status)}
+      {statusLabels[kind]?.[status] ?? humanize(status)}
     </Badge>
   );
 }

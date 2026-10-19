@@ -1,12 +1,13 @@
 import { useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { ApiError, cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, issueRef, retryRun, type Approval, type Run, type ToolCall } from "@/lib/api";
+import { ApiError, cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, issueRef, retryRun, type Approval, type Run, type RunBranch, type ToolCall } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, shortId } from "@/lib/format";
 import { requestNoun, requestRef } from "@/lib/mergeRequest";
 import { pendingQuestion, questionLine } from "@/lib/question";
 import { toolchainLabel } from "@/lib/project";
 import { canRetry, repeatsSideEffects } from "@/lib/runRetry";
+import { forkProgress } from "@/lib/trace";
 import type { Connection } from "@/lib/useEventStream";
 import Button from "../Button";
 import { Card } from "../Card";
@@ -74,11 +75,13 @@ type Props = {
   toolCalls?: readonly ToolCall[];
   /** The run's approvals so far: while the run waits on a question, the header says what it asks. */
   approvals?: readonly Approval[];
+  /** The run's branches so far: while the run is inside a fork, the step line says how many of them are still working. */
+  branches?: readonly RunBranch[];
   /** Called with the run the API returns after a cancel or a retry. */
   onRunChange: (run: Run) => void;
 };
 
-export default function RunHeader({ run, connection, now, toolCalls = [], approvals = [], onRunChange }: Props) {
+export default function RunHeader({ run, connection, now, toolCalls = [], approvals = [], branches = [], onRunChange }: Props) {
   const cancel = useMutation({ mutationFn: () => cancelRun(run.id), onSuccess: onRunChange });
   // A refusal for a run that used up a limit opens the dialog; any other refusal is told inline.
   const [limitsRefusal, setLimitsRefusal] = useState<ApiError | null>(null);
@@ -100,6 +103,9 @@ export default function RunHeader({ run, connection, now, toolCalls = [], approv
   const retries = run.retries ?? 0;
   const retryError = retry.error && !limitsRefusal ? retry.error : null;
   const asking = run.status === "waiting_approval" ? pendingQuestion(approvals) : undefined;
+  // Inside a fork the run's step is the fork until the join passes; the line says how many branches still work.
+  const inFork = terminal ? undefined : forkProgress(branches, run.current_node);
+  const step = inFork && inFork.running > 0 ? `${inFork.fork} (${inFork.running} ${inFork.running === 1 ? "branch" : "branches"} running)` : run.current_node;
 
   return (
     <section aria-label="Run summary">
@@ -176,7 +182,7 @@ export default function RunHeader({ run, connection, now, toolCalls = [], approv
           ) : null}
           {run.current_node && !terminal ? (
             <Item label="Current node">
-              <span className="font-mono">{run.current_node}</span>
+              <span className="font-mono">{step}</span>
             </Item>
           ) : null}
           <Item label="Created">{formatDateTime(run.created_at)}</Item>

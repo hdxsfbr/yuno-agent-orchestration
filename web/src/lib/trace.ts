@@ -1,4 +1,4 @@
-import type { AgentMessage, Approval, ModelCall, Run, RunNode, SSEEvent, ToolCall, Trace } from "./api";
+import type { AgentMessage, Approval, ModelCall, Run, RunBranch, RunNode, SSEEvent, ToolCall, Trace } from "./api";
 
 // The run page keeps the trace (GET /api/runs/{id}/trace) and applies the run's SSE events
 // on top of it. Every event carries the complete object, so applying one is an upsert by
@@ -10,14 +10,15 @@ export type LogLine = { id?: string; level: string; message: string; at?: string
 /** One retry of the run from the step it stopped at (the `run.retry` event, DESIGN 5.21); `retries` is its number, counted from 1. */
 export type RetryMark = { retries: number; from_node: string; by?: string; at?: string };
 
-export type RunView = Trace & { logs: LogLine[]; retries: RetryMark[] };
+/** The trace as the run page holds it; `branches` is empty for a run without forks (DESIGN 5.26). */
+export type RunView = Omit<Trace, "branches"> & { branches: RunBranch[]; logs: LogLine[]; retries: RetryMark[] };
 
 /** Log lines kept in memory; older lines are dropped from the front. */
 export const MAX_LOG_LINES = 500;
 
 /** Log lines and retry marks exist only on the event stream, so a reloaded trace brings them over from the view it replaces. */
 export function toRunView(trace: Trace, logs: LogLine[] = [], retries: RetryMark[] = []): RunView {
-  return { ...trace, logs, retries };
+  return { ...trace, branches: trace.branches ?? [], logs, retries };
 }
 
 type EventLike = Pick<SSEEvent, "event" | "data"> & { id?: string };
@@ -103,6 +104,11 @@ export function applyEvent(view: RunView, ev: EventLike): RunView {
       const node = pick<RunNode>(ev.data, "node");
       if (!node || node.run_id !== runId) return view;
       return { ...view, nodes: upsert(view.nodes, node) };
+    }
+    case "branch.status": {
+      const branch = pick<RunBranch>(ev.data, "branch");
+      if (!branch || branch.run_id !== runId) return view;
+      return { ...view, branches: upsert(view.branches, branch) };
     }
     case "model_call": {
       const call = pick<ModelCall>(ev.data, "model_call");
@@ -205,27 +211,141 @@ export function buildTimeline(view: Pick<RunView, "nodes" | "model_calls" | "too
   return out;
 }
 
-/** What the timeline lists: a node visit with its calls, or the boundary of a retry between two of them. */
-export type TimelineEntry = { kind: "node"; group: TimelineNode } | { kind: "retry"; mark: RetryMark };
+/** One branch of a fork card: the branch row and the node visits made inside it, in the order they started. */
+export type TimelineBranch = { branch: RunBranch; groups: TimelineNode[] };
+
+/**
+ * What the timeline lists: a node visit with its calls, a fork visit with its branches side by side, the join
+ * that ended a fork visit, or the boundary of a retry between two of them.
+ */
+export type TimelineEntry =
+  | { kind: "node"; group: TimelineNode }
+  | { kind: "fork"; group: TimelineNode; branches: TimelineBranch[] }
+  | { kind: "join"; group: TimelineNode; branches: number }
+  | { kind: "retry"; mark: RetryMark };
+
+/** The heads a fork or join row names in its output, `{"branches": [...]}` (DESIGN 5.26 rules 3 and 5). */
+function headsIn(output: unknown): string[] | undefined {
+  if (!isRecord(output)) return undefined;
+  const keys = Object.keys(output);
+  const heads = output.branches;
+  if (keys.length !== 1 || !Array.isArray(heads) || !heads.every((h) => typeof h === "string")) return undefined;
+  return heads as string[];
+}
+
+function sameSet(a: readonly string[], b: readonly string[]): boolean {
+  const x = new Set(a);
+  const y = new Set(b);
+  return x.size === y.size && [...x].every((h) => y.has(h));
+}
+
+/**
+ * The branches of a fork visit in the order of the fork's edges, which its row records as `output.branches`; branches
+ * the row does not name follow in the order they started.
+ */
+function inEdgeOrder(fork: RunNode, branches: readonly RunBranch[]): RunBranch[] {
+  const heads = headsIn(fork.output) ?? [];
+  const rank = (b: RunBranch) => {
+    const i = heads.indexOf(b.head);
+    return i < 0 ? Number.POSITIVE_INFINITY : i;
+  };
+  const started = (b: RunBranch) => {
+    const t = Date.parse(b.started_at);
+    return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
+  };
+  return branches
+    .map((branch, index) => ({ branch, index }))
+    .sort((a, b) => rank(a.branch) - rank(b.branch) || started(a.branch) - started(b.branch) || a.index - b.index)
+    .map((x) => x.branch);
+}
 
 /**
  * The timeline groups with a marker for each retry placed before the first visit that started
  * at or after it, so the visit that failed ends above the marker and the new visit starts
  * below it. A retry with no readable time goes after the visits that started.
+ *
+ * A fork visit (the row `fork_visit_id` of one or more branches) is one entry that holds its
+ * branches, each with the node visits made inside it (`branch_id`); a visit whose branch or fork
+ * row the view does not hold yet stays an ordinary entry. The join that ended a fork visit, the
+ * row without an agent whose output lists exactly that visit's heads, follows it as an entry of
+ * its own.
  */
-export function buildTimelineEntries(view: Pick<RunView, "nodes" | "model_calls" | "tool_calls" | "approvals" | "retries">): TimelineEntry[] {
+export function buildTimelineEntries(
+  view: Pick<RunView, "nodes" | "model_calls" | "tool_calls" | "approvals" | "retries"> & { branches?: readonly RunBranch[] },
+): TimelineEntry[] {
   const marks = [...view.retries].sort((a, b) => a.retries - b.retries);
   const timeOf = (iso?: string) => {
     const t = iso ? Date.parse(iso) : NaN;
     return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
   };
-  const out: TimelineEntry[] = [];
-  let next = 0;
+
+  // The branches a fork card can hold: those whose fork row the view has.
+  const rowIds = new Set(view.nodes.map((n) => n.id));
+  const forkBranches = new Map<string, RunBranch[]>();
+  const branchById = new Map<string, RunBranch>();
+  for (const b of view.branches ?? []) {
+    if (!rowIds.has(b.fork_visit_id)) continue;
+    branchById.set(b.id, b);
+    const list = forkBranches.get(b.fork_visit_id);
+    if (list) list.push(b);
+    else forkBranches.set(b.fork_visit_id, [b]);
+  }
+
+  const inside = new Map<string, TimelineNode[]>();
+  const top: TimelineNode[] = [];
   for (const group of buildTimeline(view)) {
+    const bid = group.node?.branch_id;
+    if (bid && branchById.has(bid)) {
+      const list = inside.get(bid);
+      if (list) list.push(group);
+      else inside.set(bid, [group]);
+    } else top.push(group);
+  }
+
+  const out: TimelineEntry[] = [];
+  const open: { heads: string[] }[] = [];
+  let next = 0;
+  for (const group of top) {
     const started = group.node?.started_at ? timeOf(group.node.started_at) : Number.POSITIVE_INFINITY;
     while (next < marks.length && timeOf(marks[next].at) <= started) out.push({ kind: "retry", mark: marks[next++] });
+    const row = group.node;
+    const owned = row ? forkBranches.get(row.id) : undefined;
+    if (row && owned) {
+      const ordered = inEdgeOrder(row, owned);
+      open.push({ heads: ordered.map((b) => b.head) });
+      out.push({ kind: "fork", group, branches: ordered.map((branch) => ({ branch, groups: inside.get(branch.id) ?? [] })) });
+      continue;
+    }
+    const joined = row && !row.agent_id && !row.branch_id ? headsIn(row.output) : undefined;
+    // The newest fork visit still open whose heads the row lists is the one it joins.
+    let fork = -1;
+    if (joined) for (let i = open.length - 1; i >= 0 && fork < 0; i--) if (sameSet(open[i].heads, joined)) fork = i;
+    if (joined && fork >= 0) {
+      open.splice(fork, 1);
+      out.push({ kind: "join", group, branches: joined.length });
+      continue;
+    }
     out.push({ kind: "node", group });
   }
   while (next < marks.length) out.push({ kind: "retry", mark: marks[next++] });
   return out;
+}
+
+/**
+ * Where a live run stands inside a fork: while `currentNode` is the fork of the newest fork visit, the fork's id and how
+ * many of that visit's branches are still working (running, or parked on a question). Undefined when the run is not in a fork.
+ */
+export function forkProgress(branches: readonly RunBranch[] | undefined, currentNode: string | undefined): { fork: string; running: number } | undefined {
+  if (!currentNode) return undefined;
+  const ofFork = (branches ?? []).filter((b) => b.fork_id === currentNode);
+  if (ofFork.length === 0) return undefined;
+  const startedAt = (b: RunBranch) => {
+    const t = Date.parse(b.started_at);
+    return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
+  };
+  // The newest fork visit: the one of the branch that started last (the later row wins a tie).
+  let newest = ofFork[0];
+  for (const b of ofFork) if (startedAt(b) >= startedAt(newest)) newest = b;
+  const visit = ofFork.filter((b) => b.fork_visit_id === newest.fork_visit_id);
+  return { fork: currentNode, running: visit.filter((b) => b.status === "running" || b.status === "waiting_approval").length };
 }

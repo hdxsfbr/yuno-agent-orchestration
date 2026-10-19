@@ -83,6 +83,20 @@ names are agent-chosen text and reach the Chief as tool output, which `AGENTS.md
 it to treat as data. Residual risk: a delivered file is still untrusted content once
 downloaded and opened elsewhere.
 
+**Parallel steps (DESIGN 5.26).** A fork runs several agent visits of one run at once.
+What they share is the run's state (written key by key, so a sibling's write is never
+lost), the run's counters and limits (summed, so two branches cannot together spend more
+than the run may), and the run directory only through the copy-forward after the join:
+a branch visit receives nothing from its siblings, and a project checkout flows past the
+join only from the branch the join names, never as a file-by-file mixture of two working
+trees that could carry one branch's edits into another's commit. Two branches never
+share an agent (refused at save), since an agent has one workspace and one sandbox hold.
+A branch's approval or question wait does not stop the run's clock, so a run in a fork
+cannot be kept alive past its time limit by one branch waiting while another works.
+Residual risk: a condition or task inside one branch that reads another branch's output
+reads whatever is there at that moment; `input_from` across branches is refused, and the
+rest is the workflow author's.
+
 **Runaway agents.** Loops, unbounded tool use, cost blow-ups. Mitigation: per-run step,
 time, cost, tool-call, node-iteration and loop-visit limits enforced on every event and
 on a tick (5.2), cancellation from the UI, a run can only ever wait on a human for

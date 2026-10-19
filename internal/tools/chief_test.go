@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -911,5 +912,126 @@ func TestRunStatusArtifacts(t *testing.T) {
 	}
 	if !slices.IsSorted(paths) || paths[0] != "data/results.csv" || paths[19] != "part-18.txt" {
 		t.Fatalf("named paths = %v", paths)
+	}
+}
+
+// T5.26.11 (DESIGN 5.26 rule 12): while the run's current node is a fork of its snapshot,
+// run_status names the branches of the fork's newest visit, each with its head, status and
+// current node, in the order they started; at any other node the key is absent.
+func TestRunStatusBranches(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	tool := NewRunStatus(pool, "")
+	if !strings.Contains(tool.Description, "the branches it runs in parallel") {
+		t.Fatalf("description = %q", tool.Description)
+	}
+
+	// The run works on the shipped Review panel: fork "panel", heads security, performance
+	// and maintainability, join "merge", then the lead.
+	file, err := os.ReadFile("../../templates/review_panel.json")
+	must(t, err)
+	var tpl struct {
+		Definition json.RawMessage `json:"definition"`
+	}
+	must(t, json.Unmarshal(file, &tpl))
+	f := newFixture(t, pool, nil)
+	moveTo := func(node string) {
+		t.Helper()
+		_, err := pool.Exec(ctx, `UPDATE runs SET workflow_snapshot = $2, current_node = $3 WHERE id = $1`, f.run.ID, tpl.Definition, node)
+		must(t, err)
+	}
+	status := func() (map[string]any, string) {
+		t.Helper()
+		res := invoke(t, tool, Call{Input: json.RawMessage(`{"chat_token":"x","run_id":"` + f.run.ID + `"}`)})
+		if res.IsError {
+			t.Fatalf("run_status: %+v", res)
+		}
+		var out map[string]any
+		must(t, json.Unmarshal(res.Output, &out))
+		return out, string(res.Output)
+	}
+	forkVisit := func(node string) *store.RunNode {
+		t.Helper()
+		now := time.Now().UTC()
+		n := &store.RunNode{RunID: f.run.ID, NodeID: node, Status: store.NodeRunning, StartedAt: &now}
+		must(t, store.CreateRunNode(ctx, pool, n))
+		return n
+	}
+	t0 := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	branch := func(visit *store.RunNode, fork, head, state, at string, start time.Time) {
+		t.Helper()
+		_, err := pool.Exec(ctx, `INSERT INTO run_branches (id, run_id, fork_visit_id, fork_id, head, status, current_node, started_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, store.NewID(), f.run.ID, visit.ID, fork, head, state, at, start)
+		must(t, err)
+	}
+	branchesOf := func(out map[string]any) [][3]string {
+		t.Helper()
+		list, ok := out["branches"].([]any)
+		if !ok {
+			t.Fatalf("branches = %v", out["branches"])
+		}
+		var got [][3]string
+		for _, b := range list {
+			m, _ := b.(map[string]any)
+			if len(m) != 3 {
+				t.Errorf("a branch carries %d fields: %v", len(m), m)
+			}
+			got = append(got, [3]string{fmt.Sprint(m["head"]), fmt.Sprint(m["status"]), fmt.Sprint(m["current_node"])})
+		}
+		return got
+	}
+
+	// Not at a fork: no key, with or without rows.
+	moveTo("coder")
+	if out, raw := status(); out["branches"] != nil || strings.Contains(raw, "branches") {
+		t.Fatalf("a run at the coder: %s", raw)
+	}
+
+	// At the fork before its rows are written: an empty list.
+	moveTo("panel")
+	out, raw := status()
+	if got := branchesOf(out); len(got) != 0 {
+		t.Fatalf("a fork without rows: %v", got)
+	}
+
+	// The first visit: three branches, one done, one working on its node, one parked.
+	v1 := forkVisit("panel")
+	branch(v1, "panel", "security", store.BranchSucceeded, "security", t0)
+	branch(v1, "panel", "performance", store.BranchRunning, "performance", t0.Add(time.Second))
+	branch(v1, "panel", "maintainability", store.BranchWaitingApproval, "maintainability", t0.Add(2*time.Second))
+	out, raw = status()
+	want := [][3]string{{"security", "succeeded", "security"}, {"performance", "running", "performance"},
+		{"maintainability", "waiting_approval", "maintainability"}}
+	if got := branchesOf(out); !slices.Equal(got, want) {
+		t.Fatalf("first visit: %v\n%s", got, raw)
+	}
+
+	// The loop around the pair enters the fork again: only the newest visit's rows are
+	// named, by the time they started, and the rows of another fork of the run (newer
+	// still) are not mixed in.
+	v2 := forkVisit("panel")
+	branch(v2, "panel", "performance", store.BranchRunning, "performance", t0.Add(time.Minute))
+	branch(v2, "panel", "security", store.BranchFailed, "security", t0.Add(time.Minute+time.Second))
+	branch(v2, "panel", "maintainability", store.BranchCancelled, "maintainability", t0.Add(time.Minute+2*time.Second))
+	other := forkVisit("elsewhere")
+	branch(other, "elsewhere", "left", store.BranchRunning, "left", t0.Add(time.Hour))
+	out, raw = status()
+	want = [][3]string{{"performance", "running", "performance"}, {"security", "failed", "security"},
+		{"maintainability", "cancelled", "maintainability"}}
+	if got := branchesOf(out); !slices.Equal(got, want) {
+		t.Fatalf("second visit: %v\n%s", got, raw)
+	}
+
+	// Past the join the run is at the lead: the rows stay, the key goes.
+	moveTo("lead")
+	if out, raw := status(); out["branches"] != nil || strings.Contains(raw, "branches") {
+		t.Fatalf("a run past the join: %s", raw)
+	}
+
+	// A snapshot that names no such node leaves the key out as well.
+	_, err = pool.Exec(ctx, `UPDATE runs SET workflow_snapshot = '{"nodes":[],"edges":[]}', current_node = 'panel' WHERE id = $1`, f.run.ID)
+	must(t, err)
+	if out, raw := status(); out["branches"] != nil || strings.Contains(raw, "branches") {
+		t.Fatalf("a snapshot without the fork: %s", raw)
 	}
 }

@@ -28,7 +28,7 @@ type Engine struct {
 	tokens *tokenRegistry
 
 	mu     sync.Mutex
-	active map[string]*visit // run id → node visit in progress
+	active map[string][]*visit // run id → node visits in progress (several inside a fork, DESIGN 5.26 rule 4)
 
 	waitMu  sync.Mutex
 	waiters map[string]*approvalWaiter // tool approval id → the MCP call waiting for it
@@ -76,7 +76,7 @@ func New(d Deps) *Engine {
 		clock:         d.Clock,
 		log:           d.Log.With("component", "engine"),
 		tokens:        newTokenRegistry(d.Clock),
-		active:        map[string]*visit{},
+		active:        map[string][]*visit{},
 		waiters:       map[string]*approvalWaiter{},
 		sbxHolds:      map[string]int{},
 		pollInterval:  500 * time.Millisecond,
@@ -635,12 +635,11 @@ func (e *Engine) Cancel(ctx context.Context, runID, by string) (*store.Run, erro
 			return done, nil
 		}
 	}
-	e.mu.Lock()
-	v := e.active[runID]
-	e.mu.Unlock()
-	if v != nil {
+	live := e.activeVisits(runID)
+	for _, v := range live {
 		v.requestCancel()
-	} else if run.Status == store.RunWaitingApproval {
+	}
+	if len(live) == 0 && run.Status == store.RunWaitingApproval {
 		// Paused with no worker (an approval node): nothing else would see the flag.
 		if done, ok := e.cancelWaitingRun(context.WithoutCancel(ctx), runID, "cancelled by "+by); ok {
 			e.log.Info("run cancelled while waiting for approval", "run_id", runID, "by", by)
@@ -688,6 +687,38 @@ func (e *Engine) RejectFinish(_ context.Context, token, message string) {
 }
 
 // ---- shared helpers ------------------------------------------------------------------
+
+// addActive and removeActive keep the live visits of a run; activeVisits lists them.
+// A sequential run has at most one; the branches of a fork have one each (DESIGN 5.26
+// rule 4), and Cancel, failRun, visitOf and the unattended re-queue look at all of them.
+func (e *Engine) addActive(v *visit) {
+	e.mu.Lock()
+	e.active[v.run.ID] = append(e.active[v.run.ID], v)
+	e.mu.Unlock()
+}
+
+func (e *Engine) removeActive(v *visit) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	live := e.active[v.run.ID]
+	for i, cur := range live {
+		if cur == v {
+			live = append(live[:i:i], live[i+1:]...)
+			break
+		}
+	}
+	if len(live) == 0 {
+		delete(e.active, v.run.ID)
+	} else {
+		e.active[v.run.ID] = live
+	}
+}
+
+func (e *Engine) activeVisits(runID string) []*visit {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]*visit(nil), e.active[runID]...)
+}
 
 // emit records an SSE event durably and fans it out; failures are logged.
 func (e *Engine) emit(ctx context.Context, runID, typ string, v any) {

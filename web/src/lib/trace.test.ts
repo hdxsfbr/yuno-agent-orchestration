@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AgentMessage, Approval, MergeRequest, ModelCall, Run, RunNode, ToolCall, Trace } from "./api";
-import { MAX_LOG_LINES, applyEvent, applyEvents, buildTimeline, buildTimelineEntries, toRunView } from "./trace";
+import type { AgentMessage, Approval, MergeRequest, ModelCall, Run, RunBranch, RunNode, ToolCall, Trace } from "./api";
+import { MAX_LOG_LINES, applyEvent, applyEvents, buildTimeline, buildTimelineEntries, forkProgress, toRunView } from "./trace";
 
 const RUN = "run-1";
 
@@ -83,6 +83,18 @@ const message = (over: Partial<AgentMessage> = {}): AgentMessage => ({
   ...over,
 });
 
+const branch = (over: Partial<RunBranch> = {}): RunBranch => ({
+  id: "b1",
+  run_id: RUN,
+  fork_visit_id: "f1",
+  fork_id: "panel",
+  head: "security",
+  status: "running",
+  current_node: "security",
+  started_at: "2026-10-15T10:00:10Z",
+  ...over,
+});
+
 const emptyTrace = (r: Run = run()): Trace => ({
   run: r,
   nodes: [],
@@ -110,6 +122,28 @@ describe("applyEvent", () => {
     expect(v.nodes).toHaveLength(1);
     expect(v.nodes[0].status).toBe("succeeded");
     expect(v.nodes[0].output).toEqual({ answer: 42 });
+  });
+
+  it("adds a branch on branch.status, then updates it in place", () => {
+    let v = applyEvent(base(), ev("branch.status", { branch: branch() }));
+    expect(v.branches).toEqual([branch()]);
+    v = applyEvent(v, ev("branch.status", { branch: branch({ id: "b2", head: "performance" }) }));
+    v = applyEvent(v, ev("branch.status", { branch: branch({ status: "failed", failure_reason: "boom", finished_at: "2026-10-15T10:00:20Z" }) }));
+    expect(v.branches.map((b) => [b.id, b.status])).toEqual([
+      ["b1", "failed"],
+      ["b2", "running"],
+    ]);
+    expect(v.branches[0].failure_reason).toBe("boom");
+    // the same event twice leaves the same state
+    expect(applyEvent(v, ev("branch.status", { branch: branch({ status: "failed", failure_reason: "boom", finished_at: "2026-10-15T10:00:20Z" }) })).branches).toEqual(v.branches);
+  });
+
+  it("ignores a branch of another run and a branch event without a branch", () => {
+    const v = base();
+    expect(applyEvent(v, ev("branch.status", { branch: branch({ run_id: "other" }) }))).toBe(v);
+    expect(applyEvent(v, ev("branch.status", {}))).toBe(v);
+    expect(applyEvent(v, ev("branch.status", { branch: { head: "security" } }))).toBe(v);
+    expect(applyEvent(v, ev("branch.status", "nope"))).toBe(v);
   });
 
   it("upserts model calls and tool calls by id", () => {
@@ -290,6 +324,11 @@ describe("toRunView", () => {
     expect(v.retries).toBe(marks);
     expect(toRunView(emptyTrace()).retries).toEqual([]);
   });
+
+  it("carries the branches of the trace, none when the trace has none", () => {
+    expect(toRunView(emptyTrace()).branches).toEqual([]);
+    expect(toRunView({ ...emptyTrace(), branches: [branch()] }).branches).toEqual([branch()]);
+  });
 });
 
 describe("buildTimelineEntries", () => {
@@ -335,5 +374,145 @@ describe("buildTimelineEntries", () => {
       ],
     });
     expect(kinds(entries)).toEqual(["n1", "retry 1", "n2", "retry 2", "n3", "retry 3"]);
+  });
+});
+
+describe("buildTimelineEntries with a fork", () => {
+  const at = (s: number) => `2026-10-15T10:00:${String(s).padStart(2, "0")}Z`;
+  const fork = (over: Partial<RunNode> = {}) =>
+    node({ id: "f1", node_id: "panel", visit: 1, status: "succeeded", started_at: at(10), finished_at: at(40), output: { branches: ["security", "performance"] }, ...over });
+  const inBranch = (id: string, nodeId: string, branchId: string, start: number, over: Partial<RunNode> = {}) =>
+    node({ id, node_id: nodeId, branch_id: branchId, visit: 1, status: "succeeded", agent_id: `a-${nodeId}`, started_at: at(start), ...over });
+  const join = (over: Partial<RunNode> = {}) =>
+    node({ id: "j1", node_id: "merge", visit: 1, status: "succeeded", started_at: at(40), finished_at: at(40), output: { branches: ["security", "performance"] }, ...over });
+  const coder = () => node({ id: "n0", node_id: "coder", agent_id: "a-coder", status: "succeeded", started_at: at(1) });
+  const lead = () => node({ id: "n9", node_id: "lead", agent_id: "a-lead", status: "running", started_at: at(41) });
+  const two = [branch({ id: "b-sec", head: "security", started_at: at(10) }), branch({ id: "b-perf", head: "performance", started_at: at(10) })];
+  const rest = { model_calls: [], tool_calls: [], approvals: [], retries: [] };
+
+  it("holds a fork visit as one entry with a column for each branch, the visits of a branch inside it, and the join after it", () => {
+    const entries = buildTimelineEntries({
+      ...rest,
+      branches: two,
+      nodes: [coder(), fork(), inBranch("n1", "security", "b-sec", 11), inBranch("n2", "performance", "b-perf", 11), inBranch("n3", "security_2", "b-sec", 20), join(), lead()],
+    });
+    expect(entries.map((e) => e.kind)).toEqual(["node", "fork", "join", "node"]);
+    const f = entries[1];
+    if (f.kind !== "fork") throw new Error("not a fork entry");
+    expect(f.group.node?.id).toBe("f1");
+    expect(f.branches.map((b) => [b.branch.head, b.groups.map((g) => g.node?.id)])).toEqual([
+      ["security", ["n1", "n3"]],
+      ["performance", ["n2"]],
+    ]);
+    const j = entries[2];
+    if (j.kind !== "join") throw new Error("not a join entry");
+    expect(j.group.node?.node_id).toBe("merge");
+    expect(j.branches).toBe(2);
+  });
+
+  it("orders the columns as the fork's edges, which its output records, whatever order the rows arrive in", () => {
+    const reversed = [two[1], two[0]];
+    const entries = buildTimelineEntries({ ...rest, branches: reversed, nodes: [fork()] });
+    const f = entries[0];
+    if (f.kind !== "fork") throw new Error("not a fork entry");
+    expect(f.branches.map((b) => b.branch.head)).toEqual(["security", "performance"]);
+  });
+
+  it("falls back to the order the branches started in when the fork's row names none", () => {
+    const entries = buildTimelineEntries({
+      ...rest,
+      branches: [branch({ id: "b-late", head: "late", started_at: at(12) }), branch({ id: "b-early", head: "early", started_at: at(10) })],
+      nodes: [fork({ output: undefined })],
+    });
+    const f = entries[0];
+    if (f.kind !== "fork") throw new Error("not a fork entry");
+    expect(f.branches.map((b) => b.branch.head)).toEqual(["early", "late"]);
+  });
+
+  it("keeps a branch with no visits yet, and a visit whose branch or fork row the view lacks as an ordinary entry", () => {
+    const entries = buildTimelineEntries({
+      ...rest,
+      branches: [...two, branch({ id: "b-ghost", fork_visit_id: "gone", head: "ghost" })],
+      nodes: [fork(), inBranch("n1", "security", "b-sec", 11), inBranch("n7", "ghost", "b-ghost", 12), inBranch("n8", "stray", "no-such-branch", 13)],
+    });
+    expect(entries.map((e) => (e.kind === "fork" ? "fork" : e.kind === "node" ? (e.group.node?.id ?? "other") : e.kind))).toEqual(["fork", "n7", "n8"]);
+    const f = entries[0];
+    if (f.kind !== "fork") throw new Error("not a fork entry");
+    expect(f.branches.map((b) => b.groups.length)).toEqual([1, 0]);
+  });
+
+  it("treats a fork row without branches, and a row that merely resembles a join, as ordinary entries", () => {
+    const lone = buildTimelineEntries({ ...rest, branches: [], nodes: [fork()] });
+    expect(lone.map((e) => e.kind)).toEqual(["node"]);
+    // the join row is only a join while a fork visit lists the same heads
+    const odd = buildTimelineEntries({
+      ...rest,
+      branches: two,
+      nodes: [fork(), join({ output: { branches: ["x", "y"] } }), join({ id: "j2", agent_id: "a1", started_at: at(41), finished_at: at(41) })],
+    });
+    expect(odd.map((e) => e.kind)).toEqual(["fork", "node", "node"]);
+  });
+
+  it("gives a loop around the pair its own fork entry and join entry each time", () => {
+    const entries = buildTimelineEntries({
+      ...rest,
+      branches: [...two, branch({ id: "b-sec2", fork_visit_id: "f2", head: "security", started_at: at(52) }), branch({ id: "b-perf2", fork_visit_id: "f2", head: "performance", started_at: at(52) })],
+      nodes: [
+        fork(),
+        inBranch("n1", "security", "b-sec", 11),
+        join(),
+        fork({ id: "f2", visit: 2, started_at: at(52), finished_at: undefined, status: "running" }),
+        inBranch("n4", "security", "b-sec2", 53, { visit: 2 }),
+        inBranch("n5", "performance", "b-perf2", 53, { visit: 2 }),
+      ],
+    });
+    expect(entries.map((e) => e.kind)).toEqual(["fork", "join", "fork"]);
+    const second = entries[2];
+    if (second.kind !== "fork") throw new Error("not a fork entry");
+    expect(second.branches.map((b) => b.groups.map((g) => g.node?.id))).toEqual([["n4"], ["n5"]]);
+  });
+
+  it("places a retry mark after the fork card it follows and before the join", () => {
+    const entries = buildTimelineEntries({
+      ...rest,
+      branches: two,
+      nodes: [fork(), inBranch("n1", "security", "b-sec", 11), join()],
+      retries: [{ retries: 1, from_node: "security", at: at(30) }],
+    });
+    expect(entries.map((e) => (e.kind === "retry" ? "retry" : e.kind))).toEqual(["fork", "retry", "join"]);
+  });
+
+  it("is the plain timeline for a run without branches", () => {
+    const entries = buildTimelineEntries({ ...rest, nodes: [coder(), lead()] });
+    expect(entries.map((e) => e.kind)).toEqual(["node", "node"]);
+  });
+});
+
+describe("forkProgress", () => {
+  const two = [branch({ id: "b1", head: "security" }), branch({ id: "b2", head: "performance", status: "succeeded" }), branch({ id: "b3", head: "maintainability", status: "waiting_approval" })];
+
+  it("counts the branches still working (running or waiting for an answer) when the run is at the fork", () => {
+    expect(forkProgress(two, "panel")).toEqual({ fork: "panel", running: 2 });
+  });
+
+  it("is undefined when the run is elsewhere or has no branches", () => {
+    expect(forkProgress(two, "coder")).toBeUndefined();
+    expect(forkProgress(two, undefined)).toBeUndefined();
+    expect(forkProgress([], "panel")).toBeUndefined();
+    expect(forkProgress(undefined, "panel")).toBeUndefined();
+  });
+
+  it("counts only the newest fork visit of the fork", () => {
+    const loop = [
+      ...two.map((b) => ({ ...b, status: "succeeded" as const })),
+      branch({ id: "b4", fork_visit_id: "f2", head: "security", started_at: "2026-10-15T10:05:00Z" }),
+      branch({ id: "b5", fork_visit_id: "f2", head: "performance", started_at: "2026-10-15T10:05:00Z" }),
+    ];
+    expect(forkProgress(loop, "panel")).toEqual({ fork: "panel", running: 2 });
+    expect(forkProgress([...loop, branch({ id: "b6", fork_visit_id: "f2", head: "third", status: "failed", started_at: "2026-10-15T10:05:00Z" })], "panel")?.running).toBe(2);
+  });
+
+  it("says none are working once every branch has ended", () => {
+    expect(forkProgress([branch({ status: "succeeded" })], "panel")).toEqual({ fork: "panel", running: 0 });
   });
 });

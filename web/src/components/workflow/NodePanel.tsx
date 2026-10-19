@@ -1,8 +1,8 @@
 import { useState } from "react";
-import type { Agent, WorkflowDefinition, WorkflowNode } from "@/lib/api";
+import type { Agent, NodeKind, WorkflowDefinition, WorkflowNode } from "@/lib/api";
 import { describeCondition } from "@/lib/condition";
 import { errorsFor, type FieldErrors } from "@/lib/agentForm";
-import { KIND_LABEL, nodeIdProblem, outgoing, stateReferences } from "@/lib/workflow";
+import { KIND_LABEL, forkHeads, forksJoiningAt, nodeIdProblem, outgoing, stateReferences } from "@/lib/workflow";
 import { countFor } from "@/lib/workflowErrors";
 import { Badge } from "../Badge";
 import Button from "../Button";
@@ -30,6 +30,24 @@ type Props = {
 
 const unset = (v: string) => (v === "" ? undefined : v);
 
+/** The members of a node each kind has a field for; a message about any other member is listed above the fields. */
+const FIELDS: Record<NodeKind, string[]> = {
+  start: ["id"],
+  end: ["id"],
+  agent: ["id", "agent_id", "agent_name", "task", "output_schema", "input_from", "on_failure"],
+  approval: ["id", "message", "on_reject"],
+  fork: ["id", "join"],
+  join: ["id", "checkout"],
+};
+
+/** A fork or a join writes nothing into the state, so it is not offered as a source of output unless the node already lists it. */
+const collectsNothing = (n: WorkflowNode) => n.kind === "fork" || n.kind === "join";
+
+/** The options of a selector over node ids: the choices, then the current value when it is none of them, so it can be seen and replaced. */
+function idOptions(empty: Option, ids: string[], current: string): Option[] {
+  return [empty, ...ids.map((id) => ({ value: id, label: id })), ...(current && !ids.includes(current) ? [{ value: current, label: current }] : [])];
+}
+
 export default function NodePanel({ def, node, agents, errors, edgeErrors, onChange, onRename, onDelete, onAddEdge, onSelectEdge, onMoveEdge, onBlocker }: Props) {
   const [idText, setIdText] = useState(node.id);
   const [renameNote, setRenameNote] = useState<string | null>(null);
@@ -38,6 +56,16 @@ export default function NodePanel({ def, node, agents, errors, edgeErrors, onCha
   const others = def.nodes.filter((n) => n.id !== node.id);
   const targets: Option[] = [{ value: "", label: "None" }, ...others.filter((n) => n.kind !== "start").map((n) => ({ value: n.id, label: n.id }))];
   const edges = outgoing(def, node.id);
+
+  const joinIds = def.nodes.filter((n) => n.kind === "join").map((n) => n.id);
+  const joiningForks = node.kind === "join" ? forksJoiningAt(def, node.id) : [];
+  const heads = joiningForks.length > 0 ? forkHeads(def, joiningForks[0].id) : [];
+  // A checkout the workflow cannot use (it does not work on a project) stays visible, so it can be cleared.
+  const showCheckout = node.kind === "join" && (!!def.project || !!node.checkout);
+  const fields = [...(FIELDS[node.kind] ?? ["id"])].filter((f) => f !== "checkout" || showCheckout);
+  const stray = Object.entries(errors).flatMap(([key, messages]) =>
+    key === "" || fields.some((f) => key === f || key.startsWith(`${f}.`)) ? [] : messages.map((m) => `${key}: ${m}`),
+  );
 
   const agentId = node.agent_id ?? agents.find((a) => a.name.toLowerCase() === node.agent_name?.toLowerCase())?.id ?? "";
   const agentOptions: Option[] = [
@@ -58,6 +86,7 @@ export default function NodePanel({ def, node, agents, errors, edgeErrors, onCha
         </Button>
       </div>
       <ErrorList errors={errors[""] ?? []} />
+      <ErrorList errors={stray} />
 
       <TextField
         label="Node id"
@@ -119,7 +148,7 @@ export default function NodePanel({ def, node, agents, errors, edgeErrors, onCha
             <p className="mb-2 text-xs text-zinc-500">The listed nodes' results are added to the task as context. The start node stands for the run input.</p>
             <div className="space-y-1.5">
               {others
-                .filter((n) => n.kind !== "end")
+                .filter((n) => n.kind !== "end" && (!collectsNothing(n) || node.input_from?.includes(n.id)))
                 .map((n) => (
                   <CheckboxField
                     key={n.id}
@@ -147,6 +176,57 @@ export default function NodePanel({ def, node, agents, errors, edgeErrors, onCha
         </>
       ) : null}
 
+      {node.kind === "fork" ? (
+        <>
+          {joinIds.length > 0 ? (
+            <SelectField
+              label="Join"
+              required
+              value={node.join ?? ""}
+              options={idOptions({ value: "", label: "Choose a join…" }, joinIds, node.join ?? "")}
+              errors={errorsFor(errors, "join")}
+              onChange={(v) => onChange({ join: v })}
+            />
+          ) : (
+            <div>
+              <p className="text-sm">Add a join node for this fork to end at.</p>
+              <ErrorList errors={errorsFor(errors, "join")} />
+            </div>
+          )}
+          <p className="text-sm text-zinc-500">Every edge whose condition holds starts a branch; the branches meet at the join.</p>
+        </>
+      ) : null}
+
+      {node.kind === "join" ? (
+        <>
+          <p className="text-sm text-zinc-500">
+            {joiningForks.length > 0 ? `Joins the branches of ${joiningForks.map((f) => f.id).join(", ")}.` : "No fork names this join yet."}
+          </p>
+          {heads.length > 0 ? (
+            <div>
+              <h3 className="mb-1 text-sm font-medium">Branches</h3>
+              <ol className="space-y-0.5 text-sm">
+                {heads.map((h) => (
+                  <li key={h} className="font-mono">
+                    {h}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
+          {showCheckout ? (
+            <SelectField
+              label="Checkout"
+              value={node.checkout ?? ""}
+              options={idOptions({ value: "", label: "None" }, heads, node.checkout ?? "")}
+              hint="Branches run at once and meet here; the checkout of the chosen branch continues past the join."
+              errors={errorsFor(errors, "checkout")}
+              onChange={(v) => onChange({ checkout: unset(v) })}
+            />
+          ) : null}
+        </>
+      ) : null}
+
       {node.kind === "approval" ? (
         <>
           <TextAreaField
@@ -171,7 +251,9 @@ export default function NodePanel({ def, node, agents, errors, edgeErrors, onCha
       {node.kind !== "end" ? (
         <div>
           <h3 className="mb-1 text-sm font-medium">Outgoing edges</h3>
-          <p className="mb-2 text-xs text-zinc-500">Edges are checked in this order and the first one whose condition holds is taken.</p>
+          <p className="mb-2 text-xs text-zinc-500">
+            {node.kind === "fork" ? "Branches appear in this order on the run page." : "Edges are checked in this order and the first one whose condition holds is taken."}
+          </p>
           {edges.length === 0 ? (
             <p className="text-sm text-zinc-500">No outgoing edges yet.</p>
           ) : (

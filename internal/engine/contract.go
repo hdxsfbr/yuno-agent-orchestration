@@ -236,4 +236,10 @@ type ArtifactInput struct {
 	Node      *store.RunNode
 	Project   *project.Config
 	Branch    string
+	// SkipDiff is set for a visit inside a parallel branch the join does not name as its
+	// checkout (DESIGN 5.26 rule 11): the generated diff.patch is not produced, so the
+	// run's one patch never flips between branches. BranchHead names the branch for the
+	// log line.
+	SkipDiff   bool
+	BranchHead string
 }

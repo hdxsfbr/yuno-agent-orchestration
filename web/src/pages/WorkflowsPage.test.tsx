@@ -159,6 +159,81 @@ describe("From template", () => {
     expect(screen.queryByText(/builder for/)).toBeNull();
   });
 
+  describe("a template with a fork and a join", () => {
+    const reviewPanel: WorkflowTemplate = {
+      key: "review_panel",
+      name: "Review panel",
+      description: "A coder writes, three reviewers read the change at once, a lead decides, a human approves the deploy.",
+      definition: {
+        project: true,
+        nodes: [
+          { id: "start", kind: "start" },
+          { id: "coder", kind: "agent", agent_name: "Coder" },
+          { id: "panel", kind: "fork", join: "merge" },
+          { id: "security", kind: "agent", agent_name: "Security Reviewer" },
+          { id: "performance", kind: "agent", agent_name: "Performance Reviewer" },
+          { id: "maintainability", kind: "agent", agent_name: "Maintainability Reviewer" },
+          { id: "merge", kind: "join" },
+          { id: "lead", kind: "agent", agent_name: "Reviewer" },
+          { id: "gate", kind: "approval", message: "Deploy?" },
+          { id: "deployer", kind: "agent", agent_name: "Deployer" },
+          { id: "end", kind: "end" },
+        ],
+        edges: [
+          { from: "start", to: "coder" },
+          { from: "coder", to: "panel" },
+          { from: "panel", to: "security" },
+          { from: "panel", to: "performance" },
+          { from: "panel", to: "maintainability" },
+          { from: "security", to: "merge" },
+          { from: "performance", to: "merge" },
+          { from: "maintainability", to: "merge" },
+          { from: "merge", to: "lead" },
+          { from: "lead", to: "gate", when: { path: "/lead/verdict", op: "eq", value: "approved" } },
+          { from: "gate", to: "deployer" },
+          { from: "deployer", to: "end" },
+        ],
+      },
+    };
+
+    beforeEach(() => {
+      api.on("GET", "/api/workflow-templates", () => [...templates, reviewPanel]);
+    });
+
+    it("lists it with its node count and the agents it names, the fork and the join not among them", async () => {
+      renderPage();
+      fireEvent.click(await screen.findByRole("button", { name: "From template" }));
+      const drawer = within(await screen.findByRole("dialog", { name: "Start from a template" }));
+      const card = within((await drawer.findByText("Review panel")).closest("li")!);
+      expect(card.getByText(reviewPanel.description)).not.toBeNull();
+      expect(card.getByText("11 nodes · Agents: Coder, Security Reviewer, Performance Reviewer, Maintainability Reviewer, Reviewer, Deployer")).not.toBeNull();
+    });
+
+    it("makes a workflow from it and opens it in the builder", async () => {
+      api.on("POST", "/api/workflow-templates/review_panel/instantiate", () => wf({ id: "w8", name: "Review panel", definition: reviewPanel.definition as Workflow["definition"] }));
+      renderPage();
+      fireEvent.click(await screen.findByRole("button", { name: "From template" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Use Review panel" }));
+      expect(await screen.findByText("builder for w8")).not.toBeNull();
+      expect(api.made("POST", "/api/workflow-templates/review_panel/instantiate")[0].body).toEqual({ name: "Review panel" });
+    });
+
+    it("names the node of the template a missing agent belongs to, counting the fork and the join in the node numbers", async () => {
+      api.on("POST", "/api/workflow-templates/review_panel/instantiate", () =>
+        apiError(422, "validation_failed", "template cannot be instantiated", [
+          { path: "nodes[3].agent_name", message: "no agent named 'Security Reviewer'" },
+          { path: "nodes[7].agent_name", message: "no agent named 'Reviewer'" },
+        ]),
+      );
+      renderPage();
+      fireEvent.click(await screen.findByRole("button", { name: "From template" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Use Review panel" }));
+      const alert = within(await screen.findByRole("alert"));
+      expect(alert.getByText("Node security: no agent named 'Security Reviewer'")).not.toBeNull();
+      expect(alert.getByText("Node lead: no agent named 'Reviewer'")).not.toBeNull();
+    });
+  });
+
   it("closes with Escape", async () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "From template" }));

@@ -23,6 +23,7 @@ export default function EdgePanel({ def, edge, index, errors, onChange, onMove, 
   const siblings = outgoing(def, edge.from);
   const position = siblings.findIndex((s) => s.index === index);
   const ids = def.nodes.map((n) => n.id);
+  const startsBranch = def.nodes.some((n) => n.id === edge.from && n.kind === "fork");
   const known = (id: string) => (ids.includes(id) ? ids : [id, ...ids]);
 
   return (
@@ -60,9 +61,17 @@ export default function EdgePanel({ def, edge, index, errors, onChange, onMove, 
           </div>
         </div>
         <p className="mt-1 text-xs text-zinc-500">
-          The edges leaving <span className="font-mono">{edge.from}</span> are checked in this order; the first whose condition holds is taken.
+          {startsBranch ? (
+            "Branches appear in this order on the run page."
+          ) : (
+            <>
+              The edges leaving <span className="font-mono">{edge.from}</span> are checked in this order; the first whose condition holds is taken.
+            </>
+          )}
         </p>
       </div>
+
+      {startsBranch ? <p className="text-sm text-zinc-500">Every edge whose condition holds starts a branch.</p> : null}
 
       <ConditionEditor
         value={edge.when}

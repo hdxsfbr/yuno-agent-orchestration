@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -31,6 +32,16 @@ type walk struct {
 	sessions []string        // node sessions to delete when the worker lets the run go
 	// noProjectLogged keeps the "no repository configured" line to one per walk.
 	noProjectLogged bool
+
+	// A branch walk (DESIGN 5.26 rule 4) runs one branch of a fork visit: branch is its
+	// row, region the fork's, parentSpan the fork's span its visits hang under, and
+	// stopReason, set by the fork before it cancels the walk's context, says the branch is
+	// being stopped because a sibling failed (rule 6) rather than the engine shutting down.
+	branch     *store.RunBranch
+	region     *workflow.ForkRegion
+	parentSpan string
+	stopMu     sync.Mutex
+	stopReason string
 
 	// The definition's state_schema, compiled at the first agent node output.
 	stateSchema         *jsonschema.Schema
@@ -62,6 +73,12 @@ func (w *walk) execute(ctx context.Context) outcome {
 			next, res = w.agentNode(ctx, node)
 		case workflow.KindApproval:
 			next, res = w.approvalNode(ctx, node)
+		case workflow.KindFork:
+			next, res = w.forkNode(ctx, node)
+		case workflow.KindJoin:
+			// Validation lets a join be reached only through its fork's branches; the fork
+			// passes it itself (DESIGN 5.26 rule 5).
+			return failed(store.RunFailed, fmt.Sprintf("join %s reached outside its fork", node.ID))
 		default:
 			return failed(store.RunFailed, fmt.Sprintf("node %s: unknown kind '%s'", node.ID, node.Kind))
 		}
@@ -170,9 +187,16 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 	if res := w.enter(ctx, node); res != nil {
 		return "", res
 	}
-	v, early := e.newVisit(ctx, w.run, node, w.over, w.rootSpan, w.stale)
+	spanParent := w.rootSpan
+	if w.parentSpan != "" {
+		spanParent = w.parentSpan
+	}
+	v, early := e.newVisit(ctx, w.run, node, w.over, spanParent, w.stale, w.branch)
 	if v == nil {
 		return "", &early
+	}
+	if w.branch != nil && w.region != nil {
+		v.skipDiff = w.region.Checkout != w.branch.Head
 	}
 	stale := w.stale
 	w.stale = nil
@@ -224,17 +248,25 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 			v.early = &o
 		}
 	}
-	e.mu.Lock()
-	e.active[w.run.ID] = v
-	e.mu.Unlock()
+	e.addActive(v)
 	res := v.execute(ctx)
-	e.mu.Lock()
-	if e.active[w.run.ID] == v {
-		delete(e.active, w.run.ID)
-	}
-	e.mu.Unlock()
+	e.removeActive(v)
 	wctx := context.WithoutCancel(ctx)
 	if res.interrupted {
+		if reason := w.stopping(); reason != "" {
+			// A sibling branch failed and the fork stopped this one (DESIGN 5.26 rule 6):
+			// the turn is aborted and the visit closes failed with the stop reason, like a
+			// limit; the run's outcome is the fork's.
+			v.abortLiveTurn(wctx)
+			res = failed(store.RunFailed, reason)
+			res.limit = true
+			v.finish(wctx, res)
+			e.collectArtifacts(wctx, v)
+			if v.sessionCreated {
+				w.sessions = append(w.sessions, v.key)
+			}
+			return "", &res
+		}
 		// Shutting down: OpenClaw must not keep executing a turn nobody mirrors. The run
 		// stays for recovery, whose replacement visit starts a session of its own.
 		v.abortLiveTurn(wctx)
@@ -253,6 +285,10 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 		w.sessions = append(w.sessions, v.key)
 	}
 	if res.paused {
+		if w.branch != nil {
+			// The branch parked (DESIGN 5.26 rule 8): the fork decides when the run waits.
+			return "", &res
+		}
 		// The visit parked on a question (DESIGN 5.24 rule 5): the worker lets the run go
 		// as it does at an approval node, and the answer re-queues it. A cancel that came
 		// in meanwhile is applied now, since nothing else would see it.
@@ -271,16 +307,32 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 // by each agent's last visit so a later visit's file wins. An agent whose last visit
 // came before v's own agent last ran is left out: its files reached this workspace
 // then, and this agent's own later changes must win over them.
-func (w *walk) carrySources(ctx context.Context, v *visit) ([]string, error) {
+//
+// Since DESIGN 5.26 rule 10 a visit inside a parallel branch receives nothing from its
+// sibling branches of the same fork visit (their files are partial and their own), and
+// the checkout (repo/) of an agent whose last visit was in a branch the join does not
+// name stays behind, so two working trees are never mixed file by file.
+func (w *walk) carrySources(ctx context.Context, v *visit) ([]carrySource, error) {
 	visits, err := store.ListRunNodes(ctx, w.e.deps.Pool, w.run.ID)
 	if err != nil {
 		return nil, err
 	}
-	last := map[string]int{} // OpenClaw agent id → index of its last earlier visit
+	rows, err := store.ListRunBranches(ctx, w.e.deps.Pool, w.run.ID)
+	if err != nil {
+		return nil, err
+	}
+	branches := map[string]store.RunBranch{}
+	for _, b := range rows {
+		branches[b.ID] = b
+	}
+	last := map[string]int{} // OpenClaw agent id -> index of its last earlier visit
 	var order []string
 	for i, n := range visits {
 		if n.ID == v.rn.ID || n.SessionKey == nil {
 			continue
+		}
+		if n.BranchID != nil && w.branch != nil && *n.BranchID != w.branch.ID && branches[*n.BranchID].ForkVisitID == w.branch.ForkVisitID {
+			continue // a sibling branch of this fork visit
 		}
 		id := sessionAgent(*n.SessionKey)
 		if id == "" {
@@ -292,14 +344,30 @@ func (w *walk) carrySources(ctx context.Context, v *visit) ([]string, error) {
 		last[id] = i
 	}
 	own, ranBefore := last[v.ocID]
-	var out []string
+	var out []carrySource
 	for _, id := range order {
-		if id != v.ocID && (!ranBefore || last[id] > own) {
-			out = append(out, id)
+		if id == v.ocID || (ranBefore && last[id] <= own) {
+			continue
 		}
+		src := carrySource{ocID: id}
+		if bid := visits[last[id]].BranchID; bid != nil && (w.branch == nil || *bid != w.branch.ID) {
+			src.skipRepo = !w.checkoutBranch(branches[*bid])
+		}
+		out = append(out, src)
 	}
-	slices.SortFunc(out, func(a, b string) int { return last[a] - last[b] })
+	slices.SortFunc(out, func(a, b carrySource) int { return last[a.ocID] - last[b.ocID] })
 	return out, nil
+}
+
+// checkoutBranch reports whether a branch is the one its join names as the checkout
+// (DESIGN 5.26 rule 10), so its repo/ flows past the join.
+func (w *walk) checkoutBranch(b store.RunBranch) bool {
+	f, ok := w.def.Node(b.ForkID)
+	if !ok {
+		return false
+	}
+	j, ok := w.def.Node(f.Join)
+	return ok && j.Checkout != "" && j.Checkout == b.Head
 }
 
 // sessionAgent is the OpenClaw agent id in a node session key (SessionKey): the
@@ -389,7 +457,17 @@ func (w *walk) advance(ctx context.Context, node *workflow.Node, output json.Raw
 	if !ok {
 		cur = node.ID
 	}
-	run, err := store.SetRunStateNode(ctx, e.deps.Pool, w.run.ID, node.ID, output, cur)
+	var run *store.Run
+	var err error
+	if w.branch != nil {
+		// The branch's position moves, the run's stays on the fork (DESIGN 5.26 rule 4).
+		run, err = store.SetRunStateNodeInBranch(ctx, e.deps.Pool, w.run.ID, node.ID, output, w.branch.ID, cur)
+		if err == nil {
+			w.branch.CurrentNode = cur
+		}
+	} else {
+		run, err = store.SetRunStateNode(ctx, e.deps.Pool, w.run.ID, node.ID, output, cur)
+	}
 	if err != nil {
 		o := failed(store.RunFailed, "store node output in run state: "+err.Error())
 		return "", &o
@@ -511,11 +589,29 @@ func (w *walk) applyPendingCancel(ctx context.Context, run *store.Run) outcome {
 }
 
 func (w *walk) setCurrent(ctx context.Context, node string) {
+	if w.branch != nil {
+		// A branch keeps its own position; runs.current_node stays the fork's (DESIGN 5.26
+		// rule 4).
+		if err := store.SetBranchCurrent(ctx, w.e.deps.Pool, w.branch.ID, node); err != nil {
+			w.e.log.Warn("set branch position failed", "run_id", w.run.ID, "branch", w.branch.Head, "node_id", node, "error", err)
+			return
+		}
+		w.branch.CurrentNode = node
+		return
+	}
 	if err := store.SetRunCurrentNode(ctx, w.e.deps.Pool, w.run.ID, node); err != nil {
 		w.e.log.Warn("set current node failed", "run_id", w.run.ID, "node_id", node, "error", err)
 		return
 	}
 	w.run.CurrentNode = &node
+}
+
+// stopping returns the reason the fork gave when it stopped this branch walk, "" when
+// it did not (DESIGN 5.26 rule 6).
+func (w *walk) stopping() string {
+	w.stopMu.Lock()
+	defer w.stopMu.Unlock()
+	return w.stopReason
 }
 
 func (w *walk) refresh(ctx context.Context) {

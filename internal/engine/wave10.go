@@ -42,6 +42,9 @@ func (e *Engine) collectArtifacts(ctx context.Context, v *visit) {
 	if v.toolchain.Name != "" {
 		in.Project = v.project
 	}
+	if v.branch != nil {
+		in.SkipDiff, in.BranchHead = v.skipDiff, v.branch.Head
+	}
 	switch {
 	case v.mergeRequest != nil:
 		in.Branch = v.mergeRequest.SourceBranch

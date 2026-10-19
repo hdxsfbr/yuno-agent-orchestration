@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"yuno/internal/obs"
@@ -71,9 +72,20 @@ func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 	// Visits left unfinished by a lost worker (a re-queue, or a decision on a run whose
 	// worker is gone) may still have turns in OpenClaw: the next agent visit aborts them
 	// by their recorded run ids before it starts its own turn.
+	// The fork visit a run resumes at after its branches parked is open on purpose
+	// (DESIGN 5.26 rule 8): it is not a lost worker's visit.
 	stale := unfinishedVisits(wctx, e, run.ID)
+	keep := ""
+	if run.ResumeNodeVisitID != nil {
+		for _, n := range stale {
+			if n.ID == *run.ResumeNodeVisitID && n.AgentID == nil { // a fork row: no agent, no session
+				keep = n.ID
+			}
+		}
+	}
+	stale = slices.DeleteFunc(stale, func(n store.RunNode) bool { return n.ID == keep })
 	if len(stale) > 0 {
-		if n, err := store.FailRunningNodes(wctx, e.deps.Pool, run.ID, "worker lost", now); err == nil && n > 0 {
+		if n, err := store.FailRunningNodesExcept(wctx, e.deps.Pool, run.ID, keep, "worker lost", now); err == nil && n > 0 {
 			e.logEvent(ctx, run.ID, "warn", fmt.Sprintf("attempt %d: %d unfinished node visit(s) marked failed", run.Attempt, n))
 		}
 	}
@@ -175,6 +187,7 @@ func (e *Engine) finishRun(ctx context.Context, runID string, res outcome, rootS
 			why = "run cancelled"
 		}
 		e.expireRunApprovals(ctx, runID, why)
+		e.closeBranches(ctx, run, res.reason)
 	}
 	e.endSpan(ctx, rootSpan, now, map[string]any{"status": run.Status, "steps": run.StepCount,
 		"tool_calls": run.ToolCallCount, "cost_usd_micros": run.CostUSDMicros, "reason": res.reason})

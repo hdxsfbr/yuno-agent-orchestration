@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
-import type { Approval, RunNode } from "@/lib/api";
+import type { Approval, ModelCall, RunBranch, RunNode } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { toRunView, type RetryMark } from "@/lib/trace";
 import { run } from "@/test/fixtures";
@@ -135,5 +135,217 @@ describe("the approval rows of a question", () => {
     expect(card.queryByText("Question")).toBeNull();
     expect(card.queryByText(/Answered|Declined/)).toBeNull();
     expect(card.getByText("By api · go")).not.toBeNull();
+  });
+});
+
+describe("a fork visit", () => {
+  const at = (sec: number) => `2026-10-15T10:00:${String(sec).padStart(2, "0")}Z`;
+  const now = Date.parse("2026-10-15T10:10:00Z");
+
+  const fork = (over: Partial<RunNode> = {}): RunNode => ({
+    id: "f1",
+    run_id: "r1",
+    node_id: "panel",
+    visit: 1,
+    iteration: 0,
+    status: "succeeded",
+    started_at: at(10),
+    finished_at: at(50),
+    output: { branches: ["security", "performance"] },
+    ...over,
+  });
+  const visit = (id: string, nodeId: string, branchId: string, over: Partial<RunNode> = {}): RunNode => ({
+    id,
+    run_id: "r1",
+    node_id: nodeId,
+    agent_id: `agent-${nodeId}`,
+    branch_id: branchId,
+    visit: 1,
+    iteration: 2,
+    status: "succeeded",
+    started_at: at(11),
+    finished_at: at(40),
+    ...over,
+  });
+  const join = (over: Partial<RunNode> = {}): RunNode => ({
+    id: "j1",
+    run_id: "r1",
+    node_id: "merge",
+    visit: 1,
+    iteration: 0,
+    status: "succeeded",
+    started_at: at(50),
+    finished_at: at(50),
+    output: { branches: ["security", "performance"] },
+    ...over,
+  });
+  const branch = (over: Partial<RunBranch> = {}): RunBranch => ({
+    id: "b-sec",
+    run_id: "r1",
+    fork_visit_id: "f1",
+    fork_id: "panel",
+    head: "security",
+    status: "succeeded",
+    current_node: "merge",
+    started_at: at(10),
+    finished_at: at(40),
+    ...over,
+  });
+  const call = (over: Partial<ModelCall> = {}): ModelCall => ({
+    id: "m1",
+    run_id: "r1",
+    run_node_id: "n-sec",
+    provider: "anthropic",
+    model: "claude-sonnet-5-5",
+    input_tokens: 10,
+    output_tokens: 5,
+    cost_usd_micros: 100,
+    duration_ms: 400,
+    attempt: 1,
+    started_at: at(12),
+    ...over,
+  });
+
+  const two = [branch(), branch({ id: "b-perf", head: "performance", status: "succeeded" })];
+
+  function renderRun(nodes: RunNode[], branches: RunBranch[], over: { model_calls?: ModelCall[]; active?: boolean } = {}) {
+    const view = toRunView({ run: run({ status: "running" }), nodes, model_calls: over.model_calls ?? [], tool_calls: [], spans: [], agent_messages: [], approvals: [], branches });
+    render(<Timeline view={view} active={over.active ?? true} now={now} />);
+  }
+
+  const column = (head: string) => within(screen.getByRole("region", { name: `Branch ${head}` }));
+  /** The head line of a column: the branch's name and status, without the node cards below. */
+  const columnHead = (head: string) => within(column(head).getByRole("heading", { name: head, level: 4 }).closest("header") as HTMLElement);
+
+  it("is one card with the fork's id, status, times and a column for each branch", () => {
+    renderRun([fork(), visit("n-sec", "security", "b-sec"), visit("n-perf", "performance", "b-perf")], two);
+    const card = within(screen.getByRole("region", { name: "Fork panel" }));
+    const head = within(card.getByRole("heading", { name: "panel", level: 3 }).closest("header") as HTMLElement);
+    expect(head.getByText("succeeded")).not.toBeNull();
+    expect(head.getByText("Fork")).not.toBeNull();
+    expect(head.getByText(`Started ${formatDateTime(at(10))} · Finished ${formatDateTime(at(50))} · 40s`)).not.toBeNull();
+    const columns = card.getAllByRole("region", { name: /^Branch / });
+    expect(columns.map((c) => c.getAttribute("aria-label"))).toEqual(["Branch security", "Branch performance"]);
+    expect(within(columns[0]).getByRole("heading", { name: "security", level: 4 }).className).toContain("font-mono");
+    expect(within(columns[1]).getByRole("heading", { name: "performance", level: 4 })).not.toBeNull();
+  });
+
+  it("puts the node cards of each branch in its own column, named with their branch", () => {
+    renderRun(
+      [fork(), visit("n-sec", "security", "b-sec"), visit("n-sec2", "security_deep", "b-sec", { started_at: at(20) }), visit("n-perf", "performance", "b-perf")],
+      two,
+    );
+    const security = column("security");
+    const cards = security.getAllByRole("region", { name: /^Node / });
+    expect(cards.map((c) => c.getAttribute("aria-label"))).toEqual(["Node security, branch security", "Node security_deep, branch security"]);
+    expect(column("performance").getAllByRole("region", { name: /^Node / }).map((c) => c.getAttribute("aria-label"))).toEqual(["Node performance, branch performance"]);
+    // the node cards are the ordinary ones: node id, status, turns
+    expect(within(cards[0]).getByRole("heading", { name: "security" })).not.toBeNull();
+    expect(within(cards[0]).getByText("2 turns")).not.toBeNull();
+    // and nothing of a branch is listed outside the fork card
+    expect(screen.getAllByRole("region", { name: /^Node / })).toHaveLength(3);
+  });
+
+  it("shows a branch status badge in each column, and reads a parked branch as waiting for an answer", () => {
+    renderRun(
+      [fork({ status: "running", finished_at: undefined }), visit("n-sec", "security", "b-sec", { status: "waiting_approval", finished_at: undefined }), visit("n-perf", "performance", "b-perf", { status: "running", finished_at: undefined })],
+      [branch({ status: "waiting_approval", finished_at: undefined }), branch({ id: "b-perf", head: "performance", status: "running", finished_at: undefined })],
+    );
+    expect(columnHead("security").getByText("Waiting for an answer")).not.toBeNull();
+    expect(columnHead("security").queryByText("waiting approval")).toBeNull();
+    expect(columnHead("performance").getByText("running")).not.toBeNull();
+    // the node card inside a parked branch keeps the node's own words
+    expect(within(screen.getByRole("region", { name: "Node security, branch security" })).getByText("waiting approval")).not.toBeNull();
+  });
+
+  it("shows a failed branch's reason in its column, the other column untouched", () => {
+    renderRun(
+      [fork({ status: "failed" }), visit("n-sec", "security", "b-sec", { status: "failed", failure_reason: "tool exec failed" }), visit("n-perf", "performance", "b-perf", { status: "failed", failure_reason: "stopped: branch security failed" })],
+      [branch({ status: "failed", failure_reason: "reviewer gave no verdict" }), branch({ id: "b-perf", head: "performance", status: "cancelled", failure_reason: "stopped: branch security failed" })],
+    );
+    const alerts = column("security").getAllByRole("alert");
+    expect(alerts.map((a) => a.textContent)).toEqual(["reviewer gave no verdict", "tool exec failed"]);
+    expect(columnHead("security").getByText("failed")).not.toBeNull();
+    expect(columnHead("performance").getByText("cancelled")).not.toBeNull();
+    expect(column("performance").queryByText("reviewer gave no verdict")).toBeNull();
+  });
+
+  it("stacks the columns on a narrow screen and puts them side by side from a medium one", () => {
+    renderRun([fork(), visit("n-sec", "security", "b-sec")], two);
+    const grid = screen.getByRole("region", { name: "Branch security" }).parentElement as HTMLElement;
+    expect(grid.className).toContain("grid");
+    expect(grid.className).toContain("md:grid-cols-2");
+    expect(grid.className).not.toMatch(/(^| )grid-cols-/);
+  });
+
+  it("gives each of three branches a column, and four or five the wide breakpoint", () => {
+    const three = [...two, branch({ id: "b-main", head: "maintainability" })];
+    renderRun([fork({ output: { branches: ["security", "performance", "maintainability"] } })], three);
+    expect((screen.getByRole("region", { name: "Branch security" }).parentElement as HTMLElement).className).toContain("md:grid-cols-3");
+    cleanup();
+    const five = ["a", "b", "c", "d", "e"].map((head) => branch({ id: `b-${head}`, head }));
+    renderRun([fork({ output: { branches: ["a", "b", "c", "d", "e"] } })], five);
+    expect((screen.getByRole("region", { name: "Branch a" }).parentElement as HTMLElement).className).toContain("lg:grid-cols-5");
+  });
+
+  it("says a branch has not started a step yet, and that an ended one recorded none", () => {
+    renderRun([fork({ status: "running", finished_at: undefined })], [branch({ status: "running", finished_at: undefined }), branch({ id: "b-perf", head: "performance", status: "succeeded" })]);
+    expect(column("security").getByText("Starting…")).not.toBeNull();
+    expect(column("performance").getByText("No activity recorded.")).not.toBeNull();
+  });
+
+  it("lists the model calls of a branch's visit in its card", () => {
+    renderRun([fork(), visit("n-sec", "security", "b-sec"), visit("n-perf", "performance", "b-perf")], two, { model_calls: [call()] });
+    expect(within(screen.getByRole("region", { name: "Node security, branch security" })).getByText("claude-sonnet-5-5")).not.toBeNull();
+    expect(within(screen.getByRole("region", { name: "Node performance, branch performance" })).queryByText("claude-sonnet-5-5")).toBeNull();
+  });
+
+  it("follows the fork card with a short join card holding the time", () => {
+    renderRun([fork(), visit("n-sec", "security", "b-sec"), visit("n-perf", "performance", "b-perf"), join()], two);
+    const card = within(screen.getByRole("region", { name: "Join merge" }));
+    expect(card.getByText("Joined 2 branches")).not.toBeNull();
+    expect(card.getByRole("heading", { name: "merge" })).not.toBeNull();
+    expect(card.getByText(formatDateTime(at(50)))).not.toBeNull();
+    expect(before(screen.getByRole("region", { name: "Fork panel" }), screen.getByRole("region", { name: "Join merge" }))).toBe(true);
+    // the join is a card of its own in the timeline, not part of the fork card
+    expect(within(screen.getByRole("region", { name: "Fork panel" })).queryByText("Joined 2 branches")).toBeNull();
+  });
+
+  it("counts one branch in the singular and shows no join card before the join", () => {
+    renderRun([fork({ output: { branches: ["security"] } }), join({ output: { branches: ["security"] } })], [branch()]);
+    expect(screen.getByText("Joined 1 branch")).not.toBeNull();
+    cleanup();
+    renderRun([fork({ status: "running", finished_at: undefined })], two);
+    expect(screen.queryByText(/^Joined/)).toBeNull();
+  });
+
+  it("is a list item of the timeline, and the join is the next one", () => {
+    renderRun([fork(), visit("n-sec", "security", "b-sec"), join()], two);
+    // the first list in the document is the timeline's own; the columns hold lists of their own
+    const items = Array.from(document.body.querySelector("ol")!.children);
+    expect(items.map((li) => li.querySelector("section")?.getAttribute("aria-label"))).toEqual(["Fork panel", "Join merge"]);
+  });
+
+  it("numbers the second round of a loop around the pair and lists its own branches", () => {
+    renderRun(
+      [
+        fork(),
+        visit("n-sec", "security", "b-sec"),
+        join(),
+        fork({ id: "f2", visit: 2, status: "running", started_at: at(60), finished_at: undefined }),
+        visit("n-sec-2", "security", "b-sec-2", { visit: 2, started_at: at(61), status: "running", finished_at: undefined }),
+      ],
+      [...two, branch({ id: "b-sec-2", fork_visit_id: "f2", started_at: at(60), status: "running", finished_at: undefined }), branch({ id: "b-perf-2", fork_visit_id: "f2", head: "performance", started_at: at(60), status: "running", finished_at: undefined })],
+    );
+    expect(screen.getByRole("region", { name: "Fork panel, visit 1" })).not.toBeNull();
+    expect(screen.getByRole("region", { name: "Fork panel, visit 2" })).not.toBeNull();
+    expect(screen.getByRole("region", { name: "Node security, visit 2, branch security" })).not.toBeNull();
+    expect(screen.getByRole("region", { name: "Node security, visit 1, branch security" })).not.toBeNull();
+  });
+
+  it("leaves a run without branches as it was", () => {
+    renderRun([visit("n1", "coder", "")], []);
+    expect(screen.queryByRole("region", { name: /^Fork/ })).toBeNull();
+    expect(screen.getAllByRole("region", { name: /^Node / })).toHaveLength(1);
   });
 });

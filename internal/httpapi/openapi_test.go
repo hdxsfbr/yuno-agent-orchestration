@@ -136,6 +136,7 @@ func TestOpenAPIConformance(t *testing.T) {
 	steps = append(steps, intakeConformanceSteps(t)...)
 	steps = append(steps, artifactConformanceSteps(t)...)
 	steps = append(steps, questionConformanceSteps(t)...)
+	steps = append(steps, branchConformanceSteps(t)...)
 	var agentID string
 	for _, st := range steps {
 		code, body := checkConformance(t, router, ts.URL, st.method, st.path, st.body, st.want < 300)
@@ -253,9 +254,13 @@ func TestOpenAPIDocumentsChannelAndSchedulerFields(t *testing.T) {
 		"ProjectIntake":      {"enabled", "label", "workflow_id", "workflow_name", "polled_at", "last_error"},
 		"IntakePollResult":   {"taken", "closed", "error"},
 		// DESIGN 5.24 and 5.25 (wave 10).
-		"RunNode":    {"question_id"},
+		"RunNode":    {"question_id", "branch_id"},
 		"AnswerBody": {"answer"},
 		"Artifact":   {"id", "run_id", "node_id", "visit", "path", "size", "sha256", "content_type", "generated", "created_at", "updated_at"},
+		// DESIGN 5.26 (wave 11).
+		"RunBranch":    {"id", "run_id", "fork_visit_id", "fork_id", "head", "status", "current_node", "failure_reason", "started_at", "finished_at"},
+		"Trace":        {"branches"},
+		"WorkflowNode": {"join", "checkout"},
 	} {
 		ref := doc.Components.Schemas[schema]
 		if ref == nil || ref.Value == nil {

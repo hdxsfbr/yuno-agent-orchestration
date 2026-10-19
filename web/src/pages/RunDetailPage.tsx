@@ -52,7 +52,7 @@ export default function RunDetailPage() {
   return (
     <div className="max-w-5xl space-y-5">
       {back}
-      <RunHeader run={view.run} connection={connection} now={now} toolCalls={view.tool_calls} approvals={view.approvals} onRunChange={applyRun} />
+      <RunHeader run={view.run} connection={connection} now={now} toolCalls={view.tool_calls} approvals={view.approvals} branches={view.branches} onRunChange={applyRun} />
       {view.run.merge_request ? <MergeRequestCard key={view.run.merge_request.id} mr={view.run.merge_request} run={view.run} onChange={applyMergeRequest} /> : null}
 
       <ArtifactsSection key={view.run.id} runId={view.run.id} status={view.run.status} />

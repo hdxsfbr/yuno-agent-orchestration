@@ -1,0 +1,429 @@
+{
+  "key": "review_panel",
+  "name": "Review panel",
+  "description": "Coder writes the code, then a security, a performance and a maintainability reviewer read the change at the same time, each focused on its own concern. A lead Reviewer merges their three verdicts into one: the change goes back to the Coder with every point raised (a loop bounded by max_loop_visits), or on to a human approval of the ship. Deployer then opens a merge request in the project repository, or updates the one the run names by pushing the work onto its branch, and publishes a release when the run has no project.",
+  "definition": {
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "string",
+          "description": "What to build"
+        },
+        "version": {
+          "type": "string",
+          "description": "Release version, default 1.0.0"
+        }
+      },
+      "required": [
+        "task"
+      ],
+      "additionalProperties": true
+    },
+    "state_schema": {
+      "type": "object",
+      "properties": {
+        "coder": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "tests_passed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "summary",
+            "files"
+          ]
+        },
+        "security": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "changes_requested"
+              ]
+            },
+            "feedback": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "verdict",
+            "feedback"
+          ]
+        },
+        "performance": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "changes_requested"
+              ]
+            },
+            "feedback": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "verdict",
+            "feedback"
+          ]
+        },
+        "maintainability": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "changes_requested"
+              ]
+            },
+            "feedback": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "verdict",
+            "feedback"
+          ]
+        },
+        "lead": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "changes_requested"
+              ]
+            },
+            "feedback": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "verdict",
+            "feedback"
+          ]
+        },
+        "deployer": {
+          "type": "object",
+          "properties": {
+            "release_id": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "merge_request_url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ]
+        }
+      }
+    },
+    "nodes": [
+      {
+        "id": "start",
+        "kind": "start"
+      },
+      {
+        "id": "coder",
+        "kind": "agent",
+        "agent_name": "Coder",
+        "task": "Implement the following, with tests you run yourself:\n\n{{.input.task}}\n{{with .state.lead}}\nThe review panel asked for changes. Address every point before finishing:\n{{.feedback}}\n{{end}}\nIf your task's protocol block describes a project repository, work inside that checkout, install its dependencies as the block says when the sandbox has network, and run the project's own tests; otherwise work in the directory runs/$RUN_ID/ of your workspace. When done, finish with a summary, the list of files you created or changed (paths relative to the checkout, or to runs/$RUN_ID/) and whether the tests passed.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "tests_passed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "summary",
+            "files"
+          ],
+          "additionalProperties": true
+        },
+        "input_from": [
+          "start",
+          "lead"
+        ]
+      },
+      {
+        "id": "panel",
+        "kind": "fork",
+        "join": "merge"
+      },
+      {
+        "id": "security",
+        "kind": "agent",
+        "agent_name": "Security Reviewer",
+        "task": "Review the change for security: injection, secrets in code, missing authorisation and input checks, unsafe deserialisation and dependency risk. The task was:\n\n{{.input.task}}\n\nThe coder reports: {{.state.coder.summary}}\nFiles: {{range .state.coder.files}}{{.}} {{end}}\n\nIf your task's protocol block describes a project repository, the change is in that checkout: run git status and git diff <default branch> there, read new files, which the diff does not show, and run the project's tests only when your concern needs it. Otherwise read the files in runs/$RUN_ID/. Do not change any file. Finish with verdict \"approved\" when nothing of your concern blocks the change, otherwise \"changes_requested\" with specific, actionable feedback.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "changes_requested"
+              ]
+            },
+            "feedback": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "verdict",
+            "feedback"
+          ],
+          "additionalProperties": true
+        },
+        "input_from": [
+          "start",
+          "coder"
+        ]
+      },
+      {
+        "id": "performance",
+        "kind": "agent",
+        "agent_name": "Performance Reviewer",
+        "task": "Review the change for performance: complexity, repeated queries, needless allocation and blocking I/O, and missing bounds. The task was:\n\n{{.input.task}}\n\nThe coder reports: {{.state.coder.summary}}\nFiles: {{range .state.coder.files}}{{.}} {{end}}\n\nIf your task's protocol block describes a project repository, the change is in that checkout: run git status and git diff <default branch> there, read new files, which the diff does not show, and run the project's tests only when your concern needs it. Otherwise read the files in runs/$RUN_ID/. Do not change any file. Finish with verdict \"approved\" when nothing of your concern blocks the change, otherwise \"changes_requested\" with specific, actionable feedback.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "changes_requested"
+              ]
+            },
+            "feedback": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "verdict",
+            "feedback"
+          ],
+          "additionalProperties": true
+        },
+        "input_from": [
+          "start",
+          "coder"
+        ]
+      },
+      {
+        "id": "maintainability",
+        "kind": "agent",
+        "agent_name": "Maintainability Reviewer",
+        "task": "Review the change for maintainability: naming, structure, duplication, tests that prove the change, and documentation where a reader needs it. The task was:\n\n{{.input.task}}\n\nThe coder reports: {{.state.coder.summary}}\nFiles: {{range .state.coder.files}}{{.}} {{end}}\n\nIf your task's protocol block describes a project repository, the change is in that checkout: run git status and git diff <default branch> there, read new files, which the diff does not show, and run the project's tests only when your concern needs it. Otherwise read the files in runs/$RUN_ID/. Do not change any file. Finish with verdict \"approved\" when nothing of your concern blocks the change, otherwise \"changes_requested\" with specific, actionable feedback.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "changes_requested"
+              ]
+            },
+            "feedback": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "verdict",
+            "feedback"
+          ],
+          "additionalProperties": true
+        },
+        "input_from": [
+          "start",
+          "coder"
+        ]
+      },
+      {
+        "id": "merge",
+        "kind": "join"
+      },
+      {
+        "id": "lead",
+        "kind": "agent",
+        "agent_name": "Reviewer",
+        "task": "Merge the three reviews of this change into one verdict. The task was:\n\n{{.input.task}}\n\nThe coder reports: {{.state.coder.summary}}\n\nSecurity reviewer ({{.state.security.verdict}}): {{.state.security.feedback}}\nPerformance reviewer ({{.state.performance.verdict}}): {{.state.performance.feedback}}\nMaintainability reviewer ({{.state.maintainability.verdict}}): {{.state.maintainability.feedback}}\n\nFinish with verdict \"approved\" only when all three reviewers approved. Otherwise finish with verdict \"changes_requested\" and, as feedback, every point the reviewers raised, grouped by theme with duplicates merged into one, each specific and actionable so the coder can address it without guessing. Do not drop a point the reviewers raised.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "changes_requested"
+              ]
+            },
+            "feedback": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "verdict",
+            "feedback"
+          ],
+          "additionalProperties": true
+        },
+        "input_from": [
+          "coder",
+          "security",
+          "performance",
+          "maintainability"
+        ]
+      },
+      {
+        "id": "gate",
+        "kind": "approval",
+        "message": "Ship this change (release {{or .input.version \"1.0.0\"}} or a merge request)? Coder: {{.state.coder.summary}} Review panel: {{.state.lead.feedback}}"
+      },
+      {
+        "id": "deployer",
+        "kind": "agent",
+        "agent_name": "Deployer",
+        "task": "Ship the reviewed work. Coder's summary: {{.state.coder.summary}}. Files: {{range .state.coder.files}}{{.}} {{end}}. Review panel: {{.state.lead.feedback}}\n\nIf your task's protocol block describes a project repository, open or update a merge request with the open_merge_request tool: title from the task ({{.input.task}}), description with the coder's summary and how it was tested. Finish with status \"merge_request_opened\" when it opened a new request and \"merge_request_updated\" when it pushed onto the request this run updates, and the merge_request_url the tool returned.\nOtherwise publish the work in runs/$RUN_ID/ as release version {{or .input.version \"1.0.0\"}} with the deploy_release tool, including the files listed, with the summary as release notes, and finish with the release id and version the tool returned and a status of \"deployed\".\nIf the tool result says the action was rejected or is pending approval, finish with that status and no release id or URL.",
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "release_id": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "merge_request_url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": true
+        },
+        "input_from": [
+          "coder",
+          "lead"
+        ]
+      },
+      {
+        "id": "end",
+        "kind": "end"
+      }
+    ],
+    "edges": [
+      {
+        "from": "start",
+        "to": "coder"
+      },
+      {
+        "from": "coder",
+        "to": "panel"
+      },
+      {
+        "from": "panel",
+        "to": "security"
+      },
+      {
+        "from": "panel",
+        "to": "performance"
+      },
+      {
+        "from": "panel",
+        "to": "maintainability"
+      },
+      {
+        "from": "security",
+        "to": "merge"
+      },
+      {
+        "from": "performance",
+        "to": "merge"
+      },
+      {
+        "from": "maintainability",
+        "to": "merge"
+      },
+      {
+        "from": "merge",
+        "to": "lead"
+      },
+      {
+        "from": "lead",
+        "to": "coder",
+        "when": {
+          "path": "/lead/verdict",
+          "op": "eq",
+          "value": "changes_requested"
+        }
+      },
+      {
+        "from": "lead",
+        "to": "gate",
+        "when": {
+          "path": "/lead/verdict",
+          "op": "eq",
+          "value": "approved"
+        }
+      },
+      {
+        "from": "gate",
+        "to": "deployer"
+      },
+      {
+        "from": "deployer",
+        "to": "end"
+      }
+    ],
+    "limits": {
+      "max_steps": 80,
+      "max_duration_seconds": 1800,
+      "max_node_iterations": 12,
+      "max_loop_visits": 3,
+      "max_cost_usd": 4,
+      "max_tool_calls": 160,
+      "approval_timeout_seconds": 86400
+    },
+    "project": true
+  }
+}

@@ -80,8 +80,7 @@ paths:
         the step it stopped at),
         run.artifacts (`{run_id, count}`: the files a step delivered were collected, DESIGN
         5.25),
-        branch.status (`{branch}`: a RunBranch of a fork visit changed, DESIGN 5.26; planned
-        for wave 11),
+        branch.status (`{branch}`: a RunBranch of a fork visit changed, DESIGN 5.26),
         schedule.fired (`{schedule, run}`, filed under the run it created),
         conversation.message (`{conversation, message}`: a Conversation and a
         ConversationMessage, platform-wide, no run), and conversation.tool_call
@@ -1294,10 +1293,10 @@ components:
         visit: { type: integer }
         iteration: { type: integer }
         question_id: { type: string, description: "set on a continuation visit: the question (an approval of kind question) whose answer this visit of the step continues with (DESIGN 5.24 rule 5); such a visit does not count toward max_loop_visits" }
-        branch_id: { type: string, x-planned: wave 11, description: "Planned for wave 11. Set on a visit made inside a branch of a fork: the RunBranch it belongs to (DESIGN 5.26 rule 4)" }
+        branch_id: { type: string, description: "set on a visit made inside a branch of a fork: the RunBranch it belongs to (DESIGN 5.26 rule 4)" }
         status: { type: string, enum: [pending, running, waiting_approval, succeeded, failed, skipped] }
         messages: { type: array, items: { type: object }, description: "transcript entries mirrored from OpenClaw, never reasoning" }
-        output: {}
+        output: { description: "the node's validated result; for a fork or join visit, {\"branches\": [<heads in edge order>]} (DESIGN 5.26 rules 3 and 5)" }
         failure_reason: { type: string }
         session_key: { type: string }
         openclaw_run_id: { type: string }
@@ -1400,11 +1399,10 @@ components:
         agent_messages: { type: array, items: { $ref: "#/components/schemas/AgentMessage" } }
         approvals: { type: array, items: { $ref: "#/components/schemas/Approval" } }
         side_effects: { type: array, items: { $ref: "#/components/schemas/SideEffect" } }
-        branches: { type: array, items: { $ref: "#/components/schemas/RunBranch" }, x-planned: wave 11, description: "Planned for wave 11. One row per branch of every fork visit of the run, by started_at (DESIGN 5.26 rule 12); absent or empty for a run without forks" }
+        branches: { type: array, items: { $ref: "#/components/schemas/RunBranch" }, description: "one row per branch of every fork visit of the run, by started_at then id (DESIGN 5.26 rule 12); empty for a run without forks" }
     RunBranch:
       type: object
-      x-planned: wave 11
-      description: "Planned for wave 11. One branch of a fork visit: the part of the run that started at one outgoing edge of the fork and runs at the same time as its siblings until the join (DESIGN 5.26)."
+      description: "One branch of a fork visit: the part of the run that started at one outgoing edge of the fork and runs at the same time as its siblings until the join (DESIGN 5.26). The rows of one fork visit are created in the fork's edge order with started_at a microsecond apart, so the started_at order is the edge order."
       required: [id, run_id, fork_visit_id, fork_id, head, status, started_at]
       properties:
         id: { type: string }
@@ -1472,9 +1470,9 @@ components:
       type: object
       properties:
         id: { type: string, description: "^[a-z0-9_]{1,40}$, unique in the workflow" }
-        kind: { type: string, description: "start | agent | approval | fork | join | end (fork and join planned for wave 11, DESIGN 5.26)" }
-        join: { type: string, x-planned: wave 11, description: "Planned for wave 11. Fork nodes: the join node every branch ends at (DESIGN 5.26 rule 1)" }
-        checkout: { type: string, x-planned: wave 11, description: "Planned for wave 11. Join nodes of a project workflow: the head of the branch whose checkout continues past the join; without it no branch's checkout does (DESIGN 5.26 rule 10)" }
+        kind: { type: string, description: "start | agent | approval | fork | join | end (fork and join: DESIGN 5.26)" }
+        join: { type: string, description: "fork nodes: the join node every branch ends at (DESIGN 5.26 rule 1)" }
+        checkout: { type: string, description: "join nodes of a project workflow: the head of the branch whose checkout continues past the join; without it no branch's checkout does (DESIGN 5.26 rule 10)" }
         agent_id: { type: string }
         agent_name: { type: string, description: templates only; resolved to agent_id on instantiate }
         task: { type: string, description: "Go text/template over {input, state}, e.g. {{.input.task}}" }

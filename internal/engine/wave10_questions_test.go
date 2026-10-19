@@ -121,9 +121,7 @@ func (env *testEnv) openSpans(runID string) int {
 
 // activeVisit reports whether the engine still holds a live visit of the run.
 func (env *testEnv) activeVisit(runID string) bool {
-	env.e.mu.Lock()
-	defer env.e.mu.Unlock()
-	return env.e.active[runID] != nil
+	return len(env.e.activeVisits(runID)) > 0
 }
 
 // setQuestionHook installs the engine's test hook for the test's duration.

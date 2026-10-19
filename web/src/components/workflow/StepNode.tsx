@@ -6,7 +6,7 @@ import { KIND_LABEL } from "@/lib/workflow";
 export type StepData = {
   id: string;
   kind: NodeKind;
-  /** The agent's name, or the start of an approval message. */
+  /** The agent's name, the start of an approval message, or a fork's join as `→ <join>`. */
   subtitle?: string;
   /** How many validation messages name this node. */
   problems: number;
@@ -17,6 +17,8 @@ const accent: Record<NodeKind, string> = {
   start: "border-l-emerald-500",
   agent: "border-l-blue-500",
   approval: "border-l-amber-500",
+  fork: "border-l-violet-500 dark:border-l-violet-400",
+  join: "border-l-violet-500 dark:border-l-violet-400",
   end: "border-l-zinc-500",
 };
 

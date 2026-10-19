@@ -137,9 +137,9 @@ func TestSeedCreatesChief(t *testing.T) {
 	}
 }
 
-// DESIGN 5.15 rule 13: both shipped templates are instantiated once, through the API's
-// own instantiation code, with their agents resolved; a workflow made from a template
-// by hand counts.
+// DESIGN 5.15 rule 13 and 5.26 rule 14: the three shipped templates (the Review panel
+// among them) are instantiated once, through the API's own instantiation code, with
+// their agents resolved; a workflow made from a template by hand counts.
 func TestSeedInstantiatesTemplatesOnce(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
@@ -159,7 +159,7 @@ func TestSeedInstantiatesTemplatesOnce(t *testing.T) {
 	must(t, srv.LoadTemplates(ctx))
 
 	made, err = Templates(ctx, pool, sh, log)
-	if err != nil || !slices.Equal(made, []string{"Dev pipeline", "Research pipeline"}) {
+	if err != nil || !slices.Equal(made, []string{"Dev pipeline", "Research pipeline", "Review panel"}) {
 		t.Fatalf("first: %v %v", made, err)
 	}
 	made, err = Templates(ctx, pool, sh, log)
@@ -178,7 +178,7 @@ func TestSeedInstantiatesTemplatesOnce(t *testing.T) {
 			t.Fatalf("instance %s = %s", wf.Name, wf.Definition)
 		}
 	}
-	if instances != 2 {
+	if instances != 3 {
 		t.Fatalf("instances = %d", instances)
 	}
 
@@ -279,25 +279,28 @@ func TestSeedTemplatesUpgradeAndFailures(t *testing.T) {
 
 	// An older copy of the Dev pipeline, made with "Create copy" before wave 5.
 	must(t, store.CreateWorkflow(ctx, pool, &store.Workflow{Name: "Dev pipeline", Definition: []byte(`{"nodes":[],"edges":[]}`)}))
-	both := &failingInstantiator{in: sh, fail: map[string]bool{"dev_pipeline": true, "research_pipeline": true}}
+	all3 := map[string]bool{"dev_pipeline": true, "research_pipeline": true, "review_panel": true}
+	both := &failingInstantiator{in: sh, fail: all3}
 	made, err := Templates(ctx, pool, both, log)
 	if len(made) != 0 || err == nil || !strings.Contains(err.Error(), "template research_pipeline: agent missing") ||
-		strings.Contains(err.Error(), "dev_pipeline") || !slices.Equal(both.asked, []string{"research_pipeline"}) {
+		!strings.Contains(err.Error(), "template review_panel: agent missing") ||
+		strings.Contains(err.Error(), "dev_pipeline") || !slices.Equal(both.asked, []string{"research_pipeline", "review_panel"}) {
 		t.Fatalf("old copy and a failure: %v %v, asked %v", made, err, both.asked)
 	}
 
 	// Every key is tried and every failure named.
 	must(t, store.DeleteWorkflow(ctx, pool, mustWorkflowNamed(t, pool, "Dev pipeline")))
-	both = &failingInstantiator{in: sh, fail: map[string]bool{"dev_pipeline": true, "research_pipeline": true}}
+	both = &failingInstantiator{in: sh, fail: all3}
 	made, err = Templates(ctx, pool, both, log)
 	if len(made) != 0 || err == nil || !strings.Contains(err.Error(), "template dev_pipeline: agent missing") ||
-		!strings.Contains(err.Error(), "template research_pipeline: agent missing") || len(both.asked) != 2 {
-		t.Fatalf("two failures: %v %v, asked %v", made, err, both.asked)
+		!strings.Contains(err.Error(), "template research_pipeline: agent missing") ||
+		!strings.Contains(err.Error(), "template review_panel: agent missing") || len(both.asked) != 3 {
+		t.Fatalf("three failures: %v %v, asked %v", made, err, both.asked)
 	}
 	one := &failingInstantiator{in: sh, fail: map[string]bool{"dev_pipeline": true}}
 	made, err = Templates(ctx, pool, one, log)
-	if !slices.Equal(made, []string{"Research pipeline"}) || err == nil || !strings.Contains(err.Error(), "dev_pipeline") {
-		t.Fatalf("first fails, second works: %v %v", made, err)
+	if !slices.Equal(made, []string{"Research pipeline", "Review panel"}) || err == nil || !strings.Contains(err.Error(), "dev_pipeline") {
+		t.Fatalf("first fails, the others work: %v %v", made, err)
 	}
 }
 
@@ -353,7 +356,7 @@ func TestResetShipped(t *testing.T) {
 
 	agents, workflows, err := ResetShipped(ctx, pool, sh)
 	must(t, err)
-	if !slices.Equal(agents, []string{"Deployer"}) || !slices.Equal(workflows, []string{"Dev pipeline (ours)", "Research pipeline"}) {
+	if !slices.Equal(agents, []string{"Deployer"}) || !slices.Equal(workflows, []string{"Dev pipeline (ours)", "Research pipeline", "Review panel"}) {
 		t.Fatalf("reset %v %v", agents, workflows)
 	}
 	deployer, err = findAgent(ctx, pool, "Deployer")
@@ -379,7 +382,7 @@ func TestResetShipped(t *testing.T) {
 	// version each), which is what a deploy does on purpose.
 	agents, workflows, err = ResetShipped(ctx, pool, sh)
 	must(t, err)
-	if len(agents) != 0 || len(workflows) != 2 {
+	if len(agents) != 0 || len(workflows) != 3 {
 		t.Fatalf("second reset %v %v", agents, workflows)
 	}
 }

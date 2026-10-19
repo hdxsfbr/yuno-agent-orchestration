@@ -17,6 +17,7 @@ import (
 	"yuno/internal/obs"
 	"yuno/internal/project"
 	"yuno/internal/store"
+	"yuno/internal/workflow"
 )
 
 // The Chief of Staff's tools (DESIGN 5.15 rules 2 and 4 to 8): the roster, delegation
@@ -664,8 +665,8 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
 		Name: RunStatusName,
 		Description: "Check on a platform run: its status, timing, steps, tool calls, cost, its final state when it " +
 			"has ended, the failure reason if it failed, the approval it waits for, if any, the question it asks " +
-			"the operator while it waits for an answer, the files it delivered, the merge request it opened or " +
-			"updates, and the issue it came from.",
+			"the operator while it waits for an answer, the files it delivered, the branches it runs in parallel, " +
+			"the merge request it opened or updates, and the issue it came from.",
 		InputSchema: runStatusSchema,
 		Risk:        RiskReadOnly,
 		Hits:        HitsPostgres,
@@ -757,9 +758,53 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
 				out["artifacts"] = shown
 				out["artifact_count"] = len(artifacts)
 			}
+			// DESIGN 5.26 rule 12: while the run is at a fork, the branches it runs at once.
+			if branches, ok, err := forkBranches(ctx, pool, run); err != nil {
+				return Result{}, err
+			} else if ok {
+				out["branches"] = branches
+			}
 			return JSONResult(out), nil
 		},
 	}
+}
+
+// forkBranches is run_status's branches (DESIGN 5.26 rule 12): while the run's current node
+// is a fork of its snapshot, the head, status and current node of each branch of the
+// fork's newest visit, in the order they started. ok is false when the run is not at a fork
+// (the key is then left out); a run at a fork whose branch rows are not written yet has an
+// empty list.
+func forkBranches(ctx context.Context, pool *pgxpool.Pool, run *store.Run) (branches []map[string]any, ok bool, err error) {
+	if run.CurrentNode == nil || len(run.WorkflowSnapshot) == 0 {
+		return nil, false, nil
+	}
+	def, perr := workflow.Parse(run.WorkflowSnapshot)
+	if perr != nil {
+		return nil, false, nil // a snapshot that does not parse names no fork
+	}
+	node, found := def.Node(*run.CurrentNode)
+	if !found || node.Kind != workflow.KindFork {
+		return nil, false, nil
+	}
+	rows, err := store.ListRunBranches(ctx, pool, run.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	// The newest visit of this fork is the one of the row that started last (the rows
+	// come by started_at, so the last one of the fork wins).
+	newest := ""
+	for _, b := range rows {
+		if b.ForkID == node.ID {
+			newest = b.ForkVisitID
+		}
+	}
+	branches = []map[string]any{}
+	for _, b := range rows {
+		if b.ForkID == node.ID && b.ForkVisitID == newest {
+			branches = append(branches, map[string]any{"head": b.Head, "status": b.Status, "current_node": b.CurrentNode})
+		}
+	}
+	return branches, true, nil
 }
 
 // questionView is run_status's question (DESIGN 5.24 rule 11): its id, text, options when

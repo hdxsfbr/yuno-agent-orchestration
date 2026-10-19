@@ -30,7 +30,7 @@ func TestShippedPromptsNameProjectNotes(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"Deployer", "Researcher", "Critic", "Writer"} {
+	for _, name := range []string{"Deployer", "Researcher", "Critic", "Writer", "Security Reviewer", "Performance Reviewer", "Maintainability Reviewer"} {
 		a, err := findAgent(ctx, pool, name)
 		must(t, err)
 		if strings.Contains(a.SystemPrompt, `scope "project"`) {

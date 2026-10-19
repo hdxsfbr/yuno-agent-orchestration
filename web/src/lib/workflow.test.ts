@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { WorkflowDefinition } from "./api";
 import {
   addEdge,
+  KIND_LABEL,
   addNode,
+  forkHeads,
+  forksJoiningAt,
   isShippedTemplate,
   moveEdge,
   newDefinition,
@@ -173,6 +176,73 @@ describe("edge order", () => {
     expect(moveEdge(def, 2, -1).def).toBe(def);
     expect(moveEdge(def, 3, 1).def).toBe(def);
     expect(moveEdge(def, 0, -1).def).toBe(def);
+  });
+});
+
+// start -> coder -> panel (fork) -> security | performance -> merge (join) -> end
+const panel = (): WorkflowDefinition => ({
+  project: true,
+  nodes: [
+    { id: "start", kind: "start" },
+    { id: "coder", kind: "agent", agent_id: "a1", task: "write" },
+    { id: "panel", kind: "fork", join: "merge" },
+    { id: "security", kind: "agent", agent_id: "a2", task: "review security" },
+    { id: "performance", kind: "agent", agent_id: "a3", task: "review speed" },
+    { id: "merge", kind: "join", checkout: "security" },
+    { id: "end", kind: "end" },
+  ],
+  edges: [
+    { from: "start", to: "coder" },
+    { from: "coder", to: "panel" },
+    { from: "panel", to: "performance" },
+    { from: "panel", to: "security", when: { path: "/coder/risky", op: "eq", value: true } },
+    { from: "security", to: "merge" },
+    { from: "performance", to: "merge" },
+    { from: "merge", to: "end" },
+  ],
+});
+
+describe("fork and join nodes", () => {
+  it("labels both kinds", () => {
+    expect(KIND_LABEL.fork).toBe("Fork");
+    expect(KIND_LABEL.join).toBe("Join");
+  });
+
+  it("adds a fork with an empty join and a join with nothing, named after their kind", () => {
+    let { def, id } = addNode(newDefinition(), "fork");
+    expect(id).toBe("fork");
+    expect(def.nodes[def.nodes.length - 1]).toEqual({ id: "fork", kind: "fork", join: "" });
+    ({ def, id } = addNode(def, "join"));
+    expect(id).toBe("join");
+    expect(def.nodes[def.nodes.length - 1]).toEqual({ id: "join", kind: "join" });
+    expect(addNode(def, "fork").id).toBe("fork_2");
+    expect(addNode(def, "join").id).toBe("join_2");
+  });
+
+  it("finds the fork that names a join and lists its heads in edge order, each once", () => {
+    const def = panel();
+    expect(forksJoiningAt(def, "merge").map((n) => n.id)).toEqual(["panel"]);
+    expect(forksJoiningAt(def, "end")).toEqual([]);
+    expect(forkHeads(def, "panel")).toEqual(["performance", "security"]);
+    expect(forkHeads({ ...def, edges: [...def.edges, { from: "panel", to: "security" }] }, "panel")).toEqual(["performance", "security"]);
+    expect(forkHeads(def, "merge")).toEqual(["end"]);
+  });
+
+  it("renaming the join or a head rewrites the fork's join and the join's checkout", () => {
+    const joined = renameNode(panel(), "merge", "meet");
+    expect(joined.nodes.find((n) => n.id === "panel")?.join).toBe("meet");
+    expect(joined.nodes.find((n) => n.id === "meet")?.checkout).toBe("security");
+    const head = renameNode(panel(), "security", "audit");
+    expect(head.nodes.find((n) => n.id === "merge")?.checkout).toBe("audit");
+    expect(head.nodes.find((n) => n.id === "panel")?.join).toBe("merge");
+  });
+
+  it("deleting the join empties the fork's join; deleting the checked-out head drops the checkout", () => {
+    const noJoin = removeNode(panel(), "merge");
+    expect(noJoin.nodes.find((n) => n.id === "panel")).toEqual({ id: "panel", kind: "fork", join: "" });
+    const noHead = removeNode(panel(), "security");
+    expect("checkout" in (noHead.nodes.find((n) => n.id === "merge") ?? {})).toBe(false);
+    expect(noHead.nodes.find((n) => n.id === "panel")?.join).toBe("merge");
   });
 });
 

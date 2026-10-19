@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 // CopyRunDir copies runs/<run_id>/ of one agent's workspace into another's (DESIGN 5.6
@@ -16,6 +17,13 @@ import (
 // through os.Root, so a link either agent planted cannot reach outside its workspace. A
 // source without a run directory (the agent wrote nothing) copies nothing.
 func CopyRunDir(stateDir, fromID, toID, runID string) (int, error) {
+	return CopyRunDirExcept(stateDir, fromID, toID, runID, nil)
+}
+
+// CopyRunDirExcept is CopyRunDir that leaves out the top-level entries of runs/<run_id>/
+// named in skip, with everything under them (DESIGN 5.26 rule 10: the checkout of a
+// parallel branch the join does not name stays in its agent's workspace).
+func CopyRunDirExcept(stateDir, fromID, toID, runID string, skip []string) (int, error) {
 	srcWS, err := os.OpenRoot(WorkspaceDir(stateDir, fromID))
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil
@@ -53,6 +61,11 @@ func CopyRunDir(stateDir, fromID, toID, runID string) (int, error) {
 		case err != nil:
 			return err
 		case p == ".":
+			return nil
+		case slices.Contains(skip, p):
+			if d.IsDir() {
+				return fs.SkipDir
+			}
 			return nil
 		case d.IsDir():
 			return ensureDir(dst, p)

@@ -551,6 +551,342 @@ describe("validation", () => {
   });
 });
 
+// start -> coder -> panel (fork) -> security | performance -> merge (join) -> end; the reviewers are Reviewer and Deployer
+// here only because those are the agents the file knows; indexes: nodes 0 start, 1 coder, 2 panel, 3 security, 4 performance,
+// 5 merge, 6 end; edges 0 start>coder, 1 coder>panel, 2 panel>security, 3 panel>performance, 4 security>merge, 5 performance>merge, 6 merge>end.
+const forkDefinition = (over: Partial<WorkflowDefinition> = {}): WorkflowDefinition => ({
+  project: true,
+  nodes: [
+    { id: "start", kind: "start" },
+    { id: "coder", kind: "agent", agent_id: "a1", task: "Build {{.input.task}}" },
+    { id: "panel", kind: "fork", join: "merge" },
+    { id: "security", kind: "agent", agent_id: "a2", task: "Review security" },
+    { id: "performance", kind: "agent", agent_id: "a3", task: "Review speed" },
+    { id: "merge", kind: "join" },
+    { id: "end", kind: "end" },
+  ],
+  edges: [
+    { from: "start", to: "coder" },
+    { from: "coder", to: "panel" },
+    { from: "panel", to: "security", when: { path: "/coder/risky", op: "eq", value: true } },
+    { from: "panel", to: "performance" },
+    { from: "security", to: "merge" },
+    { from: "performance", to: "merge" },
+    { from: "merge", to: "end" },
+  ],
+  ...over,
+});
+
+describe("fork and join nodes", () => {
+  const openWith = (def: WorkflowDefinition) => api.on("GET", "/api/workflows/wf1", () => workflow({ definition: def }));
+  const nodePanel = () => within(screen.getByRole("region", { name: "Node settings" }));
+  const open = async (name: string) => {
+    fireEvent.click((await outline()).getByRole("button", { name }));
+    return nodePanel();
+  };
+  const POINTS = "Every edge whose condition holds starts a branch; the branches meet at the join.";
+  const CHECKOUT_HINT = "Branches run at once and meet here; the checkout of the chosen branch continues past the join.";
+
+  it("adds a fork and a join from the menu, lists both in the outline and saves them", async () => {
+    api.on("POST", "/api/workflows", (r) => workflow({ ...(r.body as object), id: "wf9", version: 1 }));
+    api.on("GET", "/api/workflows/wf9", () => workflow({ id: "wf9", name: "Panel" }));
+    renderBuilder("/workflows/new");
+    await outline();
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: "Panel" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add fork" }));
+    let panel = nodePanel();
+    expect(panel.getByRole("heading", { name: "Fork node" })).not.toBeNull();
+    expect((panel.getByLabelText("Node id") as HTMLInputElement).value).toBe("fork");
+    // no join node yet: the selector gives way to a sentence
+    expect(panel.getByText("Add a join node for this fork to end at.")).not.toBeNull();
+    expect(panel.queryByLabelText(/^Join/)).toBeNull();
+    expect(panel.getByText(POINTS)).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add join" }));
+    panel = nodePanel();
+    expect(panel.getByRole("heading", { name: "Join node" })).not.toBeNull();
+    expect((panel.getByLabelText("Node id") as HTMLInputElement).value).toBe("join");
+    expect(panel.getByText("No fork names this join yet.")).not.toBeNull();
+
+    const o = await outline();
+    expect(within(o.getByRole("button", { name: "Node fork" })).getByText("Fork")).not.toBeNull();
+    expect(within(o.getByRole("button", { name: "Node join" })).getByText("Join")).not.toBeNull();
+
+    // with a join in the workflow the fork offers it
+    fireEvent.click(o.getByRole("button", { name: "Node fork" }));
+    const select = nodePanel().getByLabelText(/^Join/) as HTMLSelectElement;
+    expect(Array.from(select.options).map((opt) => opt.value)).toEqual(["", "join"]);
+    expect(nodePanel().queryByText("Add a join node for this fork to end at.")).toBeNull();
+    fireEvent.change(select, { target: { value: "join" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(api.made("POST", "/api/workflows")).toHaveLength(1));
+    const body = api.made("POST", "/api/workflows")[0].body as { definition: WorkflowDefinition };
+    expect(body.definition.nodes.slice(2)).toEqual([
+      { id: "fork", kind: "fork", join: "join" },
+      { id: "join", kind: "join" },
+    ]);
+    expect(body.definition.ui?.positions?.fork).toBeDefined();
+    expect(body.definition.ui?.positions?.join).toBeDefined();
+  });
+
+  it("draws a fork and a join in an accent of their own, and a fork's join under its id", async () => {
+    openWith(forkDefinition());
+    renderBuilder();
+    await outline();
+    const canvas = screen.getByRole("group", { name: "Workflow canvas" });
+    await waitFor(() => expect(canvas.querySelectorAll(".react-flow__node")).toHaveLength(7));
+    const drawn = (id: string) => canvas.querySelector(`.react-flow__node[data-id="${id}"]`) as HTMLElement;
+    expect(drawn("panel").innerHTML).toContain("border-l-violet-500");
+    expect(drawn("panel").innerHTML).toContain("dark:border-l-violet-400");
+    expect(drawn("merge").innerHTML).toContain("border-l-violet-500");
+    expect(drawn("coder").innerHTML).not.toContain("border-l-violet-500");
+    expect(within(drawn("panel")).getByText("→ merge")).not.toBeNull();
+    expect(within(drawn("panel")).getByText("Fork")).not.toBeNull();
+    expect(within(drawn("merge")).getByText("Join")).not.toBeNull();
+    expect(within(drawn("merge")).queryByText(/→/)).toBeNull();
+  });
+
+  it("shows a fork's join selector over the join nodes, with the sentence on what its edges do, and none of an agent's fields", async () => {
+    openWith(forkDefinition({ nodes: [...forkDefinition().nodes, { id: "meet", kind: "join" }] }));
+    renderBuilder();
+    const panel = await open("Node panel");
+    const select = panel.getByLabelText(/^Join/) as HTMLSelectElement;
+    expect(select.value).toBe("merge");
+    expect(Array.from(select.options).map((o) => [o.value, o.textContent])).toEqual([
+      ["", "Choose a join…"],
+      ["merge", "merge"],
+      ["meet", "meet"],
+    ]);
+    expect(panel.getByText(POINTS)).not.toBeNull();
+    expect(panel.queryByText("Add a join node for this fork to end at.")).toBeNull();
+    for (const field of [/^Agent/, /^Task/, "Output schema", "Message", "If this node fails, go to", "If rejected, go to"]) expect(panel.queryByLabelText(field)).toBeNull();
+    expect(panel.queryByText("Receives output from")).toBeNull();
+    // it keeps the list of outgoing edges, in the order they start their branches
+    expect(panel.getByRole("button", { name: "Edit edge to security" })).not.toBeNull();
+    expect(panel.getByText("Branches appear in this order on the run page.")).not.toBeNull();
+    expect(panel.queryByText(/the first one whose condition holds is taken/)).toBeNull();
+
+    fireEvent.change(select, { target: { value: "meet" } });
+    save();
+    await waitFor(() => expect(api.made("PUT", "/api/workflows/wf1")).toHaveLength(1));
+    expect(saved().definition.nodes[2]).toEqual({ id: "panel", kind: "fork", join: "meet" });
+  });
+
+  it("offers a fork an empty choice for its join and keeps a join that is no join node visible", async () => {
+    openWith(forkDefinition({ nodes: forkDefinition().nodes.map((n) => (n.id === "panel" ? { ...n, join: "coder" } : n)) }));
+    renderBuilder();
+    const select = (await open("Node panel")).getByLabelText(/^Join/) as HTMLSelectElement;
+    expect(select.value).toBe("coder");
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(["", "merge", "coder"]);
+    fireEvent.change(select, { target: { value: "" } });
+    save();
+    await waitFor(() => expect(api.made("PUT", "/api/workflows/wf1")).toHaveLength(1));
+    expect(saved().definition.nodes[2]).toEqual({ id: "panel", kind: "fork", join: "" });
+  });
+
+  it("names the fork that joins at a join node, lists its heads in edge order and offers each as the checkout", async () => {
+    openWith(forkDefinition());
+    renderBuilder();
+    const panel = await open("Node merge");
+    expect(panel.getByRole("heading", { name: "Join node" })).not.toBeNull();
+    expect(panel.getByText("Joins the branches of panel.")).not.toBeNull();
+    const heads = panel.getByRole("heading", { name: "Branches" }).nextElementSibling as HTMLElement;
+    expect(Array.from(heads.querySelectorAll("li")).map((li) => li.textContent)).toEqual(["security", "performance"]);
+    const checkout = panel.getByLabelText("Checkout") as HTMLSelectElement;
+    expect(checkout.value).toBe("");
+    expect(Array.from(checkout.options).map((o) => [o.value, o.textContent])).toEqual([
+      ["", "None"],
+      ["security", "security"],
+      ["performance", "performance"],
+    ]);
+    expect(panel.getByText(CHECKOUT_HINT)).not.toBeNull();
+    for (const field of [/^Agent/, /^Task/, "Output schema", "Message", "If this node fails, go to", "If rejected, go to"]) expect(panel.queryByLabelText(field)).toBeNull();
+    expect(panel.getByRole("button", { name: "Edit edge to end" })).not.toBeNull();
+
+    fireEvent.change(checkout, { target: { value: "performance" } });
+    save();
+    await waitFor(() => expect(api.made("PUT", "/api/workflows/wf1")).toHaveLength(1));
+    expect(saved().definition.nodes[5]).toEqual({ id: "merge", kind: "join", checkout: "performance" });
+    // None takes the member out again
+    fireEvent.change(checkout, { target: { value: "" } });
+    save();
+    await waitFor(() => expect(api.made("PUT", "/api/workflows/wf1")).toHaveLength(2));
+    expect("checkout" in (api.made("PUT", "/api/workflows/wf1")[1].body as { definition: WorkflowDefinition }).definition.nodes[5]).toBe(false);
+  });
+
+  it("shows no checkout while the workflow does not work on a project", async () => {
+    openWith(forkDefinition({ project: undefined }));
+    renderBuilder();
+    const panel = await open("Node merge");
+    expect(panel.getByText("Joins the branches of panel.")).not.toBeNull();
+    expect(panel.queryByLabelText("Checkout")).toBeNull();
+    expect(panel.queryByText(CHECKOUT_HINT)).toBeNull();
+    // the project box brings it in
+    fireEvent.click(screen.getByLabelText(/Runs work on the project repository/));
+    expect(nodePanel().getByLabelText("Checkout")).not.toBeNull();
+  });
+
+  it("keeps a checkout the workflow cannot use on show, so it can be cleared", async () => {
+    openWith(forkDefinition({ project: undefined, nodes: forkDefinition().nodes.map((n) => (n.id === "merge" ? { ...n, checkout: "security" } : n)) }));
+    renderBuilder();
+    const checkout = (await open("Node merge")).getByLabelText("Checkout") as HTMLSelectElement;
+    expect(checkout.value).toBe("security");
+    fireEvent.change(checkout, { target: { value: "" } });
+    save();
+    await waitFor(() => expect(api.made("PUT", "/api/workflows/wf1")).toHaveLength(1));
+    expect("checkout" in saved().definition.nodes[5]).toBe(false);
+  });
+
+  it("says no fork names a join that no fork names, and lists no branches", async () => {
+    openWith(forkDefinition({ nodes: forkDefinition().nodes.map((n) => (n.id === "panel" ? { ...n, join: undefined } : n)) }));
+    renderBuilder();
+    const panel = await open("Node merge");
+    expect(panel.getByText("No fork names this join yet.")).not.toBeNull();
+    expect(panel.queryByRole("heading", { name: "Branches" })).toBeNull();
+    expect((panel.getByLabelText("Checkout") as HTMLSelectElement).options).toHaveLength(1);
+  });
+
+  it("says on the edge of a fork that every edge whose condition holds starts a branch, and not on another edge", async () => {
+    openWith(forkDefinition());
+    renderBuilder();
+    fireEvent.click((await outline()).getByRole("button", { name: "Edge panel to security, order 1" }));
+    let edge = within(screen.getByRole("region", { name: "Edge settings" }));
+    const line = edge.getByText("Every edge whose condition holds starts a branch.");
+    expect(edge.getByText("Branches appear in this order on the run page.")).not.toBeNull();
+    expect(edge.queryByText(/the first whose condition holds is taken/)).toBeNull();
+    // the line sits above the condition editor
+    expect(line.compareDocumentPosition(edge.getByLabelText("When to follow")) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+
+    fireEvent.click((await outline()).getByRole("button", { name: "Edge coder to panel" }));
+    edge = within(screen.getByRole("region", { name: "Edge settings" }));
+    expect(edge.queryByText("Every edge whose condition holds starts a branch.")).toBeNull();
+    fireEvent.click((await outline()).getByRole("button", { name: "Edge merge to end" }));
+    expect(within(screen.getByRole("region", { name: "Edge settings" })).queryByText(/starts a branch/)).toBeNull();
+  });
+
+  it("does not offer a fork or a join as a source of output for an agent", async () => {
+    openWith(forkDefinition());
+    renderBuilder();
+    const panel = await open("Node security");
+    expect(panel.getByRole("checkbox", { name: /^coder/ })).not.toBeNull();
+    expect(panel.getByRole("checkbox", { name: /^performance/ })).not.toBeNull();
+    expect(panel.queryByRole("checkbox", { name: /^panel/ })).toBeNull();
+    expect(panel.queryByRole("checkbox", { name: /^merge/ })).toBeNull();
+  });
+
+  it("renames a join in the fork that names it, and a head in the join's checkout", async () => {
+    openWith(forkDefinition({ nodes: forkDefinition().nodes.map((n) => (n.id === "merge" ? { ...n, checkout: "security" } : n)) }));
+    renderBuilder();
+    fireEvent.change((await open("Node merge")).getByLabelText("Node id"), { target: { value: "meet" } });
+    fireEvent.click((await outline()).getByRole("button", { name: "Node security" }));
+    fireEvent.change(nodePanel().getByLabelText("Node id"), { target: { value: "audit" } });
+    save();
+    await waitFor(() => expect(api.made("PUT", "/api/workflows/wf1")).toHaveLength(1));
+    const nodes = saved().definition.nodes;
+    expect(nodes.find((n) => n.id === "panel")?.join).toBe("meet");
+    expect(nodes.find((n) => n.id === "meet")?.checkout).toBe("audit");
+  });
+
+  describe("validation", () => {
+    const details = [
+      { path: "nodes[2].join", message: "'merge' is already the join of 'other'" },
+      { path: "nodes[2]", message: "a fork needs at least two outgoing edges" },
+      { path: "nodes[5].checkout", message: "unknown branch 'audit'" },
+      { path: "edges[4].to", message: "a branch of 'panel' cannot start at its join" },
+      { path: "nodes[3].input_from[0]", message: "'performance' is in another branch of 'panel'" },
+    ];
+
+    it("lists the messages of a fork's region and marks the nodes and edges they name", async () => {
+      openWith(forkDefinition());
+      api.on("POST", "/api/workflows/validate", () => apiError(422, "validation_failed", "definition is invalid", details));
+      renderBuilder();
+      const o = await outline();
+      fireEvent.click(screen.getByRole("button", { name: "Validate" }));
+      const problems = within(await screen.findByRole("region", { name: "Problems" }));
+      expect(problems.getByText("5 problems to fix")).not.toBeNull();
+      for (const d of details) {
+        expect(problems.getByText(d.path)).not.toBeNull();
+        expect(problems.getByText(d.message)).not.toBeNull();
+      }
+      expect(within(o.getByRole("button", { name: "Node panel" })).getByText("2")).not.toBeNull();
+      expect(within(o.getByRole("button", { name: "Node merge" })).getByText("1")).not.toBeNull();
+      expect(within(o.getByRole("button", { name: "Node security" })).getByText("1")).not.toBeNull();
+      expect(within(o.getByRole("button", { name: "Edge security to merge" })).getByText("1")).not.toBeNull();
+      await waitFor(() => expect(screen.getAllByTitle("Validation problems on this node")).toHaveLength(3));
+    });
+
+    it("shows the join's message under the Join selector and the fork's own message above it", async () => {
+      openWith(forkDefinition());
+      api.on("POST", "/api/workflows/validate", () => apiError(422, "validation_failed", "definition is invalid", details));
+      renderBuilder();
+      await outline();
+      fireEvent.click(screen.getByRole("button", { name: "Validate" }));
+      fireEvent.click(within(await screen.findByRole("region", { name: "Problems" })).getByText("nodes[2].join"));
+      const panel = nodePanel();
+      expect(panel.getByText("'merge' is already the join of 'other'")).not.toBeNull();
+      expect(panel.getByLabelText(/^Join/).getAttribute("aria-invalid")).toBe("true");
+      expect(panel.getByText("a fork needs at least two outgoing edges")).not.toBeNull();
+      // choosing another join takes the fork's messages away
+      fireEvent.change(panel.getByLabelText(/^Join/), { target: { value: "" } });
+      expect(screen.queryByText("'merge' is already the join of 'other'")).toBeNull();
+      expect(within(screen.getByRole("region", { name: "Problems" })).getByText("3 problems to fix")).not.toBeNull();
+    });
+
+    it("shows the checkout's message under the Checkout selector", async () => {
+      openWith(forkDefinition());
+      api.on("POST", "/api/workflows/validate", () => apiError(422, "validation_failed", "definition is invalid", details));
+      renderBuilder();
+      await outline();
+      fireEvent.click(screen.getByRole("button", { name: "Validate" }));
+      fireEvent.click(within(await screen.findByRole("region", { name: "Problems" })).getByText("nodes[5].checkout"));
+      const panel = nodePanel();
+      expect(panel.getByText("unknown branch 'audit'")).not.toBeNull();
+      expect(panel.getByLabelText("Checkout").getAttribute("aria-invalid")).toBe("true");
+    });
+
+    it("shows the messages of the other rules where the node or edge has a field for them", async () => {
+      openWith(forkDefinition());
+      api.on("POST", "/api/workflows/validate", () => apiError(422, "validation_failed", "definition is invalid", details));
+      renderBuilder();
+      await outline();
+      fireEvent.click(screen.getByRole("button", { name: "Validate" }));
+      const problems = await screen.findByRole("region", { name: "Problems" });
+      fireEvent.click(within(problems).getByText("nodes[3].input_from[0]"));
+      expect(nodePanel().getByText("'performance' is in another branch of 'panel'")).not.toBeNull();
+      fireEvent.click(within(screen.getByRole("region", { name: "Problems" })).getByText("edges[4].to"));
+      const edge = within(screen.getByRole("region", { name: "Edge settings" }));
+      expect(edge.getByText("a branch of 'panel' cannot start at its join")).not.toBeNull();
+      expect(edge.getByLabelText("To").getAttribute("aria-invalid")).toBe("true");
+    });
+
+    it("lists a message about a member the node has no field for above the fields, with the member's name", async () => {
+      openWith(forkDefinition());
+      api.on(
+        "POST",
+        "/api/workflows/validate",
+        () =>
+          apiError(422, "validation_failed", "definition is invalid", [
+            { path: "nodes[2].on_failure", message: "a fork has none; a failed branch fails the run" },
+            { path: "nodes[5].join", message: "only fork nodes have one" },
+            { path: "nodes[1].checkout", message: "only join nodes have one" },
+          ]),
+      );
+      renderBuilder();
+      await outline();
+      fireEvent.click(screen.getByRole("button", { name: "Validate" }));
+      const problems = await screen.findByRole("region", { name: "Problems" });
+      fireEvent.click(within(problems).getByText("nodes[2].on_failure"));
+      expect(nodePanel().getByText("on_failure: a fork has none; a failed branch fails the run")).not.toBeNull();
+      fireEvent.click(within(screen.getByRole("region", { name: "Problems" })).getByText("nodes[5].join"));
+      expect(nodePanel().getByText("join: only fork nodes have one")).not.toBeNull();
+      fireEvent.click(within(screen.getByRole("region", { name: "Problems" })).getByText("nodes[1].checkout"));
+      expect(nodePanel().getByText("checkout: only join nodes have one")).not.toBeNull();
+    });
+  });
+});
+
 describe("running a workflow", () => {
   it("builds the input form from the input schema and starts the run", async () => {
     api.on("POST", "/api/runs", () => ({ id: "run42" }));

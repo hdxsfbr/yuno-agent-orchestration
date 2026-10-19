@@ -166,7 +166,7 @@ export function subscribe(
 }
 
 // ---------------------------------------------------------------------------------------
-// Types derived from api/openapi.yaml (version 0.7.0) and the endpoint functions that use
+// Types derived from api/openapi.yaml (version 0.8.0) and the endpoint functions that use
 // them. Optional fields are the ones the API may omit.
 // ---------------------------------------------------------------------------------------
 
@@ -570,7 +570,31 @@ export type RunNode = {
   openclaw_run_id?: string;
   /** Set on a continuation visit: the question (an approval of kind `question`) whose answer this visit of the step continues with (DESIGN 5.24 rule 5). */
   question_id?: string;
+  /** Set on a visit made inside a branch of a fork: the `RunBranch` it belongs to (DESIGN 5.26 rule 4). */
+  branch_id?: string;
   started_at?: string;
+  finished_at?: string;
+};
+
+export const BRANCH_STATUSES = ["running", "waiting_approval", "succeeded", "failed", "cancelled"] as const;
+/** `waiting_approval`: the branch's newest visit parked on a question (DESIGN 5.26 rule 8). */
+export type BranchStatus = (typeof BRANCH_STATUSES)[number];
+
+/** One branch of a fork visit: the part of the run that started at one outgoing edge of the fork and runs beside its siblings until the join (DESIGN 5.26). */
+export type RunBranch = {
+  id: string;
+  run_id: string;
+  /** The `RunNode` of the fork this branch belongs to. */
+  fork_visit_id: string;
+  /** The fork node's id. */
+  fork_id: string;
+  /** The branch's first node, the fork edge's target; it names the branch. */
+  head: string;
+  status: BranchStatus;
+  /** Where the branch is: the node its next or current visit runs. */
+  current_node?: string;
+  failure_reason?: string;
+  started_at: string;
   finished_at?: string;
 };
 
@@ -673,6 +697,8 @@ export type Trace = {
   spans: Span[];
   agent_messages: AgentMessage[];
   approvals: Approval[];
+  /** One row per branch of every fork visit of the run, by `started_at`; absent or empty for a run without forks (DESIGN 5.26). */
+  branches?: RunBranch[];
 };
 
 // ---------------------------------------------------------------------------------------
@@ -682,8 +708,8 @@ export type Trace = {
 // change.
 // ---------------------------------------------------------------------------------------
 
-export type NodeKind = "start" | "agent" | "approval" | "end";
-export const NODE_KINDS: readonly NodeKind[] = ["start", "agent", "approval", "end"];
+export type NodeKind = "start" | "agent" | "approval" | "fork" | "join" | "end";
+export const NODE_KINDS: readonly NodeKind[] = ["start", "agent", "approval", "fork", "join", "end"];
 
 export const CONDITION_OPS = ["eq", "neq", "in", "exists", "gt", "lt"] as const;
 export type ConditionOp = (typeof CONDITION_OPS)[number];
@@ -709,6 +735,10 @@ export type WorkflowNode = {
   message?: string;
   on_reject?: string;
   on_failure?: string;
+  /** Fork nodes: the join node every branch ends at (DESIGN 5.26 rule 1). */
+  join?: string;
+  /** Join nodes of a project workflow: the head of the branch whose checkout continues past the join; without it no branch's checkout does (DESIGN 5.26 rule 10). */
+  checkout?: string;
 };
 
 export type WorkflowEdge = { from: string; to: string; when?: Condition };
@@ -808,6 +838,7 @@ export function normalizeTrace(t: Trace): Trace {
     spans: t.spans ?? [],
     agent_messages: t.agent_messages ?? [],
     approvals: t.approvals ?? [],
+    branches: t.branches ?? [],
   };
 }
 

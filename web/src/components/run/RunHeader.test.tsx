@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
-import type { Approval, Run, RunStatus, ToolCall } from "@/lib/api";
+import type { Approval, Run, RunBranch, RunStatus, ToolCall } from "@/lib/api";
 import { apiError, installFakeApi } from "@/test/fakeApi";
 import { mergeRequest, projectSettings, run } from "@/test/fixtures";
 import RunHeader from "./RunHeader";
@@ -406,5 +406,97 @@ describe("the line for a run that asks a question", () => {
     cleanup();
     renderHeader(waiting());
     expect(asks()).toBeNull();
+  });
+});
+
+describe("the step line inside a fork", () => {
+  const branch = (over: Partial<RunBranch> = {}): RunBranch => ({
+    id: "b1",
+    run_id: "r1",
+    fork_visit_id: "f1",
+    fork_id: "panel",
+    head: "security",
+    status: "running",
+    started_at: "2026-10-15T10:00:10Z",
+    ...over,
+  });
+  const three = () => [branch(), branch({ id: "b2", head: "performance" }), branch({ id: "b3", head: "maintainability" })];
+  const live = (over: Partial<Run> = {}) => run({ status: "running", current_node: "panel", finished_at: undefined, ...over });
+
+  function renderBranches(r: Run, branches: RunBranch[]) {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <RunHeader run={r} connection="open" now={Date.parse("2026-10-15T10:06:00Z")} branches={branches} onRunChange={onRunChange} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  const stepLine = () => screen.getByText("Current node").nextElementSibling as HTMLElement;
+
+  it("names the fork and how many branches are running", () => {
+    renderBranches(live(), three());
+    expect(stepLine().textContent).toBe("panel (3 branches running)");
+  });
+
+  it("counts a branch that waits for an answer as working, and not one that has ended", () => {
+    renderBranches(live(), [branch({ status: "waiting_approval" }), branch({ id: "b2", head: "performance", status: "succeeded" }), branch({ id: "b3", head: "maintainability", status: "running" })]);
+    expect(stepLine().textContent).toBe("panel (2 branches running)");
+  });
+
+  it("says one branch in the singular", () => {
+    renderBranches(live(), [branch(), branch({ id: "b2", head: "performance", status: "succeeded" })]);
+    expect(stepLine().textContent).toBe("panel (1 branch running)");
+  });
+
+  it("counts only the branches of the newest visit when the pair has looped", () => {
+    renderBranches(live(), [
+      ...three().map((b) => ({ ...b, status: "succeeded" as const })),
+      branch({ id: "b4", fork_visit_id: "f2", started_at: "2026-10-15T10:04:00Z" }),
+      branch({ id: "b5", fork_visit_id: "f2", head: "performance", started_at: "2026-10-15T10:04:00Z" }),
+    ]);
+    expect(stepLine().textContent).toBe("panel (2 branches running)");
+  });
+
+  it("reads as today when the run is at another node, has no branches, or no branch is working", () => {
+    renderBranches(live({ current_node: "lead" }), three());
+    expect(stepLine().textContent).toBe("lead");
+    cleanup();
+    renderBranches(live(), []);
+    expect(stepLine().textContent).toBe("panel");
+    cleanup();
+    renderBranches(live(), three().map((b) => ({ ...b, status: "succeeded" as const })));
+    expect(stepLine().textContent).toBe("panel");
+  });
+
+  it("shows no step line once the run has ended", () => {
+    renderBranches(run({ status: "failed", current_node: "panel" }), three());
+    expect(screen.queryByText("Current node")).toBeNull();
+  });
+
+  it("keeps the question line when the run has released the fork to wait for an answer", () => {
+    const q: Approval = {
+      id: "q1",
+      run_id: "r1",
+      run_node_id: "n1",
+      kind: "question",
+      node_id: "security",
+      message: "Which branch should I review?",
+      status: "pending",
+      requested_at: "2026-10-18T10:00:00Z",
+      expires_at: "2026-10-19T10:00:00Z",
+    };
+    const client = new QueryClient();
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <RunHeader run={live({ status: "waiting_approval" })} connection="open" now={Date.parse("2026-10-15T10:06:00Z")} approvals={[q]} branches={[branch({ status: "waiting_approval" }), branch({ id: "b2", head: "performance", status: "succeeded" })]} onRunChange={onRunChange} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(stepLine().textContent).toBe("panel (1 branch running)");
+    expect(screen.getByRole("link", { name: "Asks: Which branch should I review?" })).not.toBeNull();
   });
 });

@@ -391,3 +391,23 @@ collector over `os.Root`, the diff from a private clone, the store, the endpoint
 sweep) and the UI (the Question card, the Artifacts section). The coordinator did the
 integration, the suite and lint, the review filtering, the fix pass and the derived docs;
 the "As built" paragraphs of 5.24 and 5.25 record the agents' interpretations.
+
+**Designing and building wave 11 (2026-10-18).** The same session wrote DESIGN 5.26
+(parallel steps: fork and join) with the design-first template after reading the walk,
+the visit, the approval and question paths, the copy-forward and the collector it
+changes, recorded the decisions it settled (D-060, D-061) and the three Andre answered
+with the recommended answer (D-062 to D-064), extended `api/openapi.yaml` to 0.8.0, and
+wrote the plan and the briefs under `docs/briefs/wave11/`. As the roadmap had planned for
+the one structural engine change, the coordinator built the engine itself: the
+prerequisites (migration 0015, the branch rows, the two node kinds with the region
+validation of rule 2 and its tests), then the fork node, the branch walks, the stop of
+siblings, the parks and the release, the re-entry, the copy-forward's sibling exclusion
+and checkout rule, the collector's diff skip and the engine tests (T5.26.2 to T5.26.10),
+while two Sonnet 5.5 agents built in parallel on disjoint files: the builder's Fork and
+Join nodes with the run page's fork card (web), and the review panel template with its
+three seeded reviewer agents and `run_status.branches`. The template agent's report that
+the Dev pipeline's limits are too small for a panel round was taken (the template's
+limits are doubled); the frontend agent's note that the trace carries no explicit edge
+order for branches led to the contract stating that branch rows are created in edge
+order. The coordinator ran the full suite and lint, the review and the fix pass, and
+wrote the derived docs.

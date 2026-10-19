@@ -529,10 +529,10 @@ func (e *Engine) settleUnwaited(ctx context.Context, a *store.Approval) {
 
 // visitOf returns the live visit that raised an approval, if any.
 func (e *Engine) visitOf(a *store.Approval) *visit {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if v := e.active[a.RunID]; v != nil && v.rn.ID == a.RunNodeID {
-		return v
+	for _, v := range e.activeVisits(a.RunID) {
+		if v.rn.ID == a.RunNodeID {
+			return v
+		}
 	}
 	return nil
 }
@@ -541,10 +541,7 @@ func (e *Engine) visitOf(a *store.Approval) *visit {
 // pending any more and no worker of this process executes it (the api restarted while
 // a turn waited): a worker then starts a fresh visit of its current node.
 func (e *Engine) requeueIfUnattended(ctx context.Context, runID string) {
-	e.mu.Lock()
-	live := e.active[runID] != nil
-	e.mu.Unlock()
-	if live {
+	if len(e.activeVisits(runID)) > 0 {
 		return
 	}
 	run, err := store.GetRun(ctx, e.deps.Pool, runID)
@@ -641,17 +638,18 @@ func (e *Engine) sweepApprovals(ctx context.Context) {
 // failRun ends a run that is not terminal with reason: a live visit aborts its turn,
 // a run paused with no worker is failed in place.
 func (e *Engine) failRun(ctx context.Context, runID, reason string) {
-	e.mu.Lock()
-	v := e.active[runID]
-	e.mu.Unlock()
-	if v != nil {
+	if live := e.activeVisits(runID); len(live) > 0 {
+		// Every live visit (the branches of a fork, DESIGN 5.26 rule 6) stops with the
+		// reason; the fork ends the run with the first of them.
 		o := failed(store.RunFailed, reason)
 		o.limit = true
-		v.post(func(ctx context.Context) {
-			if v.aborting == nil && v.result == nil {
-				v.startAbort(ctx, o)
-			}
-		})
+		for _, v := range live {
+			v.post(func(ctx context.Context) {
+				if v.aborting == nil && v.result == nil {
+					v.startAbort(ctx, o)
+				}
+			})
+		}
 		return
 	}
 	now := e.clock.Now()
@@ -684,6 +682,7 @@ func (e *Engine) closeWaitingRun(ctx context.Context, run *store.Run, reason, ap
 			e.emit(ctx, run.ID, "node.status", map[string]any{"node": rn})
 		}
 	}
+	e.closeBranches(ctx, run, reason)
 	if root, err := store.OpenRootSpan(ctx, e.deps.Pool, run.ID); err == nil {
 		e.endSpan(ctx, root, now, map[string]any{"status": run.Status, "reason": reason})
 	}

@@ -144,11 +144,15 @@ func ContinuationQuestion(ctx context.Context, q Querier, runID, nodeID string) 
 // newest question when it is no longer pending: the decisions whose re-queue (or, for an
 // expiry, whose failure) the sweep repeats (DESIGN 5.24 Failure handling).
 func ListParkedQuestions(ctx context.Context, q Querier) ([]Approval, error) {
+	// A run waits on the parked visit itself, or on the fork visit whose branch holds a
+	// parked visit (DESIGN 5.26 rule 8): both kinds of parked visit are listed.
 	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals WHERE status <> $1 AND id IN (
-		SELECT (SELECT a.id FROM approvals a WHERE a.run_node_id = r.resume_node_visit_id AND a.kind = $2
+		SELECT (SELECT a.id FROM approvals a WHERE a.run_node_id = n.id AND a.kind = $2
 		        ORDER BY a.requested_at DESC, a.id DESC LIMIT 1)
-		FROM runs r JOIN run_nodes n ON n.id = r.resume_node_visit_id
-		WHERE r.status = $3 AND n.parked_at IS NOT NULL)
+		FROM runs r JOIN run_nodes n ON n.run_id = r.id AND n.parked_at IS NOT NULL
+		  AND (n.id = r.resume_node_visit_id
+		       OR r.resume_node_visit_id = (SELECT b.fork_visit_id FROM run_branches b WHERE b.id = n.branch_id))
+		WHERE r.status = $3)
 		ORDER BY decided_at`, ApprovalPending, ApprovalKindQuestion, RunWaitingApproval)
 	if err != nil {
 		return nil, err

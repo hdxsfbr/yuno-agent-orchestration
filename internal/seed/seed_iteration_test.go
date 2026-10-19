@@ -47,6 +47,10 @@ func TestShippedPromptsAndToolsForIteratingOnARequest(t *testing.T) {
 		"Researcher": nil,
 		"Critic":     nil,
 		"Writer":     nil,
+
+		"Security Reviewer":        nil,
+		"Performance Reviewer":     nil,
+		"Maintainability Reviewer": nil,
 	}
 	holders := map[string]bool{"Coder": true, "Reviewer": true, ChiefName: true}
 	check := func(when string) {

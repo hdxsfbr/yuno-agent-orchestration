@@ -12,7 +12,7 @@ engine, approvals, limits, traces, evals, channel, UI). See `docs/adr/0001-runti
 Status: waves 1, 2 and 3 of 4 are done. Working end to end: agent configuration in the UI
 and API, materialised into OpenClaw (config entry, exec policy, workspace files);
 multi-agent workflows as graphs with conditions, feedback loops and typed state, built
-in the visual builder or loaded from the two shipped templates; agent turns executed by
+in the visual builder or loaded from the three shipped templates; agent turns executed by
 OpenClaw with `exec` in a Docker sandbox and the run directory handed forward from agent
 to agent; a project repository the platform clones for a run, with the sandbox image
 chosen by the repository's toolchain and a merge request at the end (see Projects); the
@@ -92,7 +92,7 @@ ones that matter:
 | `make probe-openclaw` | A real OpenClaw turn with a sandboxed `exec`, the integration canary |
 | `make probe-approval` | Verifies the gateway's plugin approval calls the side-effect gate relies on |
 | `make probe-sandbox` | Verifies a per-agent sandbox image and network override on the running gateway, the mechanism project runs use |
-| `make seed` | Creates the six demo agents the workflow templates name (Coder, Reviewer, Deployer, Researcher, Critic, Writer); idempotent |
+| `make seed` | Creates the nine demo agents the workflow templates name (Coder, Reviewer, Deployer, Researcher, Critic, Writer, Security Reviewer, Performance Reviewer, Maintainability Reviewer); idempotent |
 | `make seed-reset` | `make seed`, then restores the shipped agents' prompts and allowlists and the template workflows to the shipped versions, keeping everything else |
 | `make eval` | Run the evaluation suite offline with the scripted provider against the running stack; `make eval-baseline` / `make eval-final` store the report |
 | `make lint` | `go vet`, `staticcheck`, `eslint`, `tsc` |
@@ -181,14 +181,15 @@ into the agent's `MEMORY.md` before each turn.
 
 ## Workflows and approvals
 
-A workflow is a graph of `start`, `agent`, `approval` and `end` nodes with edges that
-carry optional conditions over the typed run state (`/reviewer/verdict eq approved`);
-edges are tried in order and the first true one is taken, so a feedback loop is just an
-edge back, bounded by `max_loop_visits`. Each agent node's task is a template over the
+A workflow is a graph of `start`, `agent`, `approval`, `fork`, `join` and `end` nodes
+with edges that carry optional conditions over the typed run state (`/reviewer/verdict eq
+approved`); edges are tried in order and the first true one is taken, so a feedback loop
+is just an edge back, bounded by `max_loop_visits`. Each agent node's task is a template over the
 run input and the state so far; the agent's `finish` result is validated against the
 node's output schema and becomes `state[<node>]`. The shipped templates live in
 `templates/` (`dev_pipeline`: Coder → Reviewer ⇄ feedback → human approval → Deployer;
-`research_pipeline`: Researcher → Critic ⇄ feedback → Writer). To add one, drop a JSON
+`research_pipeline`: Researcher → Critic ⇄ feedback → Writer; `review_panel`: Coder →
+three reviewers at once → a lead Reviewer ⇄ feedback → human approval → Deployer). To add one, drop a JSON
 file there with `key`, `name`, `description` and `definition`, naming agents by
 `agent_name`; it loads at the next api start, and "From template" resolves the names to
 your agents.
@@ -223,6 +224,24 @@ project run also gets `diff.patch`, the checkout against the commit it cloned, p
 in a private clone on the api side (never with the checkout's own `.git`). Downloads
 are attachments with `nosniff`, never rendered inline, and `run_status` names the files
 with the run's link for the Chief.
+
+Steps can run in parallel (DESIGN 5.26): a `fork` node starts one branch per outgoing
+edge whose condition holds (two to five), every branch runs at once as its own agent
+visits, and the fork's `join` continues when all of them are done, along its first true
+edge. Only agent steps live inside a branch, no edge enters or leaves a branch except
+through the fork and the join, forks do not nest, and two branches never share an agent
+(each agent has one workspace). The first branch to fail stops its siblings and fails the
+run; the run's step, tool-call and cost limits sum across branches and the time limit is
+wall clock, so a gated call or a question inside a branch pauses only its own step while
+the siblings keep working (the human gate goes after the join). A branch that asks the
+operator and is left waiting parks; the run keeps going until every branch is done or
+parked, then waits for the answer like any parked step. After the join every branch's
+files flow on, but a project checkout flows only from the branch the join names as its
+`checkout`, never as a mixture of two working trees. The run page shows a fork as one
+card with its branches side by side; `run_status` names the branches while they run. The
+`review_panel` template is the example: three reviewer agents (security, performance,
+maintainability) read the Coder's change at the same time and the Reviewer merges their
+verdicts.
 
 Per-agent model settings: `thinking` is the reasoning control on OpenClaw (the agent's
 `thinkingDefault`), and `max_tokens` reaches OpenClaw as the agent's `params.maxTokens`.
@@ -395,7 +414,7 @@ internal/engine/    run state machine, limits, approvals, resumption
 internal/openclaw/  baseline gateway config (openclaw-init) and the gateway client
 internal/workflow/  graph definition, validation, conditions, task templates
 internal/tools/     platform tools served over MCP, idempotent executor, policy
-internal/seed/      the six demo agents (`yuno seed`)
+internal/seed/      the nine demo agents (`yuno seed`)
 internal/channels/  Telegram binding and the keeper that re-asserts it on the gateway
 internal/sched/     cron parsing and the scheduler tick
 internal/guardrails/ cost cap, rate limit, blocked tools, input patterns

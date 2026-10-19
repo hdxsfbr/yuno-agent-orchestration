@@ -7,11 +7,13 @@ import {
   createSSEParser,
   delegatedConversationId,
   downloadArtifact,
+  getTrace,
   isDelegatedRun,
   issueRef,
   listRunArtifacts,
   type Approval,
   type Artifact,
+  type RunBranch,
   type SSEEvent,
 } from "./api";
 import { clearToken, setToken, signInRequired } from "./auth";
@@ -226,6 +228,61 @@ describe("wave 10 calls", () => {
       setToken("wrong");
       await expect(downloadArtifact("r1", "a1")).rejects.toMatchObject({ status: 401 });
       expect(signInRequired()).toBe(true);
+    });
+  });
+});
+
+describe("wave 11 calls", () => {
+  let fake: ReturnType<typeof installFakeApi>;
+
+  beforeEach(() => {
+    fake = installFakeApi();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const branch = (over: Partial<RunBranch> = {}): RunBranch => ({
+    id: "b1",
+    run_id: "r1",
+    fork_visit_id: "f1",
+    fork_id: "panel",
+    head: "security",
+    status: "waiting_approval",
+    current_node: "security",
+    started_at: "2026-10-18T10:00:00Z",
+    ...over,
+  });
+
+  const trace = (over: object = {}) => ({
+    run: { id: "r1" },
+    nodes: [{ id: "n1", run_id: "r1", node_id: "security", branch_id: "b1", visit: 1, iteration: 1, status: "waiting_approval" }],
+    model_calls: [],
+    tool_calls: [],
+    spans: [],
+    agent_messages: [],
+    approvals: [],
+    ...over,
+  });
+
+  describe("getTrace", () => {
+    it("keeps the branches of a run and the branch a visit was made in", async () => {
+      fake.on("GET", "/api/runs/r1/trace", () => trace({ branches: [branch(), branch({ id: "b2", head: "performance", status: "failed", failure_reason: "boom", finished_at: "2026-10-18T10:01:00Z" })] }));
+      const t = await getTrace("r1");
+      expect(t.branches?.map((b) => [b.head, b.status])).toEqual([
+        ["security", "waiting_approval"],
+        ["performance", "failed"],
+      ]);
+      expect(t.branches?.[1].failure_reason).toBe("boom");
+      expect(t.nodes[0].branch_id).toBe("b1");
+    });
+
+    it("reads a trace without branches, or with null ones, as having none", async () => {
+      fake.on("GET", "/api/runs/r1/trace", () => trace());
+      expect((await getTrace("r1")).branches).toEqual([]);
+      fake.on("GET", "/api/runs/r1/trace", () => trace({ branches: null }));
+      expect((await getTrace("r1")).branches).toEqual([]);
     });
   });
 });

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
-import type { AgentMessage, Approval, Run, RunNode, ToolCall, Trace } from "@/lib/api";
+import type { AgentMessage, Approval, Run, RunBranch, RunNode, ToolCall, Trace } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import { apiError, installFakeApi } from "@/test/fakeApi";
 import RunDetailPage from "./RunDetailPage";
@@ -422,5 +422,101 @@ describe("a run that asks the operator a question", () => {
     expect(first.getByText("Answered: Spanish")).not.toBeNull();
     const second = within(timeline.getByRole("region", { name: "Node coder, visit 2" }));
     expect(second.getByText("visit 2, continued after a question")).not.toBeNull();
+  });
+});
+
+describe("a run with a fork", () => {
+  const at = (sec: number) => `2026-10-15T10:00:${String(sec).padStart(2, "0")}Z`;
+  const branch = (head: string, over: Partial<RunBranch> = {}): RunBranch => ({
+    id: `b-${head}`,
+    run_id: RUN,
+    fork_visit_id: "rn-panel",
+    fork_id: "panel",
+    head,
+    status: "running",
+    current_node: head,
+    started_at: at(10),
+    ...over,
+  });
+  const visit = (head: string, over: Partial<RunNode> = {}): RunNode => ({
+    id: `rn-${head}`,
+    run_id: RUN,
+    node_id: head,
+    agent_id: `agent-${head}`,
+    branch_id: `b-${head}`,
+    visit: 1,
+    iteration: 1,
+    status: "running",
+    started_at: at(11),
+    ...over,
+  });
+  const heads = ["security", "performance", "maintainability"];
+
+  beforeEach(() => {
+    trace.run = run({ status: "running", current_node: "panel" });
+    trace.nodes = [
+      node("rn-coder", "coder", 1, { started_at: at(1) }),
+      { id: "rn-panel", run_id: RUN, node_id: "panel", visit: 1, iteration: 0, status: "running", started_at: at(10), output: { branches: heads } },
+      ...heads.map((h) => visit(h)),
+    ];
+    trace.branches = heads.map((h) => branch(h));
+  });
+
+  const header = () => within(screen.getByRole("region", { name: "Run summary" }));
+
+  it("shows the fork as one card with a column for each branch, and the header counts the branches running", async () => {
+    renderPage();
+    const timeline = await section("Timeline");
+    const fork = within(timeline.getByRole("region", { name: "Fork panel" }));
+    expect(fork.getAllByRole("region", { name: /^Branch / }).map((c) => c.getAttribute("aria-label"))).toEqual(["Branch security", "Branch performance", "Branch maintainability"]);
+    expect(timeline.getByRole("region", { name: "Node security, branch security" })).not.toBeNull();
+    expect(timeline.getByRole("region", { name: "Node coder" })).not.toBeNull();
+    expect(header().getByText("panel (3 branches running)")).not.toBeNull();
+  });
+
+  it("follows the stream: a branch ends, another waits for an answer, the join passes and the run moves on", async () => {
+    renderPage();
+    const timeline = await section("Timeline");
+    await screen.findByText("Live");
+
+    api.send(EVENTS, "branch.status", { branch: branch("security", { status: "succeeded", finished_at: at(30) }) });
+    await waitFor(() => expect(header().getByText("panel (2 branches running)")).not.toBeNull());
+    const head = (name: string) => within(timeline.getByRole("region", { name: `Branch ${name}` }).querySelector("header") as HTMLElement);
+    expect(head("security").getByText("succeeded")).not.toBeNull();
+
+    api.send(EVENTS, "branch.status", { branch: branch("performance", { status: "waiting_approval" }) });
+    await waitFor(() => expect(head("performance").getByText("Waiting for an answer")).not.toBeNull());
+    expect(header().getByText("panel (2 branches running)")).not.toBeNull();
+
+    api.send(EVENTS, "branch.status", { branch: branch("maintainability", { status: "failed", failure_reason: "no verdict", finished_at: at(35) }) });
+    await waitFor(() => expect(within(timeline.getByRole("region", { name: "Branch maintainability" })).getByText("no verdict")).not.toBeNull());
+    expect(header().getByText("panel (1 branch running)")).not.toBeNull();
+
+    // a branch of another run is not shown
+    api.send(EVENTS, "branch.status", { branch: { ...branch("elsewhere"), run_id: "other" } });
+    for (const h of heads) {
+      api.send(EVENTS, "branch.status", { branch: branch(h, { status: "succeeded", finished_at: at(40) }) });
+    }
+    api.send(EVENTS, "node.status", { node: { id: "rn-merge", run_id: RUN, node_id: "merge", visit: 1, iteration: 0, status: "succeeded", started_at: at(41), finished_at: at(41), output: { branches: heads } } });
+    expect(await timeline.findByText("Joined 3 branches")).not.toBeNull();
+    expect(timeline.queryByRole("region", { name: "Branch elsewhere" })).toBeNull();
+
+    api.send(EVENTS, "run.status", { run: run({ status: "running", current_node: "lead" }) });
+    await waitFor(() => expect(header().getByText("lead")).not.toBeNull());
+    expect(header().queryByText(/branches? running/)).toBeNull();
+  });
+
+  it("shows the branch's reason when a run fails inside a branch, and no step line", async () => {
+    trace.run = run({ status: "failed", current_node: "panel", failure_reason: "branch security failed: tool exec failed" });
+    trace.branches = [
+      branch("security", { status: "failed", failure_reason: "tool exec failed", finished_at: at(20) }),
+      branch("performance", { status: "cancelled", failure_reason: "stopped: branch security failed", finished_at: at(21) }),
+      branch("maintainability", { status: "cancelled", failure_reason: "stopped: branch security failed", finished_at: at(21) }),
+    ];
+    renderPage();
+    const timeline = await section("Timeline");
+    expect(within(timeline.getByRole("region", { name: "Branch security" })).getByText("tool exec failed")).not.toBeNull();
+    expect(within(timeline.getByRole("region", { name: "Branch performance" })).getByText("stopped: branch security failed")).not.toBeNull();
+    expect(header().queryByText("Current node")).toBeNull();
   });
 });

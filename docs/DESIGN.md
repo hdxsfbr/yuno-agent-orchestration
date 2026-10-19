@@ -412,9 +412,10 @@ Rules:
    stored; `POST /workflow-templates/{key}/instantiate` copies it into a new editable
    workflow with every `agent_name` resolved to the id of the agent of that name
    (case-insensitive; 422 `nodes[i].agent_name: no agent named 'X'` when missing; `make
-   seed` creates the six demo agents). Shipped: `dev_pipeline` (Coder → Reviewer ⇄
-   feedback → approval → Deployer) and `research_pipeline` (Researcher → Critic ⇄
-   feedback → Writer).
+   seed` creates the demo agents: six until 5.26, nine since). Shipped: `dev_pipeline` (Coder → Reviewer ⇄
+   feedback → approval → Deployer), `research_pipeline` (Researcher → Critic ⇄
+   feedback → Writer) and, since 5.26, `review_panel` (Coder → three reviewers in
+   parallel → Reviewer as lead → approval → Deployer).
 10. The loop in `dev_pipeline` is data: the `reviewer→coder` edge and `max_loop_visits`.
     Nothing in Go knows the words coder or reviewer.
 11. `input` is validated against `input_schema` at trigger time (422 with the schema
@@ -1139,7 +1140,7 @@ The full design with inputs, edge cases, failure handling and tests is
 12. The seeded `Chief of Staff` (Coordinator, `claude-opus-5-5`, the chat tools, no
     exec) carries the coordinator prompt from the brief, extended by 5.17 rule 8 and,
     since 5.24, by the answering sentence of 5.24 rule 9.
-13. Seeding instantiates both templates when no workflow carries their template key.
+13. Seeding instantiates every shipped template when no workflow carries its template key.
 14. Seeding binds the Chief of Staff when Telegram is enabled and nothing is bound; it
     never changes an existing binding.
 15. The materialiser writes a `## Chatting` section into `AGENTS.md` only for agents whose

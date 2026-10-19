@@ -470,6 +470,25 @@ func (v *visit) questionTurnEnd(ctx context.Context) bool {
 		h("park")
 	}
 	now := e.clock.Now()
+	if v.branch != nil {
+		// Inside a parallel branch the park marks the visit and its branch and leaves the
+		// run running; the fork releases the worker once every branch has ended or parked
+		// (DESIGN 5.26 rule 8).
+		if err := store.ParkBranchVisit(ctx, e.deps.Pool, v.run.ID, v.rn.ID, v.branch.ID, now); err != nil {
+			v.end(ctx, failed(store.RunFailed, "park: "+err.Error()))
+			return true
+		}
+		v.branch.Status = store.BranchWaitingApproval
+		v.rn.Status = store.NodeWaitingApproval
+		v.rn.ParkedAt = &now
+		v.saveNode(ctx)
+		e.emit(ctx, v.run.ID, "node.status", map[string]any{"node": v.rn})
+		e.emit(ctx, v.run.ID, "branch.status", map[string]any{"branch": v.branch})
+		e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("%s waits for the answer to question %s; branch %s continues when it arrives", v.agent.Name, pending, v.branch.Head),
+			"node_id", v.node.ID, "approval_id", pending)
+		v.end(ctx, outcome{paused: true})
+		return true
+	}
 	run, err := store.ParkVisit(ctx, e.deps.Pool, v.run.ID, v.rn.ID, now)
 	if err != nil {
 		v.end(ctx, failed(store.RunFailed, "park: "+err.Error()))

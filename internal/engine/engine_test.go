@@ -1419,9 +1419,7 @@ func TestFinishFirstResultWins(t *testing.T) {
 	}
 	run, done := env.start(TriggerRequest{AgentID: a.ID, Task: "x"})
 	eventually(t, "turn started", func() bool { mu.Lock(); defer mu.Unlock(); return token != "" })
-	env.e.mu.Lock()
-	v := env.e.active[run.ID]
-	env.e.mu.Unlock()
+	v := env.e.activeVisits(run.ID)[0]
 
 	errs := make([]error, 8)
 	var wg sync.WaitGroup

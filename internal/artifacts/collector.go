@@ -616,6 +616,11 @@ func (p *pass) diff(ctx context.Context, runRoot *os.Root) error {
 	if p.in.Project == nil {
 		return nil
 	}
+	if p.in.SkipDiff {
+		// A parallel branch the join does not name (DESIGN 5.26 rule 11).
+		p.c.logLine(ctx, p.runID, "info", "artifacts: diff skipped: parallel branch "+p.in.BranchHead)
+		return nil
+	}
 	info, err := runRoot.Lstat(project.RepoDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil // a run without a checkout
