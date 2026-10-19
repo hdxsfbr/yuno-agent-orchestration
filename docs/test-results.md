@@ -1,3 +1,20 @@
+# Test results, 2026-10-19 (delivery process wave 1: factory agents, plan and wave pipelines; DESIGN 5.28)
+
+Run on the development machine from `main` (commit `bfdf061` and the eval fix on top), in
+throwaway containers: the CI job's own commands in an isolated compose project, the Go suite
+again on two CPUs and the engine package on one CPU twice.
+
+| Command | Result |
+|---|---|
+| `go test ./... -count=1` (two CPUs) | every package ok (new: the factory agents and conservative retirement, both templates load and instantiate, the `waves_partition` check, the review loop bound and the gap path, the plan pipeline end to end with refused waves and a rejected design, `paths` on `open_merge_request`, a rejection's reason in state) |
+| `go test ./internal/engine/ -count=2` (one CPU) | ok |
+| `pnpm test` | 49 files, 1096 tests passed |
+| `go vet ./...`, staticcheck 2026.2.2, `gofmt -l`, eslint, `tsc --noEmit` | clean |
+| `make eval` (public split, local stack) | 18 of 18 on five runs, after case 016's margin was widened (it had failed twice in about eight runs: its five-second limit includes setting up the agent on the gateway) |
+| `make eval-final` (every split) | 25 of 25, every evaluator 1.000, 16 of 16 cases that expect success succeeded, rubric 5 of 5 (`evals/reports/final.md`) |
+| live on the local stack | `make run` retired the nine earlier agents and six shipped workflows, created the eight factory agents, kept the Chief of Staff, and instantiated "Plan pipeline" and "Wave pipeline" |
+| review | one Opus reviewer: three high, eight medium, ten low; all fixed but one low accepted (`docs/reviews/factory-wave1-review.md`) |
+
 # Test results, 2026-10-19 (wave 12: agent files, skill bundles, the skills library; DESIGN 5.27)
 
 Run on the development machine from `main` after the fix pass, in throwaway containers:

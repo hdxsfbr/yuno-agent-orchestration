@@ -1,7 +1,7 @@
 id: 016-time-limit
 version: v1
 split: public
-description: A check that sleeps for ten seconds runs against a five second time limit. The engine ends the run as timed out with the reason "time limit 5s exceeded" instead of waiting for the command.
+description: A check that sleeps for sixty seconds runs against a fifteen second time limit. The engine ends the run as timed out with the reason "time limit 15s exceeded" instead of waiting for the command. (The limit was five seconds against ten until 2026-10-19; the run's clock includes setting up the agent on the gateway, which a slow host can spend most of five seconds on before the first model call.)
 agent:
   name: Patient Checker
   system_prompt: |
@@ -9,14 +9,14 @@ agent:
   tool_allowlist: [exec, finish]
   limits:
     max_steps: 10
-    max_duration_seconds: 5
+    max_duration_seconds: 15
 task: |
   Run the migration check with the exec tool and report whether it passed. It may take a while.
 # The first command outlasts the limit; the steps after it are never asked for.
 script:
   - tool:
       name: exec
-      args: { command: "sleep 10 && echo migration check passed" }
+      args: { command: "sleep 60 && echo migration check passed" }
     usage: { prompt: 110, completion: 20 }
   - tool:
       name: exec
@@ -33,7 +33,7 @@ script:
     usage: { prompt: 230, completion: 14 }
 expect:
   status: timed_out
-  failure_reason_contains: time limit 5s exceeded
+  failure_reason_contains: time limit 15s exceeded
   min_model_calls: 1
   min_tool_calls: 1
 rubric: []

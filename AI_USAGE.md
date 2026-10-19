@@ -428,3 +428,15 @@ gaps, and the untrusted wrapping, the channels field and the eval labels, on dis
 files; the coordinator rewrote the README, ADR, threat model and compliance documents
 against the code, re-ran the evals (24 of 24) and the CI job's commands under the CI
 runner's CPU limits before pushing.
+
+2026-10-19, the delivery process (Andre's "HDX Factory" diagram), wave 0 and wave 1:
+Andre asked to replace every agent but the Chief of Staff and make Yuno run his Plan,
+Build, Ship process. A Sonnet agent produced a code fact sheet (intake, merge request sync,
+engine, tools) that the coordinator used for the PRD, the mapping and the waves under
+`docs/briefs/delivery-process/`; Andre approved the recommended answer to eight open
+decisions. The coordinator wrote DESIGN 5.28 and 5.29; three Sonnet agents built wave 1 on
+disjoint files (the agents and their retirement, the two templates with the waves check,
+eval 025 with question answers in the eval runner); one Opus reviewer found three highs
+(retirement could delete operator copies and silently stop intake; step limits too small);
+two Sonnet agents fixed every kept finding. The coordinator ran the suites under the CI
+runner's limits and the evals live, and widened the margin of a flaky time-limit case.

@@ -155,8 +155,8 @@ func TestResearchPipelineCaseMirrorsTheTemplate(t *testing.T) {
 func TestTimeLimitCaseOutlastsItsLimit(t *testing.T) {
 	c := shippedCase(t, "016-time-limit")
 	limit := c.Agent.Limits.MaxDurationSeconds
-	if limit != 5 {
-		t.Errorf("max_duration_seconds = %d, want 5", limit)
+	if limit != 15 {
+		t.Errorf("max_duration_seconds = %d, want 15", limit)
 	}
 	first := c.Script[0]
 	if first.Tool == nil || first.Tool.Name != "exec" {
@@ -170,7 +170,7 @@ func TestTimeLimitCaseOutlastsItsLimit(t *testing.T) {
 	if n, _ := strconv.Atoi(m[1]); n <= limit {
 		t.Errorf("the command sleeps %d s, which does not outlast the %d s limit", n, limit)
 	}
-	if c.Expect.Status != store.RunTimedOut || c.Expect.FailureReasonContains != "time limit 5s exceeded" {
+	if c.Expect.Status != store.RunTimedOut || c.Expect.FailureReasonContains != "time limit 15s exceeded" {
 		t.Errorf("expect = %+v", c.Expect)
 	}
 	if c.Agent.Limits.MaxSteps <= len(c.Script) {

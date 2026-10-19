@@ -416,7 +416,7 @@ below.
 | `013-output-schema-repair` | public | the first `finish` breaks the output schema, the second is valid | succeeded, the state holds the valid result |
 | `014-tool-approval-gate` | private | `deploy_release` requires approval; a human approves it and it runs in the same turn | succeeded, `deploy_release` executed, one approval approved |
 | `015-research-pipeline-happy` | public | the `research_pipeline` template's graph with three agents and no `http_fetch`: notes, an approving critic, a report | succeeded, `/critic/verdict` approved; rubric of 4 |
-| `016-time-limit` | public | an `exec` that sleeps 10 s under `max_duration_seconds: 5` | timed_out, reason `time limit 5s exceeded` (about 7 to 17 s) |
+| `016-time-limit` | public | an `exec` that sleeps 60 s under `max_duration_seconds: 15` | timed_out, reason `time limit 15s exceeded` (about 17 to 27 s) |
 | `017-tool-call-limit` | public | an agent that keeps listing directories under `max_tool_calls: 3`, well below the step limit | failed, reason `tool call limit 3 exceeded` |
 | `018-schedule-triggered-run` | public | the runner creates a one-shot schedule two seconds ahead; the scheduler fires it once; the delay schedule disables itself. The workflow has no agent node (see Actions) | succeeded, trigger `schedule` with the schedule as `trigger_ref`, schedule disabled (about 12 s) |
 | `019-rate-limit` | public | an agent with `max_runs_per_hour: 1`; the first run succeeds, the same trigger again straight after is refused | succeeded, the second trigger answers 429 `rate limit: 1 runs/hour for agent <name>` |

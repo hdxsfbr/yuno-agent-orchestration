@@ -581,20 +581,20 @@ guardrail patterns do not reach the sandbox.
 
 ## Evaluation
 
-`make eval` runs the public split (17 cases) offline against the running stack with the
+`make eval` runs the public split (18 cases) offline against the running stack with the
 deterministic scripted model, seven evaluators (`termination`, `trace_integrity`,
 `expectation`, `approval_gate`, `idempotency`, `schema`, `allowlist`) and the rubric in
 heuristic mode, and writes `evals/reports/<timestamp>.md`. `make eval-baseline` stores
-the report as `evals/reports/baseline.md`; `make eval-final` runs every split (24 cases;
+the report as `evals/reports/baseline.md`; `make eval-final` runs every split (25 cases;
 the 7 private ones need the network, a configured GitLab or a human) and stores
 `evals/reports/final.md`; `EVAL_PROVIDER=anthropic` grades the rubric with a real model
 through the proxy. Cases live in `evals/cases/v1/` and are described in `evals/README.md`.
 Each report gives "expected outcome reached" (the run ended with the status the case
 expected, a deliberate failure included) and, separately, "succeeded" over the cases that
 expect success. `evals/reports/baseline.md` is the wave 3 baseline (17 of 17 public
-cases). `evals/reports/final.md` was run on 2026-10-19 at the build after `4b94a05` with
-the scripted model over every split: 24 of 24 cases, every evaluator 1.000, 15 of 15
-cases expecting success succeeded, rubric 4 of 4 graded by its local checks. The model
+cases). `evals/reports/final.md` was run on 2026-10-19 on the delivery-process wave 1 build
+with the scripted model over every split: 25 of 25 cases, every evaluator 1.000, 16 of 16
+cases expecting success succeeded, rubric 5 of 5 graded by its local checks. The model
 calls in the eval cases are scripted, so the suite measures the platform (engine,
 gateway, sandbox, gate, deploy target), not a model's judgement.
 
