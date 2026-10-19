@@ -144,7 +144,7 @@ describe("Telegram line", () => {
 });
 
 describe("saving", () => {
-  it("sends the skills ticked and keeps the agent's channels", async () => {
+  it("sends the skills ticked and never sends channels", async () => {
     saved = agent({ skills: ["code-review"], channels: ["telegram"] });
     api.on("PUT", "/api/agents/a1", (r) => ({ ...saved, ...(r.body as AgentInput) }));
     renderPage();
@@ -156,7 +156,7 @@ describe("saving", () => {
     await waitFor(() => expect(api.made("PUT", "/api/agents/a1")).toHaveLength(1));
     const body = api.made("PUT", "/api/agents/a1")[0].body as AgentInput;
     expect(body.skills).toEqual(["code-review", "release-notes"]);
-    expect(body.channels).toEqual(["telegram"]);
+    expect(body).not.toHaveProperty("channels");
   });
 
   it("puts a bad guardrail expression's 422 next to that pattern", async () => {

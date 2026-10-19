@@ -28,7 +28,6 @@ var (
 	interactionModes = []string{"auto", "require_approval", "blocked"}
 	execSecurity     = []string{"deny", "allowlist", "full"}
 	execAsk          = []string{"off", "on-miss", "always"}
-	agentChannels    = []string{"telegram"}
 )
 
 // defaultMaxTokens mirrors the agents.max_tokens column default.
@@ -51,7 +50,9 @@ type agentInput struct {
 	MemoryPolicy     store.MemoryPolicy `json:"memory_policy"`
 	ExecPolicy       store.ExecPolicy   `json:"exec_policy"`
 	Skills           []string           `json:"skills"`
-	Channels         []string           `json:"channels"`
+	// Channels is read-only (bindings are made on the Channels page): accepted so a client
+	// that echoes a whole agent back is not refused, never validated or stored.
+	Channels json.RawMessage `json:"channels"`
 
 	ID               json.RawMessage `json:"id"`
 	OpenClawAgentID  json.RawMessage `json:"openclaw_agent_id"`
@@ -109,9 +110,6 @@ func (in *agentInput) validate(registry *tools.Registry) fieldErrors {
 	checkEnum(&fe, "exec_policy.security", in.ExecPolicy.Security, execSecurity)
 	checkEnum(&fe, "exec_policy.ask", in.ExecPolicy.Ask, execAsk)
 	checkEnum(&fe, "exec_policy.ask_fallback", in.ExecPolicy.AskFallback, execSecurity)
-	for i, ch := range in.Channels {
-		checkEnum(&fe, fmt.Sprintf("channels[%d]", i), ch, agentChannels)
-	}
 	return fe
 }
 
@@ -134,7 +132,23 @@ func (in *agentInput) apply(a *store.Agent) {
 	a.MemoryPolicy = in.MemoryPolicy
 	a.ExecPolicy = in.ExecPolicy
 	a.Skills = in.Skills
-	a.Channels = in.Channels
+	if a.Channels == nil {
+		a.Channels = []string{} // never stored from input; the bindings decide what is shown
+	}
+}
+
+// withBindings sets the agent's channels to the ones it is bound to now.
+func (s *Server) withBindings(ctx context.Context, w http.ResponseWriter, r *http.Request, a *store.Agent) bool {
+	bound, err := store.ListAgentChannels(ctx, s.pool)
+	if err != nil {
+		s.internalError(w, r, "list agent channels", err)
+		return false
+	}
+	a.Channels = bound[a.ID]
+	if a.Channels == nil {
+		a.Channels = []string{}
+	}
+	return true
 }
 
 // checkInteractionRule validates one interaction rule (DESIGN 5.3 rules 6 and 7):
@@ -219,6 +233,9 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, r, "agent", err)
 		return
 	}
+	if !s.withBindings(r.Context(), w, r, a) {
+		return
+	}
 	writeJSON(w, http.StatusOK, a)
 }
 
@@ -251,6 +268,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	saved, ok := s.materializeSaved(w, r, a.ID)
 	if !ok {
+		return
+	}
+	if !s.withBindings(r.Context(), w, r, saved) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, saved)
@@ -288,6 +308,9 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	saved, ok := s.materializeSaved(w, r, a.ID)
 	if !ok {
+		return
+	}
+	if !s.withBindings(r.Context(), w, r, saved) {
 		return
 	}
 	writeJSON(w, http.StatusOK, saved)

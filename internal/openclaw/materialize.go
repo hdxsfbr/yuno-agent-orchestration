@@ -253,6 +253,10 @@ func toolLists(a *store.Agent) (allow, deny []string) {
 			allowSet[ToolName(t)] = true
 		}
 	}
+	if a.MemoryPolicy.Enabled { // memory on offers the memory tools (policy auto)
+		allowSet[ToolName(tools.MemorySaveName)] = true
+		allowSet[ToolName(tools.MemoryRecallName)] = true
+	}
 	for t := range denySet {
 		delete(allowSet, t)
 		deny = append(deny, t)

@@ -298,14 +298,14 @@ describe("AgentForm lists", () => {
     fireEvent.keyDown(allow, { key: "Enter" });
     submit();
     const input = onSubmit.mock.calls[0][0];
-    expect(input.channels).toEqual([]);
+    expect(input).not.toHaveProperty("channels");
     expect(input.exec_policy).toMatchObject({ security: "full", allowlist: ["git status"] });
   });
 
-  it("keeps the channels an agent already has when it is saved", () => {
+  it("never sends the channels of the agent when it is saved", () => {
     const { onSubmit } = setup({ agent: saved({ channels: ["telegram"] }) });
     submit();
-    expect(onSubmit.mock.calls[0][0].channels).toEqual(["telegram"]);
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty("channels");
   });
 });
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 )
 
 // Thin typed wrappers over Client.Call with the parameter names verified against the
@@ -114,9 +115,18 @@ type ConfigPatchResult struct {
 
 // ConfigPatch merges raw (a JSON document) into the config. baseHash is the hash from
 // config.get; replacePaths lists every array-bearing path being replaced or deleted.
+//
+// A patch the gateway persisted but answers with UNAVAILABLE "recovery restart is
+// required" is recovered by restarting the gateway (see recoverPatch).
 func ConfigPatch(ctx context.Context, c Client, raw, baseHash string, replacePaths []string) (ConfigPatchResult, error) {
+	started := time.Now()
 	var out ConfigPatchResult
 	err := CallAs(ctx, c, "config.patch", ConfigPatchParams{Raw: raw, BaseHash: baseHash, ReplacePaths: replacePaths}, &out)
+	if err != nil && needsRecoveryRestart(err) {
+		if rerr := recoverPatch(ctx, c, started, raw); rerr == nil {
+			return ConfigPatchResult{OK: true}, nil
+		}
+	}
 	return out, err
 }
 

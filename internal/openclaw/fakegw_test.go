@@ -245,6 +245,10 @@ type fakeOpenClawState struct {
 	exec     map[string]any
 	execRev  int
 	rejected []string // config.patch refusals, for assertions
+	// recoveryPatches makes that many config.patch calls persist and then answer UNAVAILABLE
+	// "recovery restart is required" (gateway 2026.10.3); a restart request clears it.
+	recoveryPatches int
+	stuck           bool
 }
 
 func newFakeOpenClawState() *fakeOpenClawState {
@@ -311,7 +315,20 @@ func (s *fakeOpenClawState) install(f *fakeGateway) {
 			return nil, &RPCError{Code: "INVALID_REQUEST", Message: "refusing to replace array-bearing path " + path + " without replacePaths"}
 		}
 		s.cfgRev++
+		if s.stuck || s.recoveryPatches > 0 {
+			if s.recoveryPatches > 0 {
+				s.recoveryPatches--
+				s.stuck = true
+			}
+			return nil, &RPCError{Code: "UNAVAILABLE", Message: "config.patch persisted and updated the active Gateway, but a recovery restart is required; wait for the Gateway to restart, then run config.get to confirm the active revision"}
+		}
 		return map[string]any{"ok": true, "hash": s.cfgHash()}, nil
+	})
+	f.on("gateway.restart.request", func(json.RawMessage) (any, *RPCError) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.stuck = false
+		return map[string]any{"ok": true, "status": "scheduled"}, nil
 	})
 	f.on("exec.approvals.get", func(json.RawMessage) (any, *RPCError) {
 		s.mu.Lock()

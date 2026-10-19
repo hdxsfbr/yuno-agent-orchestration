@@ -161,7 +161,6 @@ const KNOWN_ROOTS = new Set([
   "memory_policy",
   "exec_policy",
   "skills",
-  "channels",
 ]);
 
 /** Errors whose path does not belong to a field of the form. */
@@ -312,7 +311,6 @@ export function toInput(f: FormState): AgentInput {
       allowlist: f.execAllowlist,
     },
     skills: f.skills,
-    channels: f.telegram ? ["telegram"] : [],
   };
 
   const maxTokens = num(f.maxTokens);

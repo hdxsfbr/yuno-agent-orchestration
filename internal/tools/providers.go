@@ -40,9 +40,17 @@ type errAPIStatus struct {
 	res     Result
 	status  int
 	message string
+	// plain is the text without the untrusted wrapper, for logs and stored errors that
+	// a person reads; res.Text, which the model reads, carries the wrapper.
+	plain string
 }
 
-func (e *errAPIStatus) Error() string { return e.res.Text }
+func (e *errAPIStatus) Error() string {
+	if e.plain != "" {
+		return e.plain
+	}
+	return e.res.Text
+}
 
 // providerMessage is the first line of the message a provider's error body carries: the
 // "message" (or "error") of a JSON object, else the body itself.
@@ -107,7 +115,7 @@ func (a *apiClient) do(ctx context.Context, method, u string, body, out any) (in
 		return resp.StatusCode, &errAPIStatus{res: transportFailure(a.what, err)}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return resp.StatusCode, &errAPIStatus{res: statusFailure(a.what, resp, raw), status: resp.StatusCode, message: providerMessage(raw)}
+		return resp.StatusCode, &errAPIStatus{res: statusFailure(a.what, resp, raw), plain: statusPlain(a.what, resp, raw), status: resp.StatusCode, message: providerMessage(raw)}
 	}
 	if out != nil {
 		if r := decodeJSONBody(a.what, raw, out); r != nil {

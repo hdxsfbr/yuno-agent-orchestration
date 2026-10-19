@@ -292,6 +292,11 @@ func (e *Engine) materialize(ctx context.Context, a *store.Agent, skills []store
 	if err != nil {
 		return err
 	}
+	// Materialising rewrites MEMORY.md as a bare header when the configuration changed,
+	// so the saved facts are rendered back before anything else reads the file.
+	if err := openclaw.RenderMemory(ctx, e.deps.Pool, e.deps.StateDir, a, e.clock.Now()); err != nil {
+		e.log.Warn("render MEMORY.md after materialise failed", "agent_id", a.ID, "error", err)
+	}
 	if hash == prev && a.OpenClawAgentID != nil {
 		return nil
 	}

@@ -334,3 +334,39 @@ func TestWriteReportUsesUTC(t *testing.T) {
 		t.Fatalf("path = %s", md)
 	}
 }
+
+// A case that expects a failure and gets it reaches its expected outcome but is not a
+// success: the report says both, per split, and keeps the old JSON fields.
+func TestReportSeparatesExpectedOutcomeFromSucceeded(t *testing.T) {
+	ok := passing("ok", SplitPublic)
+	ok.ExpectedStatus = "succeeded"
+	wantFail := passing("wants-fail", SplitPublic)
+	wantFail.Status, wantFail.ExpectedStatus = "failed", "failed" // E2E true: the failure was expected
+	missed := passing("missed", SplitPrivate)
+	missed.Status, missed.ExpectedStatus, missed.E2E = "failed", "succeeded", false
+	privOK := passing("priv-ok", SplitPrivate)
+	privOK.ExpectedStatus = "succeeded"
+	rep := BuildReport(ReportMeta{GeneratedAt: t0}, []CaseResult{ok, wantFail, missed, privOK})
+	s := rep.Summary
+	if s.E2EPassed != 3 || s.ExpectSucceeded != 3 || s.SucceededPassed != 2 || s.Public.ExpectSucceeded != 1 || s.Public.SucceededPassed != 1 ||
+		s.Private.Cases != 2 || s.Private.ExpectSucceeded != 2 || s.Private.SucceededPassed != 1 || s.Private.E2EPassed != 1 {
+		t.Fatalf("summary = %+v", s)
+	}
+	md := rep.Markdown()
+	for _, want := range []string{
+		"| Expected outcome reached (", "0.750 (3 of 4)",
+		"| Succeeded (cases expecting success) | 0.667 (2 of 3) |",
+		"## By split", "| private | 2 |", "| public | 2 |",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("markdown lacks %q:\n%s", want, md)
+		}
+	}
+	if strings.Contains(md, "End-to-end success") {
+		t.Errorf("old label still shown:\n%s", md)
+	}
+	raw, err := json.Marshal(rep)
+	if err != nil || !strings.Contains(string(raw), `"e2e_success"`) || !strings.Contains(string(raw), `"succeeded_rate"`) {
+		t.Fatalf("json = %s (%v)", raw, err)
+	}
+}

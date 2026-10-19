@@ -101,18 +101,21 @@ rest is the workflow author's.
 time, cost, tool-call, node-iteration and loop-visit limits enforced on every event and
 on a tick (5.2), cancellation from the UI, a run can only ever wait on a human for
 `approval_timeout_seconds`; per-agent cost cap and runs-per-hour guardrails (5.11).
-Verified by the `termination` evaluator on every eval case (100% on the public split).
+Verified by the `termination` evaluator on every eval case (100% on the public split in the evaluation report named under Evaluation in the README).
 
 **Side effects executed twice.** A retry, a re-queue or a late approval repeats a deploy.
 Mitigation: idempotency keys over run, node visit, tool and canonical input, recorded in
 the same transaction as the result; the deploy target enforces the key on its side;
 scheduler occurrences carry a unique key (5.4, D-029). Verified by the `idempotency`
-evaluator and the replay case (010).
+evaluator and the replay case (010). Limit: the key includes the node visit, so an operator retry
+from a failed step, or a run resumed after an api restart, starts a new visit and can
+repeat a `deploy_release`; `open_merge_request` is held to one merge request per run by a
+lock and a unique index, so it is not repeated.
 
 **Side effects before approval.** Mitigation: the MCP gate records the call as
 `awaiting_approval` and blocks it; the engine executes a late grant itself with the same
 key; the `approval_gate` evaluator checks that no side effect ran before its approval
-(100% on the public split).
+(100% on the public split in the evaluation report named under Evaluation in the README).
 
 **Sandbox escape / host access.** An agent's command tries to reach the host or the
 network. Mitigation: OpenClaw's Docker sandbox with `network: none`, read-only root,

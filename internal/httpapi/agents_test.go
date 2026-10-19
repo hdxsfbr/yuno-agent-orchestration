@@ -33,7 +33,6 @@ func TestCreateAgentValidation(t *testing.T) {
 		{name: "finish is always auto", body: `{"name":"a","model":"claude-opus-5-5","interaction_rules":{"finish":"blocked"}}`, wantPaths: []string{"interaction_rules.finish"}},
 		{name: "require_approval is for platform tools", body: `{"name":"a","model":"claude-opus-5-5","interaction_rules":{"exec":"require_approval","write":"blocked"}}`, wantPaths: []string{"interaction_rules.exec"}},
 		{name: "exec policy enums", body: `{"name":"a","model":"claude-opus-5-5","exec_policy":{"security":"open","ask":"never","ask_fallback":"full"}}`, wantPaths: []string{"exec_policy.security", "exec_policy.ask"}},
-		{name: "channel", body: `{"name":"a","model":"claude-opus-5-5","channels":["telegram","slack"]}`, wantPaths: []string{"channels[1]"}},
 		{name: "max tokens", body: `{"name":"a","model":"claude-opus-5-5","max_tokens":0}`, wantPaths: []string{"max_tokens"}},
 		{name: "negative limits", body: `{"name":"a","model":"claude-opus-5-5","limits":{"max_steps":-1,"max_cost_usd":-0.5,"max_tool_calls":0}}`, wantPaths: []string{"limits.max_steps", "limits.max_cost_usd"}},
 		{name: "wrong type", body: `{"name":"a","model":"claude-opus-5-5","limits":{"max_steps":"ten"}}`, wantPaths: []string{"limits.max_steps"}},
@@ -286,5 +285,49 @@ func TestAgentRefusesRequireApprovalOnAskOperator(t *testing.T) {
 	code, resp = do(t, ts, http.MethodPost, "/api/agents", `{"name":"Asker","model":"claude-opus-5-5","interaction_rules":{"ask_operator":"maybe"}}`)
 	if code != http.StatusUnprocessableEntity || !strings.Contains(string(resp), "must be one of") {
 		t.Fatalf("bad value: %d %s", code, resp)
+	}
+}
+
+// channels is read-only: input is ignored (even an unknown channel is not an error), and
+// GET of one agent, like the list, answers the channels it is bound to now.
+func TestAgentChannelsAreReadOnly(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	unbindAll := func() { _, _ = pool.Exec(ctx, `DELETE FROM channel_bindings`) }
+	unbindAll()
+	t.Cleanup(unbindAll)
+	_, ts := newTestServer(t, pool, &fakeEngine{pool: pool}, nil)
+	channelsOf := func(method, path, body string) []string {
+		t.Helper()
+		code, raw := do(t, ts, method, path, body)
+		var a struct {
+			ID       string   `json:"id"`
+			Channels []string `json:"channels"`
+		}
+		if code >= 300 || json.Unmarshal(raw, &a) != nil || a.Channels == nil {
+			t.Fatalf("%s %s: %d %s", method, path, code, raw)
+		}
+		return a.Channels
+	}
+	code, raw := do(t, ts, http.MethodPost, "/api/agents", `{"name":"ro-channels","model":"claude-opus-5-5","channels":["telegram","slack"]}`)
+	var created struct {
+		ID       string   `json:"id"`
+		Channels []string `json:"channels"`
+	}
+	if code != http.StatusCreated || json.Unmarshal(raw, &created) != nil || len(created.Channels) != 0 {
+		t.Fatalf("create: %d %s", code, raw)
+	}
+	if got := channelsOf(http.MethodGet, "/api/agents/"+created.ID, ""); len(got) != 0 {
+		t.Fatalf("unbound agent shows %v", got)
+	}
+	if _, err := store.BindChannel(ctx, pool, store.ChannelTelegram, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := channelsOf(http.MethodGet, "/api/agents/"+created.ID, ""); !slices.Equal(got, []string{"telegram"}) {
+		t.Fatalf("bound agent shows %v", got)
+	}
+	// An update that says channels: [] neither unbinds nor hides the binding.
+	if got := channelsOf(http.MethodPut, "/api/agents/"+created.ID, `{"name":"ro-channels","model":"claude-opus-5-5","channels":[]}`); !slices.Equal(got, []string{"telegram"}) {
+		t.Fatalf("after update shows %v", got)
 	}
 }

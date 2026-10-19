@@ -100,7 +100,7 @@ func TestBlockedToolNotOffered(t *testing.T) {
 		MemoryPolicy: store.MemoryPolicy{Enabled: true},
 		Guardrails:   store.Guardrails{BlockedTools: []string{"yuno__http_fetch", "exec", "finish"}}}
 	allow, deny := toolLists(a)
-	if want := []string{"yuno__finish", "yuno__memory_save"}; !slices.Equal(allow, want) {
+	if want := []string{"yuno__finish", "yuno__memory_recall", "yuno__memory_save"}; !slices.Equal(allow, want) {
 		t.Fatalf("allow = %v, want %v (finish is never blocked)", allow, want)
 	}
 	if want := []string{"exec", "yuno__http_fetch"}; !slices.Equal(deny, want) {
@@ -490,7 +490,7 @@ func TestAgentsMDChattingSection(t *testing.T) {
 	}
 	memoryOn := &store.Agent{ID: "0199f0a2-0000-7000-8000-00000000c0e0", Name: "Notes", ChatToken: token,
 		ToolAllowlist: []string{"memory_recall"}, MemoryPolicy: store.MemoryPolicy{Enabled: true}}
-	if md := plan(dir, memoryOn, nil).Files["AGENTS.md"]; !strings.Contains(md, "these platform tools: yuno__memory_recall.") ||
+	if md := plan(dir, memoryOn, nil).Files["AGENTS.md"]; !strings.Contains(md, "these platform tools: yuno__memory_recall, yuno__memory_save.") ||
 		strings.Contains(md, "[platform]") {
 		t.Errorf("memory-only chat section:\n%s", md)
 	}

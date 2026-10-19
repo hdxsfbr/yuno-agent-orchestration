@@ -62,15 +62,15 @@ describe("agentToForm and toInput", () => {
       memory_policy: { enabled: true, max_facts: 50, fact_ttl_days: 30 },
       exec_policy: { security: "allowlist", ask: "always", ask_fallback: "deny", allowlist: ["git status"] },
       skills: ["code-review"],
-      channels: ["telegram"],
     });
+    expect(input).not.toHaveProperty("channels"); // read-only: bindings are made on the Channels page
   });
 
   it("builds a minimal valid input from an empty form", () => {
     const f = { ...emptyForm(), name: "  Scout  " };
     expect(validateForm(f)).toEqual({});
     const input = toInput(f);
-    expect(input).toMatchObject({ name: "Scout", model: "claude-opus-5-5", thinking: "medium", tool_allowlist: [], interaction_rules: {}, limits: {}, channels: [] });
+    expect(input).toMatchObject({ name: "Scout", model: "claude-opus-5-5", thinking: "medium", tool_allowlist: [], interaction_rules: {}, limits: {} });
     // effort has no OpenClaw counterpart: the form neither shows nor sends it
     expect(input).not.toHaveProperty("effort");
     expect(input.max_tokens).toBeUndefined();

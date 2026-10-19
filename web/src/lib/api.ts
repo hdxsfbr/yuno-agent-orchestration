@@ -251,13 +251,14 @@ export type AgentInput = {
   memory_policy?: MemoryPolicy;
   exec_policy?: ExecPolicy;
   skills?: string[];
-  channels?: "telegram"[];
 };
 
 /** Runs of an agent that are in flight right now; the list endpoint fills it. */
 export type AgentActivity = { running: number; waiting_approval: number };
 
 export type Agent = AgentInput & {
+  /** Read-only: the channels the agent is bound to (set on the Channels page). */
+  channels?: "telegram"[];
   id: string;
   openclaw_agent_id?: string;
   materialized_hash?: string;

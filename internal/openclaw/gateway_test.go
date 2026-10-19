@@ -371,7 +371,10 @@ func TestCallWhileDisconnected(t *testing.T) {
 	if _, up := g.Info(); up {
 		t.Fatal("Info reports connected during the outage")
 	}
-	if _, err := g.Call(context.Background(), "health", nil); !errors.Is(err, ErrDisconnected) {
+	// Call waits for the reconnect while ctx allows, then returns the last error.
+	ctx, stop := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer stop()
+	if _, err := g.Call(ctx, "health", nil); !errors.Is(err, ErrDisconnected) {
 		t.Fatalf("err = %v", err)
 	}
 }

@@ -51,9 +51,12 @@ type CaseResult struct {
 	DurationMs    int64 `json:"duration_ms"`
 
 	// E2E is true when the run ended with the status the case expects.
-	E2E        bool         `json:"e2e"`
-	Evaluators []EvalResult `json:"evaluators"`
-	Rubric     RubricResult `json:"rubric"`
+	E2E bool `json:"e2e"`
+	// ExpectedStatus is the status the case expects, so the report can tell the cases
+	// that expect success from those that expect a failure.
+	ExpectedStatus string       `json:"expected_status,omitempty"`
+	Evaluators     []EvalResult `json:"evaluators"`
+	Rubric         RubricResult `json:"rubric"`
 	// Observed is what the runner saw outside the run's trace (see Observed).
 	Observed *Observed `json:"observed,omitempty"`
 }
@@ -113,6 +116,38 @@ type SplitSummary struct {
 	OverallPass         float64 `json:"overall_pass"`
 	DeterministicPass   float64 `json:"deterministic_pass"`
 	E2ESuccess          float64 `json:"e2e_success"`
+	// ExpectSucceeded cases expect a succeeded run; SucceededPassed of them got one.
+	ExpectSucceeded int     `json:"expect_succeeded"`
+	SucceededPassed int     `json:"succeeded_passed"`
+	SucceededRate   float64 `json:"succeeded_rate"`
+}
+
+// add counts one case result into the split.
+func (p *SplitSummary) add(r CaseResult) {
+	p.Cases++
+	if r.Passed() {
+		p.Passed++
+	}
+	if r.DeterministicPassed() {
+		p.DeterministicPassed++
+	}
+	if r.E2E {
+		p.E2EPassed++
+	}
+	if r.ExpectedStatus == "succeeded" {
+		p.ExpectSucceeded++
+		if r.Status == "succeeded" && r.Error == "" {
+			p.SucceededPassed++
+		}
+	}
+}
+
+// finish computes the rates once every case is counted.
+func (p *SplitSummary) finish() {
+	p.OverallPass = ratio(p.Passed, p.Cases)
+	p.DeterministicPass = ratio(p.DeterministicPassed, p.Cases)
+	p.E2ESuccess = ratio(p.E2EPassed, p.Cases)
+	p.SucceededRate = ratio(p.SucceededPassed, p.ExpectSucceeded)
 }
 
 // RubricSummary aggregates the rubric evaluator over the cases that have a rubric.
@@ -135,11 +170,15 @@ type Summary struct {
 	OverallPass         float64         `json:"overall_pass"`
 	DeterministicPass   float64         `json:"deterministic_pass"`
 	E2ESuccess          float64         `json:"e2e_success"`
+	ExpectSucceeded     int             `json:"expect_succeeded"`
+	SucceededPassed     int             `json:"succeeded_passed"`
+	SucceededRate       float64         `json:"succeeded_rate"`
 	Evaluators          []EvaluatorRate `json:"evaluators"`
 	Rubric              RubricSummary   `json:"rubric"`
 	MeanCostUSD         float64         `json:"mean_cost_usd"`
 	MeanDurationMs      float64         `json:"mean_duration_ms"`
 	Public              SplitSummary    `json:"public"`
+	Private             SplitSummary    `json:"private"`
 	SummaryLine         string          `json:"summary_line"`
 }
 
@@ -181,8 +220,14 @@ func BuildReport(meta ReportMeta, results []CaseResult) *Report {
 	}
 	var costMicros, durationMs int64
 	var rubricSum float64
-	var pub SplitSummary
+	var pub, priv SplitSummary
 	for _, r := range results {
+		if r.ExpectedStatus == "succeeded" {
+			s.ExpectSucceeded++
+			if r.Status == "succeeded" && r.Error == "" {
+				s.SucceededPassed++
+			}
+		}
 		if r.Passed() {
 			s.Passed++
 		}
@@ -218,23 +263,18 @@ func BuildReport(meta ReportMeta, results []CaseResult) *Report {
 		}
 		costMicros += r.CostUSDMicros
 		durationMs += r.DurationMs
-		if r.Split == SplitPublic {
-			pub.Cases++
-			if r.Passed() {
-				pub.Passed++
-			}
-			if r.DeterministicPassed() {
-				pub.DeterministicPassed++
-			}
-			if r.E2E {
-				pub.E2EPassed++
-			}
+		switch r.Split {
+		case SplitPublic:
+			pub.add(r)
+		case SplitPrivate:
+			priv.add(r)
 		}
 	}
 
 	s.OverallPass = ratio(s.Passed, s.Cases)
 	s.DeterministicPass = ratio(s.DeterministicPassed, s.Cases)
 	s.E2ESuccess = ratio(s.E2EPassed, s.Cases)
+	s.SucceededRate = ratio(s.SucceededPassed, s.ExpectSucceeded)
 	if s.Rubric.Cases > 0 {
 		s.Rubric.MeanScore = rubricSum / float64(s.Rubric.Cases)
 	}
@@ -254,10 +294,10 @@ func BuildReport(meta ReportMeta, results []CaseResult) *Report {
 		s.Evaluators = append(s.Evaluators, *c)
 	}
 
-	pub.OverallPass = ratio(pub.Passed, pub.Cases)
-	pub.DeterministicPass = ratio(pub.DeterministicPassed, pub.Cases)
-	pub.E2ESuccess = ratio(pub.E2EPassed, pub.Cases)
+	pub.finish()
+	priv.finish()
 	s.Public = pub
+	s.Private = priv
 	s.SummaryLine = SummaryLine(pub)
 	return rep
 }
@@ -296,12 +336,22 @@ func (r *Report) Markdown() string {
 	fmt.Fprintf(&b, "| Overall pass rate (every evaluator passed and the rubric scored %.2f or more) | %.3f (%d of %d) |\n",
 		RubricPassScore, s.OverallPass, s.Passed, s.Cases)
 	fmt.Fprintf(&b, "| Deterministic pass rate (every evaluator passed) | %.3f (%d of %d) |\n", s.DeterministicPass, s.DeterministicPassed, s.Cases)
-	fmt.Fprintf(&b, "| End-to-end success (expected status reached) | %.3f (%d of %d) |\n", s.E2ESuccess, s.E2EPassed, s.Cases)
+	fmt.Fprintf(&b, "| Expected outcome reached (the run ended with the status the case expected, a failure included) | %.3f (%d of %d) |\n", s.E2ESuccess, s.E2EPassed, s.Cases)
+	fmt.Fprintf(&b, "| Succeeded (cases expecting success) | %.3f (%d of %d) |\n", s.SucceededRate, s.SucceededPassed, s.ExpectSucceeded)
 	fmt.Fprintf(&b, "| Rubric (cases with a rubric that scored %.2f or more) | %s |\n", RubricPassScore, rubricSummaryCell(s.Rubric))
 	fmt.Fprintf(&b, "| Mean cost (USD) | %.6f |\n", s.MeanCostUSD)
 	fmt.Fprintf(&b, "| Mean duration | %s |\n\n", formatDuration(int64(s.MeanDurationMs)))
 
-	b.WriteString("## Evaluators\n\n| Evaluator | Passed | Total | Pass rate |\n|---|---|---|---|\n")
+	b.WriteString("## By split\n\n| Split | Cases | Overall pass | Deterministic pass | Expected outcome reached | Succeeded (cases expecting success) |\n|---|---|---|---|---|---|\n")
+	for _, sp := range []struct {
+		name string
+		s    SplitSummary
+	}{{SplitPublic, s.Public}, {SplitPrivate, s.Private}} {
+		fmt.Fprintf(&b, "| %s | %d | %.3f (%d) | %.3f (%d) | %.3f (%d) | %.3f (%d of %d) |\n", sp.name, sp.s.Cases,
+			sp.s.OverallPass, sp.s.Passed, sp.s.DeterministicPass, sp.s.DeterministicPassed,
+			sp.s.E2ESuccess, sp.s.E2EPassed, sp.s.SucceededRate, sp.s.SucceededPassed, sp.s.ExpectSucceeded)
+	}
+	b.WriteString("\n## Evaluators\n\n| Evaluator | Passed | Total | Pass rate |\n|---|---|---|---|\n")
 	for _, e := range s.Evaluators {
 		fmt.Fprintf(&b, "| %s | %d | %d | %.3f |\n", e.Name, e.Passed, e.Total, e.Rate)
 	}

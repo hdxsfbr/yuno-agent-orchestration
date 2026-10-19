@@ -50,6 +50,16 @@ func describeNetErr(err error) string {
 // statusFailure is the result for a non-2xx answer: 5xx is transient, the rest
 // permanent. The body's first line helps the model or the operator see why.
 func statusFailure(what string, resp *http.Response, body []byte) Result {
+	return Result{IsError: true, Transient: resp.StatusCode >= 500, Text: statusText(what, resp, body, true)}
+}
+
+// statusPlain is statusFailure's text without the untrusted wrapper, for error values a
+// person reads (logs, a stored sync error).
+func statusPlain(what string, resp *http.Response, body []byte) string {
+	return statusText(what, resp, body, false)
+}
+
+func statusText(what string, resp *http.Response, body []byte, wrap bool) string {
 	msg := strings.TrimSpace(string(body))
 	if i := strings.IndexByte(msg, '\n'); i >= 0 {
 		msg = msg[:i]
@@ -57,9 +67,12 @@ func statusFailure(what string, resp *http.Response, body []byte) Result {
 	msg = cutText(msg, 300)
 	text := fmt.Sprintf("%s: HTTP %d", what, resp.StatusCode)
 	if msg != "" {
+		if wrap {
+			msg = WrapUntrustedFrom("http_error_body", msg)
+		}
 		text += ": " + msg
 	}
-	return Result{IsError: true, Transient: resp.StatusCode >= 500, Text: text}
+	return text
 }
 
 // cutText makes text valid UTF-8 and cuts it to at most max bytes at a rune boundary: a

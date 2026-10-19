@@ -409,24 +409,32 @@ func (g *Gateway) reconnect(ctx context.Context) (*websocket.Conn, bool) {
 
 // Call sends a req frame and waits for its res frame, ctx, or a disconnect.
 func (g *Gateway) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return callWithRestartWait(ctx, method, func() (json.RawMessage, bool, error) {
+		return g.callOnce(ctx, method, params)
+	}, func(ctx context.Context) error { return g.WaitConnected(ctx) })
+}
+
+// callOnce is one attempt. sent reports whether the request frame may have reached the
+// gateway (false: it is safe to resend anything).
+func (g *Gateway) callOnce(ctx context.Context, method string, params any) (_ json.RawMessage, sent bool, _ error) {
 	raw := json.RawMessage(`{}`)
 	if params != nil {
 		b, err := json.Marshal(params)
 		if err != nil {
-			return nil, fmt.Errorf("openclaw: %s: encode params: %w", method, err)
+			return nil, false, fmt.Errorf("openclaw: %s: encode params: %w", method, err)
 		}
 		raw = b
 	}
 	id := strconv.FormatUint(g.seq.Add(1), 10)
 	req, err := json.Marshal(Frame{Type: "req", ID: id, Method: method, Params: raw})
 	if err != nil {
-		return nil, fmt.Errorf("openclaw: %s: encode frame: %w", method, err)
+		return nil, false, fmt.Errorf("openclaw: %s: encode frame: %w", method, err)
 	}
 	ch := make(chan Frame, 1)
 	g.mu.Lock()
 	if !g.connected {
 		g.mu.Unlock()
-		return nil, fmt.Errorf("openclaw: %s: %w", method, ErrDisconnected)
+		return nil, false, fmt.Errorf("openclaw: %s: %w", method, ErrDisconnected)
 	}
 	conn := g.conn
 	g.pending[id] = ch
@@ -438,26 +446,26 @@ func (g *Gateway) Call(ctx context.Context, method string, params any) (json.Raw
 	if err != nil {
 		g.forget(id)
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("openclaw: %s: %w", method, ctx.Err())
+			return nil, true, fmt.Errorf("openclaw: %s: %w", method, ctx.Err())
 		}
-		return nil, fmt.Errorf("openclaw: %s: %w (%v)", method, ErrDisconnected, err)
+		return nil, true, fmt.Errorf("openclaw: %s: %w (%v)", method, ErrDisconnected, err)
 	}
 
 	select {
 	case f, ok := <-ch:
 		if !ok {
-			return nil, fmt.Errorf("openclaw: %s: %w", method, ErrDisconnected)
+			return nil, true, fmt.Errorf("openclaw: %s: %w", method, ErrDisconnected)
 		}
 		if f.OK == nil || !*f.OK {
 			if f.Error == nil {
-				return nil, &RPCError{Code: "UNKNOWN", Message: method + " failed without an error object"}
+				return nil, true, &RPCError{Code: "UNKNOWN", Message: method + " failed without an error object"}
 			}
-			return nil, f.Error
+			return nil, true, f.Error
 		}
-		return f.Payload, nil
+		return f.Payload, true, nil
 	case <-ctx.Done():
 		g.forget(id)
-		return nil, fmt.Errorf("openclaw: %s: %w", method, ctx.Err())
+		return nil, true, fmt.Errorf("openclaw: %s: %w", method, ctx.Err())
 	}
 }
 

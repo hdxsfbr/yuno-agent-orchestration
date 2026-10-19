@@ -1142,13 +1142,17 @@ components:
         memory_policy: { $ref: "#/components/schemas/MemoryPolicy" }
         exec_policy: { $ref: "#/components/schemas/ExecPolicy" }
         skills: { type: array, items: { type: string }, description: "names of existing skills (422 skills[i] for an unknown one)" }
-        channels: { type: array, items: { type: string, enum: [telegram] } }
     Agent:
       allOf:
         - $ref: "#/components/schemas/AgentInput"
         - type: object
           required: [id, created_at, updated_at]
           properties:
+            channels:
+              type: array
+              readOnly: true
+              items: { type: string, enum: [telegram] }
+              description: The channels this agent answers now, from the channel bindings made on the Channels page. Ignored on create and update.
             id: { type: string }
             openclaw_agent_id: { type: string }
             materialized_hash: { type: string }

@@ -39,7 +39,7 @@ token and cost; an offline-capable evaluation runner; no stored chain of thought
 
 OpenClaw executes every agent turn. A Go control plane owns everything the portal PRD
 grades around the runtime: the workflow engine and typed state, approvals, idempotency,
-limits and cancellation, retries, traces and SSE, scheduler, Telegram adapter, memory and
+limits and cancellation, retries, traces and SSE, scheduler, the Telegram binding and conversation mirror (the channel itself is OpenClaw's native one), memory and
 skills materialisation, and the evaluation runner. The control plane talks to the
 gateway over loopback as a trusted backend client, serves the platform's own tools to
 OpenClaw over MCP, and fronts the model API with a proxy so the key never enters the
@@ -64,7 +64,7 @@ serves every compose role (`api`, `migrate`, `seed`, `openclaw-init`, `deploytar
 `eval`), so the stack is one image and one toolchain; the standard library covers HTTP,
 SSE, JSON and concurrency without a framework; `go test` with a real Postgres gives
 integration tests that run in the same container as the build; the type system and
-`staticcheck` keep a thirty-table data model and a forty-method gateway client honest;
+`staticcheck` keep a 23-table data model and the gateway client honest;
 and the module system pins every dependency by hash. TypeScript with React and Vite for
 the UI because React Flow is the right tool for a visual graph editor and the operator
 team already uses it. Kotlin would have done the job on the JVM at the cost of a heavier
@@ -79,8 +79,8 @@ image and slower container builds in the three-day timebox.
 - Step and cost limits are enforced from events by aborting the turn, not before each
   model call; one call may overshoot a cost limit.
 - The api container shares the gateway's network namespace. Approved `exec` commands run
-  inside the gateway container with network access unless the `sandbox` profile (Docker
-  socket) is enabled. The threat model says so.
+  in OpenClaw's Docker sandbox (read-only root, all capabilities dropped, no network unless a project turns its sandbox network on),
+  which needs the Docker socket mounted into the gateway container. The threat model says so.
 - OpenClaw's session store duplicates part of our trace; Postgres is the record, and node
   sessions are deleted once a run is stored.
 - A pinned image (`2026.10.3`) and a probe script in `scripts/` keep the integration

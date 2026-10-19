@@ -91,7 +91,7 @@ func (r *Runner) Execute(ctx context.Context, cases []Case) ([]CaseResult, error
 // case is recorded as that case failing, and the suite continues.
 func (r *Runner) runCase(ctx context.Context, c Case) (res CaseResult) {
 	started := r.now()
-	res = CaseResult{ID: c.ID, Version: c.Version, Split: c.Split, Description: c.Description}
+	res = CaseResult{ID: c.ID, Version: c.Version, Split: c.Split, Description: c.Description, ExpectedStatus: c.Expect.Status}
 	defer func() {
 		if p := recover(); p != nil {
 			r.log.Error("eval case panic", "case", c.ID, "panic", p)

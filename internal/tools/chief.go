@@ -705,10 +705,18 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
 				out["duration_seconds"] = int64(end.Sub(*run.StartedAt).Round(time.Second) / time.Second)
 			}
 			if store.IsTerminal(run.Status) {
-				out["state"] = capJSON(run.State, runStatusStateMaxSize)
+				// The state is whatever the run's agent wrote: delimited as data.
+				var stateText string
+				switch v := capJSON(run.State, runStatusStateMaxSize).(type) {
+				case json.RawMessage:
+					stateText = string(v)
+				case string:
+					stateText = v
+				}
+				out["state"] = WrapUntrustedFrom("run_state", stateText)
 			}
 			if run.FailureReason != nil && *run.FailureReason != "" {
-				out["failure_reason"] = *run.FailureReason
+				out["failure_reason"] = WrapUntrustedFrom("run_failure_reason", *run.FailureReason)
 			}
 			// DESIGN 5.17 rule 8: the project and the request the run opened.
 			if run.Project != nil {
