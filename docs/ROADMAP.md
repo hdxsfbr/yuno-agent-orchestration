@@ -453,6 +453,14 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
    this item planned), two Sonnet 5.5 agents build the frontend and the template with
    its agents in parallel.
 10. Done 2026-10-18: Andre answered the three lines with the recommended answers (D-062
-   to D-064) and approved the briefs. Next: the wave.
+   to D-064) and approved the briefs.
+11. Done 2026-10-19: wave 11 built (the engine, store, validation and API by the
+   coordinator; the frontend and the template with its agents by two Sonnet 5.5 agents),
+   reviewed (`docs/reviews/wave11-review.md`: two highs around parked branches at a
+   claim, fixed), fixed and merged to `main` as `b981048`. Next: the deploy's live
+   verification (`scripts/deploy/verify-wave11.sh`: a Review panel run on the playground
+   with three reviewers at once), then the demo recording with projects, still pending.
+   Every planned wave is now built; what remains is in the limitations lists of 5.22 to
+   5.26.
    The demo recording with projects is still pending, and the Telegram relay of an
    answer through the Chief has not been tried live (the unit tests cover it).
