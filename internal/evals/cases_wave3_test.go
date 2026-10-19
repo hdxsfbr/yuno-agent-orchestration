@@ -75,7 +75,7 @@ func TestEveryShippedCaseFitsTheTimeBudget(t *testing.T) {
 // case proves about it is what the template does. It differs in one thing, by design: the
 // researcher has no http_fetch, so the case runs offline.
 func TestResearchPipelineCaseMirrorsTheTemplate(t *testing.T) {
-	raw, err := os.ReadFile("../../templates/research_pipeline.json")
+	raw, err := os.ReadFile("../../templates/legacy/research_pipeline.json")
 	if err != nil {
 		t.Fatal(err)
 	}

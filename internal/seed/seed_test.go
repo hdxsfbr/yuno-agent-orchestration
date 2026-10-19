@@ -1,12 +1,14 @@
 package seed
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -18,6 +20,7 @@ import (
 	"yuno/internal/httpapi"
 	"yuno/internal/store"
 	"yuno/internal/tools"
+	"yuno/internal/workflow"
 )
 
 // The seed's tests run in their own schema of the test database: they bind the one
@@ -137,9 +140,260 @@ func TestSeedCreatesChief(t *testing.T) {
 	}
 }
 
-// DESIGN 5.15 rule 13 and 5.26 rule 14: the three shipped templates (the Review panel
-// among them) are instantiated once, through the API's own instantiation code, with
-// their agents resolved; a workflow made from a template by hand counts.
+// stubTemplates writes the two shipped templates' keys and names with one-node
+// definitions into a directory, so these tests do not depend on the template files'
+// content (T5.28.3 covers those).
+func stubTemplates(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for key, tpl := range map[string][2]string{"plan_pipeline": {"Plan pipeline", "Analyst"}, "wave_pipeline": {"Wave pipeline", "Builder"}} {
+		def := `{"input_schema":{"type":"object","properties":{"task":{"type":"string"}},"required":["task"]},` +
+			`"state_schema":{"type":"object"},"nodes":[{"id":"start","kind":"start"},` +
+			`{"id":"work","kind":"agent","agent_name":"` + tpl[1] + `","task":"{{.input.task}}","output_schema":{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"]},"input_from":["start"]},` +
+			`{"id":"end","kind":"end"}],"edges":[{"from":"start","to":"work"},{"from":"work","to":"end"}],` +
+			`"limits":{"max_steps":10,"max_duration_seconds":600,"max_node_iterations":5,"max_loop_visits":3,"max_cost_usd":1,"max_tool_calls":20,"approval_timeout_seconds":3600}}`
+		raw := `{"key":"` + key + `","name":"` + tpl[0] + `","description":"d","definition":` + def + `}`
+		must(t, os.WriteFile(filepath.Join(dir, key+".json"), []byte(raw), 0o644))
+	}
+	return dir
+}
+
+func loadStubTemplates(t *testing.T, pool *pgxpool.Pool) *httpapi.Shared {
+	t.Helper()
+	log := slog.New(slog.DiscardHandler)
+	srv, err := httpapi.New(httpapi.Deps{Cfg: config.Config{AnthropicBaseURL: "http://127.0.0.1:1"}, Pool: pool, Log: log,
+		TemplatesDir: stubTemplates(t)})
+	must(t, err)
+	must(t, srv.LoadTemplates(context.Background()))
+	return httpapi.NewShared(httpapi.Deps{Pool: pool, Log: log})
+}
+
+// T5.28.1 (DESIGN 5.28 rule 1): the seed creates the eight factory agents with their
+// models and tools, memory on for Scout and Builder only, none of the retired nine, and
+// leaves the Chief of Staff as it was and bound.
+func TestSeedCreatesFactoryAgents(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	created, _, err := Seed(ctx, pool)
+	must(t, err)
+	want := map[string]struct {
+		model string
+		tools []string
+		mem   bool
+	}{
+		"Analyst":       {"claude-opus-5-5", []string{"ask_operator", "read", "ls", "write", "finish"}, false},
+		"Scout":         {"claude-sonnet-5-5", []string{"read", "ls", "exec", "memory_save", "memory_recall", "finish"}, true},
+		"Architect":     {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "ask_operator", "finish"}, false},
+		"Planner":       {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "finish"}, false},
+		"Builder":       {"claude-sonnet-5-5", []string{"read", "ls", "write", "edit", "exec", "ask_operator", "memory_save", "memory_recall", "finish"}, true},
+		"Code Reviewer": {"claude-opus-5-5", []string{"read", "ls", "exec", "read_merge_request", "finish"}, false},
+		"Doc Auditor":   {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "exec", "finish"}, false},
+		"Integrator":    {"claude-sonnet-5-5", []string{"open_merge_request", "read", "ls", "memory_save", "finish"}, true},
+	}
+	if len(created) != len(want)+1 {
+		t.Fatalf("created %v", created)
+	}
+	for name, w := range want {
+		a, err := findAgent(ctx, pool, name)
+		must(t, err)
+		if a == nil {
+			t.Fatalf("no agent %s", name)
+		}
+		got := slices.Sorted(slices.Values(a.ToolAllowlist))
+		if a.Model != w.model || !slices.Equal(got, slices.Sorted(slices.Values(w.tools))) || a.MemoryPolicy.Enabled != w.mem {
+			t.Errorf("%s = %s %v memory %v, want %s %v memory %v", name, a.Model, a.ToolAllowlist, a.MemoryPolicy.Enabled, w.model, w.tools, w.mem)
+		}
+		for _, tool := range a.ToolAllowlist {
+			if tools.IsChatTool(tool) && tool != "memory_save" && tool != "memory_recall" && tool != "read_merge_request" {
+				t.Errorf("%s holds the chat tool %s", name, tool)
+			}
+		}
+		if a.Role == "" || len(a.SystemPrompt) < 400 || !strings.Contains(a.SystemPrompt, "output schema") {
+			t.Errorf("%s: role %q, prompt of %d bytes without the output schema sentence", name, a.Role, len(a.SystemPrompt))
+		}
+		if slices.Contains(a.ToolAllowlist, "exec") != slices.Contains([]string{"Scout", "Builder", "Code Reviewer", "Doc Auditor"}, name) {
+			t.Errorf("%s: exec = %v", name, slices.Contains(a.ToolAllowlist, "exec"))
+		}
+	}
+	for _, name := range RetiredAgentNames {
+		if a, err := findAgent(ctx, pool, name); err != nil || a != nil {
+			t.Errorf("seed created the retired %s (%v)", name, err)
+		}
+	}
+	for _, phrase := range []string{"docs/plans/<feature>/"} {
+		for _, name := range []string{"Analyst", "Architect", "Planner", "Doc Auditor"} {
+			a, _ := findAgent(ctx, pool, name)
+			if !strings.Contains(a.SystemPrompt, phrase) {
+				t.Errorf("%s prompt lacks %q", name, phrase)
+			}
+		}
+	}
+	builder, _ := findAgent(ctx, pool, "Builder")
+	reviewer, _ := findAgent(ctx, pool, "Code Reviewer")
+	auditor, _ := findAgent(ctx, pool, "Doc Auditor")
+	if !strings.Contains(builder.SystemPrompt, "failing test") || !strings.Contains(reviewer.SystemPrompt, "never rewrite") ||
+		!strings.Contains(auditor.SystemPrompt, "never patch around an unmet requirement") {
+		t.Error("the Builder, Reviewer or Auditor prompt lost its rule")
+	}
+
+	// The Chief is unchanged and a binding to it survives a second seed.
+	chief, err := findAgent(ctx, pool, ChiefName)
+	must(t, err)
+	if chief.SystemPrompt != ChiefPrompt || chief.Model != "claude-opus-5-5" || !chief.MemoryPolicy.Enabled {
+		t.Fatalf("chief = %+v", chief)
+	}
+	b := &fakeBinder{}
+	bound, err := BindChief(ctx, pool, b)
+	must(t, err)
+	if !bound || !slices.Equal(b.bound, []string{chief.ID}) {
+		t.Fatalf("the Chief was not bound: %v %v", bound, b.bound)
+	}
+}
+
+// T5.28.2 (DESIGN 5.28 rule 2): the seed deletes the nine retired agents by exact name,
+// through the delete path (the runtime is told), keeps one a workflow other than a copy of
+// a retired template still uses, keeps one bound to a channel, never touches the Chief or
+// an agent of another name, and is a no-op the second time.
+func TestRetireAgents(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.DiscardHandler)
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	mk := func(name string) *store.Agent {
+		a := &store.Agent{Name: name, Role: "r", SystemPrompt: "p", Model: "claude-sonnet-5-5", ToolAllowlist: []string{"read", "finish"}}
+		must(t, store.CreateAgent(ctx, pool, a))
+		return a
+	}
+	ids := map[string]string{}
+	for _, name := range RetiredAgentNames {
+		ids[name] = mk(name).ID
+	}
+	own := mk("Own agent")
+	lookalike := mk("Coder 2")
+
+	// A custom workflow uses the Reviewer; a copy of dev_pipeline uses the Coder and
+	// the Deployer; the Critic answers a channel.
+	node := func(id string) string {
+		return `{"nodes":[{"id":"start","kind":"start"},{"id":"a","kind":"agent","agent_id":"` + id + `","task":"t"},{"id":"end","kind":"end"}],"edges":[{"from":"start","to":"a"},{"from":"a","to":"end"}]}`
+	}
+	custom := &store.Workflow{Name: "Our review", Definition: json.RawMessage(node(ids["Reviewer"]))}
+	must(t, store.CreateWorkflow(ctx, pool, custom))
+	dev := "dev_pipeline"
+	copyWf := &store.Workflow{Name: "Dev pipeline", Definition: json.RawMessage(node(ids["Coder"])), FromTemplate: &dev}
+	must(t, store.CreateWorkflow(ctx, pool, copyWf))
+	_, err = store.BindChannel(ctx, pool, store.ChannelTelegram, ids["Critic"])
+	must(t, err)
+	chief, _ := findAgent(ctx, pool, ChiefName)
+
+	gone, err := RetireWorkflows(ctx, pool, log)
+	must(t, err)
+	if !slices.Equal(gone, []string{"Dev pipeline"}) {
+		t.Fatalf("workflows deleted: %v", gone)
+	}
+	rm := &fakeRemover{}
+	deleted, err := RetireAgents(ctx, pool, rm, log)
+	must(t, err)
+	wantGone := slices.DeleteFunc(slices.Clone(RetiredAgentNames), func(n string) bool { return n == "Reviewer" || n == "Critic" })
+	if !slices.Equal(slices.Sorted(slices.Values(deleted)), slices.Sorted(slices.Values(wantGone))) {
+		t.Fatalf("deleted %v, want %v", deleted, wantGone)
+	}
+	if len(rm.removed) != len(wantGone) || slices.Contains(rm.removed, ids["Reviewer"]) || slices.Contains(rm.removed, chief.ID) {
+		t.Fatalf("removed from the runtime: %v", rm.removed)
+	}
+	live, err := store.ListAgents(ctx, pool)
+	must(t, err)
+	names := map[string]bool{}
+	for _, a := range live {
+		names[a.Name] = true
+	}
+	for _, name := range []string{"Reviewer", "Critic", ChiefName, own.Name, lookalike.Name, "Analyst", "Builder"} {
+		if !names[name] {
+			t.Errorf("%s is gone", name)
+		}
+	}
+	for _, name := range wantGone {
+		if names[name] {
+			t.Errorf("%s survived", name)
+		}
+	}
+	if wf, err := store.GetWorkflow(ctx, pool, custom.ID); err != nil || wf == nil {
+		t.Errorf("the custom workflow is gone: %v", err)
+	}
+
+	// Again: nothing left to do.
+	rm = &fakeRemover{}
+	deleted, err = RetireAgents(ctx, pool, rm, log)
+	must(t, err)
+	if len(deleted) != 0 || len(rm.removed) != 0 {
+		t.Fatalf("second pass: %v %v", deleted, rm.removed)
+	}
+	// The workflow that used the Reviewer goes; the agent follows on the next seed.
+	must(t, store.DeleteWorkflow(ctx, pool, custom.ID))
+	_, err = store.UnbindChannel(ctx, pool, store.ChannelTelegram)
+	must(t, err)
+	deleted, err = RetireAgents(ctx, pool, nil, log)
+	must(t, err)
+	if !slices.Equal(slices.Sorted(slices.Values(deleted)), []string{"Critic", "Reviewer"}) {
+		t.Fatalf("third pass: %v", deleted)
+	}
+}
+
+// fakeRemover records the agents taken out of the runtime.
+type fakeRemover struct{ removed []string }
+
+func (f *fakeRemover) RemoveAgent(_ context.Context, id string) error {
+	f.removed = append(f.removed, id)
+	return nil
+}
+
+// T5.28.2 (DESIGN 5.28 rule 2): the shipped workflows of the retired templates are
+// deleted, the template rows too; one with a run in flight stays; the new templates'
+// workflows and others are untouched.
+func TestRetireWorkflows(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.DiscardHandler)
+	def := json.RawMessage(`{"nodes":[],"edges":[]}`)
+	mk := func(name string, tplKey, from string) *store.Workflow {
+		w := &store.Workflow{Name: name, Definition: def}
+		if tplKey != "" {
+			w.TemplateKey = &tplKey
+		}
+		if from != "" {
+			w.FromTemplate = &from
+		}
+		must(t, store.CreateWorkflow(ctx, pool, w))
+		return w
+	}
+	mk("Dev pipeline", "dev_pipeline", "")
+	mk("Research pipeline", "", "research_pipeline")
+	busy := mk("Review panel", "", "review_panel")
+	mk("Plan pipeline", "plan_pipeline", "")
+	mk("Plan pipeline copy", "", "plan_pipeline")
+	mk("Mine", "", "")
+	mk("Dev pipeline by hand", "", "")
+	must(t, store.CreateRun(ctx, pool, &store.Run{WorkflowID: busy.ID, WorkflowVersion: 1, Status: store.RunRunning, Input: json.RawMessage(`{}`), State: json.RawMessage(`{}`), WorkflowSnapshot: def}))
+
+	gone, err := RetireWorkflows(ctx, pool, log)
+	must(t, err)
+	if !slices.Equal(gone, []string{"Dev pipeline", "Research pipeline"}) {
+		t.Fatalf("deleted %v", gone)
+	}
+	left, err := store.ListWorkflows(ctx, pool)
+	must(t, err)
+	var names []string
+	for _, w := range left {
+		names = append(names, w.Name)
+	}
+	if !slices.Equal(names, []string{"Review panel", "Plan pipeline", "Plan pipeline copy", "Mine", "Dev pipeline by hand"}) {
+		t.Fatalf("left %v", names)
+	}
+}
+
+// T5.28.1 and DESIGN 5.28 rule 2: the seed instantiates the plan and wave pipelines once,
+// through the API's own instantiation code, with their agents resolved; a workflow made
+// from a template by hand counts; a template that is not loaded yet is skipped.
 func TestSeedInstantiatesTemplatesOnce(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
@@ -148,18 +402,13 @@ func TestSeedInstantiatesTemplatesOnce(t *testing.T) {
 	must(t, err)
 	sh := httpapi.NewShared(httpapi.Deps{Pool: pool, Log: log})
 
-	// Before the api has loaded the templates there is nothing to instantiate.
 	made, err := Templates(ctx, pool, sh, log)
 	if err != nil || len(made) != 0 {
 		t.Fatalf("without templates: %v %v", made, err)
 	}
-	srv, err := httpapi.New(httpapi.Deps{Cfg: config.Config{AnthropicBaseURL: "http://127.0.0.1:1"}, Pool: pool, Log: log,
-		TemplatesDir: "../../templates"})
-	must(t, err)
-	must(t, srv.LoadTemplates(ctx))
-
+	sh = loadStubTemplates(t, pool)
 	made, err = Templates(ctx, pool, sh, log)
-	if err != nil || !slices.Equal(made, []string{"Dev pipeline", "Research pipeline", "Review panel"}) {
+	if err != nil || !slices.Equal(made, []string{"Plan pipeline", "Wave pipeline"}) {
 		t.Fatalf("first: %v %v", made, err)
 	}
 	made, err = Templates(ctx, pool, sh, log)
@@ -178,18 +427,16 @@ func TestSeedInstantiatesTemplatesOnce(t *testing.T) {
 			t.Fatalf("instance %s = %s", wf.Name, wf.Definition)
 		}
 	}
-	if instances != 3 {
+	if instances != 2 {
 		t.Fatalf("instances = %d", instances)
 	}
-
-	// Deleting one brings it back at the next seed; the other stays single.
 	for _, wf := range all {
-		if wf.FromTemplate != nil && *wf.FromTemplate == "research_pipeline" {
+		if wf.FromTemplate != nil && *wf.FromTemplate == "wave_pipeline" {
 			must(t, store.DeleteWorkflow(ctx, pool, wf.ID))
 		}
 	}
 	made, err = Templates(ctx, pool, sh, log)
-	if err != nil || !slices.Equal(made, []string{"Research pipeline"}) {
+	if err != nil || !slices.Equal(made, []string{"Wave pipeline"}) {
 		t.Fatalf("after a delete: %v %v", made, err)
 	}
 }
@@ -223,9 +470,9 @@ func TestBindChief(t *testing.T) {
 		t.Fatalf("unbound: %v %v %v", bound, err, b.bound)
 	}
 
-	coder, err := findAgent(ctx, pool, "Coder")
+	builder, err := findAgent(ctx, pool, "Builder")
 	must(t, err)
-	_, err = store.BindChannel(ctx, pool, store.ChannelTelegram, coder.ID)
+	_, err = store.BindChannel(ctx, pool, store.ChannelTelegram, builder.ID)
 	must(t, err)
 	b = &fakeBinder{}
 	if bound, err := BindChief(ctx, pool, b); err != nil || bound || len(b.bound) != 0 {
@@ -263,44 +510,29 @@ func (f *failingInstantiator) InstantiateTemplate(ctx context.Context, key, name
 }
 
 // A copy made before workflows recorded their template (same name, no from_template)
-// counts as instantiated; a failing template does not stop the others, and each
-// failure is reported.
+// counts as instantiated; a failing template does not stop the other, and each failure
+// is reported.
 func TestSeedTemplatesUpgradeAndFailures(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
 	log := slog.New(slog.DiscardHandler)
 	_, _, err := Seed(ctx, pool)
 	must(t, err)
-	srv, err := httpapi.New(httpapi.Deps{Cfg: config.Config{AnthropicBaseURL: "http://127.0.0.1:1"}, Pool: pool, Log: log,
-		TemplatesDir: "../../templates"})
-	must(t, err)
-	must(t, srv.LoadTemplates(ctx))
-	sh := httpapi.NewShared(httpapi.Deps{Pool: pool, Log: log})
+	sh := loadStubTemplates(t, pool)
 
-	// An older copy of the Dev pipeline, made with "Create copy" before wave 5.
-	must(t, store.CreateWorkflow(ctx, pool, &store.Workflow{Name: "Dev pipeline", Definition: []byte(`{"nodes":[],"edges":[]}`)}))
-	all3 := map[string]bool{"dev_pipeline": true, "research_pipeline": true, "review_panel": true}
-	both := &failingInstantiator{in: sh, fail: all3}
+	must(t, store.CreateWorkflow(ctx, pool, &store.Workflow{Name: "Plan pipeline", Definition: []byte(`{"nodes":[],"edges":[]}`)}))
+	both := &failingInstantiator{in: sh, fail: map[string]bool{"plan_pipeline": true, "wave_pipeline": true}}
 	made, err := Templates(ctx, pool, both, log)
-	if len(made) != 0 || err == nil || !strings.Contains(err.Error(), "template research_pipeline: agent missing") ||
-		!strings.Contains(err.Error(), "template review_panel: agent missing") ||
-		strings.Contains(err.Error(), "dev_pipeline") || !slices.Equal(both.asked, []string{"research_pipeline", "review_panel"}) {
+	if len(made) != 0 || err == nil || !strings.Contains(err.Error(), "template wave_pipeline: agent missing") ||
+		strings.Contains(err.Error(), "plan_pipeline") || !slices.Equal(both.asked, []string{"wave_pipeline"}) {
 		t.Fatalf("old copy and a failure: %v %v, asked %v", made, err, both.asked)
 	}
 
-	// Every key is tried and every failure named.
-	must(t, store.DeleteWorkflow(ctx, pool, mustWorkflowNamed(t, pool, "Dev pipeline")))
-	both = &failingInstantiator{in: sh, fail: all3}
-	made, err = Templates(ctx, pool, both, log)
-	if len(made) != 0 || err == nil || !strings.Contains(err.Error(), "template dev_pipeline: agent missing") ||
-		!strings.Contains(err.Error(), "template research_pipeline: agent missing") ||
-		!strings.Contains(err.Error(), "template review_panel: agent missing") || len(both.asked) != 3 {
-		t.Fatalf("three failures: %v %v, asked %v", made, err, both.asked)
-	}
-	one := &failingInstantiator{in: sh, fail: map[string]bool{"dev_pipeline": true}}
+	must(t, store.DeleteWorkflow(ctx, pool, mustWorkflowNamed(t, pool, "Plan pipeline")))
+	one := &failingInstantiator{in: sh, fail: map[string]bool{"plan_pipeline": true}}
 	made, err = Templates(ctx, pool, one, log)
-	if !slices.Equal(made, []string{"Research pipeline", "Review panel"}) || err == nil || !strings.Contains(err.Error(), "dev_pipeline") {
-		t.Fatalf("first fails, the others work: %v %v", made, err)
+	if !slices.Equal(made, []string{"Wave pipeline"}) || err == nil || !strings.Contains(err.Error(), "plan_pipeline") || len(one.asked) != 2 {
+		t.Fatalf("first fails, the other works: %v %v", made, err)
 	}
 }
 
@@ -318,71 +550,231 @@ func mustWorkflowNamed(t *testing.T, pool *pgxpool.Pool, name string) string {
 	return ""
 }
 
-// DESIGN 5.16 rule 14: the reset restores the shipped agents' role, prompt and
-// allowlist and the template workflows' definitions, keeps everything else, and leaves
-// agents and workflows that are not shipped alone.
+// DESIGN 5.16 rule 14 with 5.28 rule 2: the reset restores the shipped agents' role,
+// prompt and allowlist and the template workflows' definitions, keeps everything else,
+// leaves other agents and workflows alone, and removes the retired templates' copies.
 func TestResetShipped(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
 	log := slog.New(slog.DiscardHandler)
 	_, _, err := Seed(ctx, pool)
 	must(t, err)
-	srv, err := httpapi.New(httpapi.Deps{Cfg: config.Config{AnthropicBaseURL: "http://127.0.0.1:1"}, Pool: pool, Log: log,
-		TemplatesDir: "../../templates"})
-	must(t, err)
-	must(t, srv.LoadTemplates(ctx))
-	sh := httpapi.NewShared(httpapi.Deps{Pool: pool, Log: log})
+	sh := loadStubTemplates(t, pool)
 	_, err = Templates(ctx, pool, sh, log)
 	must(t, err)
 
-	// An operator edited the Deployer (an older prompt, no open_merge_request, a model
-	// of their own) and the Dev pipeline (no project flag), and made an agent of their own.
-	deployer, err := findAgent(ctx, pool, "Deployer")
+	// An operator edited the Integrator (an older prompt, no open_merge_request, a model
+	// of their own) and the Plan pipeline (no project flag), and made an agent of their own.
+	integrator, err := findAgent(ctx, pool, "Integrator")
 	must(t, err)
-	deployer.SystemPrompt, deployer.ToolAllowlist, deployer.Model = "old prompt", []string{"read", "ls", "deploy_release", "finish"}, "claude-haiku-5-5"
-	deployer.Limits.MaxCostUSD = 0.25
-	must(t, store.UpdateAgent(ctx, pool, deployer))
+	integrator.SystemPrompt, integrator.ToolAllowlist, integrator.Model = "old prompt", []string{"read", "ls", "finish"}, "claude-haiku-5-5"
+	integrator.Limits.MaxCostUSD = 0.25
+	must(t, store.UpdateAgent(ctx, pool, integrator))
 	own := &store.Agent{Name: "Own agent", Role: "mine", SystemPrompt: "mine", Model: "claude-sonnet-5-5", ToolAllowlist: []string{"read", "finish"}}
 	must(t, store.CreateAgent(ctx, pool, own))
-	devID := mustWorkflowNamed(t, pool, "Dev pipeline")
-	dev, err := store.GetWorkflow(ctx, pool, devID)
+	planID := mustWorkflowNamed(t, pool, "Plan pipeline")
+	plan, err := store.GetWorkflow(ctx, pool, planID)
 	must(t, err)
 	var def map[string]any
-	must(t, json.Unmarshal(dev.Definition, &def))
-	delete(def, "project")
-	dev.Definition, _ = json.Marshal(def)
-	dev.Name = "Dev pipeline (ours)"
-	must(t, store.UpdateWorkflow(ctx, pool, dev))
+	must(t, json.Unmarshal(plan.Definition, &def))
+	def["project"] = false
+	plan.Definition, _ = json.Marshal(def)
+	plan.Name = "Plan pipeline (ours)"
+	must(t, store.UpdateWorkflow(ctx, pool, plan))
 
 	agents, workflows, err := ResetShipped(ctx, pool, sh)
 	must(t, err)
-	if !slices.Equal(agents, []string{"Deployer"}) || !slices.Equal(workflows, []string{"Dev pipeline (ours)", "Research pipeline", "Review panel"}) {
+	if !slices.Equal(agents, []string{"Integrator"}) || !slices.Equal(workflows, []string{"Plan pipeline (ours)", "Wave pipeline"}) {
 		t.Fatalf("reset %v %v", agents, workflows)
 	}
-	deployer, err = findAgent(ctx, pool, "Deployer")
+	integrator, err = findAgent(ctx, pool, "Integrator")
 	must(t, err)
-	if deployer.SystemPrompt != Agents[2].SystemPrompt || !slices.Contains(deployer.ToolAllowlist, tools.OpenMergeRequestName) {
-		t.Fatalf("deployer not reset: %q %v", deployer.SystemPrompt, deployer.ToolAllowlist)
+	if integrator.SystemPrompt != shippedPrompt(t, "Integrator") || !slices.Contains(integrator.ToolAllowlist, tools.OpenMergeRequestName) {
+		t.Fatalf("integrator not reset: %q %v", integrator.SystemPrompt, integrator.ToolAllowlist)
 	}
-	if deployer.Model != "claude-haiku-5-5" || deployer.Limits.MaxCostUSD != 0.25 || deployer.MaterializedHash != "" {
-		t.Fatalf("deployer's own settings changed: model %s limits %+v hash %q", deployer.Model, deployer.Limits, deployer.MaterializedHash)
+	if integrator.Model != "claude-haiku-5-5" || integrator.Limits.MaxCostUSD != 0.25 || integrator.MaterializedHash != "" {
+		t.Fatalf("integrator's own settings changed: model %s limits %+v hash %q", integrator.Model, integrator.Limits, integrator.MaterializedHash)
 	}
 	got, err := store.GetAgent(ctx, pool, own.ID)
 	must(t, err)
 	if got.SystemPrompt != "mine" {
 		t.Fatal("an agent that is not shipped was changed")
 	}
-	dev, err = store.GetWorkflow(ctx, pool, devID)
+	plan, err = store.GetWorkflow(ctx, pool, planID)
 	must(t, err)
-	must(t, json.Unmarshal(dev.Definition, &def))
-	if def["project"] != true || dev.Name != "Dev pipeline (ours)" || dev.Version != 3 || strings.Contains(string(dev.Definition), "agent_name") {
-		t.Fatalf("dev pipeline after the reset: name %q version %d project %v", dev.Name, dev.Version, def["project"])
+	must(t, json.Unmarshal(plan.Definition, &def))
+	if plan.Name != "Plan pipeline (ours)" || plan.Version != 3 || strings.Contains(string(plan.Definition), "agent_name") {
+		t.Fatalf("plan pipeline after the reset: name %q version %d", plan.Name, plan.Version)
 	}
 	// A second reset changes nothing on the agents and rewrites the workflows (a new
 	// version each), which is what a deploy does on purpose.
 	agents, workflows, err = ResetShipped(ctx, pool, sh)
 	must(t, err)
-	if len(agents) != 0 || len(workflows) != 3 {
+	if len(agents) != 0 || len(workflows) != 2 {
 		t.Fatalf("second reset %v %v", agents, workflows)
+	}
+}
+
+func shippedPrompt(t *testing.T, name string) string {
+	t.Helper()
+	for _, a := range Agents {
+		if a.Name == name {
+			return a.SystemPrompt
+		}
+	}
+	t.Fatalf("no shipped agent %s", name)
+	return ""
+}
+
+// T5.28.3 support (DESIGN 5.28 rule 2): the retired templates stay valid definitions in
+// templates/legacy, which the loader's non-recursive glob does not read.
+func TestLegacyTemplatesAreValidAndNotLoaded(t *testing.T) {
+	files, err := filepath.Glob("../../templates/legacy/*.json")
+	must(t, err)
+	var keys []string
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		must(t, err)
+		var tpl struct {
+			Key        string          `json:"key"`
+			Definition json.RawMessage `json:"definition"`
+		}
+		must(t, json.Unmarshal(raw, &tpl))
+		def, err := workflow.Parse(tpl.Definition)
+		must(t, err)
+		if err := def.ValidateStructure(); err != nil {
+			t.Errorf("%s: %v", f, err)
+		}
+		keys = append(keys, tpl.Key)
+	}
+	if !slices.Equal(slices.Sorted(slices.Values(keys)), slices.Sorted(slices.Values(RetiredTemplateKeys))) {
+		t.Fatalf("legacy keys %v, want %v", keys, RetiredTemplateKeys)
+	}
+	top, err := filepath.Glob("../../templates/*.json")
+	must(t, err)
+	for _, f := range top {
+		for _, k := range RetiredTemplateKeys {
+			if strings.HasPrefix(filepath.Base(f), k) {
+				t.Errorf("%s is still in the loaded directory", f)
+			}
+		}
+	}
+}
+
+// H1, H2, L2 of the wave 1 review: a copy of a retired template the operator renamed or
+// edited stays, so does one an intake setting or an enabled schedule points at (a
+// disabled schedule does not count), each with a log line saying why; the untouched
+// copies go, with their ids logged.
+func TestRetireWorkflowsKeepsWhatIsUsedOrChanged(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	def := json.RawMessage(`{"nodes":[],"edges":[]}`)
+	mk := func(name, from string) *store.Workflow {
+		w := &store.Workflow{Name: name, Definition: def, FromTemplate: &from}
+		must(t, store.CreateWorkflow(ctx, pool, w))
+		return w
+	}
+	mk("Dev pipeline", "dev_pipeline") // untouched
+	renamed := mk("My dev flow", "dev_pipeline")
+	edited := mk("Research pipeline", "research_pipeline")
+	must(t, store.UpdateWorkflow(ctx, pool, edited))
+	intake := mk("Review panel", "review_panel")
+	scheduled := mk("Research pipeline", "research_pipeline")
+	disabled := mk("Research pipeline", "research_pipeline")
+
+	p := &store.Project{Name: "demo", RepoURL: "https://gitlab.test/g/d.git", Provider: "gitlab", DefaultBranch: "main", IntakeWorkflowID: &intake.ID}
+	must(t, store.CreateProject(ctx, pool, p, nil))
+	cron := "0 * * * *"
+	sched := &store.Schedule{WorkflowID: scheduled.ID, Kind: "cron", CronExpr: &cron, TZ: "UTC", Enabled: true}
+	must(t, store.CreateSchedule(ctx, pool, sched))
+	must(t, store.CreateSchedule(ctx, pool, &store.Schedule{WorkflowID: disabled.ID, Kind: "cron", CronExpr: &cron, TZ: "UTC", Enabled: false}))
+
+	gone, err := RetireWorkflows(ctx, pool, log)
+	must(t, err)
+	if !slices.Equal(gone, []string{"Dev pipeline", "Research pipeline"}) {
+		t.Fatalf("deleted %v", gone)
+	}
+	left, err := store.ListWorkflows(ctx, pool)
+	must(t, err)
+	var ids []string
+	for _, w := range left {
+		ids = append(ids, w.ID)
+	}
+	for _, w := range []*store.Workflow{renamed, edited, intake, scheduled} {
+		if !slices.Contains(ids, w.ID) {
+			t.Errorf("%s (%s) was deleted", w.Name, w.ID)
+		}
+	}
+	if slices.Contains(ids, disabled.ID) {
+		t.Error("a workflow only a disabled schedule points at was kept")
+	}
+	out := buf.String()
+	for _, want := range []string{"referenced by intake on project demo", "referenced by schedule " + sched.ID, "the operator changed it", "retired workflow deleted"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// M1 of the review: a retired agent with a node visit in flight is kept and logged; the
+// next seed, with the run over, deletes it. A deleted agent is logged with its id.
+func TestRetireAgentsKeepsBusyAgent(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	mk := func(name string) *store.Agent {
+		a := &store.Agent{Name: name, Role: "r", SystemPrompt: "p", Model: "claude-sonnet-5-5", ToolAllowlist: []string{"finish"}}
+		must(t, store.CreateAgent(ctx, pool, a))
+		return a
+	}
+	busy, idle := mk("Coder"), mk("Writer")
+	def := json.RawMessage(`{"nodes":[],"edges":[]}`)
+	wf := &store.Workflow{Name: "Quick", Definition: def}
+	must(t, store.CreateWorkflow(ctx, pool, wf))
+	run := &store.Run{WorkflowID: wf.ID, WorkflowVersion: 1, Status: store.RunRunning, Input: json.RawMessage(`{}`), State: json.RawMessage(`{}`), WorkflowSnapshot: def}
+	must(t, store.CreateRun(ctx, pool, run))
+	must(t, store.CreateRunNode(ctx, pool, &store.RunNode{RunID: run.ID, NodeID: "a", AgentID: &busy.ID, Status: store.NodeRunning}))
+
+	rm := &fakeRemover{}
+	deleted, err := RetireAgents(ctx, pool, rm, log)
+	must(t, err)
+	if !slices.Equal(deleted, []string{"Writer"}) || !slices.Equal(rm.removed, []string{idle.ID}) {
+		t.Fatalf("deleted %v removed %v", deleted, rm.removed)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "it has a run in flight") || !strings.Contains(out, "id="+idle.ID) {
+		t.Errorf("log:\n%s", out)
+	}
+	_, err = pool.Exec(ctx, `UPDATE runs SET status = $2 WHERE id = $1`, run.ID, store.RunSucceeded)
+	must(t, err)
+	deleted, err = RetireAgents(ctx, pool, nil, log)
+	must(t, err)
+	if !slices.Equal(deleted, []string{"Coder"}) {
+		t.Fatalf("after the run: %v", deleted)
+	}
+}
+
+// L1 of the review: the delete is one statement, so a run that appears (or an edit that
+// lands) after the caller looked is not lost.
+func TestDeleteWorkflowIfIdle(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	def := json.RawMessage(`{"nodes":[],"edges":[]}`)
+	wf := &store.Workflow{Name: "W", Definition: def}
+	must(t, store.CreateWorkflow(ctx, pool, wf))
+	must(t, store.CreateRun(ctx, pool, &store.Run{WorkflowID: wf.ID, WorkflowVersion: 1, Status: store.RunQueued, Input: json.RawMessage(`{}`), State: json.RawMessage(`{}`), WorkflowSnapshot: def}))
+	if ok, err := store.DeleteWorkflowIfIdle(ctx, pool, wf.ID, 1); err != nil || ok {
+		t.Fatalf("with a queued run: %v %v", ok, err)
+	}
+	_, err := pool.Exec(ctx, `UPDATE runs SET status = $1`, store.RunSucceeded)
+	must(t, err)
+	if ok, err := store.DeleteWorkflowIfIdle(ctx, pool, wf.ID, 2); err != nil || ok {
+		t.Fatalf("at a stale version: %v %v", ok, err)
+	}
+	if ok, err := store.DeleteWorkflowIfIdle(ctx, pool, wf.ID, 1); err != nil || !ok {
+		t.Fatalf("idle: %v %v", ok, err)
 	}
 }

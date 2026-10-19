@@ -46,6 +46,9 @@ type Node struct {
 	// Checkout is the head of the branch whose project checkout continues past a join
 	// (DESIGN 5.26 rule 10); join nodes of a project workflow only.
 	Checkout string `json:"checkout,omitempty"`
+	// Checks name extra tests of an agent node's finish result that JSON Schema cannot
+	// express (DESIGN 5.28 rule 4); see KnownChecks.
+	Checks []string `json:"checks,omitempty"`
 }
 
 // IsFork and IsJoin name the two kinds of DESIGN 5.26.
@@ -199,6 +202,7 @@ func (d *Definition) ValidateStructure() error {
 		if n.OnFailure != "" && !ids[n.OnFailure] {
 			msgs = append(msgs, fmt.Sprintf("nodes[%d].on_failure: unknown node '%s'", i, n.OnFailure))
 		}
+		msgs = append(msgs, n.validateChecks(fmt.Sprintf("nodes[%d]", i))...)
 		for j, from := range n.InputFrom {
 			if !ids[from] {
 				msgs = append(msgs, fmt.Sprintf("nodes[%d].input_from[%d]: unknown node '%s'", i, j, from))

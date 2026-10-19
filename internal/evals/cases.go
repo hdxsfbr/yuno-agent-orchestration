@@ -220,6 +220,9 @@ func (s ScheduleAction) wait() int {
 type ApprovalAction struct {
 	Decision string `yaml:"decision"` // approve | reject
 	Reason   string `yaml:"reason"`
+	// Answer is what the runner answers when the pending approval is a question to the
+	// operator (ask_operator, DESIGN 5.24): approve with an answer, or reject to decline.
+	Answer string `yaml:"answer"`
 }
 
 // Expect is what the expectation evaluator checks. Zero values mean "not checked",

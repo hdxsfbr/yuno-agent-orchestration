@@ -1,0 +1,499 @@
+{
+  "key": "plan_pipeline",
+  "name": "Plan pipeline",
+  "description": "Turns a feature request into four reviewed documents under docs/plans/<feature>/: the Analyst clarifies the requirements with the operator and writes PRD.md, the Scout checks them against the codebase, the Architect writes ARCHITECTURE.md (operator approves the design), the Planner slices TASKS.md into tickets and WAVES.md into waves (operator approves the plan), and the Integrator commits the documents in one merge request.",
+  "definition": {
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "string",
+          "description": "The feature, as the requester states it"
+        },
+        "feature": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]{1,40}$",
+          "description": "Slug naming the feature; the documents go to docs/plans/<feature>/"
+        }
+      },
+      "required": [
+        "task",
+        "feature"
+      ],
+      "additionalProperties": true
+    },
+    "state_schema": {
+      "type": "object",
+      "properties": {
+        "analyst": {
+          "type": "object",
+          "properties": {
+            "prd_path": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "open_questions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "prd_path",
+            "summary",
+            "open_questions"
+          ],
+          "additionalProperties": true
+        },
+        "scout": {
+          "type": "object",
+          "properties": {
+            "gaps": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "constraints": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "gaps",
+            "constraints"
+          ],
+          "additionalProperties": true
+        },
+        "architect": {
+          "type": "object",
+          "properties": {
+            "architecture_path": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "architecture_path",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "design_gate": {
+          "type": "object",
+          "properties": {
+            "decision": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [],
+          "additionalProperties": true
+        },
+        "slicer": {
+          "type": "object",
+          "properties": {
+            "tickets": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^T[0-9]+$"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1
+                  },
+                  "tests": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "title",
+                  "files",
+                  "tests"
+                ],
+                "additionalProperties": true
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "tickets"
+          ],
+          "additionalProperties": true
+        },
+        "waves": {
+          "type": "object",
+          "properties": {
+            "waves": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "n": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "tickets": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "uniqueItems": true
+                  }
+                },
+                "required": [
+                  "n",
+                  "tickets"
+                ],
+                "additionalProperties": true
+              }
+            }
+          },
+          "required": [
+            "waves"
+          ],
+          "additionalProperties": true
+        },
+        "plan_gate": {
+          "type": "object",
+          "properties": {
+            "decision": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [],
+          "additionalProperties": true
+        },
+        "integrator": {
+          "type": "object",
+          "properties": {
+            "merge_request_url": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "merge_request_url"
+          ],
+          "additionalProperties": true
+        }
+      }
+    },
+    "nodes": [
+      {
+        "id": "start",
+        "kind": "start"
+      },
+      {
+        "id": "analyst",
+        "kind": "agent",
+        "agent_name": "Analyst",
+        "input_from": [
+          "start"
+        ],
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "prd_path": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            },
+            "open_questions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "prd_path",
+            "summary",
+            "open_questions"
+          ],
+          "additionalProperties": true
+        },
+        "task": "Clarify the requirements of this feature and write its PRD.\n\nFeature ({{.input.feature}}): {{.input.task}}\n\nRead the project checkout first (README, existing docs) so your questions are specific. Before writing anything, list every ambiguity, missing acceptance criterion, unstated user or unclear scope boundary, and ask the operator about each one with the ask_operator tool (at most three questions per turn; group related points). Do not guess an answer you could ask for. Then write docs/plans/{{.input.feature}}/PRD.md: problem, users, goals and non-goals, numbered requirements each with an acceptance criterion, and the operator's answers. Anything still unresolved goes in open_questions. Finish with prd_path (docs/plans/{{.input.feature}}/PRD.md), a summary of two or three sentences and open_questions (empty when none)."
+      },
+      {
+        "id": "scout",
+        "kind": "agent",
+        "agent_name": "Scout",
+        "input_from": [
+          "analyst"
+        ],
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "gaps": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "constraints": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "gaps",
+            "constraints"
+          ],
+          "additionalProperties": true
+        },
+        "task": "Review the PRD at {{.state.analyst.prd_path}} against the code in the checkout for the feature {{.input.feature}}.\n\nRead the code the requirements touch. Find where the PRD contradicts the code, assumes something that does not exist, or leaves out something the code forces (gaps), and the facts a designer must respect: language and toolchain, how to build and run the tests, conventions, modules the feature must extend (constraints). Run the build and the test suite once to confirm the commands work. Save the build and test commands and any lasting convention as project notes with memory_save (scope project). Do not edit files and leave no build outputs in the repository: build in a scratch directory outside the checkout, or remove any untracked file your build or tests created before finishing. Finish with gaps and constraints, each a list of short sentences."
+      },
+      {
+        "id": "architect",
+        "kind": "agent",
+        "agent_name": "Architect",
+        "input_from": [
+          "analyst",
+          "scout"
+        ],
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "architecture_path": {
+              "type": "string"
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "architecture_path",
+            "summary"
+          ],
+          "additionalProperties": true
+        },
+        "task": "Design the architecture for the feature {{.input.feature}}: {{.input.task}}\n\nInputs: the PRD at {{.state.analyst.prd_path}}, the gaps and constraints in the context below. Write docs/plans/{{.input.feature}}/ARCHITECTURE.md: components and their responsibilities, data and interfaces, how each PRD requirement is met, failure and edge cases, what is deliberately left out, and how it will be tested. Resolve the Scout's gaps explicitly. Ask the operator with ask_operator only for a decision you cannot make from the documents.\n{{with .state.design_gate}}{{if eq .decision \"rejected\"}}\nThe operator rejected the previous design.{{if .reason}} Reason:\n{{.reason}}\n{{end}} Revise docs/plans/{{.input.feature}}/ARCHITECTURE.md to address it before finishing.\n{{end}}{{end}}Finish with architecture_path and a summary of the design in a few sentences."
+      },
+      {
+        "id": "design_gate",
+        "kind": "approval",
+        "on_reject": "architect",
+        "message": "Approve the design for {{.input.feature}}? {{.state.architect.summary}} Document: {{.state.architect.architecture_path}}"
+      },
+      {
+        "id": "slicer",
+        "kind": "agent",
+        "agent_name": "Planner",
+        "input_from": [
+          "analyst",
+          "architect"
+        ],
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "tickets": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^T[0-9]+$"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "files": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1
+                  },
+                  "tests": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "title",
+                  "files",
+                  "tests"
+                ],
+                "additionalProperties": true
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "tickets"
+          ],
+          "additionalProperties": true
+        },
+        "task": "Slice the feature {{.input.feature}} into tickets. Read docs/plans/{{.input.feature}}/PRD.md and docs/plans/{{.input.feature}}/ARCHITECTURE.md.\n\nEach ticket is one thin end-to-end slice (a tracer bullet through every layer it needs) that one builder can finish and review alone, with its own acceptance tests; the first ticket is the thinnest working path. Write docs/plans/{{.input.feature}}/TASKS.md with, per ticket: id, title, the slice, the files it creates or changes, and the acceptance tests. Ids are T<n>, unique across the feature and without a wave prefix (T1, T2, T3...); which wave a ticket is built in is decided next, in WAVES.md. List every file path a ticket touches in files; tickets that touch the same file will be put in different waves.\n{{with .state.plan_gate}}{{if eq .decision \"rejected\"}}\nThe operator rejected the previous plan.{{if .reason}} Reason:\n{{.reason}}\n{{end}} Revise docs/plans/{{.input.feature}}/TASKS.md to address it before finishing.\n{{end}}{{end}}Finish with tickets: a list of {id, title, files, tests}."
+      },
+      {
+        "id": "waves",
+        "kind": "agent",
+        "agent_name": "Planner",
+        "input_from": [
+          "slicer"
+        ],
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "waves": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "n": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "tickets": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "uniqueItems": true
+                  }
+                },
+                "required": [
+                  "n",
+                  "tickets"
+                ],
+                "additionalProperties": true
+              }
+            }
+          },
+          "required": [
+            "waves"
+          ],
+          "additionalProperties": true
+        },
+        "checks": [
+          "waves_partition"
+        ],
+        "task": "Group the tickets of {{.input.feature}} into waves and write docs/plans/{{.input.feature}}/WAVES.md.\n\nA wave is a set of tickets built in parallel; the next wave starts when the previous one is merged. Number waves from 1 without gaps. Put every ticket in exactly one wave, a ticket after the tickets it depends on, and never two tickets that list a common file in the same wave. WAVES.md gives each wave's goal, its tickets and why they can run in parallel. A finish that breaks these rules is refused with the reason. Finish with waves: a list of {n, tickets: [ticket id]}."
+      },
+      {
+        "id": "plan_gate",
+        "kind": "approval",
+        "on_reject": "slicer",
+        "message": "Approve the plan for {{.input.feature}}?\n{{range .state.waves.waves}}Wave {{.n}}: {{range .tickets}}{{.}} {{end}}\n{{end}}{{range .state.slicer.tickets}}{{.id}} {{.title}}\n{{end}}"
+      },
+      {
+        "id": "integrator",
+        "kind": "agent",
+        "agent_name": "Integrator",
+        "input_from": [
+          "analyst",
+          "architect",
+          "slicer",
+          "waves"
+        ],
+        "output_schema": {
+          "type": "object",
+          "properties": {
+            "merge_request_url": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "merge_request_url"
+          ],
+          "additionalProperties": true
+        },
+        "task": "Publish the approved plan of {{.input.feature}}. The four documents docs/plans/{{.input.feature}}/PRD.md, ARCHITECTURE.md, TASKS.md and WAVES.md are in the checkout. Open one merge request with the open_merge_request tool with paths [\"docs/plans/{{.input.feature}}\"], so it commits only that directory and nothing else left in the checkout: title \"Plan: {{.input.feature}}\", description with the PRD summary ({{.state.analyst.summary}}) and the waves. Do not change the documents. If the tool result says the action was rejected or is pending approval, finish with an empty merge_request_url. Finish with the merge_request_url the tool returned."
+      },
+      {
+        "id": "end",
+        "kind": "end"
+      }
+    ],
+    "edges": [
+      {
+        "from": "start",
+        "to": "analyst"
+      },
+      {
+        "from": "analyst",
+        "to": "scout"
+      },
+      {
+        "from": "scout",
+        "to": "architect"
+      },
+      {
+        "from": "architect",
+        "to": "design_gate"
+      },
+      {
+        "from": "design_gate",
+        "to": "slicer"
+      },
+      {
+        "from": "slicer",
+        "to": "waves"
+      },
+      {
+        "from": "waves",
+        "to": "plan_gate"
+      },
+      {
+        "from": "plan_gate",
+        "to": "integrator"
+      },
+      {
+        "from": "integrator",
+        "to": "end"
+      }
+    ],
+    "limits": {
+      "max_steps": 150,
+      "max_duration_seconds": 3600,
+      "max_node_iterations": 30,
+      "max_loop_visits": 3,
+      "max_cost_usd": 5,
+      "max_tool_calls": 300,
+      "approval_timeout_seconds": 86400
+    },
+    "project": true
+  }
+}

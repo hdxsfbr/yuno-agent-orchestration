@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -176,7 +177,24 @@ var ErrNoChanges = errors.New("the checkout has no changes to propose")
 // out), commits what differs as Yuno with message, and pushes HEAD to the branch with
 // the token. ErrNoChanges when nothing differs.
 func (c Config) Propose(ctx context.Context, checkout, branch, message string) (Proposal, error) {
-	return c.propose(ctx, checkout, c.DefaultBranch, branch, "", message)
+	return c.propose(ctx, checkout, c.DefaultBranch, branch, "", message, nil)
+}
+
+// ProposePaths is Propose for only the named paths: relative files or directories of the
+// checkout, already validated by the caller. The clone is not cleared and the rest of the
+// checkout is not copied; each path replaces its counterpart in the clone (a path the
+// checkout no longer has but the repository does is a deletion), and only those paths are
+// staged and committed. A path in neither is *ErrPathMissing. With no paths it is Propose.
+func (c Config) ProposePaths(ctx context.Context, checkout, branch, message string, paths []string) (Proposal, error) {
+	return c.propose(ctx, checkout, c.DefaultBranch, branch, "", message, paths)
+}
+
+// ErrPathMissing is ProposePaths' answer for a path that is neither in the checkout nor
+// in the repository.
+type ErrPathMissing struct{ Path string }
+
+func (e *ErrPathMissing) Error() string {
+	return "the path " + e.Path + " is not in the checkout; nothing was proposed"
 }
 
 // ProposeOnto is Propose for a run that has a request already (DESIGN 5.20 rule 2): it
@@ -192,13 +210,19 @@ func (c Config) Propose(ctx context.Context, checkout, branch, message string) (
 // An empty base skips the guard: the same-run path of DESIGN 5.20 rule 2 (a run that
 // opened its own request) and runs cloned before checkout_sha existed.
 func (c Config) ProposeOnto(ctx context.Context, checkout, branch, base, message string) (Proposal, error) {
-	return c.propose(ctx, checkout, branch, branch, base, message)
+	return c.propose(ctx, checkout, branch, branch, base, message, nil)
+}
+
+// ProposeOntoPaths is ProposeOnto for only the named paths, as ProposePaths is to Propose.
+func (c Config) ProposeOntoPaths(ctx context.Context, checkout, branch, base, message string, paths []string) (Proposal, error) {
+	return c.propose(ctx, checkout, branch, branch, base, message, paths)
 }
 
 // propose clones the branch from into a private directory, replaces its working tree
 // with the checkout's, commits the difference and pushes HEAD to branch. A base that is
-// not empty must be the commit the clone is at (ErrBranchMoved otherwise).
-func (c Config) propose(ctx context.Context, checkout, from, branch, base, message string) (Proposal, error) {
+// not empty must be the commit the clone is at (ErrBranchMoved otherwise). With paths,
+// only those paths are copied over the clone, staged and committed.
+func (c Config) propose(ctx context.Context, checkout, from, branch, base, message string, paths []string) (Proposal, error) {
 	private, err := os.MkdirTemp("", "yuno-propose-")
 	if err != nil {
 		return Proposal{}, err
@@ -217,14 +241,27 @@ func (c Config) propose(ctx context.Context, checkout, from, branch, base, messa
 			return Proposal{}, &ErrBranchMoved{Branch: branch, Head: head, Base: base}
 		}
 	}
-	if err := clearWorkingTree(dest); err != nil {
-		return Proposal{}, err
+	var n int
+	addArgs := []string{"add", "--all"}
+	if len(paths) > 0 {
+		if n, err = copyPaths(checkout, dest, paths); err != nil {
+			var missing *ErrPathMissing
+			if errors.As(err, &missing) {
+				return Proposal{}, err
+			}
+			return Proposal{}, fmt.Errorf("copy the paths: %w", err)
+		}
+		addArgs = append(addArgs, "--")
+		addArgs = append(addArgs, paths...)
+	} else {
+		if err := clearWorkingTree(dest); err != nil {
+			return Proposal{}, err
+		}
+		if n, err = copyTree(checkout, dest); err != nil {
+			return Proposal{}, fmt.Errorf("copy the checkout: %w", err)
+		}
 	}
-	n, err := copyTree(checkout, dest)
-	if err != nil {
-		return Proposal{}, fmt.Errorf("copy the checkout: %w", err)
-	}
-	if _, err := c.git(ctx, dest, "add", "--all"); err != nil {
+	if _, err := c.git(ctx, dest, addArgs...); err != nil {
 		return Proposal{}, err
 	}
 	status, err := c.git(ctx, dest, "status", "--porcelain")
@@ -249,6 +286,102 @@ func (c Config) propose(ctx context.Context, checkout, from, branch, base, messa
 		return Proposal{}, err
 	}
 	return Proposal{Branch: branch, Commit: strings.TrimSpace(string(sha)), Files: n}, nil
+}
+
+// copyPaths replaces each path of dest (a fresh clone) with the same path of src (the
+// agent's checkout): a file or a directory (links and the Excluded directories inside it
+// skipped, as copyTree does). A path the checkout lacks is removed from dest, a deletion;
+// one neither has is *ErrPathMissing. A path that goes through a link, on either side, is
+// refused. It returns how many files it copied.
+func copyPaths(src, dest string, paths []string) (int, error) {
+	from, err := os.OpenRoot(src)
+	if err != nil {
+		return 0, err
+	}
+	defer from.Close()
+	to, err := os.OpenRoot(dest)
+	if err != nil {
+		return 0, err
+	}
+	defer to.Close()
+	n := 0
+	for _, p := range paths {
+		sinfo, serr := plainInfo(from, p)
+		_, derr := plainInfo(to, p)
+		for _, e := range []error{serr, derr} {
+			if e != nil && !errors.Is(e, fs.ErrNotExist) {
+				return n, e
+			}
+		}
+		if serr != nil { // not in the checkout
+			if derr != nil {
+				return n, &ErrPathMissing{Path: p}
+			}
+			if err := to.RemoveAll(p); err != nil {
+				return n, err
+			}
+			continue
+		}
+		if derr == nil {
+			if err := to.RemoveAll(p); err != nil {
+				return n, err
+			}
+		}
+		switch {
+		case sinfo.IsDir():
+			if err := to.MkdirAll(p, 0o755); err != nil {
+				return n, err
+			}
+			c, err := copyTree(filepath.Join(src, filepath.FromSlash(p)), filepath.Join(dest, filepath.FromSlash(p)))
+			n += c
+			if err != nil {
+				return n, err
+			}
+		case sinfo.Mode().IsRegular():
+			if err := to.MkdirAll(path.Dir(p), 0o755); err != nil {
+				return n, err
+			}
+			in, err := from.Open(p)
+			if err != nil {
+				return n, err
+			}
+			out, err := to.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, sinfo.Mode().Perm()|0o600)
+			if err != nil {
+				in.Close()
+				return n, err
+			}
+			_, err = copyChunks(context.Background(), out, in)
+			in.Close()
+			if cerr := out.Close(); err == nil {
+				err = cerr
+			}
+			if err != nil {
+				return n, err
+			}
+			n++
+		default:
+			return n, fmt.Errorf("path %s is not a regular file or directory", p)
+		}
+	}
+	return n, nil
+}
+
+// plainInfo is Lstat of p in root, refusing a path whose parts (the last included) are
+// links. A part that does not exist is fs.ErrNotExist.
+func plainInfo(root *os.Root, p string) (fs.FileInfo, error) {
+	var info fs.FileInfo
+	cur := ""
+	for _, part := range strings.Split(p, "/") {
+		cur = path.Join(cur, part)
+		var err error
+		if info, err = root.Lstat(cur); err != nil {
+			return nil, err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return nil, fmt.Errorf("path %s goes through a link", p)
+		}
+	}
+	return info, nil
 }
 
 // clearWorkingTree removes everything but .git from a checkout, so files the agent

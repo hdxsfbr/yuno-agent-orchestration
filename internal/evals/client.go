@@ -118,6 +118,11 @@ type decisionRequest struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// answerRequest is the body of POST /api/approvals/{id}/answer.
+type answerRequest struct {
+	Answer string `json:"answer"`
+}
+
 // scriptRegistration is the body of POST /api/evals/scripts.
 type scriptRegistration struct {
 	ScriptID string             `json:"script_id"`
@@ -209,6 +214,17 @@ func (c *Client) DecideApproval(ctx context.Context, id, decision, reason string
 	var out store.Approval
 	path := "/api/approvals/" + url.PathEscape(id) + "/" + decision
 	if err := c.do(ctx, http.MethodPost, path, decisionRequest{Reason: reason}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// AnswerApproval answers a pending question (kind question, DESIGN 5.24 rule 3). A question
+// that is no longer pending answers 409, as for DecideApproval.
+func (c *Client) AnswerApproval(ctx context.Context, id, answer string) (*store.Approval, error) {
+	var out store.Approval
+	path := "/api/approvals/" + url.PathEscape(id) + "/answer"
+	if err := c.do(ctx, http.MethodPost, path, answerRequest{Answer: answer}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

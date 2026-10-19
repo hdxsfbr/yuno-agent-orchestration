@@ -128,7 +128,20 @@ func (r *Runner) applyApprovals(ctx context.Context, c Case, runID string, st *a
 			return fmt.Sprintf("approval %s (%s) is pending and the case has no action left for it", ap.ID, describeApproval(ap))
 		}
 		act := c.Actions.Approvals[st.next]
-		_, err := r.api.DecideApproval(ctx, ap.ID, act.Decision, act.Reason)
+		var err error
+		if ap.Kind != store.ApprovalKindQuestion && act.Answer != "" {
+			// An answer is for a question; deciding a gate with it would approve something
+			// the case did not mean to (review L10).
+			return fmt.Sprintf("approval %s is not a question (%s) and the action for it has an answer", ap.ID, describeApproval(ap))
+		}
+		if ap.Kind == store.ApprovalKindQuestion && act.Decision == DecisionApprove {
+			if act.Answer == "" {
+				return fmt.Sprintf("approval %s is a question and the action for it has no answer", ap.ID)
+			}
+			_, err = r.api.AnswerApproval(ctx, ap.ID, act.Answer)
+		} else {
+			_, err = r.api.DecideApproval(ctx, ap.ID, act.Decision, act.Reason)
+		}
 		switch {
 		case err == nil:
 			r.log.Info("eval approval decided", "case", c.ID, "run", runID, "approval", ap.ID, "decision", act.Decision)
@@ -146,6 +159,9 @@ func (r *Runner) applyApprovals(ctx context.Context, c Case, runID string, st *a
 
 // describeApproval names what an approval gates, for messages.
 func describeApproval(ap ApprovalItem) string {
+	if ap.Kind == store.ApprovalKindQuestion {
+		return "question at node " + ap.NodeID
+	}
 	if ap.ToolCall != nil {
 		return "tool " + toolBase(ap.ToolCall.ToolName) + " at node " + ap.NodeID
 	}

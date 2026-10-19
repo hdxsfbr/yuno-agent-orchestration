@@ -178,6 +178,7 @@ actions:
   cancel_after_steps: 1            # POST cancel once step_count >= 1
   approvals:                       # human decisions, applied in order
     - { decision: approve, reason: Looks right. }   # approve | reject
+    - { decision: approve, answer: Use UTC. }       # a question from ask_operator is answered, not approved
     - { decision: reject }
   approval_wait_seconds: 40        # leave the first pending approval alone for this long
   cancel_when_waiting: true        # cancel the run as soon as it waits for an approval
@@ -192,7 +193,9 @@ While the run waits for approval the runner lists the run's pending approvals
 (`GET /api/approvals?run_id=<id>&status=pending`) and applies the next action to the
 oldest one it has not acted on (`POST /api/approvals/<id>/approve` or `/reject` with the
 reason). Actions are used up in order and apply to whatever kind of approval comes next,
-a workflow approval node or a gated tool call. A pending approval with no action left is a
+a workflow approval node, a gated tool call or a question from `ask_operator`. A question
+is answered with `POST /api/approvals/<id>/answer` and the action's `answer` (required for an
+`approve` on a question); `reject` declines it. A pending approval with no action left is a
 case error: the runner stops waiting, records it, cancels the run and still judges the
 trace, rather than waiting out the case timeout. `approval_wait_seconds` is for expiry cases:
 nothing is decided for that long after the first approval appears, and a run that ends
@@ -383,7 +386,7 @@ rubrics were graded. The JSON report carries the same, plus `rubric.items` per c
 the runner observed. The summary line, unchanged, is also printed to standard output:
 
 ```
-public split: 17 cases, deterministic pass 1.000, e2e success 1.000
+public split: 18 cases, deterministic pass 1.000, e2e success 1.000
 ```
 
 The command exits 1 when the overall pass rate of the public split (evaluators and rubric)
@@ -422,6 +425,7 @@ below.
 | `022-cancel-while-waiting-approval` | private | the run waits at an approval node and the runner cancels it | cancelled, one approval `expired` with the reason `run cancelled` |
 | `023-gitlab-tool-absent` | private | GitLab is not configured, so `GET /api/tools` lists `deploy_release` and `finish` and not `gitlab_create_mr`. Fails by design when `GITLAB_BASE_URL`, `GITLAB_PROJECT_ID` and `GITLAB_TOKEN` are all set | succeeded, the tool list as described |
 | `024-guardrail-blocked-input` | private | a guardrail pattern blocks `deploy_release` inputs naming `.env`, `.pem` or `secrets/` files; the call is refused before any approval is asked for | succeeded, `deploy_release` `blocked` with `input blocked by guardrail no-secret-files`, no approval |
+| `025-plan-pipeline-happy` | public | the plan pipeline without a project: the analyst asks one question with `ask_operator` and the case answers it, then scout, architect, the design gate, planner (tickets, waves), the plan gate, and an integrator that publishes the four documents with `deploy_release` | succeeded, four approvals `approved` (the question, both gates, the deploy), `deploy_release` `executed` after its approval, the question answered in the `ask_operator` output; rubric of 4. It runs an inline copy of `plan_pipeline` without a project (`deploy_release` instead of `open_merge_request`), with the `waves_partition` check on the waves node |
 
 The channel-triggered reply of DESIGN 5.13 rule 6 is not a case: it needs a real message on
 a real Telegram chat. What can be asserted without one, that a session message is mirrored

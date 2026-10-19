@@ -8,12 +8,15 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"yuno/internal/obs"
+	"yuno/internal/pathcheck"
 	"yuno/internal/project"
 	"yuno/internal/store"
 )
@@ -47,15 +50,17 @@ var mergeRequestSchema = json.RawMessage(`{
   "properties": {
     "run_token": {"type": "string", "description": "The run token from the task message."},
     "title": {"type": "string", "minLength": 1, "maxLength": 72, "description": "A short summary of the change, like a commit subject (at most 72 characters), never the task text; it is also the commit message."},
-    "description": {"type": "string", "maxLength": 20000, "description": "The detail: what changed and why, how it was tested, anything the reviewer should know."}
+    "description": {"type": "string", "maxLength": 20000, "description": "The detail: what changed and why, how it was tested, anything the reviewer should know."},
+    "paths": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "string", "minLength": 1, "maxLength": 200}, "description": "Optional. Files or directories of the checkout, relative to its root (docs/plans/x/PRD.md, docs/plans/x). When present only these are committed, and everything else left in the checkout stays out; a path deleted in the checkout is deleted in the commit. Omit to propose the whole working tree."}
   },
   "required": ["run_token", "title", "description"],
   "additionalProperties": false
 }`)
 
 type mergeRequestInput struct {
-	Title       string `json:"title"`
-	Description string `json:"description"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Paths       []string `json:"paths,omitempty"`
 }
 
 // mergeRequestOutput is the tool's result: {number, url, branch, provider, replayed?,
@@ -94,7 +99,8 @@ func NewOpenMergeRequest(cfg MergeRequestConfig) *Tool {
 			"request's branch as a new commit, with the title as its message, instead of opening a new " +
 			"request; when the answer has replayed without updated, nothing new was pushed. Needs a human " +
 			"approval unless the operator allowed it to run automatically. Returns the request's number and " +
-			"URL; if a human has not decided yet it returns status pending_approval, and if they refused it " +
+			"URL; pass paths (files or directories relative to the checkout root) to commit only those and leave " +
+			"the rest of the checkout out of the request; if a human has not decided yet it returns status pending_approval, and if they refused it " +
 			"returns status rejected with a reason.",
 		InputSchema: mergeRequestSchema,
 		Risk:        RiskSideEffecting,
@@ -133,6 +139,11 @@ func (m *mergeRequest) exec(ctx context.Context, call Call) (Result, error) {
 	if call.IdempotencyKey == "" {
 		return Result{}, errors.New("open_merge_request: no idempotency key")
 	}
+	paths, err := cleanPaths(in.Paths)
+	if err != nil {
+		return Result{}, &ModelError{Message: err.Error()}
+	}
+	in.Paths = paths
 	if m.cfg.Projects == nil {
 		return Result{}, &ModelError{Message: project.ErrNoProject.Error()}
 	}
@@ -202,8 +213,9 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 		return Result{}, err
 	}
 	if !exists {
-		if _, err := pc.Propose(ctx, checkout, branch, in.Title); err != nil {
-			if errors.Is(err, project.ErrNoChanges) {
+		if _, err := pc.ProposePaths(ctx, checkout, branch, in.Title, in.Paths); err != nil {
+			var missing *project.ErrPathMissing
+			if errors.Is(err, project.ErrNoChanges) || errors.As(err, &missing) {
 				return Result{}, &ModelError{Message: err.Error()}
 			}
 			// A push the provider refused (a token without write access, a protected
@@ -232,6 +244,32 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 		}
 	}
 	return JSONResult(out), nil
+}
+
+// cleanPaths validates the paths of a call (pathcheck.Valid), cleans them to slash form
+// without a trailing slash, drops repeats, and refuses the checkout's root and anything in
+// .git. nil when there are none, which proposes the whole working tree.
+func cleanPaths(in []string) ([]string, error) {
+	if in != nil && len(in) == 0 {
+		return nil, errors.New("paths: empty; omit paths to propose the whole working tree")
+	}
+	var out []string
+	for _, raw := range in {
+		if err := pathcheck.Valid(raw); err != nil {
+			return nil, fmt.Errorf("paths: %w", err)
+		}
+		p := path.Clean(raw)
+		if p == "." {
+			return nil, fmt.Errorf("paths: %q is the checkout itself; omit paths to propose all of it", raw)
+		}
+		if slices.Contains(strings.Split(p, "/"), ".git") {
+			return nil, fmt.Errorf("paths: %q is inside .git", raw)
+		}
+		if !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 // withIssueCloses is the description of a request being created (DESIGN 5.23 rule 7): for
@@ -282,9 +320,12 @@ func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *projec
 	if updating != nil && updating.CheckoutSHA != nil {
 		base = *updating.CheckoutSHA
 	}
-	proposal, err := pc.ProposeOnto(ctx, checkout, rec.SourceBranch, base, in.Title)
+	proposal, err := pc.ProposeOntoPaths(ctx, checkout, rec.SourceBranch, base, in.Title, in.Paths)
 	var moved *project.ErrBranchMoved
+	var missing *project.ErrPathMissing
 	switch {
+	case errors.As(err, &missing):
+		return Result{}, &ModelError{Message: missing.Error()}
 	case err == nil:
 		out.Updated = true
 	case errors.Is(err, project.ErrNoChanges):

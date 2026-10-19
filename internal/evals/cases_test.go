@@ -268,6 +268,7 @@ var shippedSplits = map[string]string{
 	"022-cancel-while-waiting-approval": SplitPrivate,
 	"023-gitlab-tool-absent":            SplitPrivate,
 	"024-guardrail-blocked-input":       SplitPrivate,
+	"025-plan-pipeline-happy":           SplitPublic,
 }
 
 func TestShippedCasesAreValid(t *testing.T) {

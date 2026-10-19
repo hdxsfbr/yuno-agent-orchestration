@@ -1667,6 +1667,7 @@ components:
         message: { type: string, description: approval nodes }
         on_reject: { type: string, description: approval nodes }
         on_failure: { type: string }
+        checks: { type: array, items: { type: string, enum: [waves_partition] }, description: "agent nodes: named tests of the finish result beyond output_schema; a result that fails one is refused with the reason, like a schema violation (DESIGN 5.28 rule 4). waves_partition: the result's waves ({n, tickets}) number 1..k without gaps, place every ticket of the input_from node's tickets ({id, files}) in exactly one wave, and keep two tickets that list a common file in different waves. Unknown names are refused at save." }
     WorkflowEdge:
       type: object
       properties:

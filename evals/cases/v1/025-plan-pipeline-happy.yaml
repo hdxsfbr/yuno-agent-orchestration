@@ -1,0 +1,385 @@
+id: 025-plan-pipeline-happy
+version: v1
+split: public
+description: The plan pipeline from start to finish, without a project. The analyst asks the operator one question and gets the answer, writes the PRD, the scout reports the gaps, the architect writes the architecture, a human approves the design, the planner slices the tickets and groups them into waves, a human approves the plan, and the integrator publishes the four documents with deploy_release once a third approval lets it run.
+workflow:
+  input_schema:
+    type: object
+    properties:
+      task: { type: string, description: The feature to plan }
+      feature: { type: string, description: "Feature slug, lowercase letters, digits and dashes" }
+    required: [task, feature]
+    additionalProperties: true
+  nodes:
+    - { id: start, kind: start }
+    - id: analyst
+      kind: agent
+      agent_name: analyst
+      task: |
+        Write the product requirements for this feature, feature slug {{.input.feature}}:
+
+        {{.input.task}}
+
+        Ask the operator with ask_operator about anything that decides the requirements and that you cannot find out yourself, then write the requirements to runs/$RUN_ID/out/PRD.md in your workspace and finish with the path of the file (relative to your workspace), a short summary and the questions that stay open.
+      output_schema:
+        type: object
+        properties:
+          prd_path: { type: string }
+          summary: { type: string }
+          open_questions: { type: array, items: { type: string } }
+        required: [prd_path, summary]
+        additionalProperties: true
+      input_from: [start]
+    - id: scout
+      kind: agent
+      agent_name: scout
+      task: |
+        Read the repository against these requirements and report what the plan must account for: gaps between what exists and what the requirements need, and constraints on the work.
+
+        Requirements: {{.state.analyst.summary}}
+
+        Finish with the gaps and the constraints, each a list of short sentences.
+      output_schema:
+        type: object
+        properties:
+          gaps: { type: array, items: { type: string } }
+          constraints: { type: array, items: { type: string } }
+        required: [gaps, constraints]
+        additionalProperties: true
+      input_from: [analyst]
+    - id: architect
+      kind: agent
+      agent_name: architect
+      task: |
+        Design the solution for feature {{.input.feature}} and write it to runs/$RUN_ID/out/ARCHITECTURE.md in your workspace.
+
+        Requirements: {{.state.analyst.summary}}
+        Gaps: {{range .state.scout.gaps}}{{.}} {{end}}
+        Constraints: {{range .state.scout.constraints}}{{.}} {{end}}
+        {{with .state.design_gate}}
+        The design was rejected. Address the reason before finishing: {{.reason}}
+        {{end}}
+        Finish with the path of the file (relative to your workspace) and a short summary of the design.
+      output_schema:
+        type: object
+        properties:
+          architecture_path: { type: string }
+          summary: { type: string }
+        required: [architecture_path, summary]
+        additionalProperties: true
+      input_from: [analyst, scout]
+    - id: design_gate
+      kind: approval
+      message: 'Approve the design for {{.input.feature}}? {{.state.architect.summary}} ({{.state.architect.architecture_path}})'
+      on_reject: architect
+    - id: slicer
+      kind: agent
+      agent_name: planner
+      task: |
+        Slice feature {{.input.feature}} into thin end-to-end tickets and write them to runs/$RUN_ID/out/TASKS.md in your workspace. Give every ticket an id T<n> (T1, T2, ...), a title, the files it changes and the tests that prove it.
+
+        Design: {{.state.architect.summary}}
+        {{with .state.plan_gate}}
+        The plan was rejected. Address the reason before finishing: {{.reason}}
+        {{end}}
+        Finish with the tickets.
+      output_schema:
+        type: object
+        properties:
+          tickets:
+            type: array
+            items:
+              type: object
+              properties:
+                id: { type: string }
+                title: { type: string }
+                files: { type: array, items: { type: string } }
+                tests: { type: array, items: { type: string } }
+              required: [id, title, files, tests]
+        required: [tickets]
+        additionalProperties: true
+      input_from: [architect]
+    - id: waves
+      kind: agent
+      agent_name: planner
+      task: |
+        Group these tickets into waves and write the waves to runs/$RUN_ID/out/WAVES.md in your workspace. Every ticket belongs to exactly one wave, waves are numbered from 1 without gaps, and two tickets of one wave never change the same file.
+
+        Tickets: {{range .state.slicer.tickets}}{{.id}} {{.title}}; {{end}}
+
+        Finish with the waves.
+      output_schema:
+        type: object
+        properties:
+          waves:
+            type: array
+            items:
+              type: object
+              properties:
+                n: { type: integer }
+                tickets: { type: array, items: { type: string } }
+              required: [n, tickets]
+        required: [waves]
+        additionalProperties: true
+      input_from: [slicer]
+      checks: [waves_partition]
+    - id: plan_gate
+      kind: approval
+      message: 'Approve the plan for {{.input.feature}}? Waves: {{range .state.waves.waves}}wave {{.n}}: {{range .tickets}}{{.}} {{end}}{{end}}Tickets: {{range .state.slicer.tickets}}{{.id}} {{.title}}; {{end}}'
+      on_reject: slicer
+    - id: integrator
+      kind: agent
+      agent_name: integrator
+      task: |
+        Publish the plan of feature {{.input.feature}} as one release with the deploy_release tool: four documents, PRD.md, ARCHITECTURE.md, TASKS.md and WAVES.md.
+
+        Write the four documents to runs/$RUN_ID/out/ in your workspace from what the earlier steps report, then publish them (paths relative to runs/$RUN_ID/).
+        Requirements: {{.state.analyst.summary}}
+        Design: {{.state.architect.summary}}
+        Tickets: {{range .state.slicer.tickets}}{{.id}} {{.title}}; {{end}}
+        Waves: {{range .state.waves.waves}}wave {{.n}}: {{range .tickets}}{{.}} {{end}}{{end}}
+
+        Finish with a status of "published", the version the tool returned and the paths of the four documents; if the tool result says the deploy was rejected or is pending approval, finish with that status.
+      output_schema:
+        type: object
+        properties:
+          status: { type: string }
+          version: { type: string }
+          documents: { type: array, items: { type: string } }
+        required: [status]
+        additionalProperties: true
+      input_from: [analyst, architect, slicer, waves]
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: analyst }
+    - { from: analyst, to: scout }
+    - { from: scout, to: architect }
+    - { from: architect, to: design_gate }
+    - { from: design_gate, to: slicer }
+    - { from: slicer, to: waves }
+    - { from: waves, to: plan_gate }
+    - { from: plan_gate, to: integrator }
+    - { from: integrator, to: end }
+  limits:
+    max_steps: 60
+    max_duration_seconds: 300
+    max_node_iterations: 12
+    max_loop_visits: 3
+    max_cost_usd: 2
+    max_tool_calls: 80
+input:
+  task: >-
+    Add a greeting feature to a small Python library: greet(name) returns "Hello, <name>!" and
+    "Hello, stranger!" for a blank name, and a command line that prints it.
+  feature: greeting
+agents:
+  analyst:
+    name: Analyst
+    system_prompt: |
+      You turn a feature request into product requirements. When a fact you cannot find out yourself
+      decides the requirements, ask the operator one short question with ask_operator, then write the
+      requirements to the file named in your task and call yuno__finish with the result.
+    tool_allowlist: [read, write, ls, ask_operator, finish]
+  scout:
+    name: Scout
+    system_prompt: |
+      You read a repository against a set of requirements and report the gaps and the constraints the
+      plan must account for. You change nothing. When you are done, call yuno__finish with the result.
+    tool_allowlist: [read, ls, finish]
+  architect:
+    name: Architect
+    system_prompt: |
+      You design the solution for a feature and write the design to the file named in your task: the
+      components, the data they keep and how they fit together. When you are done, call yuno__finish
+      with the result.
+    tool_allowlist: [read, write, ls, finish]
+  planner:
+    name: Planner
+    system_prompt: |
+      You slice a design into thin end-to-end tickets and group the tickets into waves. Write what the
+      task asks for to the file it names. When you are done, call yuno__finish with the result.
+    tool_allowlist: [read, write, ls, finish]
+  integrator:
+    name: Integrator
+    system_prompt: |
+      You publish the plan documents as one release with the deploy_release tool, exactly once per task,
+      with the version and files you were given. Never change the plan. If the tool answers that the
+      deploy was rejected or is pending approval, report that status and stop.
+    tool_allowlist: [read, write, ls, deploy_release, finish]
+script:
+  # analyst
+  - tool:
+      name: yuno__ask_operator
+      args:
+        run_token: "$RUN_TOKEN"
+        question: Should a blank name greet "stranger", or should greet refuse a blank name?
+        options: ["Greet stranger", "Refuse a blank name"]
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/out/PRD.md"
+        content: |
+          # Greeting
+
+          greet(name) returns "Hello, <name>!". A blank name returns "Hello, stranger!" (the operator's answer).
+          A command line prints the greeting for the name it is given.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          prd_path: out/PRD.md
+          summary: greet(name) greets a name and greets a stranger for a blank name; a command line prints it.
+          open_questions: []
+  - text: The requirements are written and the result has been submitted.
+  # scout
+  - tool:
+      name: ls
+      args: { path: . }
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          gaps: [The library has no greeting function, There is no command line entry point]
+          constraints: [Python 3 only, Tests run with plain python3]
+  - text: The gaps and constraints are reported and the result has been submitted.
+  # architect
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/out/ARCHITECTURE.md"
+        content: |
+          # Architecture
+
+          - greet.py holds greet(name), a pure function.
+          - cli.py reads one argument and prints greet(argument).
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          architecture_path: out/ARCHITECTURE.md
+          summary: A pure greet function in greet.py and a thin command line in cli.py that prints its result.
+  - text: The architecture is written and the result has been submitted.
+  # slicer, after the design gate is approved
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/out/TASKS.md"
+        content: |
+          # Tasks
+
+          - T1 Greet a name and a blank name. Files: greet.py, test_greet.py. Tests: test_greet.
+          - T2 Print the greeting from the command line. Files: cli.py, test_cli.py. Tests: test_cli.
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          tickets:
+            - { id: T1, title: Greet a name and a blank name, files: [greet.py, test_greet.py], tests: [test_greet] }
+            - { id: T2, title: Print the greeting from the command line, files: [cli.py, test_cli.py], tests: [test_cli] }
+  - text: The tickets are written and the result has been submitted.
+  # waves
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/out/WAVES.md"
+        content: |
+          # Waves
+
+          - Wave 1: T1
+          - Wave 2: T2 (needs greet from T1)
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          waves:
+            - { n: 1, tickets: [T1] }
+            - { n: 2, tickets: [T2] }
+  - text: The waves are written and the result has been submitted.
+  # integrator, after the plan gate is approved. Each agent has a workspace of its own, so the
+  # integrator writes the four documents it publishes.
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/out/PRD.md"
+        content: |
+          # Greeting
+
+          greet(name) greets a name and greets a stranger for a blank name; a command line prints it.
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/out/ARCHITECTURE.md"
+        content: |
+          # Architecture
+
+          A pure greet function in greet.py and a thin command line in cli.py that prints its result.
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/out/TASKS.md"
+        content: |
+          # Tasks
+
+          - T1 Greet a name and a blank name.
+          - T2 Print the greeting from the command line.
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/out/WAVES.md"
+        content: |
+          # Waves
+
+          - Wave 1: T1
+          - Wave 2: T2
+  - tool:
+      name: yuno__deploy_release
+      args:
+        run_token: "$RUN_TOKEN"
+        version: 1.0.0-plan-eval
+        notes: Plan for the greeting feature, approved at the design and plan gates.
+        paths: [out/PRD.md, out/ARCHITECTURE.md, out/TASKS.md, out/WAVES.md]
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          status: published
+          version: 1.0.0-plan-eval
+          documents: [out/PRD.md, out/ARCHITECTURE.md, out/TASKS.md, out/WAVES.md]
+  - text: The plan documents are published and the result has been submitted.
+actions:
+  approvals:
+    # The analyst's question, the design gate, the plan gate, then the deploy_release call.
+    - { decision: approve, answer: 'Greet "stranger" for a blank name.', reason: The operator answers the analyst. }
+    - { decision: approve, reason: The design is small and fits the requirements. }
+    - { decision: approve, reason: Two waves and no file shared inside a wave. }
+    - { decision: approve, reason: Publish the plan documents. }
+expect:
+  status: succeeded
+  min_model_calls: 23
+  min_tool_calls: 17
+  min_agent_messages: 5
+  state:
+    "/analyst/prd_path": out/PRD.md
+    "/architect/architecture_path": out/ARCHITECTURE.md
+    "/integrator/status": published
+    "/integrator/version": 1.0.0-plan-eval
+  tool_statuses:
+    deploy_release: [executed]
+  tool_outputs:
+    ask_operator: ["answered", "Greet \"stranger\" for a blank name."]
+  approval_statuses: [approved, approved, approved, approved]
+rubric:
+  - criterion: The analyst wrote the requirements to out/PRD.md.
+    check: { path: /analyst/prd_path, json_path_eq: out/PRD.md }
+  - criterion: The architect wrote the architecture to out/ARCHITECTURE.md.
+    check: { path: /architect/architecture_path, json_path_eq: out/ARCHITECTURE.md }
+  - criterion: The integrator reports the plan documents as published.
+    check: { path: /integrator/status, json_path_eq: published }
+  - criterion: The release carries the version the plan was published under.
+    check: { path: /integrator/version, json_path_eq: 1.0.0-plan-eval }

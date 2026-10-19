@@ -462,7 +462,7 @@ func (f *fixture) newProject() *store.Project {
 func (f *fixture) devPipeline() *store.Workflow {
 	f.t.Helper()
 	ctx := context.Background()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "templates", "dev_pipeline.json"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "templates", "legacy", "dev_pipeline.json"))
 	if err != nil {
 		f.t.Fatal(err)
 	}

@@ -6,6 +6,22 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-19
 
+**D-071 to D-078 The delivery process (the HDX Factory diagram).** (Andre, 2026-10-19:
+"take the recommended answer to D1 to D8") D-071: the old templates (`dev_pipeline`,
+`research_pipeline`, `review_panel`) and their nine agents are retired (kept under
+`templates/legacy/`, not loaded); the factory's eight agents replace them and the Chief
+of Staff stays bound to Telegram. D-072: the submitted state is the tag
+`submitted-2026-10-19` (`fcd1eb6`) and work continues on `main`. D-073: a ticket's draft MR
+call is approval-gated; the call that marks it ready runs under the manual-test approval
+already given. D-074: a wave is shippable when every ticket's MR is merged and the
+default branch's pipeline passed on a commit at or after the last merge. D-075: lessons
+go to project notes and to the repository's `CLAUDE.md` through a small MR. D-076: a PRD
+gap pauses the waves and the operator revises the plan (no automatic re-plan). D-077:
+tickets are created with `wave:<n>`; releasing a wave adds the project's intake label.
+D-078: eight factory agents (Analyst, Scout, Architect, Planner, Builder, Code Reviewer,
+Doc Auditor, Integrator), Builder on sonnet and Code Reviewer on opus. Design: DESIGN
+5.28 and 5.29; plan: `docs/briefs/delivery-process/`.
+
 **D-070 Multi-file skills arrive by zip upload or from a public Git URL.** (Andre,
 2026-10-19) Zip or folder upload, plus import from a Git repository path on an allowlisted
 host (`SKILL_IMPORT_HOSTS`, default github.com and gitlab.com), shallow and capped; the api

@@ -136,7 +136,7 @@ func line(nodes ...workflow.Node) workflow.Definition {
 // agents, as instantiating the template does.
 func devPipeline(t *testing.T, env *testEnv) *store.Workflow {
 	t.Helper()
-	raw, err := os.ReadFile("../../templates/dev_pipeline.json")
+	raw, err := os.ReadFile("../../templates/legacy/dev_pipeline.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +492,7 @@ func TestWorkflowTriggerValidation(t *testing.T) {
 		t.Fatalf("unknown workflow: %v", err)
 	}
 
-	raw, _ := os.ReadFile("../../templates/dev_pipeline.json")
+	raw, _ := os.ReadFile("../../templates/legacy/dev_pipeline.json")
 	var tpl struct {
 		Definition workflow.Definition `json:"definition"`
 	}
@@ -579,7 +579,7 @@ func TestApprovalNode(t *testing.T) {
 	}{
 		{name: "approve continues on the first true edge", decision: DecisionApprove, status: store.RunSucceeded,
 			visits: []string{"gate#1:succeeded", "ship#1:succeeded"}},
-		{name: "reject without on_reject fails", decision: DecisionReject, status: store.RunFailed, reason: "rejected at gate",
+		{name: "reject without on_reject fails", decision: DecisionReject, status: store.RunFailed, reason: "rejected at gate: because",
 			visits: []string{"gate#1:failed"}},
 		{name: "reject follows on_reject", decision: DecisionReject, onReject: true, status: store.RunSucceeded,
 			visits: []string{"gate#1:failed", "fix#1:succeeded"}},

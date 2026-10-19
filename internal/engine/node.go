@@ -1528,15 +1528,29 @@ func (v *visit) turnFinal(ctx context.Context, ce openclaw.ChatEvent) {
 		}
 	}
 	if out, ok := findJSONResult(v.schema, text); ok {
-		if accepted, ok := v.closeAcceptance(); ok {
-			v.end(ctx, succeeded(accepted)) // a finish got in first
+		msg := v.checkResult(ctx, out)
+		if msg == "" {
+			if accepted, ok := v.closeAcceptance(); ok {
+				v.end(ctx, succeeded(accepted)) // a finish got in first
+				return
+			}
+			if err := store.SetRunNodeOutput(ctx, v.e.deps.Pool, v.rn.ID, out); err != nil {
+				v.log.Warn("store node output failed", "error", err)
+			}
+			v.e.logEvent(ctx, v.run.ID, "info", "result taken from the final reply (finish was not called)")
+			v.end(ctx, succeeded(out))
 			return
 		}
-		if err := store.SetRunNodeOutput(ctx, v.e.deps.Pool, v.rn.ID, out); err != nil {
-			v.log.Warn("store node output failed", "error", err)
+		// A result in the reply that a check refuses is refused like a finish call: the
+		// reason goes back to the agent in a new turn, and the third refusal fails the visit.
+		v.rejectFinish(msg)
+		if n, last := v.finishRejections(); n >= maxFinishAttempts {
+			v.end(ctx, finishRejected(n, last))
+			return
 		}
-		v.e.logEvent(ctx, v.run.ID, "info", "result taken from the final reply (finish was not called)")
-		v.end(ctx, succeeded(out))
+		if res := v.startTurn(ctx, "Your result was refused: "+msg+"\nCorrect it and call finish again."); res != nil {
+			v.end(ctx, *res)
+		}
 		return
 	}
 	// The turn ended without a finish and without a result in its reply. A question of
@@ -1848,6 +1862,26 @@ func (v *visit) acceptFinish(ctx context.Context, result json.RawMessage) error 
 	v.finishAt = v.e.clock.Now()
 	v.wake()
 	return nil
+}
+
+// checkResult applies the node's `checks` (DESIGN 5.28 rule 4) to a result that passed
+// its schema, over the run's state as it is now; it returns the first refusal.
+func (v *visit) checkResult(ctx context.Context, result json.RawMessage) string {
+	if len(v.node.Checks) == 0 {
+		return ""
+	}
+	run, err := v.e.readRun(ctx, v.run.ID)
+	if err != nil {
+		return "check: run state unavailable: " + err.Error()
+	}
+	var state map[string]json.RawMessage
+	_ = json.Unmarshal(run.State, &state)
+	for _, c := range v.node.Checks {
+		if msg := v.node.RunCheck(c, state, result); msg != "" {
+			return "result refused by check " + c + ": " + msg
+		}
+	}
+	return ""
 }
 
 // rejectFinish counts a finish submission a schema refused (DESIGN 5.6); the visit

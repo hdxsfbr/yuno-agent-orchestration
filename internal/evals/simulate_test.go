@@ -34,7 +34,7 @@ const (
 // platformTools are served over MCP and reach the model as yuno__<name>.
 var platformTools = map[string]bool{
 	"finish": true, "http_fetch": true, "memory_save": true, "memory_recall": true,
-	"deploy_release": true, "gitlab_create_mr": true,
+	"deploy_release": true, "gitlab_create_mr": true, "ask_operator": true,
 }
 
 type simulator struct {
@@ -380,6 +380,8 @@ func (s *simulator) toolCall(n *workflow.Node, runNodeID string, visit int, spec
 		}
 	case sideEffectingTools[name]:
 		s.sideEffect(&row, n, visit, rule, tool)
+	case name == "ask_operator":
+		s.askOperator(&row, n, tool.Args)
 	case name == "http_fetch":
 		url, _ := tool.Args["url"].(string)
 		if !strings.HasPrefix(url, "https://") {
@@ -396,6 +398,40 @@ func (s *simulator) toolCall(n *workflow.Node, runNodeID string, visit int, spec
 	row.FinishedAt = &done
 	s.tr.ToolCalls = append(s.tr.ToolCalls, row)
 	return result
+}
+
+// askOperator plays ask_operator (DESIGN 5.24): the question is an approval of kind
+// question that the next action answers (approve with an answer) or declines (reject).
+func (s *simulator) askOperator(row *store.ToolCall, n *workflow.Node, args map[string]any) {
+	question, _ := args["question"].(string)
+	if strings.TrimSpace(question) == "" {
+		s.problem("node %s: ask_operator needs a question", n.ID)
+	}
+	if s.action >= len(s.c.Actions.Approvals) {
+		s.problem("node %s: ask_operator asks a question and the case has no action left", n.ID)
+		row.Status = store.ToolAwaitingApproval
+		return
+	}
+	act := s.c.Actions.Approvals[s.action]
+	s.action++
+	requested := s.tick()
+	decided := s.tick()
+	ap := store.Approval{
+		ID: fmt.Sprintf("ap%d", len(s.tr.Approvals)+1), RunID: simRunID, RunNodeID: row.RunNodeID,
+		Kind: store.ApprovalKindQuestion, NodeID: n.ID, Message: question, Status: store.ApprovalApproved,
+		RequestedAt: requested, DecidedAt: &decided,
+	}
+	if act.Decision == DecisionReject {
+		ap.Status = store.ApprovalRejected
+		row.Output, _ = json.Marshal(map[string]string{"status": "declined", "question_id": ap.ID, "reason": "the operator declined to answer"})
+	} else {
+		if act.Answer == "" {
+			s.problem("node %s: the action for the question has no answer", n.ID)
+		}
+		ap.Answer = &act.Answer
+		row.Output, _ = json.Marshal(map[string]string{"status": "answered", "question_id": ap.ID, "answer": act.Answer})
+	}
+	s.tr.Approvals = append(s.tr.Approvals, ap)
 }
 
 // builtin checks the arguments of an OpenClaw built-in and tracks the files written.

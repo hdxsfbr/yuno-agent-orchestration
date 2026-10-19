@@ -83,7 +83,7 @@ func shippedCase(t *testing.T, id string) Case {
 // Case 004 mirrors templates/dev_pipeline.json: the same nodes, edges, schemas and loop
 // limit, so what the case proves about it is what the template does.
 func TestDevPipelineCaseMirrorsTheTemplate(t *testing.T) {
-	raw, err := os.ReadFile("../../templates/dev_pipeline.json")
+	raw, err := os.ReadFile("../../templates/legacy/dev_pipeline.json")
 	if err != nil {
 		t.Fatal(err)
 	}

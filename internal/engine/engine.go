@@ -715,6 +715,10 @@ func (e *Engine) AcceptFinish(ctx context.Context, token string, result json.Raw
 		t.v.rejectFinish(msg)
 		return &FinishValidationError{Message: msg}
 	}
+	if msg := t.v.checkResult(ctx, result); msg != "" {
+		t.v.rejectFinish(msg)
+		return &FinishValidationError{Message: msg}
+	}
 	return t.v.acceptFinish(ctx, result)
 }
 

@@ -666,3 +666,21 @@ func TestRunnerDoesNotDecideTheSameApprovalTwice(t *testing.T) {
 		t.Errorf("the approval was decided %d times, want one attempt", attempts)
 	}
 }
+
+// L10 of the wave 1 review: an action with an answer meeting an approval that is not a
+// question is reported, not decided.
+func TestRunnerReportsAnAnswerForANonQuestion(t *testing.T) {
+	f, srv := startFake(t)
+	f.plans["wf-a"] = approvalPlan{raiseAt: []int{1}, tool: "deploy_release"}
+	c := workflowCase(t, "actions:\n  approvals:\n    - { decision: approve, answer: yes }\n")
+	r := fastRunner(testConfig(srv.URL))
+	r.caseTimeout = 30 * time.Second
+
+	res := r.runCase(context.Background(), c)
+	if !strings.Contains(res.Error, "is not a question") || !strings.Contains(res.Error, "has an answer") || res.Passed() {
+		t.Fatalf("result = %+v", res)
+	}
+	if got := f.decisionsSnapshot(); len(got) != 0 {
+		t.Errorf("the approval was decided: %+v", got)
+	}
+}

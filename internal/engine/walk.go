@@ -123,15 +123,39 @@ func (w *walk) resume(ctx context.Context) (string, *outcome) {
 	switch a.Status {
 	case store.ApprovalApproved:
 		w.e.logEvent(ctx, w.run.ID, "info", fmt.Sprintf("%s approved; continuing", cur), "node_id", cur)
+		// A gate rejected earlier left {decision: "rejected"} in state; the approval that
+		// follows replaces it, so state does not still read "rejected" (review L7).
+		if o := w.markApproved(ctx, cur); o != nil {
+			return "", o
+		}
 		next, res := w.follow(ctx, node)
 		return next, res
 	case store.ApprovalRejected:
 		if node.OnReject != "" {
 			w.e.logEvent(ctx, w.run.ID, "info", fmt.Sprintf("%s rejected; following on_reject to %s", cur, node.OnReject), "node_id", cur)
+			// The operator's reason is the gate's output in state, so the node the run
+			// returns to can carry it in its task: {{with .state.<gate>}}{{.reason}}{{end}}.
+			out := mustMarshal(map[string]string{"decision": "rejected", "reason": strValue(a.Reason)})
+			var run *store.Run
+			var serr error
+			if w.branch != nil {
+				run, serr = store.SetRunStateNodeInBranch(ctx, w.e.deps.Pool, w.run.ID, cur, out, w.branch.ID, cur)
+			} else {
+				run, serr = store.SetRunStateNode(ctx, w.e.deps.Pool, w.run.ID, cur, out, cur)
+			}
+			if serr != nil {
+				o := failed(store.RunFailed, "store the rejection in run state: "+serr.Error())
+				return "", &o
+			}
+			w.run = run
 			w.setCurrent(ctx, node.OnReject)
 			return node.OnReject, nil
 		}
-		o := failed(store.RunFailed, "rejected at "+cur)
+		reason := "rejected at " + cur
+		if r := strings.TrimSpace(strValue(a.Reason)); r != "" {
+			reason += ": " + r // the operator's reason travels with the failure (review L5)
+		}
+		o := failed(store.RunFailed, reason)
 		o.limit = true
 		return "", &o
 	case store.ApprovalExpired:
@@ -142,6 +166,33 @@ func (w *walk) resume(ctx context.Context) (string, *outcome) {
 	// Still pending: whoever queued the run did so early. Wait again.
 	o := w.pauseAt(ctx, rn.ID)
 	return "", &o
+}
+
+// markApproved writes {decision: "approved"} as the gate's state entry when the gate has
+// one already (a rejection that looped back wrote it); a gate never rejected leaves state
+// alone. It returns the failed outcome when the write fails.
+func (w *walk) markApproved(ctx context.Context, gate string) *outcome {
+	var state map[string]json.RawMessage
+	if json.Unmarshal(w.run.State, &state) != nil {
+		return nil
+	}
+	if _, had := state[gate]; !had {
+		return nil
+	}
+	out := mustMarshal(map[string]string{"decision": "approved"})
+	var run *store.Run
+	var err error
+	if w.branch != nil {
+		run, err = store.SetRunStateNodeInBranch(ctx, w.e.deps.Pool, w.run.ID, gate, out, w.branch.ID, gate)
+	} else {
+		run, err = store.SetRunStateNode(ctx, w.e.deps.Pool, w.run.ID, gate, out, gate)
+	}
+	if err != nil {
+		o := failed(store.RunFailed, "store the approval in run state: "+err.Error())
+		return &o
+	}
+	w.run = run
+	return nil
 }
 
 // enter checks the limits before a node runs: the run's own limits and the loop limit
@@ -632,8 +683,8 @@ func (w *walk) refresh(ctx context.Context) {
 
 // checkState validates the run state, with output stored as state[nodeID], against the
 // definition's state_schema (audit #16): the first violation, path-qualified, or ""
-// when the state holds or there is no schema. pending_effects is the engine's own
-// record, not node output, and is left out.
+// when the state holds or there is no schema. pending_effects and the entries of approval nodes are the engine's own
+// record, not node output, and are left out.
 func (w *walk) checkState(ctx context.Context, nodeID string, output json.RawMessage) string {
 	raw := bytes.TrimSpace(w.def.StateSchema)
 	if len(raw) == 0 || string(raw) == "null" {
@@ -656,6 +707,13 @@ func (w *walk) checkState(ctx context.Context, nodeID string, output json.RawMes
 		state = map[string]json.RawMessage{}
 	}
 	delete(state, workflow.StatePendingEffects)
+	// A gate's entry ({decision, reason}) is the engine's record of a decision, not node
+	// output, and a strict state_schema does not describe it (review M6).
+	for id := range state {
+		if n, ok := w.def.Node(id); ok && n.Kind == workflow.KindApproval {
+			delete(state, id)
+		}
+	}
 	state[nodeID] = output
 	doc, err := json.Marshal(state)
 	if err != nil {

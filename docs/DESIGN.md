@@ -3805,6 +3805,139 @@ an override is removed; library skills that need a network or a CLI the sandbox 
 lacks (for example `gh`) only work in a sandbox that has them; a skill's own licence
 travels with it, and the platform does not check what an imported skill does.
 
+### 5.28 The delivery process: factory agents, the plan and the ticket pipelines
+
+Purpose: Yuno runs Andre's delivery process (the "HDX Factory" diagram: Plan, Build,
+Ship) against a project repository. This section covers the agents and the two
+pipelines a feature and a ticket go through; 5.29 covers tickets, waves and their
+advance. Decisions D-071 to D-078 (Andre, 2026-10-19: the recommended answer to D1 to D8
+of `docs/briefs/delivery-process/WAVES.md`). PRD, mapping and waves:
+`docs/briefs/delivery-process/`.
+
+Inputs: the seed (`internal/seed`); the template files; the project and its checkout
+(5.16); the operator's answers (5.24) and approvals (5.5).
+
+Units: a "feature" is one plan run's subject, named by a slug (`feature`, `^[a-z0-9-]{1,40}$`);
+the "plan documents" are `docs/plans/<feature>/PRD.md`, `ARCHITECTURE.md`, `TASKS.md` and
+`WAVES.md` in the project repository; a "ticket" is one thin end-to-end slice of `TASKS.md`
+with an id `T<n>` (the wave comes from WAVES.md); times UTC.
+
+Rules:
+
+1. **The factory agents.** The seed creates, by name: Analyst (opus), Scout (sonnet),
+   Architect (opus), Planner (opus), Builder (sonnet), Code Reviewer (opus), Doc Auditor
+   (opus) and Integrator (sonnet), with the tools of the table in
+   `docs/briefs/delivery-process/ARCHITECTURE.md` (wave 1 grants only existing tools;
+   `escalate`, `publish_tickets` and `advance_wave` are added in their waves). Scout and
+   Builder have memory on. The Chief of Staff is unchanged and stays bound to Telegram.
+2. **Retired agents and templates (D-071).** The seed no longer creates Coder, Reviewer,
+   Deployer, Researcher, Critic, Writer and the three panel reviewers; `make seed` deletes
+   any of them that exists (by exact name, only those nine, never the Chief, and never an
+   agent a workflow other than the three retired templates' copies still references: such
+   an agent is kept and the seed logs why). The `dev_pipeline`, `research_pipeline` and
+   `review_panel` templates move to `templates/legacy/`, which is not loaded; their
+   shipped workflows are removed with the agents. `make seed-reset` restores the factory
+   agents and the two new templates.
+3. **`plan_pipeline`** (template, works on a project): input `{task, feature}`.
+   Nodes, in order: `analyst` (asks the operator about every ambiguity with
+   `ask_operator`, then writes PRD.md; output `{prd_path, summary, open_questions}`) →
+   `scout` (reads the checkout against the PRD; saves build and test facts as project
+   notes; output `{gaps, constraints}`) → `architect` (writes ARCHITECTURE.md; output
+   `{architecture_path, summary}`) → approval `design_gate` (message: the summary and the
+   path; `on_reject` → `architect`, whose task then carries the rejection reason) →
+   `slicer` (Planner: writes TASKS.md; output `{tickets: [{id, title, files, tests}]}`) →
+   `waves` (Planner: writes WAVES.md; output `{waves: [{n, tickets: [id]}]}`) → approval
+   `plan_gate` (message: the waves and ticket titles; `on_reject` → `slicer`) →
+   `integrator` (commits the four documents with `open_merge_request`; output
+   `{merge_request_url}`) → end. Limits: `max_loop_visits` 3, `approval_timeout_seconds`
+   86400, `max_duration_seconds` 3600, `max_cost_usd` 5.
+4. **Plan output is checked.** The `waves` node's output schema requires every ticket of
+   `slicer` in exactly one wave and waves numbered from 1 without gaps; a finish that
+   breaks it is refused with the reason (5.6 output-schema repair). Two tickets of one
+   wave that list a common file are refused the same way (the engine checks it for a node
+   whose output names `waves` and `tickets`, D-074 parallel safety).
+5. **`wave_pipeline`** (template, works on a project, one run per ticket): input `{task}`
+   (the ticket, as intake gives it). Nodes: `builder` (tests first: writes the failing test,
+   then the code, runs the suite; output `{summary, files, tests_passed}`) → `code_review`
+   (Code Reviewer; output `{verdict: approved | changes_requested, comments}`;
+   `changes_requested` → `builder`, bounded by `max_loop_visits` 3) → `doc_audit` (Doc
+   Auditor: updates the plan documents to match the code and traces each requirement the
+   ticket covers to code and tests; output `{verdict: ok | gap, reason, trace}`) →
+   `integrator` (`open_merge_request` with code and documents) → end; `doc_audit` with
+   `gap` goes to approval `gap_found` (message: the reason; approve = open the MR anyway,
+   reject = stop the ticket: the run fails "rejected at gap_found" with the operator's
+   reason, 5.5). Wave 2 replaces this path with `escalate` and adds the draft MR and the
+   manual test (5.29).
+6. **The plan's documents live in the repository**: every agent writes under
+   `docs/plans/<feature>/` in the checkout, which flows from node to node (5.16); the
+   `integrator` commits them in one MR. A ticket run reads them from its own checkout of
+   the default branch, so wave 1 builds only after the plan MR is merged.
+
+7. **A rejection that loops back carries its reason (amends 5.5).** When an approval is
+   rejected and the node has `on_reject`, the engine writes `state.<approval node> =
+   {decision: "rejected", reason}` before the run returns to the target, so the target's
+   task can show the operator's reason (`{{with .state.design_gate}}`). A rejection
+   without `on_reject` fails the run as before.
+
+8. **Commits name their paths.** `open_merge_request` takes an optional `paths` list
+   (relative, validated, not `.git`); when present only those paths are staged and
+   committed, so the plan MR carries `docs/plans/<feature>/` and nothing a build left in
+   the checkout.
+9. **Ticket runs stay parallel-safe in the documents.** In a ticket run the Doc Auditor
+   writes its requirement trace to `docs/plans/<feature>/tickets/<ticket id>.md`, never
+   edits `TASKS.md` or `WAVES.md`, and edits `ARCHITECTURE.md` only when the design
+   changed, saying so in its output (a change against the approved design is a gap).
+   Ticket ids are `T<n>`; the wave comes from `WAVES.md`.
+10. **Retiring is conservative.** The seed deletes a copy of a retired template only if it
+   still has the shipped name and version 1, no run in flight, and no project intake or
+   enabled schedule points at it; an agent only if no live workflow other than such a
+   copy uses it and it has no visit in flight. Everything kept is logged with its id;
+   every deletion is a soft delete, logged with name, id and creation time.
+
+Edge cases: an operator who never answers the Analyst (the question parks and expires,
+5.24; the run fails "question unanswered"); a rejected design three times (the loop limit
+fails the run with its reason); a feature slug already used (the documents are
+overwritten in a new branch and the MR shows the diff); a project without a toolchain
+(the plan agents need none; the Builder's run fails at checkout as today).
+
+Tests: T5.28.1 the seed creates the eight agents with their models and tools and leaves
+the Chief bound; T5.28.2 the seed deletes the nine retired agents and keeps one still
+referenced by another workflow; T5.28.3 both templates load, validate and instantiate;
+T5.28.4 the waves node refuses a ticket in two waves and two tickets sharing a file;
+T5.28.5 eval 025 runs the plan pipeline with both approvals; T5.28.6 the wave pipeline's
+review loop is bounded and the gap path fails the run with the reason.
+
+Limitations: one feature at a time per project (5.29); the plan documents are only as
+good as the agents' prompts; nothing checks that `TASKS.md` slices are really end to end.
+
+### 5.29 Tickets, waves and their advance
+
+Purpose: a plan's tickets become tracker issues grouped in waves; each wave builds in
+parallel, ships behind the operator's smoke test, and releases the next wave on its own.
+Decisions D-071 to D-078. Built in waves 2 and 3 of `docs/briefs/delivery-process/WAVES.md`.
+
+Rules (summary; the full rules, edge cases and tests are written when wave 2 starts):
+
+1. Data: `plans`, `plan_tickets`, `plan_events`, `projects.waves_paused` (ARCHITECTURE.md
+   "New data"). One plan in `building` per project.
+2. `publish_tickets` (side-effecting, gated): one issue per ticket labelled `wave:<n>`,
+   with a hidden marker; looks the marker up before creating, so no retry duplicates.
+3. Releasing a wave adds the project's intake label to its issues (D-077); intake starts
+   one `wave_pipeline` run per issue, as it does today.
+4. `open_merge_request` gains `draft`; the ticket pipeline opens a draft MR, then the
+   `manual_test` approval names the branch (`on_reject` → `builder`), then the call that
+   marks the MR ready runs under that approval (D-073).
+5. `escalate` fails its own run with a reason, pauses the project's waves, records a plan
+   event and tells the operator on Telegram.
+6. The wave watcher: plan MR merged → release wave 1; every ticket of the current wave
+   merged and the default branch's pipeline passed on a commit at or after the last merge
+   (D-074) → one `ship_pipeline` run per wave; a failed ticket run → escalate. Nothing is
+   released while the project is paused.
+7. `ship_pipeline`: approval `smoke_test` → Integrator saves lessons (project notes and
+   the repository's `CLAUDE.md` through a small MR, D-075) and calls `advance_wave` →
+   on the last wave, approval `accept_feature` → end.
+8. Every transition is a plan event, shown on the project page and pushed over SSE.
+
 ## 6. HTTP API summary
 
 Errors: `{error: {code, message, details?}}`; validation failures are 422 with

@@ -12,7 +12,7 @@ engine, approvals, limits, traces, evals, channel, UI). See `docs/adr/0001-runti
 Status: every planned wave (1 to 11) is built and live on the public instance. Working end to end: agent configuration in the UI
 and API, materialised into OpenClaw (config entry, exec policy, workspace files);
 multi-agent workflows as graphs with conditions, feedback loops and typed state, built
-in the visual builder or loaded from the three shipped templates; agent turns executed by
+in the visual builder or loaded from the two shipped templates; agent turns executed by
 OpenClaw with `exec` in a Docker sandbox and the run directory handed forward from agent
 to agent; a project repository the platform clones for a run, with the sandbox image
 chosen by the repository's toolchain and a merge request at the end (see Projects); the
@@ -26,7 +26,7 @@ Telegram through OpenClaw's native channel, with the conversation mirrored into 
 platform and approvals from chat sessions in the inbox; cron and delay schedules;
 per-agent guardrails (cost cap, runs per hour, blocked tools, input patterns); agent
 memory with a retention policy, rendered into the agent's memory file; skills; and
-`make eval` with seventeen public cases, seven evaluators and a rubric evaluator in
+`make eval` with eighteen public cases, seven evaluators and a rubric evaluator in
 heuristic and model modes; issue intake, iteration on an open merge request, questions to
 the operator, run artifacts and parallel steps (fork and join). The walkthrough video and
 the evaluation reports are described under Demo and Evaluation. This file is kept truthful
@@ -104,7 +104,7 @@ ones that matter:
 | `make probe-openclaw` | A real OpenClaw turn with a sandboxed `exec`, the integration canary |
 | `make probe-approval` | Verifies the gateway's plugin approval calls the side-effect gate relies on |
 | `make probe-sandbox` | Verifies a per-agent sandbox image and network override on the running gateway, the mechanism project runs use |
-| `make seed` | Creates the nine demo agents the workflow templates name (Coder, Reviewer, Deployer, Researcher, Critic, Writer, Security Reviewer, Performance Reviewer, Maintainability Reviewer); idempotent |
+| `make seed` | Creates the eight factory agents the shipped templates name (Analyst, Scout, Architect, Planner, Builder, Code Reviewer, Doc Auditor, Integrator) and the Chief of Staff, and deletes the nine retired demo agents (Coder, Reviewer, Deployer, Researcher, Critic, Writer and the three panel reviewers) unless a workflow of yours still uses one; idempotent |
 | `make seed-reset` | `make seed`, then restores the shipped agents' prompts and allowlists and the template workflows to the shipped versions, keeping everything else |
 | `make eval` | Run the evaluation suite offline with the scripted provider against the running stack; `make eval-baseline` / `make eval-final` store the report |
 | `make lint` | `go vet`, `staticcheck`, `eslint`, `tsc` |
@@ -112,6 +112,36 @@ ones that matter:
 | `make logs` | Follow the api logs |
 | `make tunnel` | Expose the web port via a cloudflared quick tunnel for Telegram webhooks |
 | `make clean` | Stop everything and drop the database volume |
+
+## The delivery process (Plan, Build, Ship)
+
+Yuno runs a fixed delivery process against a project repository (DESIGN 5.28 and 5.29;
+the plan and its mapping are in `docs/briefs/delivery-process/`). Eight agents do the
+work: Analyst, Scout, Architect, Planner, Builder, Code Reviewer, Doc Auditor and
+Integrator; the Chief of Staff stays the one agent on Telegram.
+
+- **Plan** (`Plan pipeline`, once per feature, input `task` and a `feature` slug): the
+  Analyst asks you about anything ambiguous and writes `PRD.md`; the Scout reviews it
+  against the codebase and saves build and test facts as project notes; the Architect
+  writes `ARCHITECTURE.md` and you approve it or send it back with a reason; the Planner
+  writes `TASKS.md` (thin end-to-end slices) and `WAVES.md` (slices grouped so that no
+  two in a wave touch the same file, which the platform checks); you approve the plan;
+  the Integrator commits the four documents under `docs/plans/<feature>/` in one merge
+  request.
+- **Build** (`Wave pipeline`, one run per ticket): the Builder writes the failing test
+  first, then the code; the Code Reviewer (a different model) sends it back with comments
+  up to three times, after which the run stops with the reason; the Doc Auditor brings
+  the plan documents in line with the code and traces the ticket's requirements to code
+  and tests; if it finds an unmet requirement you decide whether the merge request opens
+  anyway; the Integrator opens the merge request with code and documents together.
+- **Ship**: wave 1 of the plan starts tickets by hand for now; issues per ticket, the
+  draft merge request before your manual test, escalation and waves that advance
+  themselves come in the next waves (`docs/briefs/delivery-process/WAVES.md`).
+
+The earlier templates (`dev_pipeline`, `research_pipeline`, `review_panel`) and their
+agents were retired with this change; their definitions are kept in `templates/legacy/`
+and are not loaded. The state submitted to the Yuno partner project is the tag
+`submitted-2026-10-19`.
 
 ## Agent files and skills
 
@@ -192,7 +222,7 @@ output. OpenClaw's built-ins run inside the agent's Docker sandbox.
 | `finish` | computational | postgres | 5 s | `{run_token, result}` validated against the node's output schema |
 | `deploy_release` | side-effecting, approval by default | deploy target | 30 s + approval wait | `{run_token, version, notes, paths[]}` from `runs/<run id>/` |
 | `gitlab_create_mr` | side-effecting, approval by default | GitLab (when configured) | 30 s + approval wait | `{run_token, title, description, paths[]}` |
-| `open_merge_request` | side-effecting, approval by default | the run's project on GitLab or GitHub | 120 s + approval wait | `{run_token, title, description}`; commits the run's checkout, pushes a branch and opens the request |
+| `open_merge_request` | side-effecting, approval by default | the run's project on GitLab or GitHub | 120 s + approval wait | `{run_token, title, description, paths?}`; commits the run's checkout (or only the `paths`, files or directories relative to its root), pushes a branch and opens the request |
 | `http_fetch` | read-only | allowlisted https hosts | 15 s | `{run_token, url}`; output wrapped as untrusted content |
 | `memory_save` | computational | postgres | 5 s | `{run_token, key, value, ttl_days?, scope?}`; `scope: "project"` saves a note shared by every agent of a run on the project |
 | `memory_recall` | read-only | postgres | 5 s | `{run_token, query, scope?}`; output wrapped as untrusted content |
@@ -222,9 +252,9 @@ approved`); edges are tried in order and the first true one is taken, so a feedb
 is just an edge back, bounded by `max_loop_visits`. Each agent node's task is a template over the
 run input and the state so far; the agent's `finish` result is validated against the
 node's output schema and becomes `state[<node>]`. The shipped templates live in
-`templates/` (`dev_pipeline`: Coder → Reviewer ⇄ feedback → human approval → Deployer;
-`research_pipeline`: Researcher → Critic ⇄ feedback → Writer; `review_panel`: Coder →
-three reviewers at once → a lead Reviewer ⇄ feedback → human approval → Deployer). To add one, drop a JSON
+`templates/` (`plan_pipeline` and `wave_pipeline`, the delivery process; the former
+`dev_pipeline`, `research_pipeline` and `review_panel` are kept as examples in
+`templates/legacy/`, which is not loaded). To add one, drop a JSON
 file there with `key`, `name`, `description` and `definition`, naming agents by
 `agent_name`; it loads after the next build and start (`make run`), and "From template" resolves the names to
 your agents.
@@ -238,7 +268,7 @@ Every approval but a question is also registered with the gateway so OpenClaw's 
 surfaces can answer it.
 
 An agent that is missing one fact can ask for it instead of guessing (DESIGN 5.24): the
-`ask_operator` tool (the shipped Coder and Researcher hold it) puts a question, with up to
+`ask_operator` tool (the shipped Analyst, Architect and Builder hold it) puts a question, with up to
 five suggested answers, into the inbox as an approval of kind Question and blocks the
 call for the same wait as a gated tool; an answer within the wait reaches the agent in the
 same turn. Past the wait the agent is told to save its progress and end its turn, the
@@ -274,9 +304,9 @@ parked, then waits for the answer like any parked step. After the join every bra
 files flow on, but a project checkout flows only from the branch the join names as its
 `checkout`, never as a mixture of two working trees. The run page shows a fork as one
 card with its branches side by side; `run_status` names the branches while they run. The
-`review_panel` template is the example: three reviewer agents (security, performance,
-maintainability) read the Coder's change at the same time and the Reviewer merges their
-verdicts.
+`templates/legacy/review_panel.json` is the example: three reviewer agents (security,
+performance, maintainability) read the Coder's change at the same time and the Reviewer
+merges their verdicts.
 
 Per-agent model settings: `thinking` is the reasoning control on OpenClaw (the agent's
 `thinkingDefault`), and `max_tokens` reaches OpenClaw as the agent's `params.maxTokens`.
@@ -301,7 +331,7 @@ accepted, whether the default branch exists and whether the token can push, with
 clone. Deleting a project removes it from the lists; its runs keep their history.
 
 Every run on a project names it. A workflow opts in with `project: true` on its
-definition (the builder's switch; the shipped Dev pipeline opts in), and the Run dialog
+definition (the builder's switch; the shipped plan and wave pipelines opt in), and the Run dialog
 then asks for the project; a quick run from an agent offers an optional project. The run
 keeps a snapshot of the project's settings, shown on the runs list and the run page with
 a link to the project. The engine clones the default branch at depth 1 into
@@ -327,13 +357,13 @@ probe-sandbox` verifies that mechanism on the running gateway.
 
 Sandbox network is off by default: the run still clones, and agents work with what the
 image provides. The project's network opt-in gives the sandboxes of its runs network
-access, and the task tells the Coder to install dependencies from the lockfile first
+access, and the task tells the Builder to install dependencies from the lockfile first
 (`npm ci`, `pnpm install --frozen-lockfile`, `go mod download`, `uv sync` or a `.venv`
 with pip) and to run the project's tests. Network on means anything injected into the
 repository can reach the internet from the sandbox and side effects inside the sandbox
 are not gated, so it is for trusted repositories only (`docs/threat-model.md`).
 
-At the end, the Deployer calls `open_merge_request` with a short title (a commit
+At the end, the Integrator calls `open_merge_request` with a short title (a commit
 subject, at most 72 characters) and a description. The tool is approval-gated like every
 side effect and idempotent by the run's key: it clones the default branch again into a
 private directory of the api (never running git inside the agent-writable checkout,
@@ -358,7 +388,7 @@ A project also carries what a run on it should know (DESIGN 5.18): an Instructio
 the operator writes on the project form (conventions, how to build and test, what to
 leave alone), rendered into every visit's task after the checkout lines, and project
 notes, facts any agent of a run on the project saves with `memory_save` and `scope:
-"project"` (the shipped Coder and Reviewer are told to save how the project is built
+"project"` (the shipped Scout and Builder are told to save how the project is built
 and tested), of which the ten newest are rendered into the task too and all are listed
 and deletable on the project page. Notes expire after 90 days, a project keeps at most
 100, and the two blocks together never exceed 12 KiB of the task.
@@ -386,8 +416,8 @@ Run dialog, the quick-run dialog, the schedule form and a run request name one o
 project's open requests (`merge_request_id`), and the Chief of Staff takes "fix the review
 comments on !4" (`merge_request` on `delegate_task`, a number or the request's link). The
 engine then clones that request's branch, the agents read its description, unresolved
-review threads and pipeline status with `read_merge_request` (the Coder and the Reviewer
-have it; the Chief too, for "what is !4 about?"), and the Deployer's `open_merge_request`
+review threads and pipeline status with `read_merge_request` (the Builder and the Code Reviewer
+have it; the Chief too, for "what is !4 about?"), and the Integrator's `open_merge_request`
 pushes the working tree onto the branch as a new commit, answering `replayed` and
 `updated`. One run at a time may update a request, the request must be open when the run
 is queued, and the push is refused when someone else pushed to the branch since the run
@@ -414,11 +444,9 @@ repository path (`yuno-playground`), so an install that configured its project i
 environment keeps working; after that the Projects tab is the truth and those values
 are not read again. An install that predates projects keeps its seeded agents and
 workflows as they were; `make seed-reset` restores the shipped agents' prompts and
-allowlists (the Deployer gets `open_merge_request`, the Chief of Staff `list_projects`,
-the Coder and the Reviewer the memory tools for project notes) and the template
-workflows' definitions (the Dev pipeline's opt-in) while keeping ids, bindings, memory
-and every other setting; since the reset keeps memory settings, enable memory on the
-Coder's and the Reviewer's agent pages once so they can use those tools.
+allowlists and the template workflows' definitions (the plan and wave pipelines) while
+keeping ids, bindings, memory and every other setting; it also deletes the shipped
+workflows of the retired templates.
 
 ## Talking to the platform: the Chief of Staff
 
@@ -428,7 +456,7 @@ can call the chat tools (DESIGN 5.15, 5.17, 5.22, 5.24): `list_agents`, `list_wo
 `list_projects` to know the roster and the repositories, `delegate_task` to start a run
 for one agent with a task or for a workflow with input, naming the project when the
 words or the workflow call for one ("implement a trie in Python on the playground
-project" runs the Dev pipeline on that project), `run_status` to read a run (with its
+project" runs the Wave pipeline on that project), `run_status` to read a run (with its
 merge request, its state and pipeline, how often it was retried, the question it waits
 on and the files it delivered), `read_merge_request` for "what is !4 about?",
 `answer_question` to pass the person's answer to a run that asked, and the memory
@@ -469,7 +497,7 @@ web/                React + Vite + TypeScript UI
 docker/             Dockerfiles (api, web, the OpenClaw sandbox images: default and per toolchain) and nginx config
 scripts/            smoke.sh, the gateway probes (turn, approval, deliver, sandbox, telegram), ensure-env.sh, mutation-check.sh
 templates/          the three workflow templates (dev, research, review panel), loaded at api start
-evals/              versioned eval cases (seventeen public, seven private) and reports
+evals/              versioned eval cases (eighteen public, seven private) and reports
 docs/briefs/        the briefs the build agents worked from, per wave
 docs/reviews/       independent review findings and dispositions, per wave
 data/openclaw/      OpenClaw state and agent workspaces (created by make run, git-ignored)
@@ -597,7 +625,7 @@ with those scripts); the UI asks for the API token, which the operator hands out
 ## Adding a workflow template
 
 Drop a JSON file in `templates/` with `key`, `name`, `description` and a `definition`
-(see `templates/dev_pipeline.json`): nodes of kind `start`, `agent`, `approval`, `fork`, `join`, `end` (`templates/review_panel.json` shows a fork and its join);
+(see `templates/legacy/dev_pipeline.json`): nodes of kind `start`, `agent`, `approval`, `fork`, `join`, `end` (`templates/legacy/review_panel.json` shows a fork and its join);
 agent nodes name their agent with `agent_name` and carry a `task` template over
 `{{.input.*}}` and `{{.state.<node>.*}}` plus an `output_schema`; edges in evaluation
 order with optional `when` conditions over the state; `limits`. Templates are copied into the api image, so it loads after the next build and start

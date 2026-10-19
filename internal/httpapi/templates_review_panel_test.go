@@ -19,7 +19,7 @@ import (
 // created under its real names.
 func reviewPanelDir(t *testing.T, sfx string, skip ...string) (dir, key string, agents map[string]string) {
 	t.Helper()
-	raw, err := os.ReadFile("../../templates/review_panel.json")
+	raw, err := os.ReadFile("../../templates/legacy/review_panel.json")
 	mustDo(t, err)
 	var doc map[string]any
 	mustDo(t, json.Unmarshal(raw, &doc))

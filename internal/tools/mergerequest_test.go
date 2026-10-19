@@ -373,3 +373,49 @@ func TestOpenMergeRequestRegisteredAlways(t *testing.T) {
 		t.Fatalf("risk = %s", tool.Risk)
 	}
 }
+
+// M3 of the wave 1 review: with paths only those are committed; bad paths are refused to
+// the model; the paths are part of the input the idempotency key hashes.
+func TestOpenMergeRequestPaths(t *testing.T) {
+	bare := projecttest.BareRepo(t, map[string]string{"README.md": "# demo\n"})
+	g, srv := newFakeGitLab(t)
+	gitlabOnBare(t, g, bare)
+	pc := project.Config{RepoURL: bare, Token: "glpat-not-a-real-token-00", DefaultBranch: "main", Provider: project.ProviderGitLab}
+	ws, checkout := checkoutFor(t, pc, "run-p")
+	must(t, os.MkdirAll(filepath.Join(checkout, "docs", "plans", "x"), 0o755))
+	must(t, os.WriteFile(filepath.Join(checkout, "docs", "plans", "x", "PRD.md"), []byte("prd\n"), 0o644))
+	must(t, os.WriteFile(filepath.Join(checkout, "stray.txt"), []byte("stray\n"), 0o644))
+	tool := forProject(pc, srv.URL+"/api/v4/projects/group%2Fdemo", "")
+	NewRegistry().Register(tool)
+
+	for _, bad := range []string{`["/etc/passwd"]`, `["../x"]`, `["."]`, `[".git/config"]`, `["docs/../.git"]`, `[]`, `["a b"]`} {
+		in := json.RawMessage(`{"run_token":"r","title":"T","description":"","paths":` + bad + `}`)
+		res, err := tool.Invoke(context.Background(), Call{RunID: "run-p", Workspace: ws, IdempotencyKey: strings.Repeat("a", 64), Input: in})
+		if err == nil && !res.IsError {
+			t.Errorf("paths %s were accepted", bad)
+		}
+	}
+	if len(g.mrs) != 0 || len(projecttest.Branches(t, bare)) != 1 {
+		t.Fatal("a refused call opened a request or pushed")
+	}
+	res, err := tool.Invoke(context.Background(), Call{RunID: "run-p", Workspace: ws, IdempotencyKey: strings.Repeat("b", 64),
+		Input: json.RawMessage(`{"run_token":"r","title":"Plan","description":"d","paths":["docs/plans/x/","docs/plans/x/PRD.md"]}`)})
+	if err != nil || res.IsError {
+		t.Fatalf("with paths: %+v %v", res, err)
+	}
+	var out mergeRequestOutput
+	must(t, json.Unmarshal(res.Output, &out))
+	if projecttest.FileAt(t, bare, out.Branch, "docs/plans/x/PRD.md") != "prd\n" || projecttest.FileAt(t, bare, out.Branch, "stray.txt") != "" {
+		t.Fatal("the branch does not hold exactly the named paths")
+	}
+	a, err := IdempotencyKey("r", "v", OpenMergeRequestName, json.RawMessage(`{"title":"T","paths":["a"]}`))
+	must(t, err)
+	b, err := IdempotencyKey("r", "v", OpenMergeRequestName, json.RawMessage(`{"title":"T","paths":["b"]}`))
+	must(t, err)
+	if a == b {
+		t.Fatal("paths are not part of the idempotency key")
+	}
+	if !strings.Contains(tool.Description, "paths") {
+		t.Fatal("the description does not mention paths")
+	}
+}

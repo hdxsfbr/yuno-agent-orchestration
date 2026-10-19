@@ -937,7 +937,7 @@ func TestRunStatusBranches(t *testing.T) {
 
 	// The run works on the shipped Review panel: fork "panel", heads security, performance
 	// and maintainability, join "merge", then the lead.
-	file, err := os.ReadFile("../../templates/review_panel.json")
+	file, err := os.ReadFile("../../templates/legacy/review_panel.json")
 	must(t, err)
 	var tpl struct {
 		Definition json.RawMessage `json:"definition"`
