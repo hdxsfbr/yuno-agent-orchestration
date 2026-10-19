@@ -457,10 +457,12 @@ builder (`web/src/pages/WorkflowBuilder*`), run page, `templates/`.
 11. Done 2026-10-19: wave 11 built (the engine, store, validation and API by the
    coordinator; the frontend and the template with its agents by two Sonnet 5.5 agents),
    reviewed (`docs/reviews/wave11-review.md`: two highs around parked branches at a
-   claim, fixed), fixed and merged to `main` as `b981048`. Next: the deploy's live
-   verification (`scripts/deploy/verify-wave11.sh`: a Review panel run on the playground
-   with three reviewers at once), then the demo recording with projects, still pending.
-   Every planned wave is now built; what remains is in the limitations lists of 5.22 to
-   5.26.
+   claim, fixed), fixed and merged to `main` as `b981048`; deployed as `c0b0625` and
+   verified live on 2026-10-19 03:20 to 03:24 UTC (`scripts/deploy/verify-wave11.sh`: a
+   Review panel run on the playground ran its three reviewers at once, the lead approved,
+   the Deployer opened merge request !8; `docs/test-results.md`). Every planned wave is
+   now built and live; what remains is in the limitations lists of 5.22 to 5.26, the demo
+   recording with projects, and the Telegram webhook the local development stack keeps
+   deleting (docs/test-results.md, wave 11).
    The demo recording with projects is still pending, and the Telegram relay of an
    answer through the Chief has not been tried live (the unit tests cover it).

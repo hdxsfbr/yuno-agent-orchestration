@@ -118,12 +118,18 @@ Chief needs no change: `run_status` names a run's branches from the same rows.
 
 ## Deploying from GitLab CI
 
-`.gitlab-ci.yml` has two jobs. `test` runs `make run`, `make test`, `make lint` and
-`make smoke` on a runner tagged `yuno-ci`; `deploy` runs `make run-public` and
-`make smoke` on a runner tagged `yuno-prod`, which is the droplet itself; it fetches the
-commit with the job token, so the host still holds no GitLab credential. Both need the
-shell executor on a host with Docker: the tool containers bind-mount the checkout, which a
-docker-in-docker executor cannot provide. The deploy job is manual on `main` (a play button
+`.gitlab-ci.yml` has two jobs. `test` starts postgres alone (`make ci-up`) and runs the Go
+and web suites and lint against it (`make ci-test`, `make ci-lint`: the same commands as
+`make test` and `make lint`, through a Go tool container that does not depend on the
+gateway), on a runner tagged `yuno-ci`; `make ci-clean` then removes the containers and
+the data volumes and keeps the Go module and build caches, so the next job compiles only
+what changed. Nothing of OpenClaw, the sandbox images or the smoke test runs in it (until
+2026-10-19 it brought up the whole stack and wiped the caches after every job, and a green
+run took 12 to 13 minutes). `deploy` runs `make run-public` and `make smoke` on a runner
+tagged `yuno-prod`, which is the droplet itself; it fetches the commit with the job token,
+so the host still holds no GitLab credential. Both need the shell executor on a host with
+Docker: the tool containers bind-mount the checkout, which a docker-in-docker executor
+cannot provide. The deploy job is manual on `main` (a play button
 on the pipeline once `test` is green); set the project variable `DEPLOY_AUTO` to `true` to
 deploy every green `main` pipeline automatically. Pipelines are created only while the
 project variable `YUNO_CI` is `true`, so nothing shows as pending before runners exist.
@@ -144,9 +150,9 @@ by hand. Set `YUNO_CI_TEST` to `true` once the test runner is registered and `te
 a prerequisite of `deploy`.
 
 The runner service runs as `yuno`, so the deploy job can reach the checkout, its `.env`
-and the docker group. The `test` runner needs another Docker host with at least 8 GB that
-does not run the production stack (same ports, same compose project name); a second
-droplet or a workstation with the same installer and tag `yuno-ci` works.
+and the docker group. The `test` runner needs another Docker host that does not run the
+production stack (same compose project name, so the same volume names); a second droplet
+or a workstation with the same installer and tag `yuno-ci` works.
 
 ## Current deployment
 
@@ -154,7 +160,7 @@ droplet or a workstation with the same installer and tag `yuno-ci` works.
 |---|---|
 | Host | `yuno-prod`, `s-4vcpu-8gb` in `sfo2` (sfo3 did not offer that size), tag `yuno` |
 | URL | <https://143.110.128.97.sslip.io> (Let's Encrypt certificate through Caddy) |
-| Deployed | wave 10 (`2aad95c`, then the docs commit `6199a40`; questions to the operator, run artifacts) on 2026-10-18 by the pipeline on `main`, the question paths (answered within the wait, parked and resumed) and the artifacts verified live on 2026-10-19 00:10 to 00:26 UTC (docs/test-results.md); before it wave 9 (`6db1207`, iterate on an open merge request, issue intake), verified live; wave 8 (`0ff8401`), wave 7 (`f08aac5`), wave 5 (`12e6478`) by pipeline 57708 and wave 6 (`b953f2b`). First deploy: `make deploy HOST=143.110.128.97` at `4488049` |
+| Deployed | wave 11 (`c0b0625`: parallel steps, after the fix pass `b981048` and two test-only commits) on 2026-10-19 03:19 UTC by the pipeline on `main`; the Review panel verified live at 03:20 to 03:24 UTC (three reviewers at once, merge request !8; docs/test-results.md). The deploy job is red on its Telegram webhook smoke check while the coordinator's local stack owns the bot (docs/test-results.md). Before it wave 10 (`2aad95c`, then the docs commit `6199a40`; questions to the operator, run artifacts) on 2026-10-18 by the pipeline on `main`, the question paths (answered within the wait, parked and resumed) and the artifacts verified live on 2026-10-19 00:10 to 00:26 UTC (docs/test-results.md); before it wave 9 (`6db1207`, iterate on an open merge request, issue intake), verified live; wave 8 (`0ff8401`), wave 7 (`f08aac5`), wave 5 (`12e6478`) by pipeline 57708 and wave 6 (`b953f2b`). First deploy: `make deploy HOST=143.110.128.97` at `4488049` |
 | CI | runner 310 (`yuno-prod`) on the public droplet deploys; runner 311 (`yuno-ci`) on `yuno-ci` (`s-4vcpu-8gb`, `sfo2`, 157.245.188.91) runs the test job; project variables `YUNO_CI`, `YUNO_CI_TEST`, `DOMAIN`. Every push to `main` runs the tests and, with `DEPLOY_AUTO=true` (set), deploys itself when they pass; unset it to get a manual button instead |
 | Sign-in | the `API_TOKEN` in the operator's `.env.prod` (never in the repository) |
 | Telegram | webhook registered at `https://143.110.128.97.sslip.io/telegram-webhook`. Bound to the Chief of Staff since wave 5 (rebound from Coder through the API on 2026-10-16). Verified live on 2026-10-17: the Chief listed the roster, delegated a task to Coder (run succeeded in 25 s, $0.06), relayed the platform's report one second after the run ended, and answered a follow-up with `run_status`. The bot has one webhook, so this instance owns the bot while it runs; an unbound channel drops messages |

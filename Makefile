@@ -3,12 +3,14 @@
 
 COMPOSE      := docker compose
 GO           := $(COMPOSE) --profile tools run --rm go
+GO_CI        := $(COMPOSE) --profile tools run --rm go-ci
 NODE         := $(COMPOSE) --profile tools run --rm node
 WEB_PORT     ?= 8080
 
 .DEFAULT_GOAL := help
 
 .PHONY: help env run smoke probe-openclaw probe-deliver probe-sandbox stop down clean logs ps test test-go test-web web-deps \
+	ci-up ci-test ci-lint ci-clean \
         test-integration lint tidy install migrate seed seed-reset eval eval-baseline eval-final \
         tunnel build openclaw-shell openclaw-logs openclaw-validate prune-sandboxes
 
@@ -109,6 +111,26 @@ lint: web-deps ## go vet, staticcheck, eslint, tsc
 	$(GO) go vet ./...
 	$(GO) sh -c 'go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...'
 	$(NODE) pnpm lint
+
+# The CI test job (.gitlab-ci.yml): the suites and lint against postgres alone. The unit
+# tests use a fake gateway, so nothing of OpenClaw, the sandbox images or the smoke test
+# runs there (the deploy job runs `make smoke` on the droplet). The Go module and build
+# caches are named volumes that ci-clean keeps between jobs.
+ci-up: env ## CI: start postgres only and wait for it
+	$(COMPOSE) up -d --wait postgres
+
+ci-test: env ## CI: what `make test` runs, against postgres alone
+	$(GO_CI) go test ./... -count=1
+	$(MAKE) test-web
+
+ci-lint: web-deps ## CI: what `make lint` runs, against postgres alone
+	$(GO_CI) go vet ./...
+	$(GO_CI) sh -c 'go run honnef.co/go/tools/cmd/staticcheck@2026.2.2 ./...'
+	$(NODE) pnpm lint
+
+ci-clean: ## CI: remove the containers and the data volumes; keep the Go module and build caches
+	$(COMPOSE) --profile tools down --remove-orphans
+	@docker volume rm -f yuno_pgdata yuno_artifacts yuno_releases >/dev/null 2>&1 || true
 
 migrate: ## Apply database migrations
 	$(COMPOSE) run --rm api migrate

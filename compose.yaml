@@ -293,6 +293,31 @@ services:
       openclaw:
         condition: service_healthy
 
+  # The Go tool container of CI's test job (Makefile ci-test, ci-lint): the same image,
+  # caches and environment as `go`, on the project network with postgres as its only
+  # dependency. The unit tests talk to a fake gateway and the integration tests
+  # (test-integration) are not run in CI, so the gateway, which `go` shares its network
+  # namespace with, is not started there.
+  go-ci:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: docker/go.Dockerfile
+    image: yuno-go-tools:1.26
+    working_dir: /src
+    environment:
+      <<: *api-env
+      DATABASE_URL: postgres://yuno:yuno@postgres:5432/yuno_test?sslmode=disable
+      GOFLAGS: -buildvcs=false
+      CGO_ENABLED: "0"
+    volumes:
+      - .:/src
+      - gomod:/go/pkg/mod
+      - gocache:/root/.cache/go-build
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   node:
     profiles: ["tools"]
     image: node:24-slim

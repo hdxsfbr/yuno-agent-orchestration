@@ -1,8 +1,12 @@
 # GitLab CI for the Yuno stack (docs/deploy.md).
 #
-# test    runs the commands docs/test-results.md records, on a shell runner tagged yuno-ci
-#         that has Docker with compose v2. The tool containers bind-mount the checkout, so a
-#         docker-in-docker executor cannot run them; the runner must be a host with Docker.
+# test    runs the Go and web suites and lint (what docs/test-results.md records) against
+#         postgres alone, on a shell runner tagged yuno-ci that has Docker with compose v2:
+#         the unit tests use a fake gateway, so the OpenClaw gateway, the sandbox images and
+#         the smoke test are not part of it (deploy runs `make smoke` on the droplet). The
+#         Go module and build caches are named volumes kept between jobs. The tool
+#         containers bind-mount the checkout, so a docker-in-docker executor cannot run
+#         them; the runner must be a host with Docker.
 # deploy  updates the public host from the shell runner installed on it (tag yuno-prod,
 #         scripts/deploy/install-runner.sh): by hand from the pipeline page once test is
 #         green, or automatically on main when the project variable DEPLOY_AUTO is "true".
@@ -33,17 +37,14 @@ test:
     GIT_CLEAN_FLAGS: -ffdx -e web/.pnpm-store -e web/node_modules
   script:
     # The example env: no provider key (the scripted model serves the tests), Telegram off.
-    # The web port binds to loopback so the CI host never exposes the test stack.
     - cp .env.example .env
-    - sed -i 's/^WEB_BIND=.*/WEB_BIND=127.0.0.1/' .env
-    - make run
-    - make test
-    - make lint
-    - make smoke
+    - make ci-up
+    - make ci-test
+    - make ci-lint
   after_script:
-    # Full clean: volumes and the gateway state, which contains root-owned sandbox
-    # directories that would otherwise break the next job's checkout.
-    - make clean || true
+    # The containers and the data volumes go; the Go module and build caches stay, so the
+    # next job compiles only what changed.
+    - make ci-clean || true
 
 deploy:
   stage: deploy
