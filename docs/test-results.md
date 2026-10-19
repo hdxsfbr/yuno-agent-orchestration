@@ -1,3 +1,15 @@
+# Test results, 2026-10-19 (delivery process wave 4 and the Chief: revision, changes requested, lessons, approvals from Telegram)
+
+Run on the development machine from `main` (commit `06912d1`): the CI job's own targets
+(`make ci-up`, `make ci-test`, `make ci-lint`) in an isolated compose project.
+
+| Command | Result |
+|---|---|
+| `make ci-test` (Go suite and `pnpm test`) | every Go package ok (new: plan revision with issue update, close and reopen, ship attempts per wave, the revise check at trigger, changes requested, the lessons merge request, the Chief's `list_approvals`, `decide_approval` with its per-approval code, `add_project` with namespace-bound token reuse, shipped agents following their shipped version); 1140 web tests passed |
+| `make ci-lint` (go vet, staticcheck 2026.2.2, gofmt, eslint, `tsc --noEmit`) | clean |
+| `make eval` (public split, local stack) | 21 of 21 on one run, including 028 (two waves advancing with the pause) |
+| review | one Opus reviewer: two high, six medium, seven low; fourteen fixed, one disclosed (L1, the Integrator's `write`/`edit` apply in every run) (`docs/reviews/factory-wave4-review.md`) |
+
 # Test results, 2026-10-19 (delivery process wave 3: waves that advance themselves; DESIGN 5.29 rules 10 to 15, 17)
 
 Run on the development machine from `main` (commits `41c61e3` and `5283f50`): the CI job's own

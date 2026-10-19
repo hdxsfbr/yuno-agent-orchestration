@@ -26,7 +26,7 @@ Telegram through OpenClaw's native channel, with the conversation mirrored into 
 platform and approvals from chat sessions in the inbox; cron and delay schedules;
 per-agent guardrails (cost cap, runs per hour, blocked tools, input patterns); agent
 memory with a retention policy, rendered into the agent's memory file; skills; and
-`make eval` with twenty public cases, seven evaluators and a rubric evaluator in
+`make eval` with twenty-one public cases, seven evaluators and a rubric evaluator in
 heuristic and model modes; issue intake, iteration on an open merge request, questions to
 the operator, run artifacts and parallel steps (fork and join). The walkthrough video and
 the evaluation reports are described under Demo and Evaluation. This file is kept truthful
@@ -527,7 +527,7 @@ web/                React + Vite + TypeScript UI
 docker/             Dockerfiles (api, web, the OpenClaw sandbox images: default and per toolchain) and nginx config
 scripts/            smoke.sh, the gateway probes (turn, approval, deliver, sandbox, telegram), ensure-env.sh, mutation-check.sh
 templates/          the three workflow templates (dev, research, review panel), loaded at api start
-evals/              versioned eval cases (twenty public, seven private) and reports
+evals/              versioned eval cases (twenty-one public, seven private) and reports
 docs/briefs/        the briefs the build agents worked from, per wave
 docs/reviews/       independent review findings and dispositions, per wave
 data/openclaw/      OpenClaw state and agent workspaces (created by make run, git-ignored)
@@ -611,11 +611,11 @@ guardrail patterns do not reach the sandbox.
 
 ## Evaluation
 
-`make eval` runs the public split (20 cases) offline against the running stack with the
+`make eval` runs the public split (21 cases) offline against the running stack with the
 deterministic scripted model, seven evaluators (`termination`, `trace_integrity`,
 `expectation`, `approval_gate`, `idempotency`, `schema`, `allowlist`) and the rubric in
 heuristic mode, and writes `evals/reports/<timestamp>.md`. `make eval-baseline` stores
-the report as `evals/reports/baseline.md`; `make eval-final` runs every split (27 cases;
+the report as `evals/reports/baseline.md`; `make eval-final` runs every split (28 cases;
 the 7 private ones need the network, a configured GitLab or a human) and stores
 `evals/reports/final.md`; `EVAL_PROVIDER=anthropic` grades the rubric with a real model
 through the proxy. Cases live in `evals/cases/v1/` and are described in `evals/README.md`.
