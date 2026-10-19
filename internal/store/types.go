@@ -526,6 +526,8 @@ type MergeRequest struct {
 	CreatedAt         time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt         time.Time  `db:"updated_at" json:"updated_at"`
 	ClosedAt          *time.Time `db:"closed_at" json:"closed_at,omitempty"`
+	// Draft is true while the request is a draft (DESIGN 5.29 rule 4).
+	Draft bool `db:"draft" json:"draft"`
 }
 
 // Label is how the provider names this request in the texts the platform writes (every

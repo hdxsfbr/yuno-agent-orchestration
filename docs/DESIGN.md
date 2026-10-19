@@ -3913,30 +3913,153 @@ good as the agents' prompts; nothing checks that `TASKS.md` slices are really en
 ### 5.29 Tickets, waves and their advance
 
 Purpose: a plan's tickets become tracker issues grouped in waves; each wave builds in
-parallel, ships behind the operator's smoke test, and releases the next wave on its own.
-Decisions D-071 to D-078. Built in waves 2 and 3 of `docs/briefs/delivery-process/WAVES.md`.
+parallel, ships behind the operator's smoke test, and releases the next wave by itself.
+Decisions D-071 to D-078 (Andre, 2026-10-19). Built in waves 2 (rules 1 to 9) and 3
+(rules 10 to 16) of `docs/briefs/delivery-process/WAVES.md`.
 
-Rules (summary; the full rules, edge cases and tests are written when wave 2 starts):
+Inputs: the plan run's state (`slicer.tickets`, `waves.waves`, the input `feature`); the
+project and its tracker (GitLab or GitHub, 5.16, 5.23); merge request records (5.20);
+the project's intake settings (5.23); the injected clock.
 
-1. Data: `plans`, `plan_tickets`, `plan_events`, `projects.waves_paused` (ARCHITECTURE.md
-   "New data"). One plan in `building` per project.
-2. `publish_tickets` (side-effecting, gated): one issue per ticket labelled `wave:<n>`,
-   with a hidden marker; looks the marker up before creating, so no retry duplicates.
-3. Releasing a wave adds the project's intake label to its issues (D-077); intake starts
-   one `wave_pipeline` run per issue, as it does today.
-4. `open_merge_request` gains `draft`; the ticket pipeline opens a draft MR, then the
-   `manual_test` approval names the branch (`on_reject` → `builder`), then the call that
-   marks the MR ready runs under that approval (D-073).
-5. `escalate` fails its own run with a reason, pauses the project's waves, records a plan
-   event and tells the operator on Telegram.
-6. The wave watcher: plan MR merged → release wave 1; every ticket of the current wave
-   merged and the default branch's pipeline passed on a commit at or after the last merge
-   (D-074) → one `ship_pipeline` run per wave; a failed ticket run → escalate. Nothing is
-   released while the project is paused.
-7. `ship_pipeline`: approval `smoke_test` → Integrator saves lessons (project notes and
-   the repository's `CLAUDE.md` through a small MR, D-075) and calls `advance_wave` →
-   on the last wave, approval `accept_feature` → end.
-8. Every transition is a plan event, shown on the project page and pushed over SSE.
+Units: a "plan" is one feature's row; a "plan ticket" is one ticket of it with its wave;
+"released" means the ticket's issue carries the project's intake label; "the current
+wave" is the lowest wave with a ticket not `closed`; a "plan event" is one recorded
+transition; times UTC.
+
+Rules:
+
+1. **Data.** `plans(id, project_id, feature, plan_run_id, plan_mr_id NULL, status
+   [publishing | waiting_plan_merge | building | shipping | accepting | done | cancelled],
+   current_wave, created_at, updated_at)`, `(project_id, feature)` unique among open plans (a finished or cancelled plan frees the name; `POST /api/plans/{id}/cancel {reason}` cancels an open one);
+   `plan_tickets(plan_id, ticket_id, wave, title, issue_number NULL, issue_url,
+   run_id NULL, merge_request_id NULL, status [pending | released | building | in_review
+   | merged | failed | closed], updated_at)`, primary key `(plan_id, ticket_id)`;
+   `plan_events(id, plan_id, at, kind, wave NULL, ticket_id NULL, detail jsonb, notified_at NULL)`;
+   `projects.waves_paused BOOLEAN NOT NULL DEFAULT false`, `projects.waves_paused_reason
+   TEXT`. A project has at most one plan whose status is not `done` or `cancelled`
+   (partial unique index); a second plan is refused at publish with the open plan named.
+2. **`publish_tickets`** (side-effecting, approval-gated, Integrator only, project runs
+   only). Input: `{run_token}`; the tool reads the plan from the calling run's state, so
+   the model cannot alter tickets between approval and effect. It creates the plan row,
+   then for each ticket in wave order an issue titled `[<feature> T<n>] <title>`, labelled
+   `wave:<n>` and `feature:<feature>`, body: the ticket's slice, files and acceptance
+   tests, the line `Feature: <feature>` (5.28 rule 5 reads it), links to the plan
+   documents on the plan MR's branch, and a last line `<!-- yuno-ticket:<plan id>:<ticket
+   id> -->`. Before creating, it looks the marker up (`FindByMarker`, the newest 100
+   issues with label `feature:<feature>`); a found issue is reused, so a retried visit
+   creates no duplicates. It records each issue on its plan ticket (status `pending`) and
+   a plan event `published`. No issue carries the intake label yet (D-077). The
+   approval message lists the count per wave and the labels. Caps: 50 tickets, 10 waves.
+3. **Issue creation on both providers.** `IssueProvider.Create(title, body, labels)` and
+   `FindByMarker(label, marker)`: GitLab `POST /projects/:id/issues` and `GET
+   /projects/:id/issues?labels=&search=` (body search, then exact marker match);
+   GitHub `POST /repos/:o/:r/issues` and `GET /repos/:o/:r/issues?labels=&state=all`
+   with the marker matched in the body. Labels missing on the project are created first
+   (as intake does, 5.23). Errors follow 5.21's error text rules (no token in messages).
+4. **Draft merge request (D-073).** `open_merge_request` takes `draft` (default false).
+   Creating with `draft: true` opens it as a draft (GitLab: title prefixed `Draft: `;
+   GitHub: `draft: true`). A later call in the same run with `draft: false` pushes the
+   tree and marks it ready (GitLab: the title without the prefix; GitHub: the GraphQL
+   `markPullRequestReadyForReview` mutation). A later call may also replace the title and
+   description. The record gains `draft BOOLEAN`.
+5. **The ticket pipeline with a manual test.** `wave_pipeline` becomes: builder ⇄
+   code_review → `integrator_draft` (`open_merge_request` draft, output `{merge_request_url,
+   branch}`) → approval `manual_test` (message: pull the branch, run the CI tasks;
+   `on_reject` → builder, whose task shows the operator's notes as "bugs found") →
+   doc_audit → `integrator_ready` (`open_merge_request` with `draft: false`) → end. The
+   `integrator_ready` call runs without its own tool approval when the run's
+   `manual_test` approval was granted and the call only updates the run's existing MR
+   (a per-node policy `auto_after: manual_test`, validated at save: the named node must
+   be an approval node that precedes it); every other call stays gated.
+6. **`escalate`** (computational, not gated, every factory agent in a project run):
+   input `{reason, kind: prd_gap | design_wrong | loop_limit | other}`. The engine ends
+   the calling run `failed` with `escalated (<kind>): <reason>` as soon as the call is
+   recorded (the visit is aborted; no `finish` needed); when the run belongs to a plan
+   ticket it sets the ticket `failed`, pauses the project's waves with the reason, and
+   writes a plan event `escalated`. `doc_audit`'s `gap` path is replaced by the agent
+   calling `escalate`.
+7. **Failed ticket runs escalate too.** A plan ticket's run that ends `failed`,
+   `timed_out` or `cancelled` for any other reason (the loop limit, a rejection) marks the
+   ticket `failed`, pauses the waves and records `escalated` with the run's reason. The
+   intake closer still labels the issue `:failed` as today.
+8. **Telling the operator.** Plan events of kind `escalated`, `smoke_test_waiting`,
+   `accept_waiting`, `wave_done` and `feature_done` are delivered to the Chief of Staff's
+   Telegram conversation as `[platform]` messages (like budget alerts, 5.19), once each;
+   they also appear on the project page.
+9. **The project page.** A Plans section lists the open plan (feature, status, current
+   wave, paused flag with its reason) with its tickets (wave, title, issue link, run link,
+   MR link, status) and its events, newest first, live over SSE. Pause and resume are
+   `POST /api/projects/{id}/waves/pause {reason}` and `/resume`; both write plan events.
+10. **Ticket state follows the platform.** Intake's take links the run to the ticket by
+    the issue number (status `building`); an MR record of that run sets
+    `merge_request_id` (`in_review`); the MR sync's `merged` sets `merged`; `advance_wave`
+    sets `closed`.
+11. **Main is green (D-074).** `RequestProvider.DefaultBranchStatus` returns the newest
+    pipeline (GitLab) or the combined check state (GitHub) on the default branch with its
+    commit sha and time. A wave is shippable when every ticket of it is `merged` and the
+    default branch status is `passed` for a pipeline created at or after the newest merge.
+12. **The wave watcher** (a loop every `WAVE_WATCH_INTERVAL`, default 60 s, one plan per
+    project): `waiting_plan_merge` and the plan MR merged → release wave 1; `building`,
+    the current wave shippable and the project not paused → start one `ship_pipeline`
+    run for the wave (unique per plan and wave, `trigger_ref plan:<id>:wave:<n>`),
+    status `shipping`, event `smoke_test_waiting`. Releasing a wave adds the project's
+    intake label to each of its tickets' issues and sets them `released` (event
+    `wave_released`). Nothing is released or started while paused.
+13. **`ship_pipeline`** (template; trigger only by the watcher): approval `smoke_test`
+    (message: the wave, its merged MRs, main's pipeline) → `integrator` (lessons: project
+    notes, and a small MR appending them to the repository's `CLAUDE.md`, D-075; then
+    `advance_wave`) → when the result says `last`, approval `accept_feature` (message:
+    check the live app against `PRD.md`) → end. A rejected smoke test pauses the waves
+    with the operator's reason.
+14. **`advance_wave`** (side-effecting, gated by the smoke-test approval through
+    `auto_after: smoke_test`): closes the wave's issues still open, sets its tickets
+    `closed`, records `wave_done`, then releases the next wave (rule 12) or returns
+    `{last: true}`; refuses while paused; idempotent per plan and wave (a second call
+    returns the first result).
+15. **Done.** Approving `accept_feature` sets the plan `done` and records `feature_done`;
+    rejecting it pauses with the reason (the operator revises the plan, D-076).
+16. **Revising a plan** (wave 4): `plan_pipeline` with input `revise_plan` amends the
+    documents and `publish_tickets` adds or updates issues by marker; the plan resumes at
+    its current wave.
+
+Wave 2 review amendments (2026-10-19): the slicer outputs `slice` and `tests`, which the
+issue body carries; a retried ticket run moves its ticket back to `building` (or
+`in_review`) and records `retried`; escalation commits the ticket, pause and event in one
+transaction after the run itself has ended; plan events carry `notified_at` and a sweep
+resends unsent notices; `POST /api/plans/{id}/cancel` cancels a plan (a feature slug is
+unique among open plans only); `auto_after` admits a ready call only when it commits
+paths under `docs/`; issue links point at the default branch; the marker is the body's
+last line.
+
+Edge cases: an issue closed or relabelled by hand (a released ticket whose issue is
+closed without a merged MR is `failed` and escalates); a ticket MR closed unmerged
+(`failed`, escalates); main red after a wave's merges (the watcher waits; nothing
+escalates, the project page shows main's status); a pause during a running wave (runs in
+flight finish; only the next release and the ship run wait); two waves' worth of tickets
+labelled early by a person with tracker rights (intake takes them, the watcher still
+ships wave by wave; the threat model names it); an operator who rejects the manual test
+three times (the loop limit fails the run, rule 7).
+
+Failure handling: a tracker call that fails in `publish_tickets` or `advance_wave`
+returns a model error naming the ticket, the partial progress is recorded, and the retry
+reuses issues by marker; the watcher logs and retries each pass, never escalating a
+tracker outage as a ticket failure.
+
+Tests: T5.29.1 data constraints (one open plan per project); T5.29.2 `publish_tickets`
+creates issues with labels, body and marker on a fake GitLab and a fake GitHub, and a
+retried visit reuses them; T5.29.3 draft create and ready transition on both; T5.29.4
+`auto_after` lets only the ready call through after the approval and is refused at save
+when misplaced; T5.29.5 `escalate` fails the run with the reason, pauses, records,
+notifies; T5.29.6 a failed ticket run escalates; T5.29.7 pause and resume API and
+events; T5.29.8 default-branch status on both; T5.29.9 the watcher releases wave 1 after
+the plan MR merges, ships a wave only when merged and green, holds while paused; T5.29.10
+`advance_wave` closes, releases the next wave and reports `last`; evals 026 (loop limit
+escalation), 027 (PRD gap escalation), 028 (two waves auto-advance with the pause flag).
+
+Limitations: one open plan per project; main's status is read, not run, so a project
+without a default-branch pipeline never ships automatically (the operator can approve
+the smoke test after starting `ship_pipeline` by hand); issue bodies are written by the
+platform but anyone with tracker rights can edit them before intake reads them.
 
 ## 6. HTTP API summary
 

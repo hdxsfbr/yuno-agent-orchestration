@@ -450,6 +450,10 @@ export type Project = ProjectSettings & {
   spend?: ProjectSpend;
   /** The issue intake settings and what its last poll did (DESIGN 5.23). */
   intake?: ProjectIntake;
+  /** The project's waves are paused: nothing is released and no ship run starts (DESIGN 5.29). */
+  waves_paused?: boolean;
+  /** Why they are paused; absent when not paused. */
+  waves_paused_reason?: string;
 };
 
 /** What the form sends for the issue intake; absent on an update keeps the stored settings. */
@@ -515,6 +519,49 @@ export type ProjectFact = {
   expires_at?: string | null;
 };
 
+export type PlanStatus = "publishing" | "waiting_plan_merge" | "building" | "shipping" | "accepting" | "done" | "cancelled";
+export type PlanTicketStatus = "pending" | "released" | "building" | "in_review" | "merged" | "failed" | "closed";
+
+/** One feature's plan; a project has at most one that is not done or cancelled (DESIGN 5.29). */
+export type Plan = {
+  id: string;
+  project_id: string;
+  feature: string;
+  plan_run_id: string;
+  plan_mr_id?: string;
+  status: PlanStatus;
+  current_wave: number;
+  created_at: string;
+  updated_at: string;
+};
+
+/** One ticket of a plan: its wave, tracker issue, run and merge request. */
+export type PlanTicket = {
+  plan_id: string;
+  ticket_id: string;
+  wave: number;
+  title: string;
+  issue_number?: number;
+  issue_url: string;
+  run_id?: string;
+  merge_request_id?: string;
+  status: PlanTicketStatus;
+  updated_at: string;
+};
+
+/** One recorded transition of a plan; `detail` holds the kind's own fields, such as `reason`. */
+export type PlanEvent = {
+  id: string;
+  plan_id: string;
+  at: string;
+  kind: string;
+  wave?: number;
+  ticket_id?: string;
+  detail: Record<string, unknown> | null;
+};
+
+export type PlanDetail = { plan: Plan; tickets: PlanTicket[]; events: PlanEvent[] };
+
 export type MergeRequestState = "open" | "merged" | "closed";
 export type CIStatus = "none" | "pending" | "passed" | "failed";
 
@@ -543,6 +590,8 @@ export type MergeRequest = {
   updated_at: string;
   /** When it was merged or closed. */
   closed_at?: string;
+  /** The request is a draft: the ticket's manual test is still ahead (DESIGN 5.29 rule 4). */
+  draft?: boolean;
 };
 
 /** What a check of the stored token found; provider refusals come back as `ok: false`, not as errors. */
@@ -1137,6 +1186,16 @@ export const deleteProject = (id: string) => api<void>(`/api/projects/${seg(id)}
 export const checkProject = (id: string) => api<ProjectCheck>(`/api/projects/${seg(id)}/check`, withBody("POST"));
 /** Runs one intake pass over the project now. A 409 `intake_disabled` says the project's intake is off. */
 export const pollIntake = (id: string) => api<IntakePollResult>(`/api/projects/${seg(id)}/intake/poll`, withBody("POST"));
+
+/** The project's plans, newest first, finished ones included (DESIGN 5.29). */
+export const listProjectPlans = async (projectId: string) => (await api<Plan[] | null>(`/api/projects/${seg(projectId)}/plans`)) ?? [];
+/** A plan with its tickets and its newest events (at most 100), newest first. */
+export const getPlan = (id: string) => api<PlanDetail>(`/api/plans/${seg(id)}`);
+/** Holds back every release and ship run of the project's waves; runs in flight finish. */
+export const pauseWaves = (projectId: string, reason: string) => api<Project>(`/api/projects/${seg(projectId)}/waves/pause`, withBody("POST", { reason }));
+/** Cancels a plan with a reason; its feature name can be used again. */
+export const cancelPlan = (id: string, reason: string) => api<Plan>(`/api/plans/${seg(id)}/cancel`, withBody("POST", { reason }));
+export const resumeWaves = (projectId: string) => api<Project>(`/api/projects/${seg(projectId)}/waves/resume`, withBody("POST"));
 
 /** The project's live notes, newest first. */
 export const listProjectFacts = async (projectId: string) => (await api<ProjectFact[] | null>(`/api/projects/${seg(projectId)}/facts`)) ?? [];

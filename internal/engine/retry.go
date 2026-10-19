@@ -66,6 +66,7 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 	var retried *store.Run
 	var from string
 	var applied *store.Limits
+	var ticketPlan, ticketProject string
 	err := pgx.BeginFunc(ctx, e.deps.Pool, func(tx pgx.Tx) error {
 		run, err := store.GetRunForUpdate(ctx, tx, runID)
 		if err != nil {
@@ -157,6 +158,14 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 			return fmt.Errorf("run %s: %w", runID, err)
 		}
 		from = *run.CurrentNode
+		// DESIGN 5.29 rule 7 (review H2): a plan ticket the run's failure marked failed is
+		// building again (in review with a merge request), in this transaction so the run's
+		// next failure finds it so and escalates again.
+		if e.deps.Plans != nil {
+			if ticketPlan, ticketProject, err = store.RetryTicketOfRun(ctx, tx, runID); err != nil {
+				return fmt.Errorf("run %s: move its plan ticket: %w", runID, err)
+			}
+		}
 		// Rule 4: the retried claim opens a root span of its own. A run the stale-run
 		// sweeper failed ("worker lost") never ended its root span, and the resumed path
 		// would continue it without the retry attribute: end it here, in the same
@@ -168,6 +177,9 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 	}
 	// After the commit; a failed event insert is logged by emit and the run stays queued
 	// (Failure handling). The payload carries `at` because the SSE data does not.
+	if ticketPlan != "" {
+		e.deps.Plans.OnRunRetried(ticketPlan, ticketProject)
+	}
 	e.emit(ctx, runID, "run.retry", map[string]any{"retries": retried.Retries, "from_node": from, "by": by,
 		"limits": applied, "at": now})
 	e.emit(ctx, runID, "run.status", map[string]any{"run": retried})

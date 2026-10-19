@@ -269,6 +269,8 @@ var shippedSplits = map[string]string{
 	"023-gitlab-tool-absent":            SplitPrivate,
 	"024-guardrail-blocked-input":       SplitPrivate,
 	"025-plan-pipeline-happy":           SplitPublic,
+	"026-review-loop-limit-escalation":  SplitPublic,
+	"027-prd-gap-escalation":            SplitPublic,
 }
 
 func TestShippedCasesAreValid(t *testing.T) {

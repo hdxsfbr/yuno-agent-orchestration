@@ -218,6 +218,16 @@ type Deps struct {
 	// Artifacts collects the files an agent visit left under runs/<run id>/out/ (DESIGN
 	// 5.25 rule 2) when the visit ends; nil disables collection.
 	Artifacts ArtifactCollector
+	// Plans keeps plan tickets true to their runs (DESIGN 5.29 rules 6 and 7); nil skips it.
+	Plans PlanTracker
+}
+
+// PlanTracker is the part of the plans service the engine calls: OnRunTerminal for every
+// run that reaches a terminal status (an escalated run included, 5.29 rule 6), and OnRunRetried.
+type PlanTracker interface {
+	OnRunTerminal(ctx context.Context, run *store.Run)
+	// OnRunRetried publishes the change of a ticket an operator's retry moved out of failed.
+	OnRunRetried(planID, projectID string)
 }
 
 // ArtifactCollector collects the files a visit left under runs/<run id>/out/ (DESIGN

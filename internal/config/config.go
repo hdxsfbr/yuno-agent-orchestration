@@ -78,9 +78,11 @@ type Config struct {
 	BudgetTick               time.Duration
 	MergeRequestSyncInterval time.Duration
 	IntakePollInterval       time.Duration
-	HTTPFetchAllowlist       []string
-	ToolOutputMaxBytes       int
-	LogLevel                 string
+	// WaveWatchInterval is how often the wave watcher looks at each open plan (DESIGN 5.29 rule 12).
+	WaveWatchInterval  time.Duration
+	HTTPFetchAllowlist []string
+	ToolOutputMaxBytes int
+	LogLevel           string
 	// ArtifactDir is where the api keeps the files runs deliver, the named volume
 	// "artifacts" (DESIGN 5.25 rule 4); ArtifactTTLDays how many days after a run
 	// finished its artifacts are kept, 0 for ever (rule 6).
@@ -159,6 +161,7 @@ func FromEnv() Config {
 		BudgetTick:               envDuration("BUDGET_TICK", 60*time.Second),
 		MergeRequestSyncInterval: envDuration("MERGE_REQUEST_SYNC_INTERVAL", 120*time.Second),
 		IntakePollInterval:       envDuration("INTAKE_POLL_INTERVAL", 120*time.Second),
+		WaveWatchInterval:        envDuration("WAVE_WATCH_INTERVAL", 60*time.Second),
 		HTTPFetchAllowlist:       envList("HTTP_FETCH_ALLOWLIST", "docs.python.org,pypi.org,raw.githubusercontent.com"),
 		ToolOutputMaxBytes:       envInt("TOOL_OUTPUT_MAX_BYTES", 32768),
 		LogLevel:                 env("LOG_LEVEL", "info"),

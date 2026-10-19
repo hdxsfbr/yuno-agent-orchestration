@@ -181,14 +181,14 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 		tools []string
 		mem   bool
 	}{
-		"Analyst":       {"claude-opus-5-5", []string{"ask_operator", "read", "ls", "write", "finish"}, false},
-		"Scout":         {"claude-sonnet-5-5", []string{"read", "ls", "exec", "memory_save", "memory_recall", "finish"}, true},
-		"Architect":     {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "ask_operator", "finish"}, false},
-		"Planner":       {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "finish"}, false},
-		"Builder":       {"claude-sonnet-5-5", []string{"read", "ls", "write", "edit", "exec", "ask_operator", "memory_save", "memory_recall", "finish"}, true},
-		"Code Reviewer": {"claude-opus-5-5", []string{"read", "ls", "exec", "read_merge_request", "finish"}, false},
-		"Doc Auditor":   {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "exec", "finish"}, false},
-		"Integrator":    {"claude-sonnet-5-5", []string{"open_merge_request", "read", "ls", "memory_save", "finish"}, true},
+		"Analyst":       {"claude-opus-5-5", []string{"ask_operator", "read", "ls", "write", "escalate", "finish"}, false},
+		"Scout":         {"claude-sonnet-5-5", []string{"read", "ls", "exec", "memory_save", "memory_recall", "escalate", "finish"}, true},
+		"Architect":     {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "ask_operator", "escalate", "finish"}, false},
+		"Planner":       {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "escalate", "finish"}, false},
+		"Builder":       {"claude-sonnet-5-5", []string{"read", "ls", "write", "edit", "exec", "ask_operator", "memory_save", "memory_recall", "escalate", "finish"}, true},
+		"Code Reviewer": {"claude-opus-5-5", []string{"read", "ls", "exec", "read_merge_request", "escalate", "finish"}, false},
+		"Doc Auditor":   {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "exec", "escalate", "finish"}, false},
+		"Integrator":    {"claude-sonnet-5-5", []string{"open_merge_request", "publish_tickets", "read", "ls", "memory_save", "escalate", "finish"}, true},
 	}
 	if len(created) != len(want)+1 {
 		t.Fatalf("created %v", created)
@@ -231,6 +231,25 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 	builder, _ := findAgent(ctx, pool, "Builder")
 	reviewer, _ := findAgent(ctx, pool, "Code Reviewer")
 	auditor, _ := findAgent(ctx, pool, "Doc Auditor")
+	// escalate is granted to every factory agent (Scout and Integrator included, review L7),
+	// publish_tickets to the Integrator only.
+	for _, name := range FactoryAgentNames {
+		a, _ := findAgent(ctx, pool, name)
+		if !slices.Contains(a.ToolAllowlist, "escalate") {
+			t.Errorf("%s: escalate is not granted", name)
+		}
+		if slices.Contains(a.ToolAllowlist, "publish_tickets") != (name == "Integrator") {
+			t.Errorf("%s: publish_tickets granted wrongly", name)
+		}
+		if !strings.Contains(a.SystemPrompt, "escalate") {
+			t.Errorf("%s prompt does not say when to escalate", name)
+		}
+	}
+	integrator, _ := findAgent(ctx, pool, "Integrator")
+	if !strings.Contains(integrator.SystemPrompt, "publish_tickets") || !strings.Contains(integrator.SystemPrompt, "draft true") ||
+		!strings.Contains(integrator.SystemPrompt, "draft false") {
+		t.Error("the Integrator prompt lost its publish or draft steps")
+	}
 	if !strings.Contains(builder.SystemPrompt, "failing test") || !strings.Contains(reviewer.SystemPrompt, "never rewrite") ||
 		!strings.Contains(auditor.SystemPrompt, "never patch around an unmet requirement") {
 		t.Error("the Builder, Reviewer or Auditor prompt lost its rule")

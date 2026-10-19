@@ -34,7 +34,7 @@ const (
 // platformTools are served over MCP and reach the model as yuno__<name>.
 var platformTools = map[string]bool{
 	"finish": true, "http_fetch": true, "memory_save": true, "memory_recall": true,
-	"deploy_release": true, "gitlab_create_mr": true, "ask_operator": true,
+	"deploy_release": true, "gitlab_create_mr": true, "ask_operator": true, "escalate": true,
 }
 
 type simulator struct {
@@ -293,6 +293,9 @@ func (s *simulator) visit(n *workflow.Node, visit int) bool {
 		case callAccepted:
 			accepted = true
 			s.tr.Nodes[rn].Output = s.outputOf(n.ID)
+		case callEscalated:
+			s.finishNode(rn, store.NodeFailed)
+			return false
 		case callInvalid:
 			invalid++
 			if invalid >= 3 {
@@ -315,6 +318,7 @@ const (
 	callDone callResult = iota
 	callAccepted
 	callInvalid
+	callEscalated // the engine ended the run failed and aborted the visit (DESIGN 5.29 rule 6)
 )
 
 // toolCall plays one scripted tool call and records the row it leaves.
@@ -382,6 +386,8 @@ func (s *simulator) toolCall(n *workflow.Node, runNodeID string, visit int, spec
 		s.sideEffect(&row, n, visit, rule, tool)
 	case name == "ask_operator":
 		s.askOperator(&row, n, tool.Args)
+	case name == "escalate":
+		return s.escalate(&row, n, tool.Args)
 	case name == "http_fetch":
 		url, _ := tool.Args["url"].(string)
 		if !strings.HasPrefix(url, "https://") {
@@ -432,6 +438,23 @@ func (s *simulator) askOperator(row *store.ToolCall, n *workflow.Node, args map[
 		row.Output, _ = json.Marshal(map[string]string{"status": "answered", "question_id": ap.ID, "answer": act.Answer})
 	}
 	s.tr.Approvals = append(s.tr.Approvals, ap)
+}
+
+// escalate plays escalate (DESIGN 5.29 rule 6): computational, so no approval; the engine
+// ends the run failed with "escalated (<kind>): <reason>" as soon as the call is recorded
+// and aborts the visit, so the script has no step after it and the agent needs no finish.
+func (s *simulator) escalate(row *store.ToolCall, n *workflow.Node, args map[string]any) callResult {
+	kind, _ := args["kind"].(string)
+	reason, _ := args["reason"].(string)
+	if !slices.Contains([]string{"prd_gap", "design_wrong", "loop_limit", "other"}, kind) || strings.TrimSpace(reason) == "" {
+		s.problem("node %s: escalate needs a kind (prd_gap, design_wrong, loop_limit or other) and a reason", n.ID)
+	}
+	row.Output, _ = json.Marshal(map[string]string{"status": "escalated", "kind": kind})
+	s.fail(fmt.Sprintf("escalated (%s): %s", kind, strings.TrimSpace(reason)))
+	done := s.tick()
+	row.FinishedAt = &done
+	s.tr.ToolCalls = append(s.tr.ToolCalls, *row)
+	return callEscalated
 }
 
 // builtin checks the arguments of an OpenClaw built-in and tracks the files written.

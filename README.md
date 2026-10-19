@@ -128,15 +128,24 @@ Integrator; the Chief of Staff stays the one agent on Telegram.
   two in a wave touch the same file, which the platform checks); you approve the plan;
   the Integrator commits the four documents under `docs/plans/<feature>/` in one merge
   request.
-- **Build** (`Wave pipeline`, one run per ticket): the Builder writes the failing test
-  first, then the code; the Code Reviewer (a different model) sends it back with comments
-  up to three times, after which the run stops with the reason; the Doc Auditor brings
-  the plan documents in line with the code and traces the ticket's requirements to code
-  and tests; if it finds an unmet requirement you decide whether the merge request opens
-  anyway; the Integrator opens the merge request with code and documents together.
-- **Ship**: wave 1 of the plan starts tickets by hand for now; issues per ticket, the
-  draft merge request before your manual test, escalation and waves that advance
-  themselves come in the next waves (`docs/briefs/delivery-process/WAVES.md`).
+- **Publish**: after the plan's approval the Integrator opens the plan's merge request
+  and publishes one tracker issue per ticket (`publish_tickets`, approval-gated, never
+  duplicated on a retry), labelled `wave:<n>` and `feature:<feature>`; the plan appears in
+  the project page's Plans section with its tickets, their issues, runs and merge
+  requests, and every transition.
+- **Build** (`Wave pipeline`, one run per ticket; intake starts it from the ticket's issue):
+  the Builder writes the failing test first, then the code; the Code Reviewer (a
+  different model) sends it back with comments up to three times; the Integrator opens a
+  draft merge request so the branch exists, and you pull it and test it (the manual-test
+  approval; rejecting it sends your notes back to the Builder); the Doc Auditor writes
+  the ticket's requirement trace and keeps the plan documents current; the Integrator
+  marks the merge request ready with the documents, under your manual-test approval.
+- **Escalation**: an agent that finds an unmet requirement or a design the build proved
+  wrong calls `escalate`; that, or any ticket run that fails (the review loop's limit, a
+  rejection), stops the ticket with its reason, pauses the project's waves and tells you
+  on Telegram. Pause, resume and cancel a plan from its project page.
+- **Ship**: waves still advance by hand until the next wave of this work (the watcher
+  that releases the next wave once a wave is merged, deployed and smoke-tested).
 
 The earlier templates (`dev_pipeline`, `research_pipeline`, `review_panel`) and their
 agents were retired with this change; their definitions are kept in `templates/legacy/`
@@ -222,7 +231,7 @@ output. OpenClaw's built-ins run inside the agent's Docker sandbox.
 | `finish` | computational | postgres | 5 s | `{run_token, result}` validated against the node's output schema |
 | `deploy_release` | side-effecting, approval by default | deploy target | 30 s + approval wait | `{run_token, version, notes, paths[]}` from `runs/<run id>/` |
 | `gitlab_create_mr` | side-effecting, approval by default | GitLab (when configured) | 30 s + approval wait | `{run_token, title, description, paths[]}` |
-| `open_merge_request` | side-effecting, approval by default | the run's project on GitLab or GitHub | 120 s + approval wait | `{run_token, title, description, paths?}`; commits the run's checkout (or only the `paths`, files or directories relative to its root), pushes a branch and opens the request |
+| `open_merge_request` | side-effecting, approval by default | the run's project on GitLab or GitHub | 120 s + approval wait | `{run_token, title, description, paths?, draft?}`; commits the run's checkout (or only the `paths`, files or directories relative to its root), pushes a branch and opens the request; `draft: true` opens it as a draft (GitLab `Draft: ` title prefix, GitHub draft pull request), and a later call of the run with `draft: false` marks it ready and replaces its title and description; a node's `auto_after: <approval node>` lets that ready update run without a second approval once the approval was granted |
 | `http_fetch` | read-only | allowlisted https hosts | 15 s | `{run_token, url}`; output wrapped as untrusted content |
 | `memory_save` | computational | postgres | 5 s | `{run_token, key, value, ttl_days?, scope?}`; `scope: "project"` saves a note shared by every agent of a run on the project |
 | `memory_recall` | read-only | postgres | 5 s | `{run_token, query, scope?}`; output wrapped as untrusted content |

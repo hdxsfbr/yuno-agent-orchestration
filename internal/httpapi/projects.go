@@ -63,6 +63,10 @@ type projectInput struct {
 	UpdatedAt json.RawMessage `json:"updated_at"`
 	LastRun   json.RawMessage `json:"last_run"`
 	Spend     json.RawMessage `json:"spend"`
+	// The wave pause is changed by its own endpoints (DESIGN 5.29 rule 9); a body that
+	// echoes what was fetched carries it and it is ignored.
+	WavesPaused       json.RawMessage `json:"waves_paused"`
+	WavesPausedReason json.RawMessage `json:"waves_paused_reason"`
 }
 
 // intakeInput is ProjectIntakeInput. Label is a pointer to tell an absent member (the

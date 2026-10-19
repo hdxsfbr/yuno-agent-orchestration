@@ -49,6 +49,11 @@ type Node struct {
 	// Checks name extra tests of an agent node's finish result that JSON Schema cannot
 	// express (DESIGN 5.28 rule 4); see KnownChecks.
 	Checks []string `json:"checks,omitempty"`
+	// AutoAfter names an approval node that must precede this agent node on every path
+	// from start (DESIGN 5.29 rule 5): once the run's newest decision of that approval is
+	// approved, the tool gate lets this node's open_merge_request update the run's own
+	// request, and advance_wave, through without a second approval of the call.
+	AutoAfter string `json:"auto_after,omitempty"`
 }
 
 // IsFork and IsJoin name the two kinds of DESIGN 5.26.
@@ -237,6 +242,7 @@ func (d *Definition) ValidateStructure() error {
 		}
 	}
 	msgs = append(msgs, d.validateForks(ids)...)
+	msgs = append(msgs, d.validateAutoAfter()...)
 	if len(msgs) > 0 {
 		return &ValidationError{Messages: msgs}
 	}
@@ -259,4 +265,72 @@ func SingleAgent(agentID, task string, outputSchema json.RawMessage, limits stor
 		Edges:  []Edge{{From: "start", To: "agent"}, {From: "agent", To: "end"}},
 		Limits: limits,
 	}
+}
+
+// validateAutoAfter checks the auto_after members (DESIGN 5.29 rule 5): only agent nodes
+// have one, it names an approval node other than the node itself, and that approval
+// dominates the node: no path from start reaches the node without passing it (edges and
+// the on_reject and on_failure targets all count as paths). A node whose only way in is
+// through the approval can never run before the operator decided it.
+func (d *Definition) validateAutoAfter() []string {
+	var msgs []string
+	start, hasStart := d.Start()
+	for i, n := range d.Nodes {
+		if n.AutoAfter == "" {
+			continue
+		}
+		at := fmt.Sprintf("nodes[%d].auto_after", i)
+		if n.Kind != KindAgent {
+			msgs = append(msgs, at+": only agent nodes have one")
+			continue
+		}
+		a, ok := d.Node(n.AutoAfter)
+		switch {
+		case !ok:
+			msgs = append(msgs, fmt.Sprintf("%s: unknown node '%s'", at, n.AutoAfter))
+			continue
+		case a.Kind != KindApproval:
+			msgs = append(msgs, fmt.Sprintf("%s: '%s' is not an approval node", at, n.AutoAfter))
+			continue
+		}
+		if !hasStart {
+			continue
+		}
+		if d.reachableAvoiding(start, n.ID, n.AutoAfter) {
+			msgs = append(msgs, fmt.Sprintf("%s: approval '%s' must precede '%s' on every path from start, but '%s' can be reached without passing it",
+				at, n.AutoAfter, n.ID, n.ID))
+		}
+	}
+	return msgs
+}
+
+// reachableAvoiding reports whether target is reachable from start without entering
+// avoid, following edges and the on_reject and on_failure targets.
+func (d *Definition) reachableAvoiding(start, target, avoid string) bool {
+	if start == avoid {
+		return false
+	}
+	seen := map[string]bool{start: true}
+	stack := []string{start}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if cur == target {
+			return true
+		}
+		var next []string
+		for _, e := range d.OutgoingEdges(cur) {
+			next = append(next, e.To)
+		}
+		if n, ok := d.Node(cur); ok {
+			next = append(next, n.OnReject, n.OnFailure)
+		}
+		for _, to := range next {
+			if to != "" && to != avoid && !seen[to] {
+				seen[to] = true
+				stack = append(stack, to)
+			}
+		}
+	}
+	return false
 }

@@ -172,7 +172,11 @@ func TransientError(err error) bool {
 type RequestProvider interface {
 	BranchExists(ctx context.Context, branch string) (bool, error)
 	FindOpen(ctx context.Context, branch string) (*RequestRef, error)
-	Create(ctx context.Context, branch, base, title, description string) (*RequestRef, error)
+	// Create opens the request; draft opens it as a draft (DESIGN 5.29 rule 4).
+	Create(ctx context.Context, branch, base, title, description string, draft bool) (*RequestRef, error)
+	// Update replaces the request's title and description and moves it between draft and
+	// ready (DESIGN 5.29 rule 4); a nil member is left as it is. ErrRequestNotFound on a 404.
+	Update(ctx context.Context, number int64, u RequestUpdate) error
 	// Status reads the request now: ErrRequestNotFound on a 404.
 	Status(ctx context.Context, number int64) (RequestStatus, error)
 	// Merge merges the request: *ErrNotMergeable when the provider refuses,
@@ -189,6 +193,29 @@ type RequestProvider interface {
 	// values, by the mapping tables of Status. headSHA is the request's head commit
 	// (Details gives it); GitLab reads the request's own pipelines and ignores it.
 	CIStatus(ctx context.Context, number int64, headSHA string) (string, error)
+}
+
+// RequestUpdate is a change to an open request (DESIGN 5.29 rule 4): nil members stay.
+// Title is the plain title; the draft marker is the provider's business.
+type RequestUpdate struct {
+	Title       *string
+	Description *string
+	Draft       *bool
+}
+
+// draftPrefix is how GitLab marks a draft merge request in its title.
+const draftPrefix = "Draft: "
+
+// cutDraft returns the title without its draft marker and whether it had one.
+func cutDraft(title string) (string, bool) {
+	t := strings.TrimSpace(title)
+	l := strings.ToLower(t)
+	for _, m := range []string{"draft:", "[draft]", "(draft)"} {
+		if strings.HasPrefix(l, m) {
+			return strings.TrimSpace(t[len(m):]), true
+		}
+	}
+	return t, false
 }
 
 // RequestDetails is what a merge or pull request says about itself (DESIGN 5.22 rule 6).
@@ -332,10 +359,13 @@ func (g *gitlabProvider) FindOpen(ctx context.Context, branch string) (*RequestR
 	return &RequestRef{Number: open[0].IID, URL: open[0].WebURL}, nil
 }
 
-func (g *gitlabProvider) Create(ctx context.Context, branch, base, title, description string) (*RequestRef, error) {
+func (g *gitlabProvider) Create(ctx context.Context, branch, base, title, description string, draft bool) (*RequestRef, error) {
 	var mr struct {
 		IID    int64  `json:"iid"`
 		WebURL string `json:"web_url"`
+	}
+	if plain, _ := cutDraft(title); draft {
+		title = draftPrefix + plain
 	}
 	body := map[string]any{"source_branch": branch, "target_branch": base, "title": title, "description": description,
 		"remove_source_branch": true}
@@ -343,6 +373,46 @@ func (g *gitlabProvider) Create(ctx context.Context, branch, base, title, descri
 		return nil, err
 	}
 	return &RequestRef{Number: mr.IID, URL: mr.WebURL}, nil
+}
+
+// Update is DESIGN 5.29 rule 4 for GitLab: one PUT with the title (the plain title behind
+// "Draft: " while the request is a draft, without it once ready) and the description. The
+// current title is read first only when the new state needs it.
+func (g *gitlabProvider) Update(ctx context.Context, number int64, u RequestUpdate) error {
+	if u.Title == nil && u.Description == nil && u.Draft == nil {
+		return nil
+	}
+	body := map[string]any{}
+	if u.Description != nil {
+		body["description"] = *u.Description
+	}
+	if u.Title != nil || u.Draft != nil {
+		plain, draft := "", false
+		if u.Title == nil || u.Draft == nil {
+			var cur struct {
+				Title string `json:"title"`
+			}
+			if status, err := g.api.do(ctx, http.MethodGet, fmt.Sprintf("%s/merge_requests/%d", g.base, number), nil, &cur); err != nil {
+				return notFoundOr(status, err)
+			}
+			plain, draft = cutDraft(cur.Title)
+		}
+		if u.Title != nil {
+			plain, _ = cutDraft(*u.Title)
+		}
+		if u.Draft != nil {
+			draft = *u.Draft
+		}
+		if draft {
+			body["title"] = draftPrefix + plain
+		} else {
+			body["title"] = plain
+		}
+	}
+	if status, err := g.api.do(ctx, http.MethodPut, fmt.Sprintf("%s/merge_requests/%d", g.base, number), body, nil); err != nil {
+		return notFoundOr(status, err)
+	}
+	return nil
 }
 
 // gitlabStates maps a merge request's state to the record's (DESIGN 5.20 rule 3); locked
@@ -565,16 +635,76 @@ func (g *githubProvider) FindOpen(ctx context.Context, branch string) (*RequestR
 	return &RequestRef{Number: open[0].Number, URL: open[0].HTMLURL}, nil
 }
 
-func (g *githubProvider) Create(ctx context.Context, branch, base, title, description string) (*RequestRef, error) {
+func (g *githubProvider) Create(ctx context.Context, branch, base, title, description string, draft bool) (*RequestRef, error) {
 	var pr struct {
 		Number  int64  `json:"number"`
 		HTMLURL string `json:"html_url"`
 	}
 	body := map[string]any{"head": branch, "base": base, "title": title, "body": description}
+	if draft {
+		body["draft"] = true
+	}
 	if _, err := g.api.do(ctx, http.MethodPost, g.base+"/pulls", body, &pr); err != nil {
 		return nil, err
 	}
 	return &RequestRef{Number: pr.Number, URL: pr.HTMLURL}, nil
+}
+
+const (
+	markReadyMutation    = `mutation($id: ID!) { markPullRequestReadyForReview(input: {pullRequestId: $id}) { pullRequest { isDraft } } }`
+	convertDraftMutation = `mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { pullRequest { isDraft } } }`
+)
+
+// Update is DESIGN 5.29 rule 4 for GitHub: PATCH for the title and body, then, when the
+// draft state differs from the pull request's, the GraphQL mutation that moves it (it
+// needs the pull request's node_id, read first).
+func (g *githubProvider) Update(ctx context.Context, number int64, u RequestUpdate) error {
+	endpoint := fmt.Sprintf("%s/pulls/%d", g.base, number)
+	if u.Title != nil || u.Description != nil {
+		body := map[string]any{}
+		if u.Title != nil {
+			body["title"] = *u.Title
+		}
+		if u.Description != nil {
+			body["body"] = *u.Description
+		}
+		if status, err := g.api.do(ctx, http.MethodPatch, endpoint, body, nil); err != nil {
+			return notFoundOr(status, err)
+		}
+	}
+	if u.Draft == nil {
+		return nil
+	}
+	var pr struct {
+		NodeID string `json:"node_id"`
+		Draft  bool   `json:"draft"`
+	}
+	if status, err := g.api.do(ctx, http.MethodGet, endpoint, nil, &pr); err != nil {
+		return notFoundOr(status, err)
+	}
+	if pr.Draft == *u.Draft {
+		return nil
+	}
+	if pr.NodeID == "" {
+		return errors.New("github: the pull request has no node_id")
+	}
+	query := markReadyMutation
+	if *u.Draft {
+		query = convertDraftMutation
+	}
+	var out struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	body := map[string]any{"query": query, "variables": map[string]any{"id": pr.NodeID}}
+	if _, err := g.api.do(ctx, http.MethodPost, g.graphqlURL(), body, &out); err != nil {
+		return err
+	}
+	if len(out.Errors) > 0 {
+		return errors.New("github graphql: " + providerMessage([]byte(out.Errors[0].Message)))
+	}
+	return nil
 }
 
 // graphqlURL is the GraphQL endpoint beside a REST base ".../repos/<owner>/<repo>":

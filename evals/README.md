@@ -138,7 +138,8 @@ whichever node makes it. A node visit ends with a text step, so after a `yuno__f
 step the script needs a text step before the next node's first step. The script must be
 consumed exactly: a missing step ends the run with `script exhausted`, a spare one is a
 mistake in the case. The exceptions are the limit cases, whose run the engine ends while
-the model still has steps left.
+the model still has steps left, and a case whose last step is an `yuno__escalate` call (case 027):
+the engine ends the run at that call, so the script has no text step after it.
 
 Script steps have exactly one of `text` or `tool`. Tool `args` is a YAML mapping and is
 posted as a JSON object. Two names matter and are not the same thing:
@@ -426,6 +427,8 @@ below.
 | `023-gitlab-tool-absent` | private | GitLab is not configured, so `GET /api/tools` lists `deploy_release` and `finish` and not `gitlab_create_mr`. Fails by design when `GITLAB_BASE_URL`, `GITLAB_PROJECT_ID` and `GITLAB_TOKEN` are all set | succeeded, the tool list as described |
 | `024-guardrail-blocked-input` | private | a guardrail pattern blocks `deploy_release` inputs naming `.env`, `.pem` or `secrets/` files; the call is refused before any approval is asked for | succeeded, `deploy_release` `blocked` with `input blocked by guardrail no-secret-files`, no approval |
 | `025-plan-pipeline-happy` | public | the plan pipeline without a project: the analyst asks one question with `ask_operator` and the case answers it, then scout, architect, the design gate, planner (tickets, waves), the plan gate, and an integrator that publishes the four documents with `deploy_release` | succeeded, four approvals `approved` (the question, both gates, the deploy), `deploy_release` `executed` after its approval, the question answered in the `ask_operator` output; rubric of 4. It runs an inline copy of `plan_pipeline` without a project (`deploy_release` instead of `open_merge_request`), with the `waves_partition` check on the waves node |
+| `026-review-loop-limit-escalation` | public | the ticket pipeline's builder and reviewer, where the reviewer asks for changes every time and `max_loop_visits` is 3; the platform, not an agent, ends the run | failed, reason `loop limit 3 exceeded for builder`, no `deploy_release` row, no approval; rubric of 3 |
+| `027-prd-gap-escalation` | public | the ticket pipeline's documentation audit finds a requirement the PRD leaves undefined and calls `escalate` with kind `prd_gap` instead of finishing; the script ends at that call | failed, reason `escalated (prd_gap): R4 says exports are for authorised users`, the builder's result kept in the state, no `deploy_release` row, no approval |
 
 The channel-triggered reply of DESIGN 5.13 rule 6 is not a case: it needs a real message on
 a real Telegram chat. What can be asserted without one, that a session message is mirrored

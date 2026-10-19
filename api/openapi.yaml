@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Yuno Agent Orchestration API
-  version: 0.9.0
+  version: 1.0.0
   description: |
     Control plane for configurable AI agents and multi-agent workflows executed on
     OpenClaw. All endpoints are JSON. When API_TOKEN is set, every /api path except
@@ -869,6 +869,66 @@ paths:
         "200": { description: what the pass did, content: { application/json: { schema: { $ref: "#/components/schemas/IntakePollResult" } } } }
         "404": { $ref: "#/components/responses/Error" }
         "409": { description: "intake_disabled: the project's intake is off", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/projects/{id}/plans:
+    get:
+      tags: [projects]
+      summary: The project's plans, newest first
+      description: "DESIGN 5.29 rules 1 and 9: every plan of the project, finished ones included."
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: plans, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Plan" } } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/plans/{id}:
+    get:
+      tags: [projects]
+      summary: A plan with its tickets and events
+      description: "DESIGN 5.29 rule 9: the plan, its tickets by wave and its events newest first (the newest 100)."
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: the plan, content: { application/json: { schema: { $ref: "#/components/schemas/PlanDetail" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/plans/{id}/cancel:
+    post:
+      tags: [projects]
+      summary: Cancel an open plan
+      description: |
+        The plan becomes `cancelled` and a `cancelled` event records the reason. The project may
+        then start another plan, and the feature name can be used again. The plan's tickets and
+        issues are left as they are. A plan that is done or cancelled already is a 409.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/WavesPauseInput" } } }
+      responses:
+        "200": { description: the plan, content: { application/json: { schema: { $ref: "#/components/schemas/Plan" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: "plan_finished: the plan is done or cancelled already", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/projects/{id}/waves/pause:
+    post:
+      tags: [projects]
+      summary: Pause the project's waves
+      description: |
+        DESIGN 5.29 rule 9. Nothing is released and no ship run starts
+        while paused; runs in flight finish. Records a `paused` event on the open plan, if any.
+        Pausing a paused project replaces the reason.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/WavesPauseInput" } } }
+      responses:
+        "200": { description: the project, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /api/projects/{id}/waves/resume:
+    post:
+      tags: [projects]
+      summary: Resume the project's waves
+      description: "DESIGN 5.29 rule 9. Clears the pause and its reason; records a `resumed` event on the open plan, if any. Resuming a project that is not paused succeeds."
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: the project, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "404": { $ref: "#/components/responses/Error" }
   /api/projects/{id}/facts:
     get:
       tags: [projects]
@@ -1172,6 +1232,8 @@ components:
             updated_at: { type: string, format: date-time }
             last_run: { $ref: "#/components/schemas/ProjectLastRun" }
             intake: { $ref: "#/components/schemas/ProjectIntake" }
+            waves_paused: { type: boolean, description: "The project's waves are paused (DESIGN 5.29 rule 1)" }
+            waves_paused_reason: { type: string, description: "Why they are paused; absent when not paused" }
             instructions: { type: string, description: "DESIGN 5.18: the operator's standing instructions rendered into every visit's task on the project; empty when none" }
             max_cost_usd_per_day: { type: number, description: "DESIGN 5.19: the project's UTC-day cap in USD; absent when none" }
             max_cost_usd_per_month: { type: number, description: "DESIGN 5.19: the project's UTC-month cap in USD; absent when none" }
@@ -1277,6 +1339,64 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         closed_at: { type: string, format: date-time, description: "when it was merged or closed" }
+        draft: { type: boolean, description: "The request is a draft (DESIGN 5.29 rule 4): opened with open_merge_request draft true, ready once a later call says draft false" }
+    Plan:
+      type: object
+      description: "DESIGN 5.29 rule 1: one feature's plan; a project has at most one whose status is not done or cancelled."
+      required: [id, project_id, feature, plan_run_id, status, current_wave, created_at, updated_at]
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        feature: { type: string }
+        plan_run_id: { type: string, description: "the plan pipeline run that produced the plan" }
+        plan_mr_id: { type: string, description: "the merge request carrying the plan documents" }
+        status: { type: string, enum: [publishing, waiting_plan_merge, building, shipping, accepting, done, cancelled] }
+        current_wave: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    PlanTicket:
+      type: object
+      description: "DESIGN 5.29 rule 1: one ticket of a plan with its wave and tracker issue."
+      required: [plan_id, ticket_id, wave, title, issue_url, status, updated_at]
+      properties:
+        plan_id: { type: string }
+        ticket_id: { type: string, description: "the slicer's id, unique in the plan" }
+        wave: { type: integer, minimum: 1 }
+        title: { type: string }
+        issue_number: { type: integer, description: "absent until the issue exists" }
+        issue_url: { type: string }
+        run_id: { type: string, description: "the run building the ticket" }
+        merge_request_id: { type: string }
+        status: { type: string, enum: [pending, released, building, in_review, merged, failed, closed] }
+        updated_at: { type: string, format: date-time }
+    PlanEvent:
+      type: object
+      description: "DESIGN 5.29 rule 1: one recorded transition of a plan."
+      required: [id, plan_id, at, kind, detail]
+      properties:
+        id: { type: string }
+        plan_id: { type: string }
+        at: { type: string, format: date-time }
+        kind: { type: string, description: "published | wave_released | smoke_test_waiting | wave_done | accept_waiting | feature_done | escalated | paused | resumed | retried | cancelled" }
+        wave: { type: integer }
+        ticket_id: { type: string }
+        detail: { type: object, description: "kind-specific fields, for example reason" }
+        notified_at: { type: string, format: date-time, description: "when the operator was told of the event; absent until then or for events that are not told" }
+    PlanDetail:
+      type: object
+      description: "A plan with its tickets and events (DESIGN 5.29 rule 9)."
+      required: [plan, tickets, events]
+      properties:
+        plan: { $ref: "#/components/schemas/Plan" }
+        tickets: { type: array, items: { $ref: "#/components/schemas/PlanTicket" } }
+        events: { type: array, items: { $ref: "#/components/schemas/PlanEvent" }, description: "newest first, at most 100" }
+    WavesPauseInput:
+      type: object
+      description: "The body of a pause."
+      required: [reason]
+      additionalProperties: false
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 500 }
     RunRetry:
       type: object
       description: "DESIGN 5.21 rule 1: the body of a retry; limits, when given, replace the run's limits before the exhausted-limit check."
@@ -1668,6 +1788,7 @@ components:
         on_reject: { type: string, description: approval nodes }
         on_failure: { type: string }
         checks: { type: array, items: { type: string, enum: [waves_partition] }, description: "agent nodes: named tests of the finish result beyond output_schema; a result that fails one is refused with the reason, like a schema violation (DESIGN 5.28 rule 4). waves_partition: the result's waves ({n, tickets}) number 1..k without gaps, place every ticket of the input_from node's tickets ({id, files}) in exactly one wave, and keep two tickets that list a common file in different waves. Unknown names are refused at save." }
+        auto_after: { type: string, description: "agent nodes: the id of an approval node that precedes this node on every path from start (DESIGN 5.29 rule 5). After the run's newest decision of that approval is approved, this node's open_merge_request call that updates the run's existing request, and its advance_wave call, run without an approval of their own and are recorded with decided_by auto_after:<node>; every other side-effecting call stays gated. Refused at save when the node does not exist, is not an approval node, or can be reached from start without passing it." }
     WorkflowEdge:
       type: object
       properties:

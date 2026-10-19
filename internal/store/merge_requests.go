@@ -24,7 +24,7 @@ const (
 
 const mergeRequestColumnList = `id, project_id, run_id, provider, number, url, source_branch, target_branch, title,
 	state, ci_status, head_sha, unresolved_threads, last_sync_error, synced_at, reported_state, merged_by,
-	created_at, updated_at, closed_at`
+	created_at, updated_at, closed_at, draft`
 
 // mergeRequestColumns is the column list qualified with a table alias, for queries that
 // join the runs table.
@@ -71,15 +71,23 @@ func InsertMergeRequest(ctx context.Context, q Querier, mr *MergeRequest) (inser
 		mr.UpdatedAt = mr.CreatedAt
 	}
 	tag, err := q.Exec(ctx, `INSERT INTO merge_requests (`+mergeRequestColumnList+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
 		ON CONFLICT DO NOTHING`,
 		mr.ID, mr.ProjectID, mr.RunID, mr.Provider, mr.Number, mr.URL, mr.SourceBranch, mr.TargetBranch, mr.Title,
 		mr.State, mr.CIStatus, mr.HeadSHA, mr.UnresolvedThreads, mr.LastSyncError, mr.SyncedAt, mr.ReportedState, mr.MergedBy,
-		mr.CreatedAt, mr.UpdatedAt, mr.ClosedAt)
+		mr.CreatedAt, mr.UpdatedAt, mr.ClosedAt, mr.Draft)
 	if err != nil {
 		return false, err
 	}
-	return tag.RowsAffected() == 1, nil
+	if tag.RowsAffected() != 1 {
+		return false, nil
+	}
+	// The run's plan ticket, if it builds one, is now in review (DESIGN 5.29 rule 10), in
+	// the transaction that wrote the record.
+	if _, _, err := LinkTicketMergeRequest(ctx, q, mr.RunID, mr.ID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // GetMergeRequest returns a record by id, or ErrNotFound.
@@ -430,4 +438,11 @@ func providerOfURL(u string) string {
 		return "github"
 	}
 	return "gitlab"
+}
+
+// SetMergeRequestDraft records a title and draft state the platform set on the provider
+// (DESIGN 5.29 rule 4).
+func SetMergeRequestDraft(ctx context.Context, q Querier, id, title string, draft bool) error {
+	_, err := q.Exec(ctx, `UPDATE merge_requests SET title=$2, draft=$3, updated_at=now() WHERE id=$1`, id, title, draft)
+	return err
 }

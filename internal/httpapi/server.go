@@ -27,6 +27,7 @@ import (
 	"yuno/internal/mergereq"
 	"yuno/internal/model"
 	"yuno/internal/openclaw"
+	"yuno/internal/plans"
 	"yuno/internal/project"
 	"yuno/internal/sched"
 	"yuno/internal/store"
@@ -72,6 +73,8 @@ type Server struct {
 	// projects resolves a run's project for the tools and the check.
 	cipher   *project.Cipher
 	projects *project.Resolver
+	// plans keeps plan tickets and the wave pause (DESIGN 5.29).
+	plans *plans.Service
 	// checkClient talks to the providers for POST /api/projects/{id}/check.
 	checkClient *http.Client
 	rec         *events.Recorder
@@ -158,6 +161,7 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		Recorder: rec,
 		StateDir: cfg.OpenClawStateDir,
 		Effects:  s.effects,
+		Plans:    s.plans,
 	}
 	collector, err := artifacts.New(cfg.ArtifactDir, pool, log, nil, nil, cfg.ArtifactTTLDays)
 	if err != nil {
@@ -167,6 +171,8 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		engineDeps.Artifacts = collector
 	}
 	eng := engine.New(engineDeps)
+	s.plans.Reporter = eng
+	go s.plans.Run(ctx) // resends the notices not delivered (DESIGN 5.29 rule 8)
 	if collector != nil {
 		collector.Emit, collector.LogEvent = eng.Emit, eng.LogEvent
 	}
@@ -198,14 +204,14 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	// first pass settles the records of runs that predate the table.
 	go (&project.Watcher{Pool: pool, Tick: cfg.BudgetTick, Log: log, Reporter: eng}).Run(ctx)
 	mr := &mergereq.Sync{Pool: pool, Projects: s.projects, Client: s.checkClient, Reporter: eng,
-		Interval: cfg.MergeRequestSyncInterval, Log: log}
+		Plans: s.plans, Interval: cfg.MergeRequestSyncInterval, Log: log}
 	if n, err := mr.Backfill(ctx); err == nil && n > 0 {
 		log.Info("merge requests backfilled from the trace", "count", n)
 	}
 	go mr.Run(ctx)
 	// Issue intake (DESIGN 5.23 rule 2): projects with intake enabled are polled for
 	// labelled issues and their finished issue runs are posted back on the issue.
-	go (&intake.Loop{Pool: pool, Projects: s.projects, Client: s.checkClient, Engine: eng,
+	go (&intake.Loop{Pool: pool, Projects: s.projects, Client: s.checkClient, Engine: eng, Plans: s.plans,
 		Interval: cfg.IntakePollInterval, Log: log, PublicBaseURL: cfg.PublicBaseURL}).Run(ctx)
 
 	if err := s.LoadTemplates(ctx); err != nil {
@@ -302,6 +308,7 @@ func New(d Deps) (*Server, error) {
 		return nil, fmt.Errorf("project token key: %w", err)
 	}
 	s.projects = &project.Resolver{DB: d.Pool, Cipher: s.cipher}
+	s.plans = &plans.Service{Pool: d.Pool, Hub: d.Hub, Log: d.Log}
 	s.checkClient = tools.ProviderClient(d.CheckTransport)
 	s.tools = tools.NewPlatformRegistry(s.platformDeps(d))
 	s.effects = &tools.Service{
@@ -397,6 +404,11 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("DELETE /api/projects/{id}", s.deleteProject)
 	mux.HandleFunc("POST /api/projects/{id}/check", s.checkProject)
 	mux.HandleFunc("POST /api/projects/{id}/intake/poll", s.pollIntake)
+	mux.HandleFunc("GET /api/projects/{id}/plans", s.listPlans)
+	mux.HandleFunc("GET /api/plans/{id}", s.getPlan)
+	mux.HandleFunc("POST /api/plans/{id}/cancel", s.cancelPlan)
+	mux.HandleFunc("POST /api/projects/{id}/waves/pause", s.pauseWaves)
+	mux.HandleFunc("POST /api/projects/{id}/waves/resume", s.resumeWaves)
 	// Project notes (DESIGN 5.18 rule 6) and merge requests (DESIGN 5.20 rule 6).
 	mux.HandleFunc("GET /api/projects/{id}/facts", s.listProjectFacts)
 	mux.HandleFunc("DELETE /api/projects/{id}/facts/{factId}", s.deleteProjectFact)
@@ -587,7 +599,24 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 		Delegator:      delegator{s},
 		// ask_operator and answer_question reach the engine through the server at call
 		// time (DESIGN 5.24): Run sets s.engine after this registry is built.
-		Asker:         asker{s},
+		Asker: asker{s},
+		// escalate and publish_tickets reach the engine at call time as ask_operator does.
+		Escalate: func(ctx context.Context, runID, kind, reason string) error {
+			e, ok := s.engine.(interface {
+				EscalateRun(ctx context.Context, runID, kind, reason string) error
+			})
+			if !ok || e == nil {
+				return errEngineUnavailable
+			}
+			return e.EscalateRun(ctx, runID, kind, reason)
+		},
+		RunIDForToken: func(token string) (string, bool) {
+			if s.engine == nil {
+				return "", false
+			}
+			rc, ok := s.engine.ResolveRunToken(token)
+			return rc.RunID, ok
+		},
 		PublicBaseURL: cfg.PublicBaseURL,
 		MCPToolWait:   cfg.MCPToolWait,
 		Deploy: tools.DeployConfig{

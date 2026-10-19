@@ -231,6 +231,22 @@ from the UI; reads and writes go through the workspace root, only regular files 
 or replaced, so a link or pipe the agent creates cannot redirect or block them; shown
 content is redacted, and a redacted file cannot be saved back.
 
+**Tracker issues and the automatic start.** `publish_tickets` writes issues on the project's
+tracker. Mitigation: it is approval-gated, reads the tickets from the run's state rather
+than the model's input (the approved plan is what is published), validates the feature
+slug and caps titles and counts, and finds earlier issues by a marker on the body's last
+line so a retry never duplicates. Intake then starts a build for any issue carrying the
+project's label: anyone with label rights on the tracker can start builds, bounded by
+the project's budget cap (required for intake), the take limit and the pause flag.
+
+**Approval carried forward (`auto_after`).** The call that marks a ticket's merge request
+ready runs under the manual-test approval already given, but only when it updates the
+run's own merge request and commits only paths under `docs/`; any other call, or code
+changed after the test, is gated as usual.
+
+**Escalation.** `escalate` can only end the run its token belongs to; it pauses the
+project's waves, which only an operator resumes.
+
 ## Known limitations
 
 - Single operator, no authentication beyond the optional bearer token.

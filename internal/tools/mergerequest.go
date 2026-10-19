@@ -51,6 +51,7 @@ var mergeRequestSchema = json.RawMessage(`{
     "run_token": {"type": "string", "description": "The run token from the task message."},
     "title": {"type": "string", "minLength": 1, "maxLength": 72, "description": "A short summary of the change, like a commit subject (at most 72 characters), never the task text; it is also the commit message."},
     "description": {"type": "string", "maxLength": 20000, "description": "The detail: what changed and why, how it was tested, anything the reviewer should know."},
+    "draft": {"type": "boolean", "description": "Optional. true opens the request as a draft (GitLab: the title starts with \"Draft: \"); a later call of the same run with draft false marks it ready for review; omit it to leave the state as it is (a new request is not a draft)."},
     "paths": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"type": "string", "minLength": 1, "maxLength": 200}, "description": "Optional. Files or directories of the checkout, relative to its root (docs/plans/x/PRD.md, docs/plans/x). When present only these are committed, and everything else left in the checkout stays out; a path deleted in the checkout is deleted in the commit. Omit to propose the whole working tree."}
   },
   "required": ["run_token", "title", "description"],
@@ -61,6 +62,9 @@ type mergeRequestInput struct {
 	Title       string   `json:"title"`
 	Description string   `json:"description"`
 	Paths       []string `json:"paths,omitempty"`
+	// Draft is nil when the call did not say: a new request is then ready and a recorded
+	// one keeps its state (DESIGN 5.29 rule 4).
+	Draft *bool `json:"draft,omitempty"`
 }
 
 // mergeRequestOutput is the tool's result: {number, url, branch, provider, replayed?,
@@ -73,6 +77,7 @@ type mergeRequestOutput struct {
 	Provider string `json:"provider"`
 	Replayed bool   `json:"replayed,omitempty"`
 	Updated  bool   `json:"updated,omitempty"`
+	Draft    bool   `json:"draft,omitempty"`
 }
 
 // NewOpenMergeRequest builds open_merge_request: commit the run's checkout on the key's
@@ -97,7 +102,9 @@ func NewOpenMergeRequest(cfg MergeRequestConfig) *Tool {
 			"that request as a new commit (the answer then has replayed and updated true) and never opens a " +
 			"second one. A run that updates an existing merge request pushes your working tree onto that " +
 			"request's branch as a new commit, with the title as its message, instead of opening a new " +
-			"request; when the answer has replayed without updated, nothing new was pushed. Needs a human " +
+			"request; when the answer has replayed without updated, nothing new was pushed. Pass draft true to " +
+			"open the request as a draft and draft false in a later call to mark it ready for review; a later " +
+			"call of the same run that names draft also replaces the request's title and description. Needs a human " +
 			"approval unless the operator allowed it to run automatically. Returns the request's number and " +
 			"URL; pass paths (files or directories relative to the checkout root) to commit only those and leave " +
 			"the rest of the checkout out of the request; if a human has not decided yet it returns status pending_approval, and if they refused it " +
@@ -194,7 +201,7 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 			named, err := store.GetMergeRequest(ctx, call.Tx, *run.MergeRequestID)
 			switch {
 			case err == nil:
-				return m.updateRecorded(ctx, call, pc, named, in, checkout, run)
+				return m.updateRecorded(ctx, call, pc, provider, named, in, checkout, run, run)
 			case !errors.Is(err, store.ErrNotFound):
 				return Result{}, err
 			}
@@ -205,7 +212,7 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 		}
 		if rec != nil {
 			// The same-run path of 5.20 rule 2: no guard (L4 stays recorded for it).
-			return m.updateRecorded(ctx, call, pc, rec, in, checkout, nil)
+			return m.updateRecorded(ctx, call, pc, provider, rec, in, checkout, nil, run)
 		}
 	}
 	exists, err := provider.BranchExists(ctx, branch)
@@ -224,7 +231,8 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 			return Result{IsError: true, Text: "propose the changes: " + err.Error()}, nil
 		}
 	}
-	out := mergeRequestOutput{Branch: branch, Provider: string(pc.Provider)}
+	draft := in.Draft != nil && *in.Draft
+	out := mergeRequestOutput{Branch: branch, Provider: string(pc.Provider), Draft: draft}
 	open, err := provider.FindOpen(ctx, branch)
 	if err != nil {
 		return Result{}, err
@@ -232,14 +240,14 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 	if open != nil {
 		out.Number, out.URL, out.Replayed = open.Number, open.URL, true
 	} else {
-		ref, err := provider.Create(ctx, branch, pc.DefaultBranch, in.Title, withIssueCloses(in.Description, run))
+		ref, err := provider.Create(ctx, branch, pc.DefaultBranch, in.Title, withIssueCloses(in.Description, run), draft)
 		if err != nil {
 			return Result{}, err
 		}
 		out.Number, out.URL = ref.Number, ref.URL
 	}
 	if call.Tx != nil {
-		if err := m.record(ctx, call, pc, out, in.Title); err != nil {
+		if err := m.record(ctx, call, pc, out, in.Title, draft); err != nil {
 			return Result{}, err
 		}
 	}
@@ -309,13 +317,13 @@ func withIssueCloses(description string, run *store.Run) string {
 // nothing is pushed (D-050), and after a push the new commit becomes the run's
 // checkout_sha so that a later call passes the guard. A null checkout_sha (a run cloned
 // before migration 0013) skips the guard.
-func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *project.Config, rec *store.MergeRequest, in mergeRequestInput, checkout string, updating *store.Run) (Result, error) {
+func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *project.Config, provider RequestProvider, rec *store.MergeRequest, in mergeRequestInput, checkout string, updating, run *store.Run) (Result, error) {
 	if rec.State != store.MergeRequestOpen {
 		// DESIGN 5.20 edge cases, 5.22 rule 3: nothing more can be pushed to a request that
 		// was merged or closed; the model is told instead of git failing on the branch.
 		return Result{}, &ModelError{Message: fmt.Sprintf("the run's %s is %s; nothing more can be pushed to it", rec.Label(), rec.State)}
 	}
-	out := mergeRequestOutput{Number: rec.Number, URL: rec.URL, Branch: rec.SourceBranch, Provider: rec.Provider, Replayed: true}
+	out := mergeRequestOutput{Number: rec.Number, URL: rec.URL, Branch: rec.SourceBranch, Provider: rec.Provider, Replayed: true, Draft: rec.Draft}
 	base := ""
 	if updating != nil && updating.CheckoutSHA != nil {
 		base = *updating.CheckoutSHA
@@ -329,24 +337,73 @@ func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *projec
 	case err == nil:
 		out.Updated = true
 	case errors.Is(err, project.ErrNoChanges):
-		return JSONResult(out), nil
+		// Nothing to push; a title, description or draft change still goes to the provider.
 	case errors.As(err, &moved):
 		return Result{}, &ModelError{Message: moved.Error()}
 	default:
 		return Result{IsError: true, Text: "propose the changes: " + err.Error()}, nil
 	}
-	if updating != nil && call.Tx != nil {
+	if out.Updated && updating != nil && call.Tx != nil {
 		if err := store.SetRunCheckoutSHA(ctx, call.Tx, call.RunID, proposal.Commit); err != nil {
 			return Result{IsError: true, Text: "record the new checkout commit after the push: " + obs.Redact(err.Error()) +
 				"; the commit was pushed to " + rec.SourceBranch}, nil
 		}
 	}
+	if updating == nil {
+		if err := m.updateMeta(ctx, call, provider, rec, in, run, &out); err != nil {
+			return Result{}, err
+		}
+	}
 	return JSONResult(out), nil
+}
+
+// updateMeta is the title, description and draft half of a later call (DESIGN 5.29 rule
+// 4) for the run's own request. A call that names draft (true or false) is part of the
+// draft protocol: the provider gets its title and description (with the "Closes #n" line
+// a created request has) and, when the state differs from the record's, the move between
+// draft and ready; then the record follows. A call without draft keeps the earlier
+// behaviour: the title is the commit message only and the request's text stays.
+func (m *mergeRequest) updateMeta(ctx context.Context, call Call, provider RequestProvider, rec *store.MergeRequest, in mergeRequestInput, run *store.Run, out *mergeRequestOutput) error {
+	if in.Draft == nil {
+		return nil
+	}
+	moves := *in.Draft != rec.Draft
+	desc := withIssueCloses(in.Description, run)
+	u := RequestUpdate{Title: &in.Title, Description: &desc}
+	if moves {
+		u.Draft = in.Draft
+	}
+	if err := provider.Update(ctx, rec.Number, u); err != nil {
+		if errors.Is(err, ErrRequestNotFound) {
+			return &ModelError{Message: fmt.Sprintf("the run's %s is gone from the provider", rec.Label())}
+		}
+		// The provider's refusal (its text carries no token) is the model's to read, not an
+		// internal error (review L1).
+		what := "updating"
+		if moves {
+			what = "marking as draft"
+			if !*in.Draft {
+				what = "marking as ready"
+			}
+		}
+		return &ModelError{Message: fmt.Sprintf("%s the run's %s failed: %s", what, rec.Label(), err)}
+	}
+	draft := rec.Draft
+	if moves {
+		draft = *in.Draft
+	}
+	out.Draft = draft
+	if call.Tx != nil {
+		if err := store.SetMergeRequestDraft(ctx, call.Tx, rec.ID, in.Title, draft); err != nil {
+			return fmt.Errorf("record the merge request update: %w", err)
+		}
+	}
+	return nil
 }
 
 // record writes the run's merge request record in the call's transaction (DESIGN 5.20
 // rule 2): state open, ci_status none, never synced.
-func (m *mergeRequest) record(ctx context.Context, call Call, pc *project.Config, out mergeRequestOutput, title string) error {
+func (m *mergeRequest) record(ctx context.Context, call Call, pc *project.Config, out mergeRequestOutput, title string, draft bool) error {
 	run, err := store.GetRun(ctx, call.Tx, call.RunID)
 	if err != nil {
 		return fmt.Errorf("record the merge request: %w", err)
@@ -356,7 +413,7 @@ func (m *mergeRequest) record(ctx context.Context, call Call, pc *project.Config
 	}
 	inserted, err := store.InsertMergeRequest(ctx, call.Tx, &store.MergeRequest{
 		ProjectID: *run.ProjectID, RunID: call.RunID, Provider: string(pc.Provider), Number: out.Number, URL: out.URL,
-		SourceBranch: out.Branch, TargetBranch: pc.DefaultBranch, Title: title,
+		SourceBranch: out.Branch, TargetBranch: pc.DefaultBranch, Title: title, Draft: draft,
 	})
 	if err != nil {
 		return fmt.Errorf("record the merge request: %w", err)

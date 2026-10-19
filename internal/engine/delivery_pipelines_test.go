@@ -12,6 +12,7 @@ import (
 
 	"yuno/internal/openclaw"
 	"yuno/internal/store"
+	"yuno/internal/tools"
 	"yuno/internal/workflow"
 )
 
@@ -49,8 +50,6 @@ const (
 	builderOK  = `{"summary":"built","files":["a.go"],"tests_passed":true}`
 	reviewNo   = `{"verdict":"changes_requested","comments":"cover the empty case"}`
 	reviewYes  = `{"verdict":"approved","comments":"fine"}`
-	auditOK    = `{"verdict":"ok","reason":"all met","trace":[]}`
-	auditGap   = `{"verdict":"gap","reason":"R3 has no code","trace":[]}`
 	mrDone     = `{"merge_request_url":"https://git.example/mr/1"}`
 	waveTicket = `{"task":"T1.1 add the endpoint"}`
 )
@@ -80,54 +79,206 @@ func TestWavePipelineReviewLoopIsBounded(t *testing.T) {
 	}
 }
 
-// T5.28.6: a gap found by the doc audit waits at gap_found; approving opens the merge
-// request anyway, rejecting fails the run "rejected at gap_found".
-func TestWavePipelineGapPath(t *testing.T) {
+const (
+	draftMR1  = `{"merge_request_url":"https://git.example/mr/1","branch":"yuno/t1-endpoint"}`
+	auditPass = `{"verdict":"ok","trace_path":"docs/plans/x/tickets/T1.md","feature":"x"}`
+)
+
+// T5.29.4 and DESIGN 5.29 rule 5: the wave pipeline's order and the manual test. The draft
+// merge request waits for the operator at manual_test; a rejection sends the notes to the
+// builder ("Bugs found in the manual test:"), the work is reviewed and drafted again, and
+// an approval releases doc_audit and then integrator_ready.
+func TestWavePipelineManualTest(t *testing.T) {
 	ctx := context.Background()
-	for _, tc := range []struct {
-		name, decision, status, reason string
-		visits                         []string
-	}{
-		{"reject", DecisionReject, store.RunFailed, "rejected at gap_found: because",
-			[]string{"builder#1:succeeded", "code_review#1:succeeded", "doc_audit#1:succeeded", "gap_found#1:failed"}},
-		{"approve", DecisionApprove, store.RunSucceeded, "",
-			[]string{"builder#1:succeeded", "code_review#1:succeeded", "doc_audit#1:succeeded", "gap_found#1:succeeded", "integrator#1:succeeded"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			env := newEnv(t)
-			wf := templatePipeline(t, env, "wave_pipeline.json")
-			sc := env.script(map[string][]string{
-				"builder": {builderOK}, "code_review": {reviewYes}, "doc_audit": {auditGap}, "integrator": {mrDone},
-			})
-			r := env.triggerAndRun(TriggerRequest{WorkflowID: wf.ID, Input: json.RawMessage(waveTicket)})
-			if r.Status != store.RunWaitingApproval || deref(r.CurrentNode) != "gap_found" {
-				t.Fatalf("run = %s at %s", r.Status, deref(r.CurrentNode))
-			}
-			a := pendingApproval(t, env, r.ID)
-			if !strings.Contains(a.Message, "R3 has no code") {
-				t.Fatalf("message = %q", a.Message)
-			}
-			if _, err := env.e.DecideApproval(ctx, a.ID, tc.decision, "andre", "because"); err != nil {
-				t.Fatal(err)
-			}
-			r = env.resume(env.e, r.ID)
-			if r.Status != tc.status || deref(r.FailureReason) != tc.reason {
-				t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
-			}
-			if got := visitsOf(runNodes(t, env, r.ID)); !slices.Equal(got, tc.visits) {
-				t.Fatalf("visits = %v", got)
-			}
-			if tc.decision == DecisionApprove && !strings.Contains(sc.message("integrator", 1), "R3 has no code") {
-				t.Fatalf("integrator task lacks the audit reason:\n%s", sc.message("integrator", 1))
-			}
-		})
+	env := newEnv(t)
+	wf := templatePipeline(t, env, "wave_pipeline.json")
+	sc := env.script(map[string][]string{
+		"builder":          {builderOK, builderOK},
+		"code_review":      {reviewYes, reviewYes},
+		"integrator_draft": {draftMR1, draftMR1},
+		"doc_audit":        {auditPass},
+		"integrator_ready": {mrDone},
+	})
+	r := env.triggerAndRun(TriggerRequest{WorkflowID: wf.ID, Input: json.RawMessage(waveTicket)})
+	if r.Status != store.RunWaitingApproval || deref(r.CurrentNode) != "manual_test" {
+		t.Fatalf("run = %s at %s %q", r.Status, deref(r.CurrentNode), deref(r.FailureReason))
+	}
+	a := pendingApproval(t, env, r.ID)
+	for _, want := range []string{"Pull branch yuno/t1-endpoint", "run the CI tasks locally", "https://git.example/mr/1"} {
+		if !strings.Contains(a.Message, want) {
+			t.Fatalf("manual_test message lacks %q:\n%s", want, a.Message)
+		}
+	}
+	if m := sc.message("integrator_draft", 1); !strings.Contains(m, "draft true") {
+		t.Fatalf("integrator_draft task:\n%s", m)
+	}
+	if m := sc.message("builder", 1); strings.Contains(m, "Bugs found") {
+		t.Fatalf("builder visit 1 mentions bugs:\n%s", m)
+	}
+	if _, err := env.e.DecideApproval(ctx, a.ID, DecisionReject, "andre", "the export button does nothing on Safari"); err != nil {
+		t.Fatal(err)
+	}
+	r = env.resume(env.e, r.ID)
+	if r.Status != store.RunWaitingApproval || deref(r.CurrentNode) != "manual_test" {
+		t.Fatalf("after the rejection: %s at %s %q", r.Status, deref(r.CurrentNode), deref(r.FailureReason))
+	}
+	if m := sc.message("builder", 2); !strings.Contains(m, "Bugs found in the manual test:") || !strings.Contains(m, "the export button does nothing on Safari") {
+		t.Fatalf("builder visit 2 lacks the bugs:\n%s", m)
+	}
+	if d := gateEntry(t, r, "manual_test"); d["decision"] != "rejected" {
+		t.Fatalf("state.manual_test = %v", d)
+	}
+	if got := sc.message("doc_audit", 1); got != "" {
+		t.Fatalf("doc_audit ran before the manual test passed:\n%s", got)
+	}
+	a = pendingApproval(t, env, r.ID)
+	if _, err := env.e.DecideApproval(ctx, a.ID, DecisionApprove, "andre", ""); err != nil {
+		t.Fatal(err)
+	}
+	r = env.resume(env.e, r.ID)
+	if r.Status != store.RunSucceeded {
+		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+	want := []string{"builder#1:succeeded", "code_review#1:succeeded", "integrator_draft#1:succeeded", "manual_test#1:failed",
+		"builder#2:succeeded", "code_review#2:succeeded", "integrator_draft#2:succeeded", "manual_test#2:succeeded",
+		"doc_audit#1:succeeded", "integrator_ready#1:succeeded"}
+	if got := visitsOf(runNodes(t, env, r.ID)); !slices.Equal(got, want) {
+		t.Fatalf("visits = %v", got)
+	}
+	if m := sc.message("integrator_ready", 1); !strings.Contains(m, "draft false") || !strings.Contains(m, "docs/plans/x/tickets/T1.md") || !strings.Contains(m, "yuno/t1-endpoint") ||
+		!strings.Contains(m, `paths ["docs/plans/x"]`) {
+		t.Fatalf("integrator_ready task:\n%s", m)
+	}
+	if st := stateOf(t, r); st["integrator_ready"] == nil || st["doc_audit"] == nil {
+		t.Fatalf("state = %v", st)
+	}
+}
+
+// DESIGN 5.29 rules 5 and 7: rejecting the manual test again and again is bounded by
+// max_loop_visits through the builder.
+func TestWavePipelineManualTestRejectionsAreBounded(t *testing.T) {
+	ctx := context.Background()
+	env := newEnv(t)
+	wf := templatePipeline(t, env, "wave_pipeline.json")
+	env.script(map[string][]string{
+		"builder":          {builderOK, builderOK, builderOK},
+		"code_review":      {reviewYes, reviewYes, reviewYes},
+		"integrator_draft": {draftMR1, draftMR1, draftMR1},
+	})
+	r := env.triggerAndRun(TriggerRequest{WorkflowID: wf.ID, Input: json.RawMessage(waveTicket)})
+	for i := 0; i < 3; i++ {
+		if r.Status != store.RunWaitingApproval {
+			t.Fatalf("rejection %d: run = %s %q", i+1, r.Status, deref(r.FailureReason))
+		}
+		a := pendingApproval(t, env, r.ID)
+		if _, err := env.e.DecideApproval(ctx, a.ID, DecisionReject, "andre", "still broken"); err != nil {
+			t.Fatal(err)
+		}
+		r = env.resume(env.e, r.ID)
+	}
+	if r.Status != store.RunFailed || deref(r.FailureReason) != "loop limit 3 exceeded for builder" {
+		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+}
+
+// DESIGN 5.29 rule 6: the doc auditor finds a PRD gap and calls the registered escalate
+// tool instead of finishing; the run fails with the reason and the merge request is never
+// marked ready.
+func TestWavePipelineDocAuditEscalates(t *testing.T) {
+	ctx := context.Background()
+	env := newEnv(t)
+	wf := templatePipeline(t, env, "wave_pipeline.json")
+	sc := env.script(map[string][]string{
+		"builder": {builderOK}, "code_review": {reviewYes}, "integrator_draft": {draftMR1},
+	})
+	scripted := env.fc.onSend
+	tool := tools.NewEscalate(tools.EscalateDeps{Escalate: env.e.EscalateRun})
+	run, err := env.e.Trigger(ctx, TriggerRequest{WorkflowID: wf.ID, Input: json.RawMessage(waveTicket)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := make(chan error, 1)
+	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
+		if node, _ := visitOf(p.SessionKey); node != "doc_audit" {
+			return scripted(p, n)
+		}
+		go func() {
+			_, err := tool.Exec(ctx, tools.Call{RunID: run.ID, Input: json.RawMessage(`{"run_token":"` + tokenIn(p.Message) +
+				`","kind":"prd_gap","reason":"R4 never says who is authorised"}`)})
+			called <- err
+		}()
+		return startedTurn(p)
+	}
+	r := env.resume(env.e, run.ID)
+	if r.Status != store.RunWaitingApproval || deref(r.CurrentNode) != "manual_test" {
+		t.Fatalf("run = %s at %s %q", r.Status, deref(r.CurrentNode), deref(r.FailureReason))
+	}
+	a := pendingApproval(t, env, r.ID)
+	if _, err := env.e.DecideApproval(ctx, a.ID, DecisionApprove, "andre", ""); err != nil {
+		t.Fatal(err)
+	}
+	r = env.resume(env.e, r.ID)
+	if err := recv(t, called, "the escalate call"); err != nil {
+		t.Fatalf("escalate: %v", err)
+	}
+	if r.Status != store.RunFailed || deref(r.FailureReason) != "escalated (prd_gap): R4 never says who is authorised" {
+		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+	if m := sc.message("doc_audit", 1); m != "" {
+		t.Fatalf("the scripted sender saw doc_audit: %s", m)
+	}
+	for _, v := range visitsOf(runNodes(t, env, r.ID)) {
+		if strings.HasPrefix(v, "integrator_ready") {
+			t.Fatalf("integrator_ready ran: %v", v)
+		}
+	}
+}
+
+// DESIGN 5.29 rule 5: auto_after sits on integrator_ready only, names the manual test, and
+// is valid there; it is refused on a node the approval does not dominate.
+func TestWavePipelineAutoAfterPlacement(t *testing.T) {
+	raw, err := os.ReadFile("../../templates/wave_pipeline.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tpl struct {
+		Definition workflow.Definition `json:"definition"`
+	}
+	if err := json.Unmarshal(raw, &tpl); err != nil {
+		t.Fatal(err)
+	}
+	def := &tpl.Definition
+	for _, n := range def.Nodes {
+		if (n.AutoAfter != "") != (n.ID == "integrator_ready") {
+			t.Errorf("node %s: auto_after = %q", n.ID, n.AutoAfter)
+		}
+		if n.ID == "gap_found" {
+			t.Error("the gap_found approval is still in the pipeline")
+		}
+	}
+	if n, _ := def.Node("integrator_ready"); n == nil || n.AutoAfter != "manual_test" {
+		t.Fatalf("integrator_ready = %+v", n)
+	}
+	if mt, _ := def.Node("manual_test"); mt == nil || mt.Kind != workflow.KindApproval || mt.OnReject != "builder" {
+		t.Fatalf("manual_test = %+v", mt)
+	}
+	if err := def.ValidateStructure(); err != nil {
+		t.Fatalf("template invalid: %v", err)
+	}
+	for i := range def.Nodes {
+		if def.Nodes[i].ID == "integrator_draft" {
+			def.Nodes[i].AutoAfter = "manual_test" // reachable without passing the approval
+		}
+	}
+	if err := def.ValidateStructure(); err == nil || !strings.Contains(err.Error(), "must precede") {
+		t.Fatalf("misplaced auto_after accepted: %v", err)
 	}
 }
 
 const slicerOut = `{"tickets":[
- {"id":"T1","title":"Endpoint","files":["api/a.go","api/shared.go"],"tests":["a_test"]},
- {"id":"T2","title":"Client","files":["web/c.ts","api/shared.go"],"tests":["c_test"]},
- {"id":"T3","title":"Docs","files":["README.md"],"tests":["d_test"]}]}`
+ {"id":"T1","title":"Endpoint","slice":"An endpoint.","files":["api/a.go","api/shared.go"],"tests":["a_test"]},
+ {"id":"T2","title":"Client","slice":"A client.","files":["web/c.ts","api/shared.go"],"tests":["c_test"]},
+ {"id":"T3","title":"Docs","slice":"Docs.","files":["README.md"],"tests":["d_test"]}]}`
 
 // T5.28.4: the waves node's finish is refused for a ticket in two waves and two tickets
 // sharing a file (workflow's checks_test.go covers the other refusals); the first valid one is
@@ -142,7 +293,7 @@ func TestPlanPipelineEndToEnd(t *testing.T) {
 		"scout":      {`{"gaps":[],"constraints":["go test ./..."]}`},
 		"architect":  {`{"architecture_path":"docs/plans/x/ARCHITECTURE.md","summary":"v1"}`, `{"architecture_path":"docs/plans/x/ARCHITECTURE.md","summary":"v2"}`},
 		"slicer":     {slicerOut},
-		"integrator": {mrDone},
+		"integrator": {`{"merge_request_url":"https://git.example/mr/1","plan_id":"p1","issues_count":3}`},
 	})
 	scripted := env.fc.onSend
 	refusals := make(chan string, 8)

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"yuno/internal/store"
@@ -69,12 +70,25 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 		if def.Limits.MaxLoopVisits != 3 || def.Limits.MaxCostUSD != 5 || def.Limits.MaxDurationSeconds != 3600 || def.Limits.ApprovalTimeoutSeconds != 86400 {
 			t.Errorf("%s limits = %+v", key, def.Limits)
 		}
+		if key == "wave_pipeline" {
+			r, _ := def.Node("integrator_ready")
+			m, _ := def.Node("manual_test")
+			d, _ := def.Node("integrator_draft")
+			if _, gap := def.Node("gap_found"); gap || r == nil || r.AutoAfter != "manual_test" || m == nil || m.OnReject != "builder" ||
+				d == nil || d.AutoAfter != "" {
+				t.Errorf("wave wiring: integrator_ready %+v manual_test %+v integrator_draft %+v", r, m, d)
+			}
+		}
 		if key == "plan_pipeline" {
 			w, _ := def.Node("waves")
 			g, _ := def.Node("design_gate")
 			p, _ := def.Node("plan_gate")
 			if w == nil || len(w.Checks) != 1 || w.Checks[0] != workflow.CheckWavesPartition || g.OnReject != "architect" || p.OnReject != "slicer" {
 				t.Errorf("plan wiring: waves %+v design_gate %+v plan_gate %+v", w, g, p)
+			}
+			if i, _ := def.Node("integrator"); i == nil || !strings.Contains(i.Task, "publish_tickets") ||
+				!strings.Contains(string(i.OutputSchema), "issues_count") || !strings.Contains(string(i.OutputSchema), "plan_id") {
+				t.Errorf("plan integrator = %+v", i)
 			}
 			var in struct {
 				Required []string `json:"required"`

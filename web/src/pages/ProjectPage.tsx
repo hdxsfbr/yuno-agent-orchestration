@@ -13,6 +13,7 @@ import { CheckNote, useProjectChecks } from "@/components/project/CheckResult";
 import IntakeCard from "@/components/project/IntakeCard";
 import ProjectDialog from "@/components/project/ProjectDialog";
 import ProjectMergeRequests from "@/components/project/ProjectMergeRequests";
+import ProjectPlans from "@/components/project/ProjectPlans";
 import ProjectNotes from "@/components/project/ProjectNotes";
 import ProjectRuns from "@/components/project/ProjectRuns";
 import { Loading, QueryError, errorText } from "@/components/QueryState";
@@ -139,6 +140,7 @@ export default function ProjectPage() {
         </Card>
       </section>
 
+      <ProjectPlans project={project} />
       <ProjectNotes projectId={project.id} />
       <ProjectMergeRequests projectId={project.id} />
       <ProjectRuns projectId={project.id} />

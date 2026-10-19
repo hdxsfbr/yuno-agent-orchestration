@@ -229,7 +229,11 @@ func (g *gateCall) run(ctx context.Context) (string, bool) {
 		g.call.IdempotencyKey = key
 		g.row.IdempotencyKey = &key
 	}
-	if policy == tools.PolicyRequireApproval {
+	autoBy := ""
+	if policy == tools.PolicyRequireApproval && g.chat == nil {
+		autoBy = g.autoAfter(ctx)
+	}
+	if policy == tools.PolicyRequireApproval && autoBy == "" {
 		if g.chat != nil {
 			// An approval pauses a run, and a conversation has none: an operator who
 			// gates this tool for the agent gets no ungated chat-time calls either.
@@ -246,8 +250,13 @@ func (g *gateCall) run(ctx context.Context) (string, bool) {
 	}
 	res := out.Result
 	if t.Risk == tools.RiskSideEffecting && !res.IsError {
-		// The audit row says the effect ran without a human decision (T5.3.6).
-		res = tools.Result{Output: tools.WithFields(res.Output, map[string]any{"policy": tools.PolicyAuto})}
+		// The audit row says the effect ran without a human decision (T5.3.6), or that
+		// an earlier approval of the workflow covered it (DESIGN 5.29 rule 5).
+		pol := tools.PolicyAuto
+		if autoBy != "" {
+			pol = autoApprover(autoBy)
+		}
+		res = tools.Result{Output: tools.WithFields(res.Output, map[string]any{"policy": pol})}
 	}
 	status := store.ToolExecuted
 	switch {
@@ -256,7 +265,11 @@ func (g *gateCall) run(ctx context.Context) (string, bool) {
 	case res.IsError:
 		status = store.ToolFailed
 	}
-	return g.finish(ctx, status, res, out.Attempts)
+	text, isErr := g.finish(ctx, status, res, out.Attempts)
+	if autoBy != "" {
+		g.recordAutoApproval(ctx, autoBy)
+	}
+	return text, isErr
 }
 
 // agentGuardrails reads the calling agent's guardrails as they are now (DESIGN 5.11

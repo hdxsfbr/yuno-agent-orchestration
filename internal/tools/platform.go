@@ -56,6 +56,12 @@ type PlatformDeps struct {
 	// MCPToolWait is how long ask_operator blocks for the operator's answer before it
 	// reports the question pending (DESIGN 5.24 rule 4): the api's MCP_TOOL_WAIT.
 	MCPToolWait time.Duration
+	// Escalate ends a run with the agent's reason and, for a plan ticket, pauses the
+	// project's waves (DESIGN 5.29 rule 6); nil leaves escalate unable to run.
+	Escalate EscalateFunc
+	// RunIDForToken resolves a run token for publish_tickets' approval sentence (5.29
+	// rule 2); nil gives the generic sentence.
+	RunIDForToken func(token string) (runID string, ok bool)
 }
 
 // NewPlatformRegistry returns the platform tools served over MCP (DESIGN 5.7).
@@ -79,6 +85,12 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 		MaxOutputBytes: d.MaxOutputBytes}))
 	r.Register(NewAskOperator(d))
 	r.Register(NewAnswerQuestion(d))
+	pt := PublishTicketsConfig{Projects: d.Projects, Client: d.ProviderClient, RunIDForToken: d.RunIDForToken}
+	if d.Pool != nil {
+		pt.DB = d.Pool
+	}
+	r.Register(NewPublishTickets(pt))
+	r.Register(NewEscalate(EscalateDeps{Escalate: d.Escalate}))
 	return r
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"yuno/internal/project"
 )
@@ -77,6 +78,57 @@ type IssueProvider interface {
 	SwapLabels(ctx context.Context, number int64, add, remove string) error
 	// Comment posts a comment on the issue (rule 3 (d), rule 5 (b)).
 	Comment(ctx context.Context, number int64, body string) error
+	// Create opens an issue with the labels, creating the labels the repository lacks first
+	// (DESIGN 5.29 rule 3), and returns its number and page.
+	Create(ctx context.Context, title, body string, labels []string) (Issue, error)
+	// ListAll lists the issues (any state, pull requests left out) that carry label, newest
+	// first, page after page up to max issues (DESIGN 5.29 rule 2); publish_tickets matches
+	// its markers on the answer.
+	ListAll(ctx context.Context, label string, max int) ([]Issue, error)
+}
+
+// IssueColorTicket is the colour of the labels publish_tickets puts on an issue (wave:<n>,
+// feature:<name>).
+const IssueColorTicket = "#6e7781"
+
+// ensuredLabels is the set of label names a provider value has ensured already.
+type ensuredLabels struct {
+	mu   sync.Mutex
+	done map[string]bool
+}
+
+// ensure creates the labels of names that this value has not ensured yet.
+func (e *ensuredLabels) ensure(ctx context.Context, p IssueProvider, names []string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var todo []string
+	for _, n := range names {
+		if !e.done[n] {
+			todo = append(todo, n)
+		}
+	}
+	if len(todo) == 0 {
+		return nil
+	}
+	if err := p.EnsureLabels(ctx, ticketLabels(todo)); err != nil {
+		return err
+	}
+	if e.done == nil {
+		e.done = map[string]bool{}
+	}
+	for _, n := range todo {
+		e.done[n] = true
+	}
+	return nil
+}
+
+// ticketLabels turns label names into labels to ensure.
+func ticketLabels(names []string) []IssueLabel {
+	out := make([]IssueLabel, 0, len(names))
+	for _, n := range names {
+		out = append(out, IssueLabel{Name: n, Color: IssueColorTicket})
+	}
+	return out
 }
 
 // IssueProviderFor builds the issue provider of a project over client, which should come
@@ -129,6 +181,8 @@ func IssueGone(err error) bool {
 type gitlabIssues struct {
 	api  *apiClient
 	base string
+	// ensured remembers the labels Create has ensured, so a run of issues looks each up once.
+	ensured ensuredLabels
 }
 
 // ListLabelled is GET issues?labels=<label>&state=opened&scope=all&order_by=created_at&
@@ -211,12 +265,71 @@ func (g *gitlabIssues) Comment(ctx context.Context, number int64, body string) e
 	return err
 }
 
+// Create ensures the labels, then POST issues {title, description, labels: "a,b"} (rule 3).
+func (g *gitlabIssues) Create(ctx context.Context, title, body string, labels []string) (Issue, error) {
+	if err := g.ensured.ensure(ctx, g, labels); err != nil {
+		return Issue{}, err
+	}
+	var made struct {
+		IID    int64  `json:"iid"`
+		WebURL string `json:"web_url"`
+	}
+	payload := map[string]any{"title": title, "description": body}
+	if len(labels) > 0 {
+		payload["labels"] = strings.Join(labels, ",")
+	}
+	if _, err := g.api.do(ctx, http.MethodPost, g.base+"/issues", payload, &made); err != nil {
+		return Issue{}, err
+	}
+	return Issue{Number: made.IID, Title: title, Body: body, URL: made.WebURL}, nil
+}
+
+// ListAll is GET issues?labels=<label>&state=all&scope=all&order_by=created_at&sort=desc&
+// per_page=100, page after page until a short page or max issues (rule 2).
+func (g *gitlabIssues) ListAll(ctx context.Context, label string, max int) ([]Issue, error) {
+	var out []Issue
+	for page := 1; len(out) < max; page++ {
+		var list []struct {
+			IID         int64  `json:"iid"`
+			Title       string `json:"title"`
+			Description string `json:"description"`
+			WebURL      string `json:"web_url"`
+		}
+		q := url.Values{"labels": {label}, "state": {"all"}, "scope": {"all"}, "order_by": {"created_at"}, "sort": {"desc"},
+			"per_page": {"100"}, "page": {strconv.Itoa(page)}}
+		if _, err := g.api.do(ctx, http.MethodGet, g.base+"/issues?"+q.Encode(), nil, &list); err != nil {
+			return nil, err
+		}
+		for _, i := range list {
+			out = append(out, Issue{Number: i.IID, Title: i.Title, Body: i.Description, URL: i.WebURL})
+		}
+		if len(list) < 100 {
+			break
+		}
+	}
+	return capIssues(out, max), nil
+}
+
+// capIssues keeps the first max issues.
+func capIssues(list []Issue, max int) []Issue {
+	if len(list) > max {
+		return list[:max]
+	}
+	return list
+}
+
+// issueScanCap is the most issues of one feature label publish_tickets reads (a plan has
+// at most MaxPlanTickets tickets; the rest is room for earlier attempts).
+const issueScanCap = 1000
+
 // ---- GitHub -------------------------------------------------------------------------
 
 // githubIssues is GitHub's issue API for one repository: base is .../repos/<owner>/<repo>.
 type githubIssues struct {
 	api  *apiClient
 	base string
+	// ensured remembers the labels Create has ensured, so a run of issues looks each up once.
+	ensured ensuredLabels
 }
 
 // ListLabelled is GET issues?labels=<label>&state=open&sort=created&direction=asc&
@@ -310,6 +423,60 @@ func (g *githubIssues) SwapLabels(ctx context.Context, number int64, add, remove
 func (g *githubIssues) Comment(ctx context.Context, number int64, body string) error {
 	_, err := g.api.do(ctx, http.MethodPost, fmt.Sprintf("%s/issues/%d/comments", g.base, number), map[string]any{"body": body}, nil)
 	return err
+}
+
+// Create ensures the labels, then POST issues {title, body, labels} (rule 3).
+func (g *githubIssues) Create(ctx context.Context, title, body string, labels []string) (Issue, error) {
+	if err := g.ensured.ensure(ctx, g, labels); err != nil {
+		return Issue{}, err
+	}
+	var made struct {
+		Number  int64  `json:"number"`
+		HTMLURL string `json:"html_url"`
+	}
+	payload := map[string]any{"title": title, "body": body}
+	if len(labels) > 0 {
+		payload["labels"] = labels
+	}
+	if _, err := g.api.do(ctx, http.MethodPost, g.base+"/issues", payload, &made); err != nil {
+		return Issue{}, err
+	}
+	return Issue{Number: made.Number, Title: title, Body: body, URL: made.HTMLURL}, nil
+}
+
+// ListAll is GET issues?labels=<label>&state=all&sort=created&direction=desc&per_page=100,
+// page after page until a short page or max issues; the pull requests the endpoint also
+// lists are skipped (rule 2).
+func (g *githubIssues) ListAll(ctx context.Context, label string, max int) ([]Issue, error) {
+	var out []Issue
+	for page := 1; len(out) < max; page++ {
+		var list []struct {
+			Number      int64     `json:"number"`
+			Title       string    `json:"title"`
+			Body        *string   `json:"body"`
+			HTMLURL     string    `json:"html_url"`
+			PullRequest *struct{} `json:"pull_request"`
+		}
+		q := url.Values{"labels": {label}, "state": {"all"}, "sort": {"created"}, "direction": {"desc"},
+			"per_page": {"100"}, "page": {strconv.Itoa(page)}}
+		if _, err := g.api.do(ctx, http.MethodGet, g.base+"/issues?"+q.Encode(), nil, &list); err != nil {
+			return nil, err
+		}
+		for _, i := range list {
+			if i.PullRequest != nil {
+				continue
+			}
+			is := Issue{Number: i.Number, Title: i.Title, URL: i.HTMLURL}
+			if i.Body != nil {
+				is.Body = *i.Body
+			}
+			out = append(out, is)
+		}
+		if len(list) < 100 {
+			break
+		}
+	}
+	return capIssues(out, max), nil
 }
 
 // ---- the task text (DESIGN 5.23 rule 4) ---------------------------------------------

@@ -1,0 +1,139 @@
+id: 027-prd-gap-escalation
+version: v1
+split: public
+description: The ticket pipeline's documentation audit finds that the PRD does not say what the ticket needs. The auditor does not finish with a patched-over trace; it calls escalate with kind prd_gap, the run ends failed with the reason, and the integrator never publishes anything.
+workflow:
+  input_schema:
+    type: object
+    properties:
+      task: { type: string, description: The ticket }
+    required: [task]
+    additionalProperties: true
+  nodes:
+    - { id: start, kind: start }
+    - id: builder
+      kind: agent
+      agent_name: builder
+      task: |
+        Implement this ticket in the directory runs/$RUN_ID/ of your workspace:
+
+        {{.input.task}}
+
+        Finish with a summary and the files you created or changed (paths relative to runs/$RUN_ID/).
+      output_schema:
+        type: object
+        properties:
+          summary: { type: string }
+          files: { type: array, items: { type: string } }
+        required: [summary, files]
+        additionalProperties: true
+      input_from: [start]
+    - id: doc_audit
+      kind: agent
+      agent_name: auditor
+      task: |
+        Trace every requirement of this ticket to the code that implements it:
+
+        {{.input.task}}
+
+        The builder reports: {{.state.builder.summary}}
+        Files: {{range .state.builder.files}}{{.}} {{end}}
+
+        If a requirement cannot be traced because the PRD does not say what is wanted, call escalate with kind prd_gap and the reason, and stop: do not finish. Otherwise finish with verdict "ok" and trace_path.
+      output_schema:
+        type: object
+        properties:
+          verdict: { type: string, enum: [ok] }
+          trace_path: { type: string }
+        required: [verdict, trace_path]
+        additionalProperties: true
+      input_from: [builder]
+    - id: integrator
+      kind: agent
+      agent_name: integrator
+      task: |
+        Publish the audited work of this ticket with the deploy_release tool, version 1.0.0, and finish with the version it returned.
+
+        Ticket: {{.input.task}}
+      output_schema:
+        type: object
+        properties:
+          version: { type: string }
+        required: [version]
+        additionalProperties: true
+      input_from: [builder, doc_audit]
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: builder }
+    - { from: builder, to: doc_audit }
+    - { from: doc_audit, to: integrator }
+    - { from: integrator, to: end }
+  limits:
+    max_steps: 40
+    max_duration_seconds: 300
+    max_node_iterations: 12
+    max_loop_visits: 3
+    max_cost_usd: 2
+    max_tool_calls: 60
+input:
+  task: >-
+    T2: let a user export their data. Requirement R4 of the PRD: "exports are available to authorised
+    users".
+agents:
+  builder:
+    name: Builder
+    system_prompt: |
+      You build one ticket inside the run directory named in your task. When you are done, call
+      yuno__finish with the result.
+    tool_allowlist: [read, write, ls, exec, finish]
+  auditor:
+    name: Doc Auditor
+    system_prompt: |
+      You check the code against the plan's requirements. You never patch around a gap: when the PRD
+      does not say what is wanted, you call escalate with the reason and stop, and you do not finish
+      afterwards.
+    tool_allowlist: [read, ls, escalate, finish]
+  integrator:
+    name: Integrator
+    system_prompt: |
+      You publish audited work with the deploy_release tool, exactly once. Never change the work.
+    tool_allowlist: [read, write, ls, deploy_release, finish]
+script:
+  # builder
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/export.py"
+        content: |
+          def export(user):
+              return {"user": user}
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: A minimal export of the user record.
+          files: [export.py]
+  - text: The build is written and the result has been submitted.
+  # doc_audit: R4 names "authorised users" and the PRD defines no authorisation
+  - tool:
+      name: read
+      args: { path: "runs/$RUN_ID/export.py" }
+  - tool:
+      name: yuno__escalate
+      args:
+        run_token: "$RUN_TOKEN"
+        kind: prd_gap
+        reason: R4 says exports are for authorised users, but the PRD never defines who is authorised.
+expect:
+  status: failed
+  failure_reason_contains: "escalated (prd_gap): R4 says exports are for authorised users"
+  min_model_calls: 5
+  min_tool_calls: 4
+  min_agent_messages: 1
+  state:
+    "/builder/summary": A minimal export of the user record.
+  tool_statuses:
+    deploy_release: []
+  approval_statuses: []
+rubric: []

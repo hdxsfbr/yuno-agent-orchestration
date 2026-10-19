@@ -655,3 +655,140 @@ func TestIssueTaskDropsNULAndInvalidUTF8(t *testing.T) {
 		t.Errorf("task = %q", got)
 	}
 }
+
+// T5.29.2 (creation, GitLab): rule 3's POST with the labels ensured first and joined.
+func TestGitLabIssuesCreate(t *testing.T) {
+	f, p := gitlabIssueFixture(t)
+	f.onFunc("GET /labels", func(c issueCall) issueAnswer {
+		if c.Query.Get("search") == "wave:1" {
+			return issueAnswer{200, []map[string]any{{"name": "wave:1"}}}
+		}
+		return issueAnswer{200, []map[string]any{}}
+	})
+	f.on("POST /labels", 201, map[string]any{})
+	f.on("POST /issues", 201, map[string]any{"iid": 12, "web_url": "https://gitlab.test/group/demo/-/issues/12"})
+	got, err := p.Create(context.Background(), "[x T1] a", "body", []string{"wave:1", "feature:x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Number != 12 || got.URL != "https://gitlab.test/group/demo/-/issues/12" {
+		t.Fatalf("issue = %+v", got)
+	}
+	wantCalls(t, f, "GET /labels", "GET /labels", "POST /labels", "POST /issues")
+	if b := f.call(t, 2).Body; b["name"] != "feature:x" {
+		t.Errorf("label created as %v", b)
+	}
+	b := f.call(t, 3).Body
+	if b["title"] != "[x T1] a" || b["description"] != "body" || b["labels"] != "wave:1,feature:x" {
+		t.Errorf("issue body = %v", b)
+	}
+	// A second issue looks the labels up no more.
+	if _, err := p.Create(context.Background(), "t", "b", []string{"wave:1", "feature:x"}); err != nil {
+		t.Fatal(err)
+	}
+	if f.count() != 5 {
+		t.Errorf("calls = %q", f.seen())
+	}
+	// A refusal is an error without the token.
+	e, p2 := gitlabIssueFixture(t)
+	e.on("GET /labels", 200, []map[string]any{{"name": "a"}})
+	e.on("POST /issues", 403, map[string]string{"message": "403 Forbidden"})
+	_, err = p2.Create(context.Background(), "t", "b", []string{"a"})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || strings.Contains(err.Error(), issueTestToken) {
+		t.Fatalf("a 403: %v", err)
+	}
+}
+
+func TestGitLabIssuesListAll(t *testing.T) {
+	f, p := gitlabIssueFixture(t)
+	f.on("GET /issues", 200, []map[string]any{
+		{"iid": 3, "title": "other", "description": "x", "web_url": "u3"},
+		{"iid": 2, "title": "mine", "description": "text\nm", "web_url": "u2"},
+	})
+	got, err := p.ListAll(context.Background(), "feature:x", 1000)
+	if err != nil || len(got) != 2 || got[1].Number != 2 || got[1].URL != "u2" || got[1].Body != "text\nm" {
+		t.Fatalf("found = %+v, %v", got, err)
+	}
+	if n := len(f.calls); n != 1 {
+		t.Fatalf("a short page needs one call, got %d", n)
+	}
+	c := f.call(t, 0)
+	for k, v := range map[string]string{"labels": "feature:x", "state": "all", "per_page": "100", "page": "1", "order_by": "created_at", "sort": "desc"} {
+		if c.Query.Get(k) != v {
+			t.Errorf("query %s = %q, want %q", k, c.Query.Get(k), v)
+		}
+	}
+	e, p2 := gitlabIssueFixture(t)
+	e.on("GET /issues", 500, map[string]string{"message": "boom"})
+	if _, err := p2.ListAll(context.Background(), "l", 1000); err == nil || strings.Contains(err.Error(), issueTestToken) {
+		t.Fatalf("a 500: %v", err)
+	}
+}
+
+// A full page is followed by the next one, up to the cap.
+func TestIssuesListAllPaginatesUpToTheCap(t *testing.T) {
+	full := make([]map[string]any, 100)
+	for i := range full {
+		full[i] = map[string]any{"iid": i + 1, "number": i + 1, "title": "t", "description": "d", "body": "d", "web_url": "u", "html_url": "u"}
+	}
+	f, p := gitlabIssueFixture(t)
+	f.on("GET /issues", 200, full)
+	got, err := p.ListAll(context.Background(), "feature:x", 250)
+	if err != nil || len(got) != 250 {
+		t.Fatalf("gitlab: %d, %v", len(got), err)
+	}
+	if n := len(f.calls); n != 3 || f.call(t, 2).Query.Get("page") != "3" {
+		t.Fatalf("gitlab calls = %d", n)
+	}
+	g, gp := githubIssueFixture(t)
+	g.on("GET /issues", 200, full)
+	got, err = gp.ListAll(context.Background(), "feature:x", 150)
+	if err != nil || len(got) != 150 || len(g.calls) != 2 {
+		t.Fatalf("github: %d, %v, calls %d", len(got), err, len(g.calls))
+	}
+}
+
+func TestGitHubIssuesCreate(t *testing.T) {
+	f, p := githubIssueFixture(t)
+	f.on("GET /labels/wave:1", 200, map[string]any{})
+	f.on("GET /labels/feature:x", 404, map[string]string{"message": "Not Found"})
+	f.on("POST /labels", 201, map[string]any{})
+	f.on("POST /issues", 201, map[string]any{"number": 7, "html_url": "https://github.com/owner/demo/issues/7"})
+	got, err := p.Create(context.Background(), "[x T1] a", "body", []string{"wave:1", "feature:x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Number != 7 || got.URL != "https://github.com/owner/demo/issues/7" {
+		t.Fatalf("issue = %+v", got)
+	}
+	wantCalls(t, f, "GET /labels/wave:1", "GET /labels/feature:x", "POST /labels", "POST /issues")
+	b := f.call(t, 3).Body
+	if b["title"] != "[x T1] a" || b["body"] != "body" || !reflect.DeepEqual(b["labels"], []any{"wave:1", "feature:x"}) {
+		t.Errorf("issue body = %v", b)
+	}
+	e, p2 := githubIssueFixture(t)
+	e.on("GET /labels/a", 200, map[string]any{})
+	e.on("POST /issues", 422, map[string]string{"message": "Validation Failed"})
+	if _, err := p2.Create(context.Background(), "t", "b", []string{"a"}); err == nil || strings.Contains(err.Error(), issueTestToken) {
+		t.Fatalf("a 422: %v", err)
+	}
+}
+
+func TestGitHubIssuesListAll(t *testing.T) {
+	f, p := githubIssueFixture(t)
+	f.on("GET /issues", 200, []map[string]any{
+		{"number": 9, "title": "a pull request", "body": "m", "html_url": "pr", "pull_request": map[string]any{}},
+		{"number": 5, "title": "no body", "body": nil, "html_url": "u5"},
+		{"number": 4, "title": "mine", "body": "x\nm", "html_url": "u4"},
+	})
+	got, err := p.ListAll(context.Background(), "feature:x", 1000)
+	if err != nil || len(got) != 2 || got[0].Number != 5 || got[0].Body != "" || got[1].Number != 4 || got[1].URL != "u4" {
+		t.Fatalf("found = %+v, %v", got, err)
+	}
+	c := f.call(t, 0)
+	for k, v := range map[string]string{"labels": "feature:x", "state": "all", "per_page": "100", "page": "1", "sort": "created", "direction": "desc"} {
+		if c.Query.Get(k) != v {
+			t.Errorf("query %s = %q, want %q", k, c.Query.Get(k), v)
+		}
+	}
+}

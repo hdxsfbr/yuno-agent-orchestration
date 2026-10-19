@@ -1,7 +1,7 @@
 {
   "key": "wave_pipeline",
   "name": "Wave pipeline",
-  "description": "Builds one ticket: the Builder writes the failing test first, then the code; the Code Reviewer sends it back until it is approved (bounded); the Doc Auditor updates the plan documents and traces the requirements to code and tests, a gap goes to the operator; the Integrator opens one merge request with code and documents.",
+  "description": "Builds one ticket: the Builder writes the failing test first, then the code; the Code Reviewer sends it back until it is approved (bounded); the Integrator opens a draft merge request; the operator pulls the branch and runs the CI tasks locally (bugs go back to the Builder); the Doc Auditor updates the plan documents and traces the requirements, escalating a PRD gap or a wrong design instead of finishing; the Integrator then marks the merge request ready with code and documents.",
   "definition": {
     "input_schema": {
       "type": "object",
@@ -62,55 +62,62 @@
           ],
           "additionalProperties": true
         },
+        "integrator_draft": {
+          "type": "object",
+          "properties": {
+            "merge_request_url": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "merge_request_url",
+            "branch"
+          ],
+          "additionalProperties": true
+        },
+        "manual_test": {
+          "type": "object",
+          "properties": {
+            "decision": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [],
+          "additionalProperties": true
+        },
         "doc_audit": {
           "type": "object",
           "properties": {
             "verdict": {
               "type": "string",
               "enum": [
-                "ok",
-                "gap"
+                "ok"
               ]
             },
-            "reason": {
-              "type": "string"
+            "trace_path": {
+              "type": "string",
+              "minLength": 1
             },
-            "trace": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "requirement": {
-                    "type": "string"
-                  },
-                  "code": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "tests": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                },
-                "required": [
-                  "requirement"
-                ],
-                "additionalProperties": true
-              }
+            "feature": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]{1,40}$"
             }
           },
           "required": [
             "verdict",
-            "reason",
-            "trace"
+            "trace_path",
+            "feature"
           ],
           "additionalProperties": true
         },
-        "integrator": {
+        "integrator_ready": {
           "type": "object",
           "properties": {
             "merge_request_url": {
@@ -160,7 +167,7 @@
           ],
           "additionalProperties": true
         },
-        "task": "Implement this ticket in the project checkout, tests first:\n\n{{.input.task}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): read that plan, docs/plans/<feature>/ in the checkout (PRD.md, ARCHITECTURE.md, TASKS.md, WAVES.md), for the context and follow its design. Work in this order: write the failing test for each acceptance test of the ticket, run the suite and see them fail for the right reason, then write the code until they pass, then run the whole suite. Stay inside the ticket's slice and files; ask the operator with ask_operator only when the ticket cannot be built as written.\n{{with .state.code_review}}{{if eq .verdict \"changes_requested\"}}\nThe code reviewer asked for changes. Address every point, with tests, before finishing:\n{{.comments}}\n{{end}}{{end}}Finish with a summary, the files you created or changed (paths relative to the checkout) and whether the whole suite passes (tests_passed)."
+        "task": "Implement this ticket in the project checkout, tests first:\n\n{{.input.task}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): read that plan, docs/plans/<feature>/ in the checkout (PRD.md, ARCHITECTURE.md, TASKS.md, WAVES.md), for the context and follow its design. Work in this order: write the failing test for each acceptance test of the ticket, run the suite and see them fail for the right reason, then write the code until they pass, then run the whole suite. Stay inside the ticket's slice and files; ask the operator with ask_operator only when the ticket cannot be built as written.\n{{with .state.code_review}}{{if eq .verdict \"changes_requested\"}}\nThe code reviewer asked for changes. Address every point, with tests, before finishing:\n{{.comments}}\n{{end}}{{end}}{{with .state.manual_test}}{{if eq .decision \"rejected\"}}\nBugs found in the manual test:{{if .reason}}\n{{.reason}}\n{{end}} Reproduce each one with a failing test, fix it, and re-run the whole suite before finishing.\n{{end}}{{end}}Finish with a summary, the files you created or changed (paths relative to the checkout) and whether the whole suite passes (tests_passed)."
       },
       {
         "id": "code_review",
@@ -192,9 +199,9 @@
         "task": "Review the change for this ticket:\n\n{{.input.task}}\n\nThe builder reports: {{.state.builder.summary}}\nFiles: {{range .state.builder.files}}{{.}} {{end}}\nTests passed: {{.state.builder.tests_passed}}\n\nIn the checkout run git status and git diff against the default branch, read the new files and run the test suite yourself. Check that a test exists for every acceptance test of the ticket and was written to fail first, that the code does what the ticket and docs/plans/ ask and nothing outside its slice, and that errors and edge cases are handled. Do not edit files. Finish with verdict \"approved\" when it is correct and the suite passes, otherwise \"changes_requested\" with specific, actionable comments."
       },
       {
-        "id": "doc_audit",
+        "id": "integrator_draft",
         "kind": "agent",
-        "agent_name": "Doc Auditor",
+        "agent_name": "Integrator",
         "input_from": [
           "builder",
           "code_review"
@@ -202,72 +209,78 @@
         "output_schema": {
           "type": "object",
           "properties": {
+            "merge_request_url": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "merge_request_url",
+            "branch"
+          ],
+          "additionalProperties": true
+        },
+        "task": "Open the merge request for this ticket as a draft, with the code, using the open_merge_request tool with draft true:\n\n{{.input.task}}\n\nTitle from the ticket; description with the builder's summary ({{.state.builder.summary}}) and the reviewer's verdict ({{.state.code_review.verdict}}). It stays a draft: the operator tests the branch by hand next, and the plan documents are added after that. If the run already has a merge request (the operator sent the work back), the tool pushes the new work onto it. If the tool result says the action was rejected or is pending approval, finish with empty merge_request_url and branch. Finish with the merge_request_url and the branch the tool returned."
+      },
+      {
+        "id": "manual_test",
+        "kind": "approval",
+        "on_reject": "builder",
+        "message": "Pull branch {{.state.integrator_draft.branch}} and run the CI tasks locally (the project's build, lint and test commands), then try the change by hand. Draft merge request: {{.state.integrator_draft.merge_request_url}}\nApprove when it works. Reject with the bugs you found: they go back to the Builder."
+      },
+      {
+        "id": "doc_audit",
+        "kind": "agent",
+        "agent_name": "Doc Auditor",
+        "input_from": [
+          "builder",
+          "code_review",
+          "integrator_draft"
+        ],
+        "output_schema": {
+          "type": "object",
+          "properties": {
             "verdict": {
               "type": "string",
               "enum": [
-                "ok",
-                "gap"
+                "ok"
               ]
             },
-            "reason": {
-              "type": "string"
+            "trace_path": {
+              "type": "string",
+              "minLength": 1
             },
-            "trace": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "requirement": {
-                    "type": "string"
-                  },
-                  "code": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  },
-                  "tests": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                },
-                "required": [
-                  "requirement"
-                ],
-                "additionalProperties": true
-              }
+            "feature": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]{1,40}$"
             }
           },
           "required": [
             "verdict",
-            "reason",
-            "trace"
+            "trace_path",
+            "feature"
           ],
           "additionalProperties": true
         },
-        "task": "Audit the documents against the finished change for this ticket:\n\n{{.input.task}}\n\nThe builder reports: {{.state.builder.summary}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): the plan is in docs/plans/<feature>/ in the checkout; read it. Write your requirement trace to docs/plans/<feature>/tickets/<ticket-id>.md, a new file for this ticket. Never edit TASKS.md or WAVES.md in a ticket run (tickets of one wave run in parallel and would conflict). Edit ARCHITECTURE.md only if the built design differs from it; then say so in your output, and if the change contradicts the approved design report a gap instead. You may update the project's own docs and README so they describe what the code now does (edit only documents, never code). Then trace every requirement of the PRD that this ticket covers to the code and tests that satisfy it, in that file. Finish with verdict \"ok\" when every covered requirement is met and the design still holds, otherwise \"gap\" with the reason (which requirement is unmet or which design assumption is wrong). trace lists {requirement, code, tests} for each requirement you traced."
+        "task": "Audit the documents against the finished, manually tested change for this ticket:\n\n{{.input.task}}\n\nThe builder reports: {{.state.builder.summary}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): the plan is in docs/plans/<feature>/ in the checkout; read it. Write your requirement trace to docs/plans/<feature>/tickets/<ticket-id>.md, a new file for this ticket. Never edit TASKS.md or WAVES.md in a ticket run (tickets of one wave run in parallel and would conflict). Edit ARCHITECTURE.md only if the built design differs from it. You may update the project's own docs and README so they describe what the code now does (edit only documents, never code). Then trace every requirement of the PRD that this ticket covers to the code and tests that satisfy it, in that file.\n\nIf a requirement cannot be met because the PRD is silent, ambiguous or contradicts itself, call the escalate tool with kind prd_gap; if the built or required design contradicts the approved ARCHITECTURE.md or cannot work, call escalate with kind design_wrong. Give the reason and the requirement it concerns. Never edit the PRD or the design to match the code, never soften a requirement and never patch around the gap. After escalate the run ends: do not finish.\nOtherwise finish with verdict \"ok\", trace_path (the path of the trace file you wrote) and feature (the slug of the ticket's Feature line, exactly as written)."
       },
       {
-        "id": "gap_found",
-        "kind": "approval",
-        "message": "The documentation audit found a gap in this ticket: {{.state.doc_audit.reason}}\nApprove to open the merge request anyway, reject to stop the ticket."
-      },
-      {
-        "id": "integrator",
+        "id": "integrator_ready",
         "kind": "agent",
         "agent_name": "Integrator",
+        "auto_after": "manual_test",
         "input_from": [
-          "builder",
+          "integrator_draft",
           "doc_audit"
         ],
         "output_schema": {
           "type": "object",
           "properties": {
             "merge_request_url": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           "required": [
@@ -275,7 +288,7 @@
           ],
           "additionalProperties": true
         },
-        "task": "Open the merge request for this ticket with the open_merge_request tool, with the code and the updated documents together:\n\n{{.input.task}}\n\nTitle from the ticket; description with the builder's summary ({{.state.builder.summary}}), the requirements traced by the audit and the audit verdict ({{.state.doc_audit.verdict}}{{with .state.doc_audit.reason}}: {{.}}{{end}}). If the tool result says the action was rejected or is pending approval, finish with an empty merge_request_url. Finish with the merge_request_url the tool returned."
+        "task": "Mark the merge request of this ticket ready for review, with the code and the updated documents together, using the open_merge_request tool with draft false and paths [\"docs/plans/{{.state.doc_audit.feature}}\"] (the plan documents of the feature, and nothing else):\n\n{{.input.task}}\n\nKeep the title from the ticket; description with the builder's summary ({{.state.builder.summary}}), the requirements traced by the audit (trace file {{.state.doc_audit.trace_path}}) and the manual test the operator approved on branch {{.state.integrator_draft.branch}}. The call pushes those documents onto the draft's branch and marks it ready; the code is already on the branch. If the tool result says the action was rejected or is pending approval, finish with an empty merge_request_url. Finish with the merge_request_url the tool returned."
       },
       {
         "id": "end",
@@ -302,7 +315,7 @@
       },
       {
         "from": "code_review",
-        "to": "doc_audit",
+        "to": "integrator_draft",
         "when": {
           "path": "/code_review/verdict",
           "op": "eq",
@@ -310,29 +323,19 @@
         }
       },
       {
-        "from": "doc_audit",
-        "to": "integrator",
-        "when": {
-          "path": "/doc_audit/verdict",
-          "op": "eq",
-          "value": "ok"
-        }
+        "from": "integrator_draft",
+        "to": "manual_test"
+      },
+      {
+        "from": "manual_test",
+        "to": "doc_audit"
       },
       {
         "from": "doc_audit",
-        "to": "gap_found",
-        "when": {
-          "path": "/doc_audit/verdict",
-          "op": "eq",
-          "value": "gap"
-        }
+        "to": "integrator_ready"
       },
       {
-        "from": "gap_found",
-        "to": "integrator"
-      },
-      {
-        "from": "integrator",
+        "from": "integrator_ready",
         "to": "end"
       }
     ],

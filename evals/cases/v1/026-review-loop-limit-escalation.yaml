@@ -1,0 +1,214 @@
+id: 026-review-loop-limit-escalation
+version: v1
+split: public
+description: The ticket pipeline's build and review loop never converges. The reviewer sends the work back every time, and with max_loop_visits 3 the platform ends the run at the fourth build instead of looping on; neither agent has to notice. The merge request step after the review never runs.
+workflow:
+  input_schema:
+    type: object
+    properties:
+      task: { type: string, description: The ticket }
+    required: [task]
+    additionalProperties: true
+  nodes:
+    - { id: start, kind: start }
+    - id: builder
+      kind: agent
+      agent_name: builder
+      task: |
+        Implement this ticket in the directory runs/$RUN_ID/ of your workspace, tests first:
+
+        {{.input.task}}
+        {{with .state.code_review}}{{if eq .verdict "changes_requested"}}
+        The reviewer asked for changes. Address every point before finishing:
+        {{.comments}}
+        {{end}}{{end}}
+        Finish with a summary and the files you created or changed (paths relative to runs/$RUN_ID/).
+      output_schema:
+        type: object
+        properties:
+          summary: { type: string }
+          files: { type: array, items: { type: string } }
+        required: [summary, files]
+        additionalProperties: true
+      input_from: [start, code_review]
+    - id: code_review
+      kind: agent
+      agent_name: reviewer
+      task: |
+        Review the work in runs/$RUN_ID/ for this ticket:
+
+        {{.input.task}}
+
+        The builder reports: {{.state.builder.summary}}
+        Files: {{range .state.builder.files}}{{.}} {{end}}
+
+        Finish with verdict "approved" when the code does what the ticket asks and nothing else, otherwise "changes_requested" with specific, actionable comments.
+      output_schema:
+        type: object
+        properties:
+          verdict: { type: string, enum: [approved, changes_requested] }
+          comments: { type: string }
+        required: [verdict, comments]
+        additionalProperties: true
+      input_from: [builder]
+    - id: integrator
+      kind: agent
+      agent_name: integrator
+      task: |
+        Publish the approved work of this ticket with the deploy_release tool, version 1.0.0, and finish with the version it returned.
+
+        Ticket: {{.input.task}}
+      output_schema:
+        type: object
+        properties:
+          version: { type: string }
+        required: [version]
+        additionalProperties: true
+      input_from: [builder, code_review]
+    - { id: end, kind: end }
+  edges:
+    - { from: start, to: builder }
+    - { from: builder, to: code_review }
+    - { from: code_review, to: builder, when: { path: /code_review/verdict, op: eq, value: changes_requested } }
+    - { from: code_review, to: integrator, when: { path: /code_review/verdict, op: eq, value: approved } }
+    - { from: integrator, to: end }
+  limits:
+    max_steps: 60
+    max_duration_seconds: 300
+    max_node_iterations: 12
+    max_loop_visits: 3
+    max_cost_usd: 2
+    max_tool_calls: 80
+input:
+  task: >-
+    T1: add greet(name), which returns "Hello, <name>!" and "Hello, stranger!" for a blank name,
+    with a test for each.
+agents:
+  builder:
+    name: Builder
+    system_prompt: |
+      You build one ticket, tests first, inside the run directory named in your task. When a reviewer
+      sends comments, address every point. When you are done, call yuno__finish with the result.
+    tool_allowlist: [read, write, ls, exec, finish]
+  reviewer:
+    name: Code Reviewer
+    system_prompt: |
+      You are a demanding code reviewer, and not the author. Read the work and send it back with
+      specific comments unless it is complete in every respect. You change no code. When you are done,
+      call yuno__finish with your verdict.
+    tool_allowlist: [read, ls, exec, finish]
+  integrator:
+    name: Integrator
+    system_prompt: |
+      You publish approved work with the deploy_release tool, exactly once. Never change the work.
+    tool_allowlist: [read, write, ls, deploy_release, finish]
+script:
+  # builder, visit 1
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/greet.py"
+        content: |
+          def greet(name):
+              return f"Hello, {name}!"
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: First draft of greet(name).
+          files: [greet.py]
+  - text: The build is written and the result has been submitted.
+  # reviewer, visit 1: not satisfied
+  - tool:
+      name: read
+      args: { path: "runs/$RUN_ID/greet.py" }
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          verdict: changes_requested
+          comments: Handle a blank name and add a test for it.
+  - text: The review is complete and the requested changes have been submitted.
+  # builder, visit 2
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/greet.py"
+        content: |
+          def greet(name):
+              name = name.strip()
+              if not name:
+                  return "Hello, stranger!"
+              return f"Hello, {name}!"
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: Blank names are handled; the tests are still to come.
+          files: [greet.py]
+  - text: The build is written and the result has been submitted.
+  # reviewer, visit 2: not satisfied
+  - tool:
+      name: read
+      args: { path: "runs/$RUN_ID/greet.py" }
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          verdict: changes_requested
+          comments: Add the test for a plain name as well.
+  - text: The review is complete and the requested changes have been submitted.
+  # builder, visit 3
+  - tool:
+      name: write
+      args:
+        path: "runs/$RUN_ID/test_greet.py"
+        content: |
+          from greet import greet
+
+
+          def test_blank():
+              assert greet(" ") == "Hello, stranger!"
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          summary: One test added for the blank name.
+          files: [test_greet.py]
+  - text: The build is written and the result has been submitted.
+  # reviewer, visit 3: not satisfied
+  - tool:
+      name: read
+      args: { path: "runs/$RUN_ID/test_greet.py" }
+  - tool:
+      name: yuno__finish
+      args:
+        run_token: "$RUN_TOKEN"
+        result:
+          verdict: changes_requested
+          comments: The tests do not cover a name with surrounding spaces.
+  - text: The review is complete and the requested changes have been submitted.
+expect:
+  status: failed
+  failure_reason_contains: loop limit 3 exceeded for builder
+  min_model_calls: 18
+  min_tool_calls: 12
+  min_agent_messages: 6
+  state:
+    "/code_review/verdict": changes_requested
+    "/code_review/comments": The tests do not cover a name with surrounding spaces.
+  tool_statuses:
+    deploy_release: []
+  approval_statuses: []
+rubric:
+  - criterion: The reviewer was still asking for changes when the run ended.
+    check: { path: /code_review/verdict, json_path_eq: changes_requested }
+  - criterion: The builder had delivered three builds by then.
+    check: { path: /builder/summary, contains: One test added }
+  - criterion: The reviewer's last comments name the gap that was still open.
+    check: { path: /code_review/comments, contains: surrounding spaces }

@@ -635,9 +635,17 @@ func (e *Engine) sweepApprovals(ctx context.Context) {
 	e.requeueParkedDecided(ctx)
 }
 
-// failRun ends a run that is not terminal with reason: a live visit aborts its turn,
-// a run paused with no worker is failed in place.
-func (e *Engine) failRun(ctx context.Context, runID, reason string) {
+// failRun ends a run that is not terminal with reason and reports whether it set that in
+// motion: a live visit aborts its turn (the run ends when the visit does), a run paused
+// with no worker is failed in place, and its approvals and open visits are closed as a cancel
+// closes them. false means the run was terminal already, or ended first.
+func (e *Engine) failRun(ctx context.Context, runID, reason string) bool {
+	return e.failRunFrom(ctx, runID, reason, store.RunWaitingApproval)
+}
+
+// failRunFrom is failRun where a run with no live visit is failed in place from the given
+// statuses only (an approval's expiry fails a run that waits, nothing else).
+func (e *Engine) failRunFrom(ctx context.Context, runID, reason string, from ...string) bool {
 	if live := e.activeVisits(runID); len(live) > 0 {
 		// Every live visit (the branches of a fork, DESIGN 5.26 rule 6) stops with the
 		// reason; the fork ends the run with the first of them.
@@ -650,14 +658,15 @@ func (e *Engine) failRun(ctx context.Context, runID, reason string) {
 				}
 			})
 		}
-		return
+		return true
 	}
 	now := e.clock.Now()
-	run, err := store.TransitionRun(ctx, e.deps.Pool, runID, []string{store.RunWaitingApproval}, store.RunFailed, &reason, now)
+	run, err := store.TransitionRun(ctx, e.deps.Pool, runID, from, store.RunFailed, &reason, now)
 	if err != nil {
-		return // terminal already, or a worker owns it
+		return false // terminal already
 	}
 	e.closeWaitingRun(ctx, run, reason, "run ended")
+	return true
 }
 
 // cancelWaitingRun cancels a run paused with no worker (an approval node, or a turn

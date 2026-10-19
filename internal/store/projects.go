@@ -53,6 +53,11 @@ type Project struct {
 	IntakePolledAt     *time.Time `db:"intake_polled_at" json:"-"`
 	IntakeLastError    *string    `db:"intake_last_error" json:"-"`
 	IntakeWorkflowName *string    `db:"intake_workflow_name" json:"-"`
+	// WavesPaused stops a plan's next wave release and ship run; the reason is the
+	// operator's or the escalation's (DESIGN 5.29 rule 1, migration 0017). Written by
+	// SetWavesPaused only.
+	WavesPaused       bool    `db:"waves_paused" json:"waves_paused"`
+	WavesPausedReason *string `db:"waves_paused_reason" json:"waves_paused_reason,omitempty"`
 	// LastRun, Spend and Intake are not columns; FillProjectLastRuns and
 	// FillProjectSpend set the first two for the API's views, fillIntake the third.
 	LastRun *ProjectLastRun `db:"-" json:"last_run,omitempty"`
@@ -129,6 +134,7 @@ const projectColumns = `p.id, p.name, p.repo_url, p.provider, p.default_branch, 
 	p.instructions, p.budget_day_usd_micros, p.budget_month_usd_micros,
 	(p.token_enc IS NOT NULL) AS token_set, p.created_at, p.updated_at, p.deleted_at,
 	p.intake_enabled, p.intake_label, p.intake_workflow_id, p.intake_polled_at, p.intake_last_error,
+	p.waves_paused, p.waves_paused_reason,
 	w.name AS intake_workflow_name`
 
 // projectFrom is the table projectColumns reads: the project and its intake workflow. The

@@ -77,6 +77,10 @@ func reportsTo(run *store.Run) bool {
 // so the caller (a worker, an HTTP cancel, the approval sweeper) is not held up by the
 // gateway. Runs that do not report back cost nothing.
 func (e *Engine) afterTerminal(ctx context.Context, run *store.Run) {
+	if run != nil && e.deps.Plans != nil && store.IsTerminal(run.Status) {
+		// DESIGN 5.29 rule 7: a plan ticket's run that ended badly escalates.
+		e.deps.Plans.OnRunTerminal(context.WithoutCancel(ctx), run)
+	}
 	if run == nil || !reportsTo(run) || !store.IsTerminal(run.Status) {
 		return
 	}

@@ -73,6 +73,11 @@ type Triggerer interface {
 	Trigger(ctx context.Context, req engine.TriggerRequest) (*store.Run, error)
 }
 
+// PlanHook is the part of the plans service the taker calls.
+type PlanHook interface {
+	OnIssueTaken(ctx context.Context, projectID string, issueNumber int64, runID string) error
+}
+
 // Loop polls the projects with intake enabled. Client should come from
 // tools.ProviderClient, so a token header never follows a redirect to another host; nil is
 // that client over the default transport. Interval is INTAKE_POLL_INTERVAL, Timeout bounds
@@ -81,10 +86,12 @@ type Triggerer interface {
 // system's, in UTC) and PublicBaseURL prefixes the run links in the comments (relative
 // without it).
 type Loop struct {
-	Pool          *pgxpool.Pool
-	Projects      *project.Resolver
-	Client        *http.Client
-	Engine        Triggerer
+	Pool     *pgxpool.Pool
+	Projects *project.Resolver
+	Client   *http.Client
+	Engine   Triggerer
+	// Plans, when set, links the run of a taken issue to its plan ticket (DESIGN 5.29 rule 10).
+	Plans         PlanHook
 	Interval      time.Duration
 	Timeout       time.Duration
 	CloseTimeout  time.Duration
@@ -363,6 +370,11 @@ func (l *Loop) takePass(ctx context.Context, p *store.Project) (takeResult, erro
 			newRuns++
 			res.taken++
 			ilog.Info("intake: issue taken", "run_id", run.ID)
+			if l.Plans != nil {
+				if err := l.Plans.OnIssueTaken(ctx, p.ID, issue.Number, run.ID); err != nil {
+					l.logDB(ctx, "link a taken issue to its plan ticket", err)
+				}
+			}
 		}
 		// (c) the swap goes first, it is the state; (d) the comment is best effort.
 		if err := prov.SwapLabels(pctx, issue.Number, p.IntakeLabel+tools.IssueRunningSuffix, p.IntakeLabel); err != nil {

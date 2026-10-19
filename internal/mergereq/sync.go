@@ -45,6 +45,14 @@ type Reporter interface {
 	SendPlatformMessage(ctx context.Context, runID, conversationID, key, text string) (deferred bool)
 }
 
+// PlanHook is the part of the plans service the sync calls: a plan ticket whose merge
+// request merged is merged.
+type PlanHook interface {
+	OnMergeRequestMerged(ctx context.Context, mrID string) error
+	// ReapplyMerged sets every ticket whose record is merged to merged (review L5).
+	ReapplyMerged(ctx context.Context) (int, error)
+}
+
 // Sync refreshes merge request records from their providers (DESIGN 5.20 rules 3, 4 and
 // 8). Client should come from tools.ProviderClient, so a token header never follows a
 // redirect to another host; nil is that client over the default transport. A nil
@@ -54,6 +62,8 @@ type Sync struct {
 	Projects *project.Resolver
 	Client   *http.Client
 	Reporter Reporter
+	// Plans, when set, hears every record that turns merged (DESIGN 5.29 rule 10).
+	Plans    PlanHook
 	Interval time.Duration
 	// Timeout bounds the refresh of one record; SyncTimeout (10 s) when zero.
 	Timeout time.Duration
@@ -90,6 +100,7 @@ func (s *Sync) Run(ctx context.Context) {
 func (s *Sync) TickOnce(ctx context.Context) (synced, failed int) {
 	now := s.now()
 	s.reportPending(ctx, now)
+	s.reapplyPlans(ctx)
 	recs, err := store.ListMergeRequestsToSync(ctx, s.Pool, now.Add(-Window), PassLimit)
 	if err != nil {
 		s.logDB(ctx, "list the merge requests to sync", err)
@@ -111,6 +122,20 @@ func (s *Sync) TickOnce(ctx context.Context) (synced, failed int) {
 		}
 	}
 	return synced, failed
+}
+
+// reapplyPlans re-applies the merges the plan tickets missed (DESIGN 5.29 rule 10, review
+// L5): a record that turned merged while its ticket was not told, as when the process
+// stopped between the two writes, is not lost.
+func (s *Sync) reapplyPlans(ctx context.Context) {
+	if s.Plans == nil {
+		return
+	}
+	if n, err := s.Plans.ReapplyMerged(ctx); err != nil {
+		s.logDB(ctx, "re-apply merged plan tickets", err)
+	} else if n > 0 {
+		s.log().Info("plan tickets of merged requests set merged", "count", n)
+	}
 }
 
 // SyncOne refreshes one record at once (POST /api/merge-requests/{id}/sync, rule 3) and
@@ -275,6 +300,11 @@ func (s *Sync) recordFailure(ctx context.Context, rec *store.MergeRequest, at ti
 // reported sends the record's final-state report and returns the record re-read, so the
 // caller sees reported_state.
 func (s *Sync) reported(ctx context.Context, rec *store.MergeRequest) (*store.MergeRequest, error) {
+	if s.Plans != nil && rec.State == store.MergeRequestMerged {
+		if err := s.Plans.OnMergeRequestMerged(ctx, rec.ID); err != nil {
+			s.logDB(ctx, "update the plan ticket of a merged request", err, "merge_request_id", rec.ID)
+		}
+	}
 	s.report(ctx, rec)
 	return store.GetMergeRequest(ctx, s.Pool, rec.ID)
 }
