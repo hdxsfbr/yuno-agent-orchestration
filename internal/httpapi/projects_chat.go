@@ -96,6 +96,16 @@ func (s *Server) tokenForRepo(ctx context.Context, in *projectInput) (token, fro
 	if err != nil {
 		return "", "", err
 	}
+	// A token is used only when the provider accepts it for this repository: a token
+	// scoped to one project (a GitLab project access token) opens nothing else.
+	opens := func(tok string) bool {
+		pc := project.Config{RepoURL: in.RepoURL, Token: tok, DefaultBranch: in.DefaultBranch, Provider: project.Provider(provider)}
+		if s.tokenOpens != nil {
+			return s.tokenOpens(ctx, pc)
+		}
+		return tools.CheckProject(ctx, s.checkClient, pc, "").OK
+	}
+	tried := false
 	for _, p := range projects {
 		if p.Provider != provider || hostOf(p.RepoURL) != host || ns == "" || namespaceOf(p.RepoURL) != ns {
 			continue
@@ -104,10 +114,21 @@ func (s *Server) tokenForRepo(ctx context.Context, in *projectInput) (token, fro
 		if terr != nil || strings.TrimSpace(tok) == "" {
 			continue // no token stored, or one that does not open: try the next
 		}
-		return tok, p.Name, nil
+		tried = true
+		if opens(tok) {
+			return tok, p.Name, nil
+		}
 	}
 	if t := strings.TrimSpace(s.cfg.ProjectGitToken); t != "" {
-		return t, "", nil
+		tried = true
+		if opens(t) {
+			return t, "", nil
+		}
+	}
+	if tried {
+		return "", "", &tools.ModelError{Message: "no known token opens " + in.RepoURL + ": the tokens of the other projects on " + host +
+			" and the configured one were refused for it (a token can be limited to one repository). Tell the person to add this " +
+			"project once on the Projects page with a token for it; never ask for a token in chat"}
 	}
 	return "", "", &tools.ModelError{Message: "no token is known for " + host + " (" + provider + "): no project in the same group or owner has one " +
 		"and none is configured. Tell the person to add this project once on the Projects page, where the token is entered; " +

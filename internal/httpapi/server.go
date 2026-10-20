@@ -80,7 +80,10 @@ type Server struct {
 	waves *waves.Service
 	// checkClient talks to the providers for POST /api/projects/{id}/check.
 	checkClient *http.Client
-	rec         *events.Recorder
+	// tokenOpens, when set, replaces the provider check add_project makes before it reuses
+	// a token (tests); nil asks the provider.
+	tokenOpens func(ctx context.Context, pc project.Config) bool
+	rec        *events.Recorder
 	// templatesDir is where LoadTemplates reads workflow templates.
 	templatesDir string
 	startedAt    time.Time

@@ -311,6 +311,29 @@ func TestChiefAddProject(t *testing.T) {
 		p.BudgetDayUSDMicros == nil || int64(*p.BudgetDayUSDMicros) != 10_000_000 {
 		t.Fatalf("intake = %v %+v", out, p)
 	}
+	// A lender whose token the provider refuses for the new repository (a token limited to
+	// its own project) is passed over for the configured one; with none configured, the
+	// answer says the known tokens were refused and nothing is created.
+	host = "s" + sfx + ".test"
+	scoped := &store.Project{ID: store.NewID(), Name: "scoped-" + sfx, RepoURL: "https://" + host + "/g/scoped.git", Provider: "gitlab", DefaultBranch: "main"}
+	blob, err = testCipher(t).Seal(scoped.ID, acceptedTokenPrefix+"elsewhere"+sfx)
+	mustDo(t, err)
+	mustDo(t, store.CreateProject(ctx, testPool, scoped, blob))
+	t.Cleanup(func() { _ = store.DeleteProject(ctx, testPool, scoped.ID) })
+	o, text, isErr := f.callJSON(t, "add_project", map[string]any{"repo_url": "https://" + host + "/g/next-" + sfx + ".git"})
+	if isErr || o["token_source"] != "config" || o["token_from_project"] != nil {
+		t.Fatalf("refused lender = %v %s", isErr, text)
+	}
+	t.Cleanup(func() { _ = store.DeleteProject(ctx, testPool, o["project_id"].(string)) })
+	f.s.cfg.ProjectGitToken = acceptedTokenPrefix + "elsewhere-cfg" + sfx
+	text, isErr = f.call(t, "add_project", map[string]any{"chat_token": f.token, "repo_url": "https://" + host + "/other/last-" + sfx + ".git"})
+	if !isErr || !strings.Contains(text, "refused") || !strings.Contains(text, "Projects page") || strings.Contains(text, acceptedTokenPrefix) {
+		t.Fatalf("every token refused = %v %s", isErr, text)
+	}
+	if _, err := store.GetProjectByName(ctx, testPool, "last-"+sfx); err == nil {
+		t.Fatal("a project was created with a token the provider refused")
+	}
+	f.s.cfg.ProjectGitToken = cfgTok
 	// The API's own rules apply: a name in use is refused.
 	text, isErr = f.call(t, "add_project", map[string]any{"chat_token": f.token, "repo_url": "https://" + host + "/g/third.git", "name": "Second " + sfx})
 	if !isErr || !strings.Contains(text, "already exists") {

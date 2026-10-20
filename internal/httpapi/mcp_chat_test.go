@@ -11,6 +11,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"yuno/internal/engine"
+	"yuno/internal/project"
 	"yuno/internal/store"
 	"yuno/internal/tools"
 )
@@ -45,6 +46,10 @@ func newChatFixture(t *testing.T, rules map[string]string) *chatFixture {
 		ToolAllowlist: f.agent.ToolAllowlist, InteractionRules: rules,
 	}}}
 	f.s, f.ts = newTestServerDeps(t, Deps{Cfg: testConfig(), Pool: pool}, f.fe)
+	// The provider accepts the test tokens, except one marked as limited to another repository.
+	f.s.tokenOpens = func(_ context.Context, pc project.Config) bool {
+		return strings.HasPrefix(pc.Token, acceptedTokenPrefix) && !strings.Contains(pc.Token, "elsewhere")
+	}
 	return f
 }
 
