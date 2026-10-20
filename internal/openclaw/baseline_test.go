@@ -1,6 +1,8 @@
 package openclaw
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -222,5 +224,52 @@ func TestWriteBaselineRefusesUnverifiableWebhook(t *testing.T) {
 	in.TelegramMode = "polling"
 	if _, err := WriteBaseline(t.TempDir(), in); err != nil {
 		t.Fatalf("polling: %v", err)
+	}
+}
+
+// A gateway whose config was written by an older baseline with the same inputs and the
+// same BaselineVersion (a content change nobody versioned, like the sandbox scope) is
+// rewritten: the hash covers the baseline's content, not only its inputs.
+func TestWriteBaselineAppliesContentChanges(t *testing.T) {
+	dir := t.TempDir()
+	in := inputs()
+	if _, err := WriteBaseline(dir, in); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "openclaw.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	sandbox := cfg["agents"].(map[string]any)["defaults"].(map[string]any)["sandbox"].(map[string]any)
+	sandbox["scope"] = "agent" // what the previous baseline wrote
+	raw, _ = json.Marshal(cfg)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The sidecar the previous build left: inputs and version only.
+	old, _ := json.Marshal(struct {
+		Version int
+		Inputs  BaselineInputs
+	}{BaselineVersion, in})
+	sum := sha256.Sum256(old)
+	if err := os.WriteFile(filepath.Join(dir, HashFile), []byte(hex.EncodeToString(sum[:])+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := WriteBaseline(dir, in)
+	if err != nil || !changed {
+		t.Fatalf("stale content: changed=%v err=%v", changed, err)
+	}
+	raw, _ = os.ReadFile(path)
+	if !strings.Contains(string(raw), `"scope": "session"`) {
+		t.Fatalf("scope not rewritten: %s", raw)
+	}
+	if changed, _ := WriteBaseline(dir, in); changed {
+		t.Fatal("a second write with the same content should be a no-op")
 	}
 }

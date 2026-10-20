@@ -200,12 +200,15 @@ func ValidateTelegram(in BaselineInputs) error {
 	return errors.Join(errs...)
 }
 
-// InputsHash is a stable digest of the inputs and the baseline version.
+// InputsHash is a stable digest of the inputs, the baseline version and the managed
+// keys the baseline writes, so a change to the baseline's content reaches an existing
+// gateway even when nobody bumped BaselineVersion (encoding/json sorts map keys).
 func InputsHash(in BaselineInputs) string {
 	b, _ := json.Marshal(struct {
-		Version int
-		Inputs  BaselineInputs
-	}{BaselineVersion, in})
+		Version  int
+		Inputs   BaselineInputs
+		Baseline map[string]any
+	}{BaselineVersion, in, Baseline(in)})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
