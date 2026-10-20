@@ -219,3 +219,46 @@ func TestRunRepositoryInitAndRefusals(t *testing.T) {
 		t.Fatal("OpenCheckout went through a link")
 	}
 }
+
+// A file one round adds and a later round renames reaches the next step under its new
+// name only: each step starts from a fresh checkout of the commit, so a deletion carries.
+// (Before DESIGN 5.30 the run folder was copied forward, which added and overwrote files
+// but never removed one: a Builder renamed V006 to V014 six times and the Code Reviewer
+// saw both every round, until the loop limit ended the run.)
+func TestRunRepositoryCarriesARename(t *testing.T) {
+	f := newRunRepoFixture(t, map[string]string{"README.md": "# demo\n"})
+	ctx := context.Background()
+	one := f.checkoutPath("ws1")
+	writeAt(t, filepath.Join(one, "sql", "migrations", "V006__top_factors.sql"), "ALTER TABLE t ADD COLUMN c VARCHAR;\n")
+	first := f.commit(t, "ws1", f.base, "builder-1", "builder visit 1")
+
+	review := f.checkoutPath("ws-review")
+	must(t, os.MkdirAll(filepath.Dir(review), 0o755))
+	must(t, f.cfg.CheckoutRun(ctx, f.runRepo, first, review, "main"))
+	if _, err := os.Stat(filepath.Join(review, "sql", "migrations", "V006__top_factors.sql")); err != nil {
+		t.Fatalf("the reviewer did not get the first round's file: %v", err)
+	}
+
+	// The Builder's second round renames the file in its own checkout.
+	again := f.checkoutPath("ws1b")
+	must(t, os.MkdirAll(filepath.Dir(again), 0o755))
+	must(t, f.cfg.CheckoutRun(ctx, f.runRepo, first, again, "main"))
+	must(t, os.Rename(filepath.Join(again, "sql", "migrations", "V006__top_factors.sql"),
+		filepath.Join(again, "sql", "migrations", "V014__top_factors.sql")))
+	second := f.commit(t, "ws1b", first, "builder-2", "builder visit 2")
+
+	review2 := f.checkoutPath("ws-review2")
+	must(t, os.MkdirAll(filepath.Dir(review2), 0o755))
+	must(t, f.cfg.CheckoutRun(ctx, f.runRepo, second, review2, "main"))
+	entries, err := os.ReadDir(filepath.Join(review2, "sql", "migrations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !slices.Equal(names, []string{"V014__top_factors.sql"}) {
+		t.Fatalf("the next step sees %v, want only the renamed file", names)
+	}
+}
