@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -110,6 +111,7 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 	repoOf := func(p openclaw.ChatSendParams) string {
 		return filepath.Join(env.dir, "workspace-"+sessionAgent(p.SessionKey), "runs", run.ID, "repo")
 	}
+	snapshot := filepath.Join(t.TempDir(), "run")
 	var mu sync.Mutex
 	seen := map[string]string{} // node → README content when its turn started
 	messages := map[string]string{}
@@ -123,6 +125,12 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 		if node == "one" {
 			writeFile(t, filepath.Join(repoOf(p), "README.md"), "# demo\nedited by one\n")
 			writeFile(t, filepath.Join(repoOf(p), "cmd", "main.go"), "package main\n")
+		}
+		if node == "two" {
+			// The run's folders go when it succeeds; keep the deployer's as it stood.
+			if out, err := exec.Command("cp", "-a", filepath.Dir(repoOf(p)), snapshot).CombinedOutput(); err != nil {
+				t.Errorf("snapshot: %v %s", err, out)
+			}
 		}
 		go finishThenFinal(t, env, p, `{"ok":true}`)
 		return startedTurn(p)
@@ -153,7 +161,7 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 		}
 	}
 	// The checkout's git config holds the bare URL only.
-	cfg, _ := os.ReadFile(filepath.Join(env.dir, "workspace-"+openclaw.DeriveAgentID(coder.ID), "runs", run.ID, "repo", ".git", "config"))
+	cfg, _ := os.ReadFile(filepath.Join(snapshot, "repo", ".git", "config"))
 	if strings.Contains(string(cfg), "extraheader") || strings.Contains(string(cfg), testProjectToken) {
 		t.Fatalf(".git/config:\n%s", cfg)
 	}
@@ -166,6 +174,11 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 	}
 	// Each visit selected the go image with network and cleared it afterwards.
 	coderID, deployerID := openclaw.DeriveAgentID(coder.ID), openclaw.DeriveAgentID(deployer.ID)
+	for _, id := range []string{coderID, deployerID} {
+		if _, err := os.Lstat(filepath.Join(env.dir, "workspace-"+id, "runs", run.ID)); !os.IsNotExist(err) {
+			t.Fatalf("the succeeded run's folder is still in workspace %s: %v", id, err)
+		}
+	}
 	want := []string{"set " + coderID + " session yuno-sandbox-go:latest bridge", "clear " + coderID,
 		"set " + deployerID + " session yuno-sandbox-go:latest bridge", "clear " + deployerID}
 	if got := sandboxPatches(env); !slices.Equal(got, want) {
@@ -177,6 +190,13 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 
 	// The Deployer's open_merge_request, as the MCP handler would run it in the
 	// deployer's workspace (the fake provider reports branches from the bare repository).
+	deployerRun := filepath.Join(env.dir, "workspace-"+deployerID, "runs", run.ID)
+	if err := os.MkdirAll(filepath.Dir(deployerRun), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("cp", "-a", snapshot, deployerRun).CombinedOutput(); err != nil {
+		t.Fatalf("restore: %v %s", err, out)
+	}
 	var mrs []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

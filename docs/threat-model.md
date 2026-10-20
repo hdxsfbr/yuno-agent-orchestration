@@ -91,6 +91,9 @@ a branch visit receives nothing from its siblings, and a project checkout flows 
 join only from the branch the join names, never as a file-by-file mixture of two working
 trees that could carry one branch's edits into another's commit. Two branches never
 share an agent (refused at save), since an agent has one workspace and one sandbox hold.
+Sandboxes are scoped per session and a finished run's `runs/<id>/` folders are deleted, so a
+run no longer sees other finished runs' folders or container state; concurrent runs of the same
+agent still share the workspace mount.
 A branch's approval or question wait does not stop the run's clock, so a run in a fork
 cannot be kept alive past its time limit by one branch waiting while another works.
 Residual risk: a condition or task inside one branch that reads another branch's output

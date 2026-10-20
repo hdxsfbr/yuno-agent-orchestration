@@ -7,7 +7,7 @@
 # never copies forward or packages. The gateway sets HOME=/workspace and its own PATH
 # for every exec [probed], so tools must be in /usr/local/bin and HOME is the workspace.
 FROM python:3.12-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl \
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir pytest==9.1.1 uv==0.13.1 \
     && useradd -u 1000 -m -s /bin/bash sandbox

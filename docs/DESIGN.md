@@ -437,7 +437,11 @@ Rules:
     permission bits, links and special files are skipped, and deletions do not flow
     forward. Since 5.26 a visit inside a fork's branch receives nothing from its sibling
     branches, and `repo/` flows past the join only from the branch the join names (5.26
-    rule 10). (D-019, from the wave-2 evaluator agent's finding that Reviewer and
+    rule 10). The folders are deleted once nothing can need them: when a run ends
+    `succeeded` (its artifacts and diff are in the artifact store by then), and an hourly
+    sweep (also run at start) removes those of failed, timed-out or cancelled runs seven
+    days after they ended, and of run ids the database does not know once seven days old;
+    such a run keeps its folders until then because Retry (5.21) resumes on them. (D-019, from the wave-2 evaluator agent's finding that Reviewer and
     Deployer could not see the Coder's files.) Since 5.25 the `out/` directory inside it
     is also collected as the run's artifacts at the end of every agent visit (5.25 rule 2).
 
@@ -1061,11 +1065,16 @@ Rules:
     strips `thinking.display`, and the engine drops any `agent` event with
     `stream: reasoning` and any transcript part of type `thinking` before storage.
 12. **Exec isolation: Docker sandbox, always on. [decision D-012]** Baseline config sets
-    `agents.defaults.sandbox: { mode: "all", scope: "agent", workspaceAccess: "rw",
+    `agents.defaults.sandbox: { mode: "all", scope: "session", workspaceAccess: "rw",
+    prune: { idleHours: 1, maxAgeDays: 1 },
     docker: { image: "yuno-sandbox:latest", network: "none", readOnlyRoot: true,
     capDrop: ["ALL"], pidsLimit: 256, memory: "1g", cpus: 1, tmpfs: ["/tmp"] } }` and
     `tools.sandbox.tools.alsoAllow: ["bundle-mcp"]` so platform MCP tools stay callable
-    in sandbox mode **[docs]**. The gateway container gets the host Docker socket
+    in sandbox mode **[docs]**. The scope is `session`: every run visit has its own session
+    key and so its own fresh container, nothing installed in a container reaches another
+    run, and idle session containers are pruned after an hour and any after a day
+    (`sandbox.prune`, **[docs]** gateway/config-agents/sandbox.md); the workspace stays the
+    agent's, mounted read-write. The gateway container gets the host Docker socket
     (`OPENCLAW_SANDBOX=1`, `OPENCLAW_DOCKER_SOCKET=/var/run/docker.sock`) and creates
     sibling containers named `openclaw-sbx-*`; the state directory and workspaces are
     **bind mounts from the host** (`./data/openclaw`), because named volumes cannot be

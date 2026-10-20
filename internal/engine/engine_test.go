@@ -547,8 +547,11 @@ func TestFullRunFromFixture(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(ws, "AGENTS.md")); err != nil {
 		t.Fatalf("agent not materialised: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(ws, "runs", run.ID)); err != nil {
-		t.Fatalf("run directory: %v", err)
+	if _, err := os.Stat(filepath.Join(ws, "runs", run.ID)); !os.IsNotExist(err) {
+		t.Fatalf("run directory of a succeeded run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ws, "runs")); err != nil {
+		t.Fatalf("runs directory: %v", err)
 	}
 	got, _ := store.GetAgent(ctx, env.pool, a.ID)
 	if got.OpenClawAgentID == nil || *got.OpenClawAgentID != ocID || got.MaterializedHash == "" {

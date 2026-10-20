@@ -130,11 +130,16 @@ func Baseline(in BaselineInputs) map[string]any {
 		"agents.defaults.reasoningDefault": "off",
 		"agents.defaults.userTimezone":     "UTC",
 		"agents.defaults.sandbox": map[string]any{
-			"mode":            "all",
-			"scope":           "agent",
+			"mode": "all",
+			// One container per session key: every run visit (yuno-<run>-<node>-<n>) starts
+			// a fresh one, so nothing installed in a container reaches another run. The
+			// workspace stays the agent's, mounted read-write at /workspace.
+			"scope":           "session",
 			"workspaceAccess": "rw",
-			// agents.delete leaves an agent's sandbox container behind [probed]; the
-			// gateway prunes idle ones itself. `make prune-sandboxes` is the manual path.
+			// Session containers pile up: idle ones go after an hour, any after a day
+			// (agents.defaults.sandbox.prune: idleHours, maxAgeDays; gateway/config-agents/
+			// sandbox.md). agents.delete leaves a container behind [probed]; the gateway
+			// prunes it here too, and `make prune-sandboxes` is the manual path.
 			"prune": map[string]any{"idleHours": 1, "maxAgeDays": 1},
 			"docker": map[string]any{
 				"image":        in.SandboxImage,

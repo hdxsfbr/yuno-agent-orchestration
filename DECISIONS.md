@@ -4,6 +4,23 @@ Newest first. Each entry says what was decided, by whom, and why. Design rules t
 refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR under
 `docs/adr/`.
 
+## 2026-10-20
+
+**D-082 A fresh sandbox per session, and run folders deleted when no retry can need them.**
+(Andre 2026-10-20) `agents.defaults.sandbox.scope` is `session` (it was `agent`): each run
+visit has its own session key, so it gets a new container and nothing installed in one
+reaches another run; `workspaceAccess` stays `rw`, and idle session containers are pruned
+by `sandbox.prune` (`idleHours: 1`, `maxAgeDays: 1`, the keys of OpenClaw's sandbox
+configuration reference). The Chief's Telegram session stays one long session in its own
+container. The sandbox image gains `libgomp1` (the OpenMP runtime numpy, scikit-learn,
+lightgbm and xgboost wheels load), in both the base and the python image. `runs/<run id>/`
+is deleted from every agent workspace when a run ends `succeeded`, after its artifacts and
+diff are collected; a `failed`, `timed_out` or `cancelled` run keeps its folders for 7 days
+because Retry resumes on the earlier nodes' folders (the Builder's checkout), and an
+hourly sweep (also at start) removes the expired ones, those of finished runs a hook
+missed, and folders of unknown run ids older than 7 days. Alternative rejected:
+keeping every folder until a size or age cap.
+
 ## 2026-10-19
 
 **D-081 Approvals and project setup from Telegram through the Chief.** (Andre 2026-10-19)

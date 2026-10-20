@@ -163,7 +163,7 @@ func (e *Engine) Start(ctx context.Context) error {
 			e.worker(ctx, n)
 		}(i)
 	}
-	wg.Add(4)
+	wg.Add(5)
 	go func() {
 		defer wg.Done()
 		e.sweeper(ctx)
@@ -179,6 +179,10 @@ func (e *Engine) Start(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		e.listenGateway(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		e.runDirSweeper(ctx)
 	}()
 	e.log.Info("engine started", "workers", workers)
 	wg.Wait()
