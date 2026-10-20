@@ -659,3 +659,35 @@ func TestCutIntakeMessage(t *testing.T) {
 		t.Errorf("a message of exactly the cap was cut: %d", len(got))
 	}
 }
+
+// DESIGN 5.29 rule 10: a run Poll now starts for a plan ticket's issue is linked to the
+// ticket, which leaves failed for building, as with the background loop. (Poll now used to
+// build its own loop without the plan link, so a relabelled ticket stayed failed.)
+func TestPollIntakeLinksThePlanTicket(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	api, transport := newIntakeAPI(t)
+	_, ts := newTestServerDeps(t, Deps{Cfg: testConfig(), Pool: pool, CheckTransport: transport}, intakeEngine{&fakeEngine{pool: pool}})
+	p := seedIntakeProject(t, "poll-plan-"+uniqueSuffix(), goodIntakeWorkflow(t), true)
+	plan, tickets := seedPlan(t, p)
+	moved, err := store.MoveTicket(ctx, pool, plan.ID, tickets[0].TicketID, "failed", "pending")
+	mustDo(t, err)
+	if !moved {
+		t.Fatal("the ticket could not be set failed")
+	}
+
+	api.labelled(int(*tickets[0].IssueNumber), tickets[0].Title, "Relabelled after a failure.")
+	if code, body, res := postPoll(t, ts, p.ID); code != http.StatusOK || res.Taken != 1 {
+		t.Fatalf("poll: %d %s", code, body)
+	}
+	runs, err := store.ListRuns(ctx, pool, store.RunFilter{Trigger: store.TriggerIssue, ProjectID: p.ID})
+	mustDo(t, err)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %+v", runs)
+	}
+	got, err := store.TicketByIssue(ctx, pool, p.ID, *tickets[0].IssueNumber)
+	mustDo(t, err)
+	if got.Status != "building" || got.RunID == nil || *got.RunID != runs[0].ID {
+		t.Fatalf("ticket after the poll: status %s run %v, want building on %s", got.Status, got.RunID, runs[0].ID)
+	}
+}

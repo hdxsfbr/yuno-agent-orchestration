@@ -187,8 +187,14 @@ func (s *Server) intakeLoop() *intake.Loop {
 	if s.engine != nil {
 		eng = s.engine
 	}
-	return &intake.Loop{Pool: s.pool, Projects: s.projects, Client: s.checkClient, Engine: eng, Log: s.log,
+	l := &intake.Loop{Pool: s.pool, Projects: s.projects, Client: s.checkClient, Engine: eng, Log: s.log,
 		PublicBaseURL: s.cfg.PublicBaseURL}
+	// A run Poll now starts for a plan's ticket is linked to it, as the background loop's
+	// are (DESIGN 5.29 rule 10); without the link the ticket stayed failed after a relabel.
+	if s.plans != nil {
+		l.Plans = s.plans
+	}
+	return l
 }
 
 // pollIntake runs one intake pass for one project at once (DESIGN 5.23 rule 2): 200
