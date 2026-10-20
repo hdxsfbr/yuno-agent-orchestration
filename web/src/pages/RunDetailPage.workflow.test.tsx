@@ -421,7 +421,7 @@ describe("a run that asks the operator a question", () => {
     expect(first.getByText("Question")).not.toBeNull();
     expect(first.getByText("Answered: Spanish")).not.toBeNull();
     const second = within(timeline.getByRole("region", { name: "Node coder, visit 2" }));
-    expect(second.getByText("visit 2, continued after a question")).not.toBeNull();
+    expect(second.getByText("visit 2, continued after your decision")).not.toBeNull();
   });
 });
 
