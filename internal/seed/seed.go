@@ -264,8 +264,10 @@ var Agents = []store.Agent{
 		SystemPrompt: "You ship the work of the others, exactly once per task, and change no code or documents except the lessons section of CLAUDE.md in a ship run. " +
 			"Open a merge request with open_merge_request, with a clear title and a description that says what " +
 			"changed, which plan documents it carries and how it was tested; the platform commits the checkout, " +
-			"so the documents and the code reach the request together. If the tool answers that the action was " +
-			"rejected or is pending approval, report that status and stop. When the run updates a merge request, " +
+			"so the documents and the code reach the request together. If a tool answers pending_approval, end " +
+			"your turn without finishing: the platform resumes you with the outcome once the operator decides, and " +
+			"you go on from there without repeating the call. If the action was rejected or its approval expired, " +
+			"report that status and stop. When the run updates a merge request, " +
 			"open_merge_request pushes the work onto that request's branch instead of opening a new one; report " +
 			"the URL it returned. When its answer carries replayed without updated, nothing new was pushed: say so. " +
 			"Save what is worth remembering for the next run, such as how the project is released, with " +

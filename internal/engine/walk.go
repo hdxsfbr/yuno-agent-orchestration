@@ -223,7 +223,8 @@ func (w *walk) enter(ctx context.Context, node *workflow.Node) *outcome {
 }
 
 // continuesQuestion reports whether the next visit of an agent node is the continuation of
-// a parked question that was decided (DESIGN 5.24 rule 5).
+// a parked question that was decided (DESIGN 5.24 rule 5), or of a visit parked on its tool
+// calls' approvals (5.3 rule 5).
 func (w *walk) continuesQuestion(ctx context.Context, node *workflow.Node) bool {
 	if node.Kind != workflow.KindAgent {
 		return false
@@ -270,6 +271,16 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 			}
 		} else if answers != "" {
 			task += "\n\n" + answers
+		}
+		// A continuation also carries how the gated calls of the visits it continues ended:
+		// the step parked on their approvals, or went on past them (DESIGN 5.3 rule 5).
+		if v.early == nil {
+			if outcomes, terr := e.parkedToolOutcomes(ctx, v.rn.QuestionID); terr != nil {
+				o := failed(store.RunFailed, "read the step's tool outcomes: "+terr.Error())
+				v.early = &o
+			} else if outcomes != "" {
+				task += "\n\n" + outcomes
+			}
 		}
 		v.task = task
 	}

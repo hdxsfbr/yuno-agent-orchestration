@@ -74,7 +74,12 @@ type gateRejected struct {
 type gatePending struct {
 	Status     string `json:"status"` // "pending_approval"
 	ApprovalID string `json:"approval_id"`
+	Message    string `json:"message"`
 }
+
+// pendingMessage tells the model what pending_approval asks of it: the engine parks the
+// step on the approval and resumes it with the outcome (DESIGN 5.3 rule 5, D-085).
+const pendingMessage = "a human has not decided yet; end your turn now without finishing, and the platform resumes you with the outcome"
 
 // callPlatformTool is the gate every platform tool call goes through (DESIGN 5.3 rules
 // 5–8, 5.4 rule 1, 5.7 rules 3–4, 5.11 rules 3–4, 5.15 rules 1–3): resolve the run token
@@ -321,11 +326,12 @@ func (g *gateCall) gated(ctx context.Context) (string, bool) {
 	cancel()
 	if err != nil || decided == nil || decided.Status == store.ApprovalPending {
 		// The wait ended without a decision. The row stays awaiting_approval; once the
-		// approval is granted the engine executes the effect under the same key.
+		// approval is granted the engine executes the effect under the same key, and the
+		// visit, parked-on the approval by WaitApproval, resumes with the outcome.
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			g.log.Warn("wait for approval ended", "approval_id", appr.ID, "error", err)
 		}
-		return g.modelJSON(gatePending{Status: "pending_approval", ApprovalID: appr.ID}), false
+		return g.modelJSON(gatePending{Status: "pending_approval", ApprovalID: appr.ID, Message: pendingMessage}), false
 	}
 	// The decision belongs to this call now: record it even if the client went away.
 	dctx := context.WithoutCancel(ctx)

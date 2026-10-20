@@ -196,6 +196,33 @@ Rules:
    in `runs.state.pending_effects[]` (a later rejection is recorded there too). A
    decision made while a handler still waits is delivered to that handler and never also
    executed by the engine. **[decision]**
+
+   **The step waits for a late decision (D-085).** The pending result also carries
+   `message: "a human has not decided yet; end your turn now without finishing, and the
+   platform resumes you with the outcome"`, and the step waits for the approval as it waits
+   for a question's answer (5.24 rules 4 and 5): when the wait ends, `WaitApproval` marks
+   the visit parked-on the approval and the run and node return to `running`; a turn that
+   then ends without `finish` while the approval is undecided, or granted with its effect
+   still running, parks the visit (`ParkVisit`: run `waiting_approval` with
+   `resume_node_visit_id`, `parked_at`, the worker released), and a park survives an api
+   restart as 5.24's does. The decision is settled as above (the effect under the same key,
+   or the rejection or expiry recorded, then the `pending_effects` entry) and only then
+   delivered in 5.24 rule 5's order: the parked run is re-queued by `RequeueParkedRun`,
+   which also requires that the visit waits on nothing any more (no pending question or tool
+   approval, no granted call whose row is still `awaiting_approval`), or the live visit sends
+   it as its next turn in the same session. The outcome is one block per call,
+   `Earlier in this step you called yuno__<tool>, which needed a human approval (approval
+   <id>).` then `It was approved and ran; its result: <the call's result as JSON>`, `It was
+   approved but failed: <JSON>`, `It was rejected[: <reason>].` or `It expired: nobody
+   decided in time.`; the live turn's message ends with 5.24 rule 7's continue sentence, and a
+   continuation visit (its `question_id` names the parked visit's question or, without one,
+   its newest decided tool approval; free of `max_loop_visits` as 5.24's) carries the blocks
+   of every decided tool approval of the visits it continues after the task. An expiry while
+   a visit waits this way does not fail the run: the agent decides (an empty URL, a
+   question). The approval sweep repeats a re-queue that did not happen and settles again a
+   grant whose effect a lost process left unrecorded (the key replays a finished effect).
+   Unchanged: the gate, the keys, `auto_after`, a decision within the wait, and an agent that
+   finishes anyway, which leaves a later grant to `pending_effects` as before.
 5a. **Gateway registration, verified 2026-10-15 on 2026.10.3 (`make probe-approval`).**
    `plugin.approval.request { title, description, detail?, severity: info|warning|critical,
    toolName, toolCallId, mcpTool: {server: "yuno", tool}, allowedDecisions:
@@ -243,7 +270,12 @@ blocks, approve within wait → executed once, result in same turn. T5.3.4 rejec
 rejected result. T5.3.5 wait timeout → pending result, later approval → executed by
 engine once, state updated. T5.3.6 `auto` policy executes without approval and the audit
 row says so. T5.3.7 cancel while waiting → approval expired, exec resolved deny. T5.3.8 double decision → 409. T5.3.9 gateway timeout event (resolvedBy null)
-leaves the approval pending; a later web decision still applies.
+leaves the approval pending; a later web decision still applies. T5.3.10 wait timeout and a
+turn that ends without finish → the step parks; a grant continues it with the call's
+result (the merge request URL reaches the step's output), a rejection with the reason, an
+expiry with `expired` and the run not failed; a decision before the turn's end is the next
+turn in the same session; a decision within the wait parks nothing; the park survives a
+restart, and the sweep settles a grant a lost process left unrecorded.
 
 ### 5.4 Idempotent side effects
 

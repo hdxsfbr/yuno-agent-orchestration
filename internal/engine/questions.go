@@ -324,7 +324,9 @@ func (e *Engine) deliverQuestion(ctx context.Context, a *store.Approval) {
 
 // requeueParked is step (i): it re-queues the run parked on the decided question's visit
 // and reports whether it did. The parked visit's row is closed succeeded without output by
-// the same statement (store.RequeueParkedRun).
+// the same statement (store.RequeueParkedRun), which holds only once the visit waits on
+// nothing any more: a settled tool approval of a parked visit (DESIGN 5.3 rule 5) comes
+// here too, and the last decision of a visit that waits on several re-queues it.
 func (e *Engine) requeueParked(ctx context.Context, a *store.Approval) bool {
 	if a.RunID == "" || a.RunNodeID == "" {
 		return false
@@ -351,18 +353,23 @@ func (e *Engine) requeueParked(ctx context.Context, a *store.Approval) bool {
 		}
 	}
 	e.emit(ctx, a.RunID, "run.status", map[string]any{"run": run})
-	what := "answered"
-	if a.Status == store.ApprovalRejected {
-		what = "declined"
+	line := fmt.Sprintf("tool approval %s; continuing %s", a.Status, a.NodeID)
+	if a.Kind == store.ApprovalKindQuestion {
+		what := "answered"
+		if a.Status == store.ApprovalRejected {
+			what = "declined"
+		}
+		line = fmt.Sprintf("question %s; continuing %s", what, a.NodeID)
 	}
-	e.logEvent(ctx, a.RunID, "info", fmt.Sprintf("question %s; continuing %s", what, a.NodeID), "node_id", a.NodeID, "approval_id", a.ID)
+	e.logEvent(ctx, a.RunID, "info", line, "node_id", a.NodeID, "approval_id", a.ID)
 	return true
 }
 
 // requeueParkedDecided repeats what a decision could not finish: every run that waits on
 // a parked visit whose newest question is decided is re-queued, and one whose question
 // expired fails with question unanswered (DESIGN 5.24 Failure handling). It runs with
-// each approval sweep.
+// each approval sweep. The tool approvals of parked visits are repeated the same way
+// (requeueParkedTools).
 func (e *Engine) requeueParkedDecided(ctx context.Context) {
 	parked, err := store.ListParkedQuestions(ctx, e.deps.Pool)
 	if err != nil {
@@ -378,6 +385,7 @@ func (e *Engine) requeueParkedDecided(ctx context.Context) {
 			e.failRun(ctx, a.RunID, unansweredReason)
 		}
 	}
+	e.requeueParkedTools(ctx)
 }
 
 // sweepQuestion expires a question past its expires_at (DESIGN 5.24 rule 8). A call that
@@ -443,19 +451,22 @@ func (e *Engine) expireStepQuestions(ctx context.Context, runID string, visits [
 
 // ---- the turn's end ----------------------------------------------------------------
 
-// questionTurnEnd is what a turn that ended without finish does when the visit asked a
-// question (DESIGN 5.24 rule 5). It reports whether it dealt with the turn's end:
+// questionTurnEnd is what a turn that ended without finish does when the visit waits on
+// the operator: for a question it asked (DESIGN 5.24 rule 5), or for the approval of a
+// tool call it was told is pending_approval (5.3 rule 5). It reports whether it dealt with
+// the turn's end:
 //
-//   - a decision reached the visit (the live handoff, or the row read now): the next
-//     turn starts in the same session with the answer paragraph, so the agent keeps its
-//     context;
-//   - the question is still pending: the visit parks (ParkVisit, one transaction), logs
-//     it, and ends with a paused outcome that lets the worker go, as an approval node
-//     does.
+//   - every decision reached the visit (the live handoff, or the rows read now): the next
+//     turn starts in the same session with the answer paragraph and the calls' outcomes,
+//     so the agent keeps its context;
+//   - something is still undecided (the question, an approval, or an approved call whose
+//     effect still runs): the visit parks (ParkVisit, one transaction), logs it, and ends
+//     with a paused outcome that lets the worker go, as an approval node does.
 //
-// It returns false for a visit with no question, which goes on to the usual endings.
+// It returns false for a visit that waits on nothing, which goes on to the usual endings.
 func (v *visit) questionTurnEnd(ctx context.Context) bool {
-	if v.answered == nil && v.pendingQuestion == "" && v.parkedOn == "" {
+	asked := v.answered != nil || v.pendingQuestion != "" || v.parkedOn != ""
+	if !asked && len(v.parkedTools) == 0 {
 		return false
 	}
 	e := v.e
@@ -466,18 +477,30 @@ func (v *visit) questionTurnEnd(ctx context.Context) bool {
 	if pending == "" {
 		pending = v.parkedOn
 	}
-	if v.answered != nil {
-		return v.continueWithAnswer(ctx, "")
-	}
 	// A decision recorded but not yet handed over (its delivery waits for this loop) is
 	// found in the row; the handoff then finds the question taken and drops it.
-	if a, err := store.GetApproval(ctx, e.deps.Pool, pending); err != nil {
-		v.log.Warn("read the pending question failed", "approval_id", pending, "error", err)
-	} else if a.Status != store.ApprovalPending {
-		return v.continueWithAnswer(ctx, pending)
+	waitsOn, taken := "", ""
+	if asked && v.answered == nil {
+		if a, err := store.GetApproval(ctx, e.deps.Pool, pending); err != nil {
+			v.log.Warn("read the pending question failed", "approval_id", pending, "error", err)
+			waitsOn = pending
+		} else if a.Status != store.ApprovalPending {
+			taken = pending
+		} else {
+			waitsOn = pending
+		}
+	}
+	settled, toolWaits := v.settledTools(ctx)
+	if waitsOn == "" && toolWaits == "" {
+		return v.continueWithAnswer(ctx, asked, taken, settled)
 	}
 	if h := questionTestHook; h != nil {
 		h("park")
+	}
+	// What the log line names: the question, else an approval still undecided.
+	what := "the answer to question " + waitsOn
+	if waitsOn == "" {
+		what, waitsOn = "the decision on approval "+toolWaits, toolWaits
 	}
 	now := e.clock.Now()
 	if v.branch != nil {
@@ -494,8 +517,8 @@ func (v *visit) questionTurnEnd(ctx context.Context) bool {
 		v.saveNode(ctx)
 		e.emit(ctx, v.run.ID, "node.status", map[string]any{"node": v.rn})
 		e.emit(ctx, v.run.ID, "branch.status", map[string]any{"branch": v.branch})
-		e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("%s waits for the answer to question %s; branch %s continues when it arrives", v.agent.Name, pending, v.branch.Head),
-			"node_id", v.node.ID, "approval_id", pending)
+		e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("%s waits for %s; branch %s continues when it arrives", v.agent.Name, what, v.branch.Head),
+			"node_id", v.node.ID, "approval_id", waitsOn)
 		v.end(ctx, outcome{paused: true})
 		return true
 	}
@@ -510,17 +533,19 @@ func (v *visit) questionTurnEnd(ctx context.Context) bool {
 	v.saveNode(ctx)
 	e.emit(ctx, run.ID, "node.status", map[string]any{"node": v.rn})
 	e.emit(ctx, run.ID, "run.status", map[string]any{"run": run})
-	e.logEvent(ctx, run.ID, "info", fmt.Sprintf("%s waits for the answer to question %s; the step continues when it arrives", v.agent.Name, pending),
-		"node_id", v.node.ID, "approval_id", pending)
+	e.logEvent(ctx, run.ID, "info", fmt.Sprintf("%s waits for %s; the step continues when it arrives", v.agent.Name, what),
+		"node_id", v.node.ID, "approval_id", waitsOn)
 	v.end(ctx, outcome{paused: true})
 	return true
 }
 
-// continueWithAnswer starts the next turn of a visit whose question was decided while
-// its turn was open: the message is the answer paragraph of rule 7 and ends with the
-// continue sentence. taken is the pending question found decided in its row ("" when the
-// decision came through the live handoff); a question the visit asked since stays pending.
-func (v *visit) continueWithAnswer(ctx context.Context, taken string) bool {
+// continueWithAnswer starts the next turn of a visit whose question, or whose tool calls
+// told pending_approval, were decided while its turn was open: the message is the answer
+// paragraph of rule 7 when the visit asked, then one block per settled call (5.3 rule 5),
+// and ends with the continue sentence. taken is the pending question found decided in its
+// row ("" when the decision came through the live handoff); a question the visit asked
+// since stays pending.
+func (v *visit) continueWithAnswer(ctx context.Context, asked bool, taken string, settled []toolOutcome) bool {
 	e := v.e
 	v.answered = nil
 	if taken != "" {
@@ -533,16 +558,25 @@ func (v *visit) continueWithAnswer(ctx context.Context, taken string) bool {
 	}
 	// A visit never runs on a silently incomplete prompt (DESIGN 5.18): when the step's
 	// questions cannot be read, the visit fails with the read's error (review L8).
-	message := continueMessage
-	text, err := e.stepAnswers(ctx, v.run.ID, v.node.ID)
-	if err != nil {
-		v.end(ctx, failed(store.RunFailed, "read the step's answers: "+err.Error()))
-		return true
+	var parts []string
+	if asked {
+		text, err := e.stepAnswers(ctx, v.run.ID, v.node.ID)
+		if err != nil {
+			v.end(ctx, failed(store.RunFailed, "read the step's answers: "+err.Error()))
+			return true
+		}
+		if text != "" {
+			parts = append(parts, text)
+		}
+		e.logEvent(ctx, v.run.ID, "info", "question answered; continuing "+v.node.ID, "node_id", v.node.ID)
 	}
-	if text != "" {
-		message = text + "\n\n" + continueMessage
+	for _, o := range settled {
+		delete(v.parkedTools, o.approval.ID)
+		parts = append(parts, o.block())
+		e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("tool approval %s; continuing %s", o.approval.Status, v.node.ID),
+			"node_id", v.node.ID, "approval_id", o.approval.ID)
 	}
-	e.logEvent(ctx, v.run.ID, "info", "question answered; continuing "+v.node.ID, "node_id", v.node.ID)
+	message := strings.Join(append(parts, continueMessage), "\n\n")
 	if res := v.startTurn(ctx, message); res != nil {
 		v.end(ctx, *res)
 	}

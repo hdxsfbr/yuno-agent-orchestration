@@ -132,8 +132,9 @@ func NewPublishTickets(cfg PublishTicketsConfig) *Tool {
 			"tickets and waves from the run's earlier steps, so nothing else is passed. Refuses when the project " +
 			"already has an open plan. When the run's input names a plan to revise, it amends that plan instead: new tickets " +
 			"get issues, changed tickets update theirs, dropped tickets are closed. Needs a human approval. Returns the plan id and each ticket's issue number " +
-			"and URL; if a human has not decided yet it returns status pending_approval, and if they refused it " +
-			"returns status rejected with a reason.",
+			"and URL; if a human has not decided yet it returns status pending_approval: then end your turn " +
+			"without finishing, and the platform resumes you with the outcome; if they refused it returns " +
+			"status rejected with a reason.",
 		InputSchema: publishTicketsSchema,
 		Risk:        RiskSideEffecting,
 		Hits:        HitsExternal,

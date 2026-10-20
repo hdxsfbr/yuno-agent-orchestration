@@ -213,7 +213,8 @@ func TestMCPGatePendingThenFallback(t *testing.T) {
 	if len(apprs) != 1 {
 		t.Fatalf("approvals = %+v", apprs)
 	}
-	want := `{"status":"pending_approval","approval_id":"` + apprs[0].ID + `"}`
+	want := `{"status":"pending_approval","approval_id":"` + apprs[0].ID + `","message":"a human has not decided yet; end your turn now ` +
+		`without finishing, and the platform resumes you with the outcome"}`
 	if isErr || text != want {
 		t.Fatalf("result %v %s, want %s", isErr, text, want)
 	}

@@ -80,8 +80,9 @@ func NewDeployRelease(cfg DeployConfig) *Tool {
 		Name: DeployReleaseName,
 		Description: "Publish files from your run directory as a release on the deploy target. Needs a human " +
 			"approval unless the operator allowed it to run automatically. Returns the release id, version and URL; " +
-			"if a human has not decided yet it returns status pending_approval, and if they refused it returns " +
-			"status rejected with a reason.",
+			"if a human has not decided yet it returns status pending_approval: then end your turn without " +
+			"finishing, and the platform resumes you with the outcome; if they refused it returns status " +
+			"rejected with a reason.",
 		InputSchema: deploySchema,
 		Risk:        RiskSideEffecting,
 		Hits:        HitsLocalService,

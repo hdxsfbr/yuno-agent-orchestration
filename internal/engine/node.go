@@ -160,6 +160,12 @@ type visit struct {
 	pendingQuestion string
 	parkedOn        string
 	answered        *store.Approval
+
+	// The tool approvals whose MCP call answered the model pending_approval (DESIGN 5.3
+	// rule 5), owned by the visit goroutine: parked-on them, the visit waits for their
+	// outcome as for a question's answer. The value is the decision once it reached the
+	// live visit (toolSettled), nil before.
+	parkedTools map[string]*store.Approval
 }
 
 // SessionKey is the node-scoped OpenClaw session of a visit (DESIGN 5.14 rule 5). It
@@ -180,7 +186,7 @@ func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.No
 		runIDs: map[string]bool{}, seenMsgs: map[string]bool{}, tools: map[string]*toolState{},
 		inputs: map[string]toolInput{}, pendingOutputs: map[string]json.RawMessage{},
 		approvals: map[string]*store.Approval{}, approvalSpans: map[string]string{},
-		toolBlocking: map[string]bool{}, platformSpans: map[string]string{},
+		toolBlocking: map[string]bool{}, platformSpans: map[string]string{}, parkedTools: map[string]*store.Approval{},
 		calls: make(chan func()), loopDone: make(chan struct{}),
 		lastTouch: time.Now(), lastEventAt: time.Now(),
 	}
@@ -1691,10 +1697,12 @@ func (v *visit) turnFinal(ctx context.Context, ce openclaw.ChatEvent) {
 		return
 	}
 	// The turn ended without a finish and without a result in its reply. A question of
-	// this visit decides what that means (DESIGN 5.24 rule 5): a decision becomes the next
-	// turn, a pending question parks the visit. Every other end of the visit (a finish, a
-	// result taken from the reply, an error, an abort, a limit, a cancel) parks nothing
-	// and closes the question as the visit finishes.
+	// this visit, or a tool call it was told is pending_approval, decides what that means
+	// (DESIGN 5.24 rule 5, 5.3 rule 5): decisions become the next turn, anything still
+	// undecided parks the visit. Every other end of the visit (a finish, a result taken
+	// from the reply, an error, an abort, a limit, a cancel) parks nothing and closes the
+	// question as the visit finishes; a tool approval stays pending for the engine's own
+	// execution of a later grant.
 	if v.questionTurnEnd(ctx) {
 		return
 	}
@@ -2078,8 +2086,9 @@ func (v *visit) release() {
 
 // finish is the visit's terminal housekeeping: revoke the token, reconcile the
 // transcript, close open tool calls and approvals, write the node row and span. A visit
-// that parked on a question (res.paused, DESIGN 5.24 rule 5) is not finished: its row and
-// the run keep the waiting_approval the park wrote, and the decision closes the row.
+// that parked on a question or a tool approval (res.paused, DESIGN 5.24 rule 5, 5.3 rule
+// 5) is not finished: its row and the run keep the waiting_approval the park wrote, and the
+// decision closes the row.
 func (v *visit) finish(ctx context.Context, res outcome) {
 	e := v.e
 	v.closing = true

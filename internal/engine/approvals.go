@@ -40,6 +40,10 @@ func secondsDuration(n int) time.Duration { return time.Duration(n) * time.Secon
 type approvalWaiter struct {
 	ch chan *store.Approval // buffered 1; written once, under waitMu, as the entry is removed
 	v  *visit               // the visit whose turn the call blocks; nil after a restart
+	// tool marks a platform tool's approval (RequestApproval): a wait that ends with no
+	// decision leaves the visit parked-on it (waitEnded), as QuestionPending does for a
+	// question.
+	tool bool
 }
 
 // deliver hands a decided approval to its waiter, if one is attached.
@@ -108,7 +112,7 @@ func (e *Engine) RequestApproval(ctx context.Context, req ApprovalRequest) (*sto
 		a.ToolCallID = &id
 	}
 	e.waitMu.Lock()
-	e.waiters[a.ID] = &approvalWaiter{ch: make(chan *store.Approval, 1), v: v}
+	e.waiters[a.ID] = &approvalWaiter{ch: make(chan *store.Approval, 1), v: v, tool: true}
 	e.waitMu.Unlock()
 	drop := func() {
 		e.waitMu.Lock()
@@ -198,7 +202,8 @@ func (e *Engine) registerPluginApproval(ctx context.Context, v *visit, a *store.
 
 // WaitApproval blocks until the approval is decided or ctx ends. A decision made
 // while it waits is the caller's to act on; once it returns ctx.Err() the engine acts
-// on a later grant itself (DESIGN 5.3 rule 5).
+// on a later grant itself (DESIGN 5.3 rule 5), and for a tool approval the visit whose
+// call it was waits for that outcome (waitEnded).
 func (e *Engine) WaitApproval(ctx context.Context, approvalID string) (*store.Approval, error) {
 	e.waitMu.Lock()
 	w := e.waiters[approvalID]
@@ -243,7 +248,11 @@ func (e *Engine) WaitApproval(ctx context.Context, approvalID string) (*store.Ap
 		delete(e.waiters, approvalID)
 	}
 	e.waitMu.Unlock()
-	w.unblock(nil, approvalID)
+	if w.tool {
+		w.waitEnded(ctx, approvalID)
+	} else {
+		w.unblock(nil, approvalID)
+	}
 	return nil, ctx.Err()
 }
 
@@ -368,8 +377,9 @@ func (e *Engine) decideTool(ctx context.Context, a *store.Approval, status, by, 
 		e.resolvePlugin(ctx, decided, decision)
 	}
 	if !e.deliver(decided) {
+		// Settled in the background; the outcome then goes to the visit that waits for it, or
+		// re-queues a run left waiting with no worker (deliverSettled).
 		e.settleUnwaited(ctx, decided)
-		e.requeueIfUnattended(ctx, decided.RunID)
 	}
 	return decided, nil
 }
@@ -466,65 +476,80 @@ func (e *Engine) resolvePlugin(ctx context.Context, a *store.Approval, decision 
 // settleUnwaited acts on a tool approval decided after its MCP call stopped waiting: a
 // grant executes the effect under the call's idempotency key, a rejection or an expiry
 // is recorded, and either way the outcome is appended to state.pending_effects (DESIGN
-// 5.3 rule 5). The effect runs in the background so the decision returns at once.
+// 5.3 rule 5). The effect runs in the background so the decision returns at once; once
+// it is settled, the outcome goes to the visit that was told pending_approval
+// (deliverSettled). An approval this process is settling already is left to that.
 func (e *Engine) settleUnwaited(ctx context.Context, a *store.Approval) {
 	if a.ToolCallID == nil || *a.ToolCallID == "" {
+		e.deliverSettled(ctx, a)
 		return
 	}
 	if a.Status == store.ApprovalApproved && e.deps.Effects == nil {
 		e.logEvent(ctx, a.RunID, "warn", "approved side effect not executed: no executor is configured", "approval_id", a.ID)
+		e.deliverSettled(ctx, a)
+		return
+	}
+	if _, busy := e.settling.LoadOrStore(a.ID, true); busy {
 		return
 	}
 	e.bg.Add(1)
 	go func() {
 		defer e.bg.Done()
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), effectTimeout)
-		defer cancel()
-		toolCallID := *a.ToolCallID
-		var status string
-		var output json.RawMessage
-		switch a.Status {
-		case store.ApprovalApproved:
-			out, isError, err := e.deps.Effects.ExecuteApproved(ctx, toolCallID)
-			status, output = "executed", out
-			switch {
-			case err != nil:
-				status, output = "failed", mustMarshal(map[string]string{"error": obs.Redact(err.Error())})
-			case isError:
-				status = "failed"
-			}
-		default:
-			reason := strValue(a.Reason)
-			if reason == "" {
-				reason = defaultRejectReason
-			}
-			status = a.Status // rejected | expired
-			output = mustMarshal(map[string]string{"status": store.ToolRejected, "reason": reason})
-			rowStatus := store.ToolRejected
-			if a.Status == store.ApprovalExpired {
-				rowStatus = store.ToolExpired
-			}
-			if err := store.SetToolCallOutcome(ctx, e.deps.Pool, toolCallID, rowStatus, output, e.clock.Now()); err != nil {
-				e.log.Warn("record tool call outcome failed", "tool_call_id", toolCallID, "error", err)
-			}
-		}
-		if len(output) == 0 {
-			output = json.RawMessage(`null`)
-		}
-		entry := mustMarshal(map[string]any{"approval_id": a.ID, "tool_call_id": toolCallID, "status": status, "output": output})
-		run, err := store.AppendPendingEffect(ctx, e.deps.Pool, a.RunID, entry)
-		if err != nil {
-			e.log.Warn("record pending effect failed", "run_id", a.RunID, "approval_id", a.ID, "error", err)
-			return
-		}
-		e.emit(ctx, a.RunID, "run.status", map[string]any{"run": run})
-		e.logEvent(ctx, a.RunID, "info", fmt.Sprintf("side effect settled after approval: %s", status), "approval_id", a.ID, "tool_call_id", toolCallID)
-		if status == "executed" {
-			if row, err := store.GetToolCall(ctx, e.deps.Pool, toolCallID); err == nil && tools.PlainName(row.ToolName) == tools.OpenMergeRequestName {
-				e.reportLateMergeRequest(ctx, a.RunID, toolCallID, output)
-			}
-		}
+		defer e.settling.Delete(a.ID)
+		e.settle(ctx, a)
+		e.deliverSettled(context.WithoutCancel(ctx), a)
 	}()
+}
+
+// settle is settleUnwaited's work: the effect or the recorded refusal, and the
+// state.pending_effects entry.
+func (e *Engine) settle(ctx context.Context, a *store.Approval) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), effectTimeout)
+	defer cancel()
+	toolCallID := *a.ToolCallID
+	var status string
+	var output json.RawMessage
+	switch a.Status {
+	case store.ApprovalApproved:
+		out, isError, err := e.deps.Effects.ExecuteApproved(ctx, toolCallID)
+		status, output = "executed", out
+		switch {
+		case err != nil:
+			status, output = "failed", mustMarshal(map[string]string{"error": obs.Redact(err.Error())})
+		case isError:
+			status = "failed"
+		}
+	default:
+		reason := strValue(a.Reason)
+		if reason == "" {
+			reason = defaultRejectReason
+		}
+		status = a.Status // rejected | expired
+		output = mustMarshal(map[string]string{"status": store.ToolRejected, "reason": reason})
+		rowStatus := store.ToolRejected
+		if a.Status == store.ApprovalExpired {
+			rowStatus = store.ToolExpired
+		}
+		if err := store.SetToolCallOutcome(ctx, e.deps.Pool, toolCallID, rowStatus, output, e.clock.Now()); err != nil {
+			e.log.Warn("record tool call outcome failed", "tool_call_id", toolCallID, "error", err)
+		}
+	}
+	if len(output) == 0 {
+		output = json.RawMessage(`null`)
+	}
+	entry := mustMarshal(map[string]any{"approval_id": a.ID, "tool_call_id": toolCallID, "status": status, "output": output})
+	run, err := store.AppendPendingEffect(ctx, e.deps.Pool, a.RunID, entry)
+	if err != nil {
+		e.log.Warn("record pending effect failed", "run_id", a.RunID, "approval_id", a.ID, "error", err)
+		return
+	}
+	e.emit(ctx, a.RunID, "run.status", map[string]any{"run": run})
+	e.logEvent(ctx, a.RunID, "info", fmt.Sprintf("side effect settled after approval: %s", status), "approval_id", a.ID, "tool_call_id", toolCallID)
+	if status == "executed" {
+		if row, err := store.GetToolCall(ctx, e.deps.Pool, toolCallID); err == nil && tools.PlainName(row.ToolName) == tools.OpenMergeRequestName {
+			e.reportLateMergeRequest(ctx, a.RunID, toolCallID, output)
+		}
+	}
 }
 
 // visitOf returns the live visit that raised an approval, if any.
@@ -547,6 +572,13 @@ func (e *Engine) requeueIfUnattended(ctx context.Context, runID string) {
 	run, err := store.GetRun(ctx, e.deps.Pool, runID)
 	if err != nil || run.Status != store.RunWaitingApproval {
 		return
+	}
+	// A parked visit is re-queued by the decision that leaves it waiting on nothing, which
+	// also closes it (requeueParked); re-queued here, it would stay open.
+	if run.ResumeNodeVisitID != nil {
+		if parked, err := store.IsParkedOn(ctx, e.deps.Pool, runID, *run.ResumeNodeVisitID); err != nil || parked {
+			return
+		}
 	}
 	if pending, err := store.ListPendingApprovals(ctx, e.deps.Pool, runID); err != nil || len(pending) > 0 {
 		return
@@ -612,7 +644,8 @@ func (e *Engine) expireRunApprovals(ctx context.Context, runID, reason string) {
 
 // sweepApprovals expires approvals past their expires_at and fails their runs with
 // reason "approval expired" (DESIGN 5.2 rule 10); a question is treated by sweepQuestion
-// (5.24 rule 8). It then repeats the re-queues a decision could not finish.
+// (5.24 rule 8), and a tool approval by sweepToolApproval (5.3 rule 5). It then repeats
+// the re-queues a decision could not finish.
 func (e *Engine) sweepApprovals(ctx context.Context) {
 	due, err := store.ListExpiredApprovals(ctx, e.deps.Pool, e.clock.Now())
 	if err != nil {
@@ -625,6 +658,10 @@ func (e *Engine) sweepApprovals(ctx context.Context) {
 			// A question's expiry does not fail the run unless the run waits on it
 			// (DESIGN 5.24 rule 8), and then with its own reason.
 			e.sweepQuestion(ctx, a)
+			continue
+		}
+		if a.Kind == store.ApprovalKindTool && a.RunID != "" {
+			e.sweepToolApproval(ctx, a)
 			continue
 		}
 		// A conversation's approval has no run to fail.

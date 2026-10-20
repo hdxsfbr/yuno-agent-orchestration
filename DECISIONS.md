@@ -6,6 +6,23 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-20
 
+**D-085 A tool call that waits for approval parks the step until the approval is decided.**
+(Andre, 2026-10-20) Seen live: when nobody decided within `MCP_TOOL_WAIT`, the gate answered
+`pending_approval` and the Integrator's draft step finished with `branch: "pending_approval"`
+and no merge request URL; the pipeline went on to the manual-test approval with nothing to
+test, and the merge request appeared two hours later, outside the run, when the operator
+approved. The pending result now tells the agent to end its turn without finishing, and the
+step waits for the approval with the question machinery of 5.24 (D-046): the visit parks, the
+engine settles the decision as before (the effect under the same idempotency key, or the
+rejection or expiry), and the step resumes with the outcome, as its next turn or in the
+continuation's task: the call's result as JSON (the merge request's URL, number and branch),
+`rejected` with the operator's reason, or `expired`. An expiry while the step waits no
+longer fails the run; the agent decides. The gate, the keys, `auto_after` and a decision
+within the wait are unchanged, and the Integrator's prompt and the pipelines' task text say to
+end the turn on `pending_approval`. Alternative rejected: a longer wait in the MCP call
+(OpenClaw's MCP request timeout of 600 s caps it, and an approval can take hours). DESIGN 5.3
+rule 5.
+
 **D-084 Escalations ask the operator instead of ending the run.** (Andre, 2026-10-20:
 "those types of errors should be raised to HITL and not just crap out", and "we already
 have something like that ... dont reinvent the wheel") A design_wrong escalation ended a

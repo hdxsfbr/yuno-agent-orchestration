@@ -42,6 +42,9 @@ type Engine struct {
 	sbxHolds map[string]int
 	bg       sync.WaitGroup // side effects executed after a late approval
 	reports  sync.WaitGroup // report-back sends in flight (report.go)
+	// settling holds the tool approvals whose late outcome this process is settling
+	// (settleUnwaited), so the sweep that repeats an interrupted one does not run it twice.
+	settling sync.Map
 
 	// unsavedStarts holds, per run id, the started_at stamp whose write failed in runRun:
 	// the engine's re-reads of the run put it back (readRun), so the attempt still has

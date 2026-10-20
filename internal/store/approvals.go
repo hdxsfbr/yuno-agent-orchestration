@@ -87,15 +87,43 @@ const (
 
 	listStepQuestionsSQL = `SELECT ` + approvalSelect + ` FROM approvals
 		WHERE kind='question' AND run_id=$1 AND node_id=$2 AND status <> $3 ORDER BY requested_at, id`
+)
 
+var (
 	continuationQuestionSQL = `SELECT ` + approvalSelect + ` FROM approvals
 		WHERE kind='question' AND run_id=$1 AND node_id=$2 AND status IN ($3, $4)
 		  AND EXISTS (SELECT 1 FROM run_nodes p WHERE p.id = approvals.run_node_id AND p.parked_at IS NOT NULL)
 		  AND NOT EXISTS (SELECT 1 FROM run_nodes n WHERE n.question_id = approvals.id)
 		  AND NOT EXISTS (SELECT 1 FROM approvals later WHERE later.kind = 'question' AND later.run_node_id = approvals.run_node_id
 		                  AND (later.requested_at, later.id) > (approvals.requested_at, approvals.id))
+		  AND ` + visitSettled("approvals.run_node_id") + `
+		ORDER BY requested_at DESC, id DESC LIMIT 1`
+
+	// continuationToolSQL is the continuation of a visit that parked on its tool calls'
+	// approvals (DESIGN 5.3 rule 5): its newest decided tool approval, once nothing of the
+	// visit waits any more, while no visit continues the parked one yet (a continuation may
+	// name its question instead). The first EXISTS reads no approval for a step that never
+	// parked, the usual case; a parked visit that failed (its run was cancelled or failed)
+	// is retried, not continued.
+	continuationToolSQL = `SELECT ` + approvalSelect + ` FROM approvals
+		WHERE kind='tool' AND run_id=$1 AND node_id=$2 AND status <> 'pending'
+		  AND EXISTS (SELECT 1 FROM run_nodes g WHERE g.run_id = $1 AND g.node_id = $2 AND g.parked_at IS NOT NULL)
+		  AND EXISTS (SELECT 1 FROM run_nodes p WHERE p.id = approvals.run_node_id AND p.parked_at IS NOT NULL
+		              AND p.status IN ('waiting_approval', 'succeeded'))
+		  AND NOT EXISTS (SELECT 1 FROM run_nodes n JOIN approvals x ON x.id = n.question_id WHERE x.run_node_id = approvals.run_node_id)
+		  AND ` + visitSettled("approvals.run_node_id") + `
 		ORDER BY requested_at DESC, id DESC LIMIT 1`
 )
+
+// visitSettled is the predicate that the visit whose id the SQL expression visit gives
+// waits on nothing (DESIGN 5.3 rule 5, 5.24 rule 5): none of its questions or tool
+// approvals is pending, and no approved tool call of it is still executing (its row still
+// awaiting_approval while the engine runs the effect).
+func visitSettled(visit string) string {
+	return `NOT EXISTS (SELECT 1 FROM approvals u LEFT JOIN tool_calls c ON c.id = u.tool_call_id
+		WHERE u.run_node_id = ` + visit + ` AND u.kind IN ('question', 'tool')
+		  AND (u.status = 'pending' OR (u.kind = 'tool' AND u.status = 'approved' AND c.status = 'awaiting_approval')))`
+}
 
 // CountStepQuestions counts the questions a step has asked in a run: the rows of kind
 // question with the run and node id, whatever their status (rule 2: the fourth is
@@ -128,8 +156,21 @@ func ListStepQuestions(ctx context.Context, q Querier, runID, nodeID string) ([]
 // nothing: an expired question is not one (a retry after rule 8 is not a continuation),
 // and a question the visit went on past (answered within the wait) is not the one it
 // parked on.
+//
+// A visit also parks on the approvals of tool calls it was told are pending (DESIGN 5.3
+// rule 5): it is continued only once nothing of it waits any more, and when it has no
+// question to name, the continuation names its newest decided tool approval. Either way
+// the approval's run_node_id is the parked visit.
 func ContinuationQuestion(ctx context.Context, q Querier, runID, nodeID string) (*Approval, error) {
-	rows, err := q.Query(ctx, continuationQuestionSQL, runID, nodeID, ApprovalApproved, ApprovalRejected)
+	a, err := continuation(ctx, q, continuationQuestionSQL, runID, nodeID, ApprovalApproved, ApprovalRejected)
+	if !errors.Is(err, ErrNotFound) {
+		return a, err
+	}
+	return continuation(ctx, q, continuationToolSQL, runID, nodeID)
+}
+
+func continuation(ctx context.Context, q Querier, sql string, args ...any) (*Approval, error) {
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -138,6 +179,38 @@ func ContinuationQuestion(ctx context.Context, q Querier, runID, nodeID string) 
 		return nil, ErrNotFound
 	}
 	return a, err
+}
+
+// ListVisitToolApprovals lists a visit's tool approvals, oldest first: what a continuation
+// of the visit is told about its gated calls (DESIGN 5.3 rule 5).
+func ListVisitToolApprovals(ctx context.Context, q Querier, runNodeID string) ([]Approval, error) {
+	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals WHERE run_node_id = $1 AND kind = $2
+		ORDER BY requested_at, id`, runNodeID, ApprovalKindTool)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[Approval])
+}
+
+// ListParkedToolApprovals returns the decided tool approvals of every visit a run waits on
+// parked (DESIGN 5.3 rule 5, the parked visits of ListParkedQuestions): the decisions whose
+// re-queue the sweep repeats, and the approved calls whose effect it runs again when the
+// process that ran it is gone (the row still awaiting_approval).
+func ListParkedToolApprovals(ctx context.Context, q Querier) ([]Approval, error) {
+	rows, err := q.Query(ctx, `SELECT `+approvalSelect+` FROM approvals WHERE kind = $2 AND status <> $1 AND run_node_id IN (
+		SELECT n.id FROM runs r JOIN run_nodes n ON n.run_id = r.id AND n.parked_at IS NOT NULL AND n.status = $4
+		  AND (n.id = r.resume_node_visit_id
+		       OR r.resume_node_visit_id = (SELECT b.fork_visit_id FROM run_branches b WHERE b.id = n.branch_id))
+		WHERE r.status = $3)
+		ORDER BY decided_at`, ApprovalPending, ApprovalKindTool, RunWaitingApproval, NodeWaitingApproval)
+	if err != nil {
+		return nil, err
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowToStructByName[Approval])
+	if out == nil {
+		out = []Approval{}
+	}
+	return out, err
 }
 
 // ListParkedQuestions returns, for every run that waits on a parked visit, that visit's

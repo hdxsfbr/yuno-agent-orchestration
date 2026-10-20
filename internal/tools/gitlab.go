@@ -81,8 +81,9 @@ func NewGitLabCreateMR(cfg GitLabConfig) *Tool {
 		Name: GitLabCreateMRName,
 		Description: "Commit files from your run directory to a new branch and open a GitLab merge request. Needs " +
 			"a human approval unless the operator allowed it to run automatically. Returns the merge request number " +
-			"and URL; if a human has not decided yet it returns status pending_approval, and if they refused it " +
-			"returns status rejected with a reason.",
+			"and URL; if a human has not decided yet it returns status pending_approval: then end your turn " +
+			"without finishing, and the platform resumes you with the outcome; if they refused it returns " +
+			"status rejected with a reason.",
 		InputSchema: gitlabSchema,
 		Risk:        RiskSideEffecting,
 		Hits:        HitsExternal,

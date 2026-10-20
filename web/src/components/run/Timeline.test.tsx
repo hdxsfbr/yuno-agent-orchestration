@@ -68,16 +68,16 @@ describe("a continuation visit", () => {
   it("says why the step ran twice", () => {
     renderVisits(visits);
     const second = within(screen.getByRole("region", { name: "Node coder, visit 2" }));
-    expect(second.getByText("visit 2, continued after a question")).not.toBeNull();
+    expect(second.getByText("visit 2, continued after your decision")).not.toBeNull();
     const first = within(screen.getByRole("region", { name: "Node coder, visit 1" }));
     expect(first.getByText("visit 1")).not.toBeNull();
-    expect(first.queryByText(/continued after a question/)).toBeNull();
+    expect(first.queryByText(/continued after your decision/)).toBeNull();
   });
 
   it("numbers a second visit that follows a loop or a retry as before", () => {
     renderVisits([node({ status: "succeeded" }), node({ id: "n2", visit: 2, status: "succeeded", started_at: "2026-10-15T10:07:00Z" })]);
     expect(screen.getByText("visit 2")).not.toBeNull();
-    expect(screen.queryByText(/continued after a question/)).toBeNull();
+    expect(screen.queryByText(/continued after your decision/)).toBeNull();
   });
 });
 

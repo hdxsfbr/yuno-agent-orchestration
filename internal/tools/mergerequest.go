@@ -107,8 +107,9 @@ func NewOpenMergeRequest(cfg MergeRequestConfig) *Tool {
 			"call of the same run that names draft also replaces the request's title and description. Needs a human " +
 			"approval unless the operator allowed it to run automatically. Returns the request's number and " +
 			"URL; pass paths (files or directories relative to the checkout root) to commit only those and leave " +
-			"the rest of the checkout out of the request; if a human has not decided yet it returns status pending_approval, and if they refused it " +
-			"returns status rejected with a reason.",
+			"the rest of the checkout out of the request; if a human has not decided yet it returns status " +
+			"pending_approval: then end your turn without finishing, and the platform resumes you with the " +
+			"outcome; if they refused it returns status rejected with a reason.",
 		InputSchema: mergeRequestSchema,
 		Risk:        RiskSideEffecting,
 		Hits:        HitsExternal,

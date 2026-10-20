@@ -316,7 +316,8 @@ func ParkVisit(ctx context.Context, db interface {
 }
 
 // IsParkedOn reports whether the run waits on a parked visit: the predicate of
-// RequeueParkedRun, read without changing anything (DESIGN 5.24 rule 8).
+// RequeueParkedRun, read without changing anything (DESIGN 5.24 rule 8), less its check
+// that the visit waits on nothing any more.
 func IsParkedOn(ctx context.Context, q Querier, runID, runNodeID string) (bool, error) {
 	var parked bool
 	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM runs WHERE runs.id=$1 AND runs.status=$3 AND `+parkedResumeSQL+`
@@ -333,6 +334,10 @@ func IsParkedOn(ctx context.Context, q Querier, runID, runNodeID string) (bool, 
 // It returns ErrNotFound when the predicate does not hold (nothing parked, or already
 // re-queued), which makes every call after the first idempotent.
 //
+// A visit parks on its tool calls' approvals too (DESIGN 5.3 rule 5), and on a question and
+// such approvals at once: the predicate also requires that it waits on nothing any more
+// (visitSettled), so the last of its decisions re-queues the run.
+//
 // Since DESIGN 5.26 rule 8 the predicate also holds when the run waits on the fork visit
 // whose branch the parked visit belongs to (parkedResumeSQL); the branch row goes back to
 // running in the same statement, so the fork's re-entry runs it.
@@ -341,6 +346,7 @@ func RequeueParkedRun(ctx context.Context, q Querier, runID, runNodeID string, a
 			UPDATE run_nodes SET status=$5, finished_at=$3
 			WHERE id=$2 AND run_id=$1 AND parked_at IS NOT NULL AND status IN ($6, $7, $8)
 			  AND EXISTS (SELECT 1 FROM runs WHERE runs.id=$1 AND runs.status=$4 AND `+parkedResumeSQL+`)
+			  AND `+visitSettled("$2")+`
 			RETURNING id, branch_id),
 		branch AS (
 			UPDATE run_branches SET status=$7 WHERE id IN (SELECT branch_id FROM parked WHERE branch_id IS NOT NULL) AND status=$8
@@ -350,6 +356,7 @@ func RequeueParkedRun(ctx context.Context, q Querier, runID, runNodeID string, a
 			paused_at=NULL, updated_at=now()
 		WHERE runs.id=$1 AND runs.status=$4 AND `+parkedResumeSQL+`
 		  AND EXISTS (SELECT 1 FROM run_nodes WHERE id=$2 AND parked_at IS NOT NULL AND status=$8)
+		  AND `+visitSettled("$2")+`
 		RETURNING `+runColumns,
 		runID, runNodeID, at.UTC(), RunWaitingApproval, NodeSucceeded, NodePending, NodeRunning, NodeWaitingApproval, RunQueued))
 }

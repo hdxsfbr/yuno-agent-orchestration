@@ -117,7 +117,9 @@ scheduler occurrences carry a unique key (5.4, D-029). Verified by the `idempote
 evaluator and the replay case (010). Limit: the key includes the node visit, so an operator retry
 from a failed step, or a run resumed after an api restart, starts a new visit and can
 repeat a `deploy_release`; `open_merge_request` is held to one merge request per run by a
-lock and a unique index, so it is not repeated.
+lock and a unique index, so it is not repeated. A step that waited for a late approval
+continues in a new visit too (5.3 rule 5, D-085); its task says how the call ended, so the
+agent has no reason to repeat it, and a repeat would ask for an approval of its own.
 
 **Side effects before approval.** Mitigation: the MCP gate records the call as
 `awaiting_approval` and blocks it; the engine executes a late grant itself with the same

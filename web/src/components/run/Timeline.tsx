@@ -122,7 +122,7 @@ function NodeCard({ node, items, now, repeated, branch }: CardProps) {
         <StatusBadge kind="node" status={node.status} />
         {repeated || node.visit > 1 || node.question_id ? (
           // A visit that continues after a question is a second visit of the step because the operator answered.
-          <span className="text-xs text-zinc-500">{node.question_id ? `visit ${node.visit}, continued after a question` : `visit ${node.visit}`}</span>
+          <span className="text-xs text-zinc-500">{node.question_id ? `visit ${node.visit}, continued after your decision` : `visit ${node.visit}`}</span>
         ) : null}
         {node.iteration > 0 ? (
           <span className="text-xs text-zinc-500">
