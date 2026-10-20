@@ -85,6 +85,17 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 				d == nil || d.AutoAfter != "" {
 				t.Errorf("wave wiring: integrator_ready %+v manual_test %+v integrator_draft %+v", r, m, d)
 			}
+			// D-084: the doc audit goes on to the ready step on "ok" and back to the Builder,
+			// with the operator's decision, on "rework".
+			routes := map[string]string{}
+			for _, e := range def.OutgoingEdges("doc_audit") {
+				if e.When != nil {
+					routes[strings.Trim(string(e.When.Value), `"`)] = e.To
+				}
+			}
+			if routes["ok"] != "integrator_ready" || routes["rework"] != "builder" {
+				t.Errorf("doc_audit routes = %v", routes)
+			}
 		}
 		if key == "ship_pipeline" {
 			i, _ := def.Node("integrator")

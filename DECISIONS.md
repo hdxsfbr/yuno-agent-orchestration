@@ -6,6 +6,17 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-20
 
+**D-084 Escalations ask the operator instead of ending the run.** (Andre, 2026-10-20:
+"those types of errors should be raised to HITL and not just crap out", and "we already
+have something like that ... dont reinvent the wheel") A design_wrong escalation ended a
+ticket run after 1h22m of work (T4) although the agent only needed a decision. Every
+factory agent that can escalate now has `ask_operator` and one shared rule: ask with
+concrete options and "Stop this ticket", carry out the answer, escalate only on "stop".
+The Doc Auditor gets a `rework` verdict that sends the operator's decision back to the
+Builder. No engine change: `ask_operator` (5.24) already parks the step and relays the
+question through the Chief. The review-loop limit still ends a run; asking there too is
+a separate change. Amends D-076 (a PRD gap pauses the waves) for the agent's own calls.
+
 **D-083 Each run step works in its own private workspace; work moves through a per-run
 git repository.** (Andre, 2026-10-20: "probe workspaceAccess none ... and if it holds,
 build per-step private workspaces with hand-off through the run's branch") D-082 gave each

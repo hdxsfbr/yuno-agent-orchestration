@@ -3994,6 +3994,15 @@ Rules:
    ticket it sets the ticket `failed`, pauses the project's waves with the reason, and
    writes a plan event `escalated`. `doc_audit`'s `gap` path is replaced by the agent
    calling `escalate`.
+   Since D-084 an agent does not call `escalate` on its own judgement: a decision that is
+   not its own (a PRD gap, a design that contradicts the code or cannot work, a provider
+   refusal) goes to the operator with `ask_operator` (5.24: the step waits, the question
+   reaches Telegram through the Chief), with concrete options and always "Stop this
+   ticket"; the agent carries out the answer, and calls `escalate` only when the operator
+   chooses to stop. The Doc Auditor, which changes documents only, finishes with verdict
+   `rework` and the decision in `notes` when the code must change, and `wave_pipeline`
+   routes `rework` back to the Builder, whose task shows the decision (as it shows a
+   rejected manual test's notes); those rounds count toward the loop limit.
 7. **Failed ticket runs escalate too.** A plan ticket's run that ends `failed`,
    `timed_out` or `cancelled` for any other reason (the loop limit, a rejection) marks the
    ticket `failed`, pauses the waves and records `escalated` with the run's reason. The

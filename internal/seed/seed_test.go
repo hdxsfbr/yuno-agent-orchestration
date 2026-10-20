@@ -182,13 +182,13 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 		mem   bool
 	}{
 		"Analyst":       {"claude-opus-5-5", []string{"ask_operator", "read", "ls", "write", "escalate", "finish"}, false},
-		"Scout":         {"claude-sonnet-5-5", []string{"read", "ls", "exec", "memory_save", "memory_recall", "escalate", "finish"}, true},
+		"Scout":         {"claude-sonnet-5-5", []string{"read", "ls", "exec", "ask_operator", "memory_save", "memory_recall", "escalate", "finish"}, true},
 		"Architect":     {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "ask_operator", "escalate", "finish"}, false},
-		"Planner":       {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "escalate", "finish"}, false},
+		"Planner":       {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "ask_operator", "escalate", "finish"}, false},
 		"Builder":       {"claude-sonnet-5-5", []string{"read", "ls", "write", "edit", "exec", "ask_operator", "memory_save", "memory_recall", "escalate", "finish"}, true},
-		"Code Reviewer": {"claude-opus-5-5", []string{"read", "ls", "exec", "read_merge_request", "escalate", "finish"}, false},
-		"Doc Auditor":   {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "exec", "escalate", "finish"}, false},
-		"Integrator":    {"claude-sonnet-5-5", []string{"open_merge_request", "publish_tickets", "advance_wave", "read", "ls", "write", "edit", "memory_save", "escalate", "finish"}, true},
+		"Code Reviewer": {"claude-opus-5-5", []string{"read", "ls", "exec", "read_merge_request", "ask_operator", "escalate", "finish"}, false},
+		"Doc Auditor":   {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "exec", "ask_operator", "escalate", "finish"}, false},
+		"Integrator":    {"claude-sonnet-5-5", []string{"open_merge_request", "publish_tickets", "advance_wave", "read", "ls", "write", "edit", "ask_operator", "memory_save", "escalate", "finish"}, true},
 	}
 	if len(created) != len(want)+1 {
 		t.Fatalf("created %v", created)
@@ -260,8 +260,19 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 		t.Error("the Integrator prompt does not cover the lessons merge request")
 	}
 	if !strings.Contains(builder.SystemPrompt, "failing test") || !strings.Contains(reviewer.SystemPrompt, "never rewrite") ||
-		!strings.Contains(auditor.SystemPrompt, "never patch around an unmet requirement") {
+		!strings.Contains(auditor.SystemPrompt, "never patch around it") {
 		t.Error("the Builder, Reviewer or Auditor prompt lost its rule")
+	}
+	// D-084: a decision that is not the agent's own goes to the operator, and escalate is
+	// only the operator's stop; every agent that can escalate can ask.
+	for _, a := range Agents {
+		if a.Name == ChiefName || !slices.Contains(a.ToolAllowlist, "escalate") {
+			continue
+		}
+		if !slices.Contains(a.ToolAllowlist, "ask_operator") || !strings.Contains(a.SystemPrompt, "Stop this ticket") ||
+			strings.Contains(a.SystemPrompt, "escalate ends the run") {
+			t.Errorf("%s does not ask the operator before it escalates", a.Name)
+		}
 	}
 
 	// The Chief is unchanged and a binding to it survives a second seed.

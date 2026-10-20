@@ -167,7 +167,7 @@
           ],
           "additionalProperties": true
         },
-        "task": "Implement this ticket in the project checkout, tests first:\n\n{{.input.task}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): read that plan, docs/plans/<feature>/ in the checkout (PRD.md, ARCHITECTURE.md, TASKS.md, WAVES.md), for the context and follow its design. Work in this order: write the failing test for each acceptance test of the ticket, run the suite and see them fail for the right reason, then write the code until they pass, then run the whole suite. Stay inside the ticket's slice and files; ask the operator with ask_operator only when the ticket cannot be built as written.\n{{with .state.code_review}}{{if eq .verdict \"changes_requested\"}}\nThe code reviewer asked for changes. Address every point, with tests, before finishing:\n{{.comments}}\n{{end}}{{end}}{{with .state.manual_test}}{{if eq .decision \"rejected\"}}\nBugs found in the manual test:{{if .reason}}\n{{.reason}}\n{{end}} Reproduce each one with a failing test, fix it, and re-run the whole suite before finishing.\n{{end}}{{end}}Finish with a summary, the files you created or changed (paths relative to the checkout) and whether the whole suite passes (tests_passed)."
+        "task": "Implement this ticket in the project checkout, tests first:\n\n{{.input.task}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): read that plan, docs/plans/<feature>/ in the checkout (PRD.md, ARCHITECTURE.md, TASKS.md, WAVES.md), for the context and follow its design. Work in this order: write the failing test for each acceptance test of the ticket, run the suite and see them fail for the right reason, then write the code until they pass, then run the whole suite. Stay inside the ticket's slice and files; ask the operator with ask_operator only when the ticket cannot be built as written.\n{{with .state.code_review}}{{if eq .verdict \"changes_requested\"}}\nThe code reviewer asked for changes. Address every point, with tests, before finishing:\n{{.comments}}\n{{end}}{{end}}{{with .state.manual_test}}{{if eq .decision \"rejected\"}}\nBugs found in the manual test:{{if .reason}}\n{{.reason}}\n{{end}} Reproduce each one with a failing test, fix it, and re-run the whole suite before finishing.\n{{end}}{{end}}{{with .state.doc_audit}}{{if eq .verdict \"rework\"}}\nThe operator decided, after the documentation audit: {{.notes}}\nMake that change, tests first, and re-run the whole suite before finishing.\n{{end}}{{end}}Finish with a summary, the files you created or changed (paths relative to the checkout) and whether the whole suite passes (tests_passed)."
       },
       {
         "id": "code_review",
@@ -246,7 +246,8 @@
             "verdict": {
               "type": "string",
               "enum": [
-                "ok"
+                "ok",
+                "rework"
               ]
             },
             "trace_path": {
@@ -256,6 +257,9 @@
             "feature": {
               "type": "string",
               "pattern": "^[a-z0-9-]{1,40}$"
+            },
+            "notes": {
+              "type": "string"
             }
           },
           "required": [
@@ -265,7 +269,7 @@
           ],
           "additionalProperties": true
         },
-        "task": "Audit the documents against the finished, manually tested change for this ticket:\n\n{{.input.task}}\n\nThe builder reports: {{.state.builder.summary}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): the plan is in docs/plans/<feature>/ in the checkout; read it. Write your requirement trace to docs/plans/<feature>/tickets/<ticket-id>.md, a new file for this ticket. Never edit TASKS.md or WAVES.md in a ticket run (tickets of one wave run in parallel and would conflict). Edit ARCHITECTURE.md only if the built design differs from it. You may update the project's own docs and README so they describe what the code now does (edit only documents, never code). Then trace every requirement of the PRD that this ticket covers to the code and tests that satisfy it, in that file.\n\nIf a requirement cannot be met because the PRD is silent, ambiguous or contradicts itself, call the escalate tool with kind prd_gap; if the built or required design contradicts the approved ARCHITECTURE.md or cannot work, call escalate with kind design_wrong. Give the reason and the requirement it concerns. Never edit the PRD or the design to match the code, never soften a requirement and never patch around the gap. After escalate the run ends: do not finish.\nOtherwise finish with verdict \"ok\", trace_path (the path of the trace file you wrote) and feature (the slug of the ticket's Feature line, exactly as written)."
+        "task": "Audit the documents against the finished, manually tested change for this ticket:\n\n{{.input.task}}\n\nThe builder reports: {{.state.builder.summary}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): the plan is in docs/plans/<feature>/ in the checkout; read it. Write your requirement trace to docs/plans/<feature>/tickets/<ticket-id>.md, a new file for this ticket. Never edit TASKS.md or WAVES.md in a ticket run (tickets of one wave run in parallel and would conflict). Edit ARCHITECTURE.md only if the built design differs from it. You may update the project's own docs and README so they describe what the code now does (edit only documents, never code). Then trace every requirement of the PRD that this ticket covers to the code and tests that satisfy it, in that file.\n\nIf a requirement cannot be met because the PRD is silent, ambiguous or contradicts itself, or the built or required design contradicts the approved ARCHITECTURE.md or cannot work, do not decide it yourself: ask the operator with ask_operator, naming the requirement and the section, with concrete options and \"Stop this ticket\". Carry out the answer. When the documents are to change, make the change, record the decision in your trace and finish \"ok\". When the code is to change, finish with verdict \"rework\" and the decision, as precise instructions for the Builder, in notes: the ticket goes back to the Builder. Call escalate only when the operator chooses to stop.\nFinish with verdict \"ok\" or \"rework\", trace_path (the path of the trace file you wrote), feature (the slug of the ticket's Feature line, exactly as written) and, for \"rework\", notes."
       },
       {
         "id": "integrator_ready",
@@ -332,7 +336,21 @@
       },
       {
         "from": "doc_audit",
-        "to": "integrator_ready"
+        "to": "integrator_ready",
+        "when": {
+          "path": "/doc_audit/verdict",
+          "op": "eq",
+          "value": "ok"
+        }
+      },
+      {
+        "from": "doc_audit",
+        "to": "builder",
+        "when": {
+          "path": "/doc_audit/verdict",
+          "op": "eq",
+          "value": "rework"
+        }
       },
       {
         "from": "integrator_ready",
