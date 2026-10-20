@@ -48,11 +48,14 @@ type TriggerRequest struct {
 
 // RunContext is what a run token resolves to (DESIGN 5.7 rule 3).
 type RunContext struct {
-	RunID            string
-	RunNodeID        string
-	NodeID           string
-	AgentID          string
-	OpenClawAgentID  string
+	RunID           string
+	RunNodeID       string
+	NodeID          string
+	AgentID         string
+	OpenClawAgentID string
+	// Workspace is the visit's private workspace (DESIGN 5.30), where its run directory
+	// and checkout are; "" when the visit has none.
+	Workspace        string
 	OutputSchema     json.RawMessage
 	ToolAllowlist    []string
 	InteractionRules map[string]string
@@ -249,9 +252,9 @@ type ArtifactCollector interface {
 	Collect(ctx context.Context, in ArtifactInput)
 }
 
-// ArtifactInput is one visit's end: the agent's workspace directory, the run and the
-// visit, the project configuration when the run has a checkout (nil otherwise), and
-// the branch the checkout is on (the request's source branch for a 5.22 run, else
+// ArtifactInput is one visit's end: the visit's private workspace (DESIGN 5.30), the run
+// and the visit, the project configuration when the run has a checkout (nil otherwise),
+// and the branch the checkout is on (the request's source branch for a 5.22 run, else
 // the default branch).
 type ArtifactInput struct {
 	Workspace string

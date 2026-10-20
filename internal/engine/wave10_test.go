@@ -43,8 +43,8 @@ func (f *fakeCollector) seen() []ArtifactInput {
 var _ ArtifactCollector = (*fakeCollector)(nil)
 
 // T5.25.1 (the engine's side): every agent visit that ends is handed to the collector
-// once, after its row is finished, with the agent's workspace, the run and the visit; a
-// run without a checkout passes no project.
+// once, after its row is finished, with the visit's private workspace (DESIGN 5.30 rule
+// 6), the run and the visit; a run without a checkout passes no project.
 func TestAgentVisitsAreHandedToTheCollector(t *testing.T) {
 	env := newEnv(t)
 	col := &fakeCollector{}
@@ -73,8 +73,11 @@ func TestAgentVisitsAreHandedToTheCollector(t *testing.T) {
 			t.Fatalf("agent %d: %+v %v", i, got, err)
 		}
 		in := calls[i]
-		if want := openclaw.WorkspaceDir(env.dir, *got.OpenClawAgentID); in.Workspace != want {
-			t.Errorf("call %d: workspace = %q, want %q", i, in.Workspace, want)
+		if in.Node == nil || in.Node.SessionKey == nil {
+			t.Fatalf("call %d: node = %+v", i, in.Node)
+		}
+		if want := openclaw.SessionWorkspaceDir(env.dir, *got.OpenClawAgentID, *in.Node.SessionKey); in.Workspace != want || deref(in.Node.WorkspaceDir) != want {
+			t.Errorf("call %d: workspace = %q (recorded %q), want %q", i, in.Workspace, deref(in.Node.WorkspaceDir), want)
 		}
 		if in.Run == nil || in.Run.ID != run.ID {
 			t.Errorf("call %d: run = %+v, want %s", i, in.Run, run.ID)
@@ -109,8 +112,8 @@ func TestProjectVisitIsCollectedWithItsProject(t *testing.T) {
 	}
 }
 
-// collectArtifacts picks the project, the branch and the workspace as the brief says, and
-// does nothing without a collector.
+// collectArtifacts picks the project, the branch and the visit's workspace as the brief
+// says, and does nothing without a collector or for a visit that never had a workspace.
 func TestCollectArtifactsInput(t *testing.T) {
 	col := &fakeCollector{}
 	e := New(Deps{StateDir: "/state", Artifacts: col})
@@ -128,7 +131,7 @@ func TestCollectArtifactsInput(t *testing.T) {
 		{"merge request branch", &visit{project: cfg, toolchain: project.Toolchain{Name: "go"}, mergeRequest: mr}, true, "yuno/abc"},
 		{"project not cloned", &visit{project: cfg}, false, "main"},
 	} {
-		c.v.run, c.v.rn, c.v.ocID = run, node, "oc-1"
+		c.v.run, c.v.rn, c.v.ocID, c.v.workspace = run, node, "oc-1", "/state/sandboxes/workspace-1"
 		before := len(col.seen())
 		e.collectArtifacts(context.Background(), c.v)
 		calls := col.seen()
@@ -137,7 +140,7 @@ func TestCollectArtifactsInput(t *testing.T) {
 			continue
 		}
 		in := calls[len(calls)-1]
-		if in.Workspace != "/state/workspace-oc-1" || in.Run != run || in.Node.ID != "rn-1" || in.Node.Visit != 2 {
+		if in.Workspace != "/state/sandboxes/workspace-1" || in.Run != run || in.Node.ID != "rn-1" || in.Node.Visit != 2 {
 			t.Errorf("%s: input = %+v", c.name, in)
 		}
 		if (in.Project != nil) != c.wantProject || (c.wantProject && in.Project != cfg) || in.Branch != c.wantBranch {
@@ -145,6 +148,11 @@ func TestCollectArtifactsInput(t *testing.T) {
 		}
 	}
 
+	before := len(col.seen())
+	e.collectArtifacts(context.Background(), &visit{run: run, rn: node, ocID: "oc-1"})
+	if len(col.seen()) != before {
+		t.Error("a visit without a workspace was collected")
+	}
 	none := New(Deps{StateDir: "/state"})
 	none.collectArtifacts(context.Background(), &visit{run: run, rn: node}) // must not panic
 }

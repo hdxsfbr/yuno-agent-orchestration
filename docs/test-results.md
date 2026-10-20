@@ -1,3 +1,33 @@
+# Test results, 2026-10-20 (private step workspaces and the run repository; DESIGN 5.30, D-083)
+
+The probe behind D-083, run on the live local gateway (OpenClaw 2026.10.3) with
+`workspaceAccess: none` and `scope: session`, agent `ag7a991cd2d9` (workspace
+`/home/node/.openclaw/workspace-ag7a991cd2d9`), two sessions
+`agent:ag7a991cd2d9:yuno-probe-preplace-1` and `-2`:
+
+- The path rule matched the gateway: the platform's computation (scope key = session key +
+  `:workspace:` + the first 32 hex of sha256 of the agent workspace path; folder =
+  `workspace-` + the first 32 hex of sha256 of the scope key) gave
+  `sandboxes/workspace-640eac68f7f7ae4e9195a7761731a2ec` and
+  `sandboxes/workspace-3f9d4c915577bdee18379089b8c36e51`, the folders the gateway created.
+  T5.30.1 pins both.
+- A file placed in the computed folder before the session's first turn survived OpenClaw's
+  setup and was visible to the agent at `/workspace`.
+- The agent's own workspace was not visible: no `/agent` mount, and a marker file placed in
+  the agent workspace was not in the session's container.
+- OpenClaw seeded `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `USER.md` and the skills into the
+  private workspace, but not `MEMORY.md` (the engine now copies it in, rule 3).
+- `libgomp` was present in the sandbox image (D-082).
+
+The build of 5.30, from the working tree on top of `ed1e3b1` (uncommitted), in a throwaway
+container with a fresh database:
+
+| Command | Result |
+|---|---|
+| `go build ./...`, `go vet ./...` | clean |
+| `go test -p 1 ./internal/... -count=1` | every package ok (new: the path rule against the probe's paths, the run repository's commit and checkout with real git, a two-step project run handing the change on through the run repository, a fork carrying only the named branch's commit, a retry starting from the earlier step's commit with no shared folder left, cleanup on success and on failure, the sweep leaving unrecorded `sandboxes/` folders alone) |
+| `gofmt -l internal cmd`, staticcheck 2026.2.2 | clean |
+
 # Test results, 2026-10-19 (delivery process wave 4 and the Chief: revision, changes requested, lessons, approvals from Telegram)
 
 Run on the development machine from `main` (commit `06912d1`): the CI job's own targets

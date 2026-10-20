@@ -547,11 +547,16 @@ func TestFullRunFromFixture(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(ws, "AGENTS.md")); err != nil {
 		t.Fatalf("agent not materialised: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(ws, "runs", run.ID)); !os.IsNotExist(err) {
-		t.Fatalf("run directory of a succeeded run: %v", err)
+	// The visit worked in its private workspace (DESIGN 5.30), never in the agent's, and a
+	// succeeded run's workspaces are gone.
+	if _, err := os.Stat(filepath.Join(ws, "runs")); !os.IsNotExist(err) {
+		t.Fatalf("runs directory in the agent's workspace: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(ws, "runs")); err != nil {
-		t.Fatalf("runs directory: %v", err)
+	if rc.Workspace != openclaw.SessionWorkspaceDir(env.dir, ocID, wantKey) {
+		t.Fatalf("run context workspace = %q", rc.Workspace)
+	}
+	if _, err := os.Stat(rc.Workspace); !os.IsNotExist(err) {
+		t.Fatalf("workspace of a succeeded run: %v", err)
 	}
 	got, _ := store.GetAgent(ctx, env.pool, a.ID)
 	if got.OpenClawAgentID == nil || *got.OpenClawAgentID != ocID || got.MaterializedHash == "" {

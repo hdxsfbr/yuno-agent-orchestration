@@ -6,6 +6,18 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-20
 
+**D-083 Each run step works in its own private workspace; work moves through a per-run
+git repository.** (Andre, 2026-10-20: "probe workspaceAccess none ... and if it holds,
+build per-step private workspaces with hand-off through the run's branch") D-082 gave each
+step a fresh container but still mounted the agent's whole workspace, so a step saw every
+other active run of that agent. Agent factories elsewhere give each task its own sandbox
+filesystem and hand work on through git. OpenClaw's `workspaceAccess: none` gives each
+session a private workspace; the probe showed its path is computable, files placed there
+before the first turn survive, and nothing of the agent's workspace is visible. The
+checkout moves between steps as commits in a platform-side bare repository per run
+(`<state>/yuno-runs/<run id>.git`), not as branches on the project's remote: no
+unreviewed work-in-progress branches on GitLab and no token use per step. DESIGN 5.30.
+
 **D-082 A fresh sandbox per session, and run folders deleted when no retry can need them.**
 (Andre 2026-10-20) `agents.defaults.sandbox.scope` is `session` (it was `agent`): each run
 visit has its own session key, so it gets a new container and nothing installed in one

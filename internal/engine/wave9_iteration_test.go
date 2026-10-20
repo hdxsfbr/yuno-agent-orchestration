@@ -309,10 +309,10 @@ func TestIterationRule1MergeRequestForRequest(t *testing.T) {
 	}
 }
 
-// repoFile reads a file of the run's checkout in the workspace of the agent whose turn is
+// repoFile reads a file of the run's checkout in the workspace of the visit whose turn is
 // starting; a file that is not there reads as "".
 func repoFile(env *testEnv, p openclaw.ChatSendParams, runID, rel string) string {
-	b, err := os.ReadFile(filepath.Join(env.dir, "workspace-"+sessionAgent(p.SessionKey), "runs", runID, "repo", rel))
+	b, err := os.ReadFile(filepath.Join(turnWS(env, p), "runs", runID, "repo", rel))
 	if err != nil {
 		return ""
 	}

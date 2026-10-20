@@ -52,6 +52,12 @@ func (c Config) authEnv() []string {
 // git runs one command in dir with the project's auth environment and returns its
 // output. The error carries the redacted tail of stderr.
 func (c Config) git(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	return c.gitEnv(ctx, dir, nil, args...)
+}
+
+// gitEnv is git with env added to the command's environment (GIT_DIR, GIT_WORK_TREE and
+// GIT_INDEX_FILE for the run repository, DESIGN 5.30).
+func (c Config) gitEnv(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, GitTimeout)
@@ -59,18 +65,32 @@ func (c Config) git(ctx context.Context, dir string, args ...string) ([]byte, er
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(baseEnv(), c.authEnv()...)
+	cmd.Env = append(append(baseEnv(), c.authEnv()...), env...)
 	cmd.Stdin = nil
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	if err != nil {
 		if ctx.Err() != nil {
-			return stdout.Bytes(), fmt.Errorf("git %s: %w", args[0], ctx.Err())
+			return stdout.Bytes(), fmt.Errorf("git %s: %w", subcommand(args), ctx.Err())
 		}
-		return stdout.Bytes(), fmt.Errorf("git %s: %s", args[0], obs.Redact(tail(stderr.String(), 400)))
+		return stdout.Bytes(), fmt.Errorf("git %s: %s", subcommand(args), obs.Redact(tail(stderr.String(), 400)))
 	}
 	return stdout.Bytes(), nil
+}
+
+// subcommand is the git command args run, past the global options before it (--git-dir,
+// --work-tree, -c and its value), for the error text.
+func subcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "-c":
+			i++
+		case !strings.HasPrefix(args[i], "-"):
+			return args[i]
+		}
+	}
+	return "command"
 }
 
 // baseEnv is the environment every git command gets: the path and home of the api's
@@ -430,13 +450,18 @@ func copyTreeCtx(ctx context.Context, src, dst string, limit int64) (int, error)
 		return 0, err
 	}
 	defer root.Close()
+	return copyTreeRoot(ctx, root, dst, limit)
+}
+
+// copyTreeRoot is copyTreeCtx for a checkout the caller opened as an os.Root.
+func copyTreeRoot(ctx context.Context, root *os.Root, dst string, limit int64) (int, error) {
 	skip := map[string]bool{".git": true}
 	for _, d := range Excluded {
 		skip[strings.TrimSuffix(d, "/")] = true
 	}
 	n := 0
 	var total int64
-	err = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -451,6 +476,11 @@ func copyTreeCtx(ctx context.Context, src, dst string, limit int64) (int, error)
 				return fs.SkipDir
 			}
 			return os.MkdirAll(filepath.Join(dst, p), 0o755)
+		}
+		if d.Name() == ".git" {
+			// A .git file (a gitfile naming another repository) is never content, and git
+			// would follow it from the copy (the run repository's commit, DESIGN 5.30).
+			return nil
 		}
 		if !d.Type().IsRegular() {
 			return nil

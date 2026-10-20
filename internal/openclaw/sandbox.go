@@ -16,13 +16,15 @@ type SandboxSpec struct {
 // entry is the agents.entries.<id>.sandbox block the spec becomes. Scope "session" is
 // deliberate: the gateway keeps a hot agent-scoped container running when its
 // configuration changes [docs], so a per-session scope is what makes the next node
-// visit start a container from the current image and network [probed].
+// visit start a container from the current image and network [probed]. The block says
+// workspaceAccess "none" like the defaults, so a project visit also works in its own
+// private workspace and never sees the agent's (DESIGN 5.30 rule 1).
 func (s SandboxSpec) entry() map[string]any {
 	network := "none"
 	if s.Network {
 		network = "bridge"
 	}
-	return map[string]any{"scope": "session", "docker": map[string]any{"image": s.Image, "network": network}}
+	return map[string]any{"scope": "session", "workspaceAccess": "none", "docker": map[string]any{"image": s.Image, "network": network}}
 }
 
 // SetAgentSandbox sets agents.entries.<id>.sandbox to the spec [probed: the agent's

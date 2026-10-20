@@ -135,7 +135,8 @@ func TestMemoryRenderedBeforeTurn(t *testing.T) {
 	var mu sync.Mutex
 	seen := map[string]string{}
 	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
-		b, err := os.ReadFile(filepath.Join(env.dir, "workspace-"+sessionAgent(p.SessionKey), "MEMORY.md"))
+		// The visit's private workspace holds the agent's MEMORY.md (DESIGN 5.30 rule 3).
+		b, err := os.ReadFile(filepath.Join(turnWS(env, p), "MEMORY.md"))
 		mu.Lock()
 		seen[sessionAgent(p.SessionKey)] = string(b)
 		if err != nil {

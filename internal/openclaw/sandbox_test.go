@@ -36,7 +36,9 @@ func TestSetAndClearAgentSandbox(t *testing.T) {
 	entry := raw["agents"].(map[string]any)["entries"].(map[string]any)[id].(map[string]any)
 	sandbox := entry["sandbox"].(map[string]any)
 	docker := sandbox["docker"].(map[string]any)
-	if sandbox["scope"] != "session" || docker["image"] != "yuno-sandbox-go:latest" || docker["network"] != "bridge" {
+	// The project visit's block keeps the agent's workspace out of the container, as the
+	// defaults do (DESIGN 5.30 rule 1).
+	if sandbox["scope"] != "session" || sandbox["workspaceAccess"] != "none" || docker["image"] != "yuno-sandbox-go:latest" || docker["network"] != "bridge" {
 		t.Fatalf("sandbox block = %v", sandbox)
 	}
 	if p.BaseHash == "" || len(p.ReplacePaths) != 0 {

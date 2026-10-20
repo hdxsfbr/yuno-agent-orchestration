@@ -86,10 +86,10 @@ func TestWriteBaseline(t *testing.T) {
 	if sb["mode"] != "all" || sb["docker"].(map[string]any)["network"] != "none" {
 		t.Errorf("sandbox wrong: %v", sb)
 	}
-	// A fresh container per session, the agent's workspace mounted read-write, idle
-	// containers pruned after an hour and any after a day.
-	if sb["scope"] != "session" || sb["workspaceAccess"] != "rw" {
-		t.Errorf("sandbox scope/workspaceAccess = %v/%v, want session/rw", sb["scope"], sb["workspaceAccess"])
+	// A fresh container per session with a private workspace, never the agent's (DESIGN
+	// 5.30 rule 1), idle containers pruned after an hour and any after a day.
+	if sb["scope"] != "session" || sb["workspaceAccess"] != "none" {
+		t.Errorf("sandbox scope/workspaceAccess = %v/%v, want session/none", sb["scope"], sb["workspaceAccess"])
 	}
 	if pr, _ := sb["prune"].(map[string]any); pr["idleHours"] != float64(1) || pr["maxAgeDays"] != float64(1) || len(pr) != 2 {
 		t.Errorf("sandbox prune = %v, want idleHours 1 and maxAgeDays 1", sb["prune"])

@@ -311,6 +311,7 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 			v.abortLiveTurn(wctx)
 			res = failed(store.RunFailed, reason)
 			res.limit = true
+			w.saveCheckoutOrLog(wctx, v)
 			v.finish(wctx, res)
 			e.collectArtifacts(wctx, v)
 			if v.sessionCreated {
@@ -319,12 +320,24 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 			return "", &res
 		}
 		// Shutting down: OpenClaw must not keep executing a turn nobody mirrors. The run
-		// stays for recovery, whose replacement visit starts a session of its own.
+		// stays for recovery, whose replacement visit starts a session of its own, from
+		// the checkout this one leaves (DESIGN 5.30 rule 4).
 		v.abortLiveTurn(wctx)
+		w.saveCheckoutOrLog(wctx, v)
 		v.release()
 		return "", &res
 	}
 	v.abortLiveTurn(wctx) // a turn whose chat.send answer was lost, or an unconfirmed abort
+	// The checkout goes into the run repository whatever the outcome (DESIGN 5.30 rule 4);
+	// a visit that succeeded or parked but whose work could not be saved fails, since the
+	// next step would not get it.
+	if res.nodeStatus == store.NodeSucceeded || res.paused {
+		if err := v.saveCheckout(wctx); err != nil {
+			res = failed(store.RunFailed, "run repository: "+err.Error())
+		}
+	} else {
+		w.saveCheckoutOrLog(wctx, v)
+	}
 	if res.nodeStatus == store.NodeSucceeded {
 		if msg := w.checkState(ctx, node.ID, res.output); msg != "" {
 			res = failed(store.RunFailed, "state schema: "+msg)
@@ -353,16 +366,27 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 	return w.advance(ctx, node, res.output)
 }
 
-// carrySources lists the workspaces whose runs/<run_id>/ flows into visit v's agent
-// before its turn (DESIGN 5.6 rule 13): the agents of the run's earlier visits, ordered
-// by each agent's last visit so a later visit's file wins. An agent whose last visit
-// came before v's own agent last ran is left out: its files reached this workspace
-// then, and this agent's own later changes must win over them.
+// saveCheckoutOrLog is saveCheckout for a visit whose outcome stands whatever the commit
+// does: a failure is a log line of the run.
+func (w *walk) saveCheckoutOrLog(ctx context.Context, v *visit) {
+	if err := v.saveCheckout(ctx); err != nil {
+		w.e.logEvent(ctx, w.run.ID, "warn", fmt.Sprintf("the checkout of %s visit %d was not saved: %v", v.node.ID, v.rn.Visit, err))
+	}
+}
+
+// carrySources lists the earlier visits whose runs/<run_id>/ flows into visit v's
+// workspace before its turn (DESIGN 5.6 rule 13): the last visit of each agent of the
+// run's earlier visits, ordered by it so a later visit's file wins. An agent whose last
+// visit came before v's own agent last ran is left out: its files reached that visit of
+// v's agent, and this agent's own later changes must win over them. Since every visit has
+// a private workspace of its own (5.30), v's own agent's last visit is a source too, the
+// first, as its workspace was before: its files and its checkout, which a later source's
+// checkout replaces.
 //
 // Since DESIGN 5.26 rule 10 a visit inside a parallel branch receives nothing from its
 // sibling branches of the same fork visit (their files are partial and their own), and
 // the checkout (repo/) of an agent whose last visit was in a branch the join does not
-// name stays behind, so two working trees are never mixed file by file.
+// name stays behind, so two working trees are never mixed.
 func (w *walk) carrySources(ctx context.Context, v *visit) ([]carrySource, error) {
 	visits, err := store.ListRunNodes(ctx, w.e.deps.Pool, w.run.ID)
 	if err != nil {
@@ -405,11 +429,12 @@ func (w *walk) carrySources(ctx context.Context, v *visit) ([]carrySource, error
 	own, ranBefore := last[v.ocID]
 	var out []carrySource
 	for _, id := range order {
-		if id == v.ocID || (ranBefore && last[id] <= own) {
+		if id != v.ocID && ranBefore && last[id] < own {
 			continue
 		}
-		src := carrySource{ocID: id}
-		if bid := visits[last[id]].BranchID; bid != nil && (w.branch == nil || *bid != w.branch.ID) {
+		n := visits[last[id]]
+		src := carrySource{ocID: id, visitID: n.ID, workspace: strValue(n.WorkspaceDir), repoSHA: strValue(n.RepoSHA)}
+		if bid := n.BranchID; id != v.ocID && bid != nil && (w.branch == nil || *bid != w.branch.ID) {
 			src.skipRepo = !w.checkoutBranch(branches[*bid])
 		}
 		out = append(out, src)

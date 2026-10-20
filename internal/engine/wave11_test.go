@@ -1082,7 +1082,7 @@ func TestBranchFilesCheckoutAndDiff(t *testing.T) {
 				t.Fatal(err)
 			}
 			path := func(p openclaw.ChatSendParams, rel string) string {
-				return filepath.Join(env.dir, "workspace-"+sessionAgent(p.SessionKey), "runs", run.ID, rel)
+				return filepath.Join(turnWS(env, p), "runs", run.ID, rel)
 			}
 			read := func(p openclaw.ChatSendParams, rel string) string {
 				b, err := os.ReadFile(path(p, rel))
@@ -1227,7 +1227,7 @@ func TestLoopAroundThePairKeepsSiblingsApart(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := func(p openclaw.ChatSendParams, rel string) string {
-		return filepath.Join(env.dir, "workspace-"+sessionAgent(p.SessionKey), "runs", run.ID, rel)
+		return filepath.Join(turnWS(env, p), "runs", run.ID, rel)
 	}
 	exists := func(p openclaw.ChatSendParams, rel string) bool {
 		_, err := os.Stat(path(p, rel))

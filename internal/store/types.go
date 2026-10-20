@@ -330,6 +330,11 @@ type RunNode struct {
 	// BranchID is the branch of a fork visit this visit was made in (DESIGN 5.26 rule 4);
 	// nil for a visit outside any fork.
 	BranchID *string `db:"branch_id" json:"branch_id,omitempty"`
+	// WorkspaceDir is the visit's private workspace (DESIGN 5.30 rule 2) and RepoSHA the
+	// run repository commit its checkout ended at (rule 4); nil until the visit has them.
+	// Not part of the contract.
+	WorkspaceDir *string `db:"workspace_dir" json:"-"`
+	RepoSHA      *string `db:"repo_sha" json:"-"`
 }
 
 // RunBranch is one branch of a fork visit (DESIGN 5.26 rule 3): the part of the run that

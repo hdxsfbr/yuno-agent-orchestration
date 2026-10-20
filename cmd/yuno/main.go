@@ -6,7 +6,8 @@
 //	                    shipped templates once, bind the chief to Telegram when unbound (idempotent);
 //	                    --reset-shipped also restores the shipped agents' prompts and allowlists
 //	                    and the instantiated templates to the current shipped versions
-//	yuno openclaw-init  write the baseline openclaw.json into the state directory and exit
+//	yuno openclaw-init  write the baseline openclaw.json into the state directory, create its
+//	                    sandboxes/ folder, and exit
 //	yuno deploytarget   local release store the deploy tool publishes to
 //	yuno eval           run the evaluation suite and write a report
 //	yuno forgefake      the fake forge the evals run against (FORGEFAKE_TOKEN, FORGEFAKE_ADDR;
@@ -65,6 +66,9 @@ func main() {
 		})
 		if err == nil {
 			log.Info("openclaw baseline config", "state_dir", cfg.OpenClawStateDir, "changed", changed)
+			// The sessions' private workspaces live under sandboxes/, which the api writes
+			// into before OpenClaw does (DESIGN 5.30 rule 2).
+			err = openclaw.EnsureSandboxesDir(cfg.OpenClawStateDir)
 		}
 	case "deploytarget":
 		err = deploytarget.Run(ctx, cfg, log)

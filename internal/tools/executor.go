@@ -210,7 +210,12 @@ func (s *Service) ExecuteApproved(ctx context.Context, toolCallID string) (json.
 	if row.IdempotencyKey != nil {
 		call.IdempotencyKey = *row.IdempotencyKey
 	}
-	if s.Workspace != nil && va.OpenClawAgentID != "" {
+	// The visit's private workspace holds its run directory (DESIGN 5.30); a visit made
+	// before those existed worked in the agent's.
+	switch {
+	case va.WorkspaceDir != "":
+		call.Workspace = va.WorkspaceDir
+	case s.Workspace != nil && va.OpenClawAgentID != "":
 		call.Workspace = s.Workspace(va.OpenClawAgentID)
 	}
 	out, err := s.Execute(ctx, t, call)

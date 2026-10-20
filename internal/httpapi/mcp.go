@@ -115,9 +115,14 @@ func (s *Server) callPlatformTool(ctx context.Context, t *tools.Tool, args json.
 	g := &gateCall{s: s, t: t, rc: rc, token: token, args: args, start: time.Now().UTC(),
 		log: s.log.With("run_id", rc.RunID, "node_id", rc.NodeID, "tool", t.Name)}
 	g.agentID, g.allowlist, g.rules = rc.AgentID, rc.ToolAllowlist, rc.InteractionRules
+	// The visit's private workspace holds its run directory (DESIGN 5.30).
+	ws := rc.Workspace
+	if ws == "" {
+		ws = s.workspace(rc.OpenClawAgentID)
+	}
 	g.call = tools.Call{
 		RunID: rc.RunID, NodeVisitID: rc.RunNodeID, NodeID: rc.NodeID, AgentID: rc.AgentID,
-		OpenClawAgentID: rc.OpenClawAgentID, Workspace: s.workspace(rc.OpenClawAgentID),
+		OpenClawAgentID: rc.OpenClawAgentID, Workspace: ws,
 	}
 	return g.run(ctx)
 }

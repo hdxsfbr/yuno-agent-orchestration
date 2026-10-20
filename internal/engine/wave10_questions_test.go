@@ -516,7 +516,7 @@ func (r *parkRig) notesPath(p openclaw.ChatSendParams) string {
 	if !ok {
 		return ""
 	}
-	return filepath.Join(openclaw.WorkspaceDir(r.env.dir, p.AgentID), "runs", rc.RunID, "notes.md")
+	return filepath.Join(turnWS(r.env, p), "runs", rc.RunID, "notes.md")
 }
 
 func (r *parkRig) turn(t *testing.T, p openclaw.ChatSendParams, i int) {

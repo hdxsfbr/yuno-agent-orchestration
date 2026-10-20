@@ -26,7 +26,15 @@ func CopyRunDir(stateDir, fromID, toID, runID string) (int, error) {
 // named in skip, with everything under them (DESIGN 5.26 rule 10: the checkout of a
 // parallel branch the join does not name stays in its agent's workspace).
 func CopyRunDirExcept(stateDir, fromID, toID, runID string, skip []string) (int, error) {
-	srcWS, err := os.OpenRoot(WorkspaceDir(stateDir, fromID))
+	return CopyRunDirAt(WorkspaceDir(stateDir, fromID), WorkspaceDir(stateDir, toID), runID, skip)
+}
+
+// CopyRunDirAt is CopyRunDirExcept for workspaces given as their directories: since DESIGN
+// 5.30 rule 5 the files of a run flow from the private workspaces of earlier visits into
+// the private workspace of the next one, with the checkout (repo/) in skip, since it
+// moves through the run repository instead.
+func CopyRunDirAt(fromWS, toWS, runID string, skip []string) (int, error) {
+	srcWS, err := os.OpenRoot(fromWS)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil
 	}
@@ -43,10 +51,10 @@ func CopyRunDirExcept(stateDir, fromID, toID, runID string, skip []string) (int,
 	}
 	defer src.Close()
 
-	if err := EnsureRunDir(stateDir, toID, runID); err != nil {
+	if err := EnsureRunDirAt(toWS, runID); err != nil {
 		return 0, err
 	}
-	dstWS, err := os.OpenRoot(WorkspaceDir(stateDir, toID))
+	dstWS, err := os.OpenRoot(toWS)
 	if err != nil {
 		return 0, err
 	}

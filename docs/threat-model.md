@@ -11,7 +11,8 @@ Rules referenced as 5.x are in `docs/DESIGN.md`; decisions as D-nnn in `DECISION
   `PROJECT_TOKEN_KEY`), the optional GitLab token, and the git token of every project
   (stored in the database AES-GCM encrypted under `PROJECT_TOKEN_KEY`; `PROJECT_GIT_TOKEN`
   only bootstraps the first project).
-- The host: Docker socket, the state directory with every agent's workspace, Postgres.
+- The host: Docker socket, the state directory with every agent's workspace, the steps'
+  private workspaces and the run repositories, Postgres.
 - The side effects: releases on the deploy target, merge requests on GitLab, branches
   and merge or pull requests on the project repository, outbound Telegram messages.
 - The record: runs, traces, approvals, conversations, which must stay truthful.
@@ -22,8 +23,8 @@ Rules referenced as 5.x are in `docs/DESIGN.md`; decisions as D-nnn in `DECISION
 |---|---|---|---|
 | Model output | the engine | everything the model says or calls | tool schemas, allowlists, interaction rules, approval gate, limits |
 | Tool output | the engine | files, command output, fetched pages | untrusted-content wrapper (5.7 rule 5), `AGENTS.md` rules, no instruction-following in tool results |
-| Sandbox | gateway container | agent commands | per-agent Docker sandbox: no network (unless a project opts in, 5.16 rule 8), read-only root, dropped capabilities, pids and memory limits, only the agent's workspace mounted (5.14 rule 12) |
-| Project checkout | api | the repository's content and the agent's edits to it | the api never runs git inside the checkout; the token stays in the api's git environment; the checkout holds the bare URL (5.16 rules 4, 10) |
+| Sandbox | gateway container | agent commands | per-session Docker sandbox: no network (unless a project opts in, 5.16 rule 8), read-only root, dropped capabilities, pids and memory limits, only the session's private workspace mounted, never the agent's (5.14 rule 12, 5.30) |
+| Project checkout | api | the repository's content and the agent's edits to it | the api never runs git inside the checkout (a step's checkout is saved to the run repository from a copy of its working tree); the token stays in the api's git environment; the checkout holds the bare URL (5.16 rules 4, 10; 5.30 rule 4) |
 | Channel | gateway | Telegram users | `dmPolicy: allowlist` of numeric user ids; closed until an agent is bound (D-025, D-026); webhook secret header in webhook mode, bot-token-authenticated polling otherwise |
 | Browser | api | the operator's browser | optional `API_TOKEN` bearer; no accounts (single operator) |
 | MCP | api | the gateway's MCP client | `YUNO_MCP_TOKEN` bearer, loopback only |
@@ -91,9 +92,12 @@ a branch visit receives nothing from its siblings, and a project checkout flows 
 join only from the branch the join names, never as a file-by-file mixture of two working
 trees that could carry one branch's edits into another's commit. Two branches never
 share an agent (refused at save), since an agent has one workspace and one sandbox hold.
-Sandboxes are scoped per session and a finished run's `runs/<id>/` folders are deleted, so a
-run no longer sees other finished runs' folders or container state; concurrent runs of the same
-agent still share the workspace mount.
+Each step of a run works in a private workspace of its own (DESIGN 5.30, D-083): the
+sandbox is scoped per session and mounts that workspace, never the agent's, so no run or step
+sees another's files or container state, concurrent runs of the same agent included. Work moves
+forward as copies into the next step's workspace and, for the checkout, as commits of a
+platform-side run repository that no sandbox mounts and nothing pushes; a run's workspaces and
+repository are deleted when it succeeds, or seven days after it failed.
 A branch's approval or question wait does not stop the run's clock, so a run in a fork
 cannot be kept alive past its time limit by one branch waiting while another works.
 Residual risk: a condition or task inside one branch that reads another branch's output
@@ -122,9 +126,9 @@ key; the `approval_gate` evaluator checks that no side effect ran before its app
 
 **Sandbox escape / host access.** An agent's command tries to reach the host or the
 network. Mitigation: OpenClaw's Docker sandbox with `network: none`, read-only root,
-`cap_drop ALL`, non-root user, only the agent's workspace mounted; the gateway container
-is the only one with the Docker socket. Residual risk (known limitation): mounting the
-Docker socket into the gateway container is root-equivalent on the host; the gateway is
+`cap_drop ALL`, non-root user, only the session's private workspace mounted; the gateway
+container is the only one with the Docker socket. Residual risk (known limitation): mounting
+the Docker socket into the gateway container is root-equivalent on the host; the gateway is
 trusted code from a pinned image, but a gateway compromise is a host compromise.
 Exec guardrail patterns do not reach the sandbox (D-028).
 
@@ -135,7 +139,7 @@ dependencies. That is a deliberate widening of the
 sandbox boundary: anything injected into the repository (a README, a test, a
 dependency's install script, a package the lockfile names) runs in a container that
 can reach the internet, so it can exfiltrate whatever the sandbox holds (the checkout,
-the agent's workspace, the task text) and can call any service, and side effects
+the step's workspace, the task text) and can call any service, and side effects
 inside the sandbox are not gated by the approval gate (D-028 applies). The container
 can also reach the host's published ports, which is why `API_TOKEN` matters on any host
 with the opt-in. Mitigation: off by default; the opt-in is per project, for a
@@ -148,7 +152,7 @@ approval-gated side effect; the redactor knows GitLab and GitHub token shapes an
 credentials. Residual risk: with network on, the sandbox is a general-purpose network
 client in the hands of whatever the model reads; use it only with repositories whose
 contents you would run on your own machine. With network off the clone still happens
-and the only widening is the checkout's content in the agent's workspace, which the
+and the only widening is the checkout's content in the step's workspace, which the
 untrusted-content rules already cover.
 
 **Project tokens at rest (DESIGN 5.17 rule 2, D-038).** A project's git token is the

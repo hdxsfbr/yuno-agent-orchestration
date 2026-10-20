@@ -4142,6 +4142,71 @@ without a default-branch pipeline never ships automatically (the operator can ap
 the smoke test after starting `ship_pipeline` by hand); issue bodies are written by the
 platform but anyone with tracker rights can edit them before intake reads them.
 
+### 5.30 Private step workspaces and the run repository
+
+Purpose: every step of a run (one node visit) works in a workspace no other run or step
+can see, the way per-task sandboxes work elsewhere: work moves between steps through a
+per-run git repository and the platform, never through a folder two runs share. Decision
+D-083 (Andre, 2026-10-20), after the probe recorded in `docs/test-results.md`.
+
+Inputs: the visit's session key `agent:<openclaw id>:yuno-<run id>-<node id>-<visit>`;
+the agent's workspace path; the carry rules of 5.6 rule 13 and 5.26 rule 10; the project
+and its token (5.16).
+
+Rules:
+
+1. **No shared mount.** `agents.defaults.sandbox.workspaceAccess` is `none` (and every
+   per-agent sandbox entry says so too), with `scope: session` (D-082). Each session gets
+   OpenClaw's private workspace under `<state>/sandboxes/`, mounted at `/workspace`;
+   OpenClaw seeds it with the agent's bootstrap files (`AGENTS.md`, `SOUL.md`,
+   `IDENTITY.md`, `USER.md`) and mirrors its skills read-only [probed 2026-10-20].
+2. **Locating it.** The platform computes the private workspace of a session with
+   OpenClaw's own rule [probed, OpenClaw 2026.10.3 `sandbox/shared.ts`]: scope key =
+   session key + `:workspace:` + the first 32 hex of sha256(agent workspace path); folder
+   = `workspace-` + the first 32 hex of sha256(scope key). A test pins the probe's two
+   observed paths, so an OpenClaw upgrade that changes the rule fails the suite. The path
+   is stored on the visit (`run_nodes.workspace_dir`). `openclaw-init` makes the
+   `sandboxes/` root owned by uid 1000, so the api can create it.
+3. **Preparing a step.** Before the visit's first turn the engine creates
+   `runs/<run id>/` in that private workspace and writes the files it writes per visit
+   today (`MEMORY.md`, which OpenClaw does not copy, and any other per-visit file).
+4. **The run repository.** A project run has a bare repository
+   `<state>/yuno-runs/<run id>.git`, owned by the platform. The first step that needs the
+   checkout gets it as today (a clone of the project with the token, or of the merge
+   request's branch, 5.22). When a visit ends, whatever its outcome, the platform commits
+   the checkout's changes (the `Excluded` directories left out) as `<node> visit <n>` and
+   records the commit as `refs/visits/<visit id>` and on `run_nodes.repo_sha`. A later
+   visit's checkout is a clone of the commit the carry rules name: the `repo_sha` of the
+   last carry source that brings `repo/` (5.6 rule 13 order; a source whose checkout stays
+   behind under 5.26 rule 10 brings none). Its `origin` stays the project, so
+   `open_merge_request` pushes as before.
+5. **Other files.** Files outside `repo/` under `runs/<run id>/` are copied from the
+   carry sources' private workspaces, in the same order, as today.
+6. **Collection.** `out/` and the diff are collected from the private workspace (5.25).
+7. **Retry.** A retried visit starts from the same computed commit and copies, so it
+   needs the run repository and the earlier steps' private workspaces, which are kept as
+   D-082 keeps run folders (7 days for failed, timed-out and cancelled runs).
+8. **Cleanup.** When a run succeeds the platform deletes its steps' private workspaces
+   (from `run_nodes.workspace_dir`) and its run repository; the hourly sweep applies the
+   D-082 retention to them. Folders under `sandboxes/` that belong to no recorded visit
+   (the Chief's chat session among them) are never touched by the sweep.
+
+Edge cases: two runs of the same agent at once (different session keys, so different
+workspaces); a fork's branches (each branch's visits start from their own carry
+sources); a visit that fails before its first turn (no commit; the next attempt starts
+from the same commit); a run that is not on a project (no run repository; rule 5 only).
+
+Tests: T5.30.1 the path rule against the probe's two paths; T5.30.2 a two-step project
+run hands the Builder's change to the next step through the run repository with no
+shared folder; T5.30.3 a fork whose join names one branch carries only that branch's
+commit; T5.30.4 retry of a failed later step starts from the earlier step's commit after
+the shared run folders are gone; T5.30.5 cleanup removes the private workspaces and the
+run repository on success and keeps them on failure; T5.30.6 the sweep never touches a
+`sandboxes/` folder no visit records.
+
+Limitations: the path rule is OpenClaw's internal behaviour, pinned by a test, not an API;
+on an OpenClaw upgrade the probe in `docs/test-results.md` is repeated.
+
 ## 6. HTTP API summary
 
 Errors: `{error: {code, message, details?}}`; validation failures are 422 with

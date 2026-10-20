@@ -14,6 +14,12 @@ import (
 	"yuno/internal/workflow"
 )
 
+// turnWS is the private workspace of the visit whose turn p starts (DESIGN 5.30 rule 2):
+// where its run directory and checkout are.
+func turnWS(env *testEnv, p openclaw.ChatSendParams) string {
+	return openclaw.SessionWorkspaceDir(env.dir, sessionAgent(p.SessionKey), p.SessionKey)
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -24,10 +30,11 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-// T5.6.12: a file node 1's agent wrote is in node 2's agent workspace before its turn;
-// the file node 2 rewrote wins on node 3 (a third agent) and on node 4 (node 1's agent
-// again); node 5, the same agent as node 4, keeps node 4's version. Links are not copied
-// (DESIGN 5.6 rule 13).
+// T5.6.12: a file node 1's agent wrote is in node 2's workspace before its turn; the file
+// node 2 rewrote wins on node 3 (a third agent) and on node 4 (node 1's agent again);
+// node 5, the same agent as node 4, keeps node 4's version. Links are not copied (DESIGN
+// 5.6 rule 13). Every visit works in a private workspace of its own (5.30), and nothing
+// of the run is in the agents' workspaces.
 func TestRunDirectoryFlowsForward(t *testing.T) {
 	env := newEnv(t)
 	ctx := context.Background()
@@ -46,7 +53,7 @@ func TestRunDirectoryFlowsForward(t *testing.T) {
 	writeFile(t, filepath.Join(outside, "secret.txt"), "outside")
 	// path is a file in the run directory of the workspace the visit's turn works in.
 	path := func(p openclaw.ChatSendParams, rel string) string {
-		return filepath.Join(env.dir, "workspace-"+sessionAgent(p.SessionKey), "runs", run.ID, rel)
+		return filepath.Join(turnWS(env, p), "runs", run.ID, rel)
 	}
 	var mu sync.Mutex
 	found := map[string]string{} // node → the files its agent had when its turn started
@@ -98,6 +105,11 @@ func TestRunDirectoryFlowsForward(t *testing.T) {
 			t.Errorf("%s started with %q, want %q", node, found[node], w)
 		}
 	}
+	for _, a := range []*store.Agent{coder, reviewer, deployer} {
+		if _, err := os.Lstat(filepath.Join(openclaw.WorkspaceDir(env.dir, openclaw.DeriveAgentID(a.ID)), "runs")); !os.IsNotExist(err) {
+			t.Errorf("agent %s's workspace has a runs folder: %v", a.Name, err)
+		}
+	}
 }
 
 // A run directory that cannot be copied fails the node with reason "run directory:
@@ -113,10 +125,11 @@ func TestRunDirectoryCopyFailureFailsTheNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
-		ws := filepath.Join(env.dir, "workspace-"+sessionAgent(p.SessionKey))
-		writeFile(t, filepath.Join(ws, "runs", run.ID, "notes.md"), "draft")
-		// The reviewer's run directory is taken by a file: nothing can be copied into it.
-		writeFile(t, filepath.Join(env.dir, "workspace-"+openclaw.DeriveAgentID(reviewer.ID), "runs", run.ID), "in the way")
+		writeFile(t, filepath.Join(turnWS(env, p), "runs", run.ID, "notes.md"), "draft")
+		// The run directory of the reviewer's visit is taken by a file: nothing can be
+		// copied into it.
+		revID := openclaw.DeriveAgentID(reviewer.ID)
+		writeFile(t, filepath.Join(openclaw.SessionWorkspaceDir(env.dir, revID, SessionKey(revID, run.ID, "two", 1)), "runs", run.ID), "in the way")
 		go finishThenFinal(t, env, p, `{"ok":true}`)
 		return startedTurn(p)
 	}

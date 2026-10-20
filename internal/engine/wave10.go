@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 
-	"yuno/internal/openclaw"
 	"yuno/internal/tools"
 )
 
@@ -27,15 +26,16 @@ func (e *Engine) LogEvent(ctx context.Context, runID, level, msg string, attrs .
 }
 
 // collectArtifacts hands a finished agent visit to the artifact collector (DESIGN 5.25
-// rule 2) with the agent's workspace, the run, the visit, the project configuration when
-// the run has a checkout and the branch that checkout is on. It does nothing while
-// Deps.Artifacts is nil.
+// rule 2) with the visit's private workspace (5.30 rule 6), the run, the visit, the
+// project configuration when the run has a checkout and the branch that checkout is on.
+// It does nothing while Deps.Artifacts is nil, or for a visit that ended before it had a
+// workspace (it left no files).
 func (e *Engine) collectArtifacts(ctx context.Context, v *visit) {
-	if e.deps.Artifacts == nil {
+	if e.deps.Artifacts == nil || v.workspace == "" {
 		return
 	}
 	in := ArtifactInput{
-		Workspace: openclaw.WorkspaceDir(e.deps.StateDir, v.ocID),
+		Workspace: v.workspace,
 		Run:       v.run,
 		Node:      v.rn,
 	}

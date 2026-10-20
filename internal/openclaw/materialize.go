@@ -973,7 +973,12 @@ func removeStaleSkills(root *os.Root, d desired) error {
 // EnsureRunDir creates runs/<run_id>/ in an agent's workspace through an os.Root, so a
 // runs symlink the agent planted cannot point the directory elsewhere.
 func EnsureRunDir(stateDir, openclawID, runID string) error {
-	ws := WorkspaceDir(stateDir, openclawID)
+	return EnsureRunDirAt(WorkspaceDir(stateDir, openclawID), runID)
+}
+
+// EnsureRunDirAt is EnsureRunDir for a workspace given as its directory, such as a
+// visit's private workspace (DESIGN 5.30 rule 3), which it creates when missing.
+func EnsureRunDirAt(ws, runID string) error {
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		return err
 	}
@@ -1108,7 +1113,13 @@ func listWorkspaceFiles(dir string) []string {
 // it is not part of the materialised hash, which keeps the bare header, so a new fact
 // never re-materialises the agent.
 func WriteMemoryMD(stateDir, openclawID, content string) error {
-	dir := WorkspaceDir(stateDir, openclawID)
+	return WriteMemoryMDAt(WorkspaceDir(stateDir, openclawID), content)
+}
+
+// WriteMemoryMDAt is WriteMemoryMD for a workspace given as its directory: a visit's
+// private workspace gets the agent's MEMORY.md this way, since OpenClaw seeds the other
+// bootstrap files into it but not this one (DESIGN 5.30 rule 3).
+func WriteMemoryMDAt(dir, content string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}

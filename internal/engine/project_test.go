@@ -89,11 +89,13 @@ func sandboxPatches(env *testEnv) []string {
 	return out
 }
 
-// T5.16.3, T5.17.4: a two-node project workflow run queued with a project clones from
-// its snapshot (the token read from the row) into the first agent's workspace before
-// its turn, records the toolchain and the span, selects the sandbox for each visit,
-// carries the checkout to the second agent, whose open_merge_request resolves the same
-// project, pushes the edit to the bare repository and opens the request on the fake.
+// T5.16.3, T5.17.4, T5.30.2: a two-node project workflow run queued with a project clones
+// from its snapshot (the token read from the row) into the first visit's private
+// workspace before its turn, records the toolchain and the span, selects the sandbox for
+// each visit, carries the checkout to the second visit through the run repository (no
+// folder is shared: the agents' workspaces hold nothing of the run), whose
+// open_merge_request resolves the same project, pushes the edit to the bare repository
+// and opens the request on the fake.
 func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 	env, bare, p := projectEnv(t, map[string]string{"README.md": "# demo\n", "go.mod": "module demo\n"}, true)
 	ctx := context.Background()
@@ -109,7 +111,7 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 		t.Fatalf("queued run project = %v %+v", run.ProjectID, run.Project)
 	}
 	repoOf := func(p openclaw.ChatSendParams) string {
-		return filepath.Join(env.dir, "workspace-"+sessionAgent(p.SessionKey), "runs", run.ID, "repo")
+		return filepath.Join(turnWS(env, p), "runs", run.ID, "repo")
 	}
 	snapshot := filepath.Join(t.TempDir(), "run")
 	var mu sync.Mutex
@@ -160,10 +162,33 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 			t.Errorf("%s task carries the token", node)
 		}
 	}
-	// The checkout's git config holds the bare URL only.
+	// The second visit's checkout came from the run repository: the edit is a change
+	// against the cloned branch, and its git config holds the bare URL only.
 	cfg, _ := os.ReadFile(filepath.Join(snapshot, "repo", ".git", "config"))
-	if strings.Contains(string(cfg), "extraheader") || strings.Contains(string(cfg), testProjectToken) {
+	if strings.Contains(string(cfg), "extraheader") || strings.Contains(string(cfg), testProjectToken) || !strings.Contains(string(cfg), bare) {
 		t.Fatalf(".git/config:\n%s", cfg)
+	}
+	checkout := filepath.Join(snapshot, "repo")
+	if changed, added := projecttest.Git(t, checkout, "diff", "--name-status"), projecttest.Git(t, checkout, "ls-files", "--others", "--exclude-standard"); changed != "M\tREADME.md" || added != "cmd/main.go" {
+		t.Fatalf("the deployer's checkout: changed %q, added %q", changed, added)
+	}
+	// Each visit recorded its private workspace and the commit its checkout ended at: the
+	// clone's commit for neither, the coder's commit for both (the deployer changed nothing).
+	nodes := runNodes(t, env, run.ID)
+	if len(nodes) != 2 || nodes[0].WorkspaceDir == nil || nodes[1].WorkspaceDir == nil || *nodes[0].WorkspaceDir == *nodes[1].WorkspaceDir ||
+		nodes[0].RepoSHA == nil || nodes[1].RepoSHA == nil || *nodes[0].RepoSHA != *nodes[1].RepoSHA || *nodes[0].RepoSHA == deref(r.CheckoutSHA) {
+		t.Fatalf("visits = %+v", nodes)
+	}
+	for _, n := range nodes {
+		if !strings.HasPrefix(*n.WorkspaceDir, filepath.Join(env.dir, "sandboxes", "workspace-")) {
+			t.Fatalf("workspace of %s = %s", n.NodeID, *n.WorkspaceDir)
+		}
+		if _, err := os.Lstat(*n.WorkspaceDir); !os.IsNotExist(err) {
+			t.Fatalf("the succeeded run's workspace %s is still there: %v", *n.WorkspaceDir, err)
+		}
+	}
+	if _, err := os.Lstat(project.RunRepoPath(env.dir, run.ID)); !os.IsNotExist(err) {
+		t.Fatalf("the succeeded run's repository is still there: %v", err)
 	}
 	// One clone span with the toolchain, one log line.
 	if n := env.count(`SELECT count(*) FROM spans WHERE run_id=$1 AND kind='project' AND name='project_clone' AND attrs->>'toolchain'='go'`, run.ID); n != 1 {
@@ -175,8 +200,8 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 	// Each visit selected the go image with network and cleared it afterwards.
 	coderID, deployerID := openclaw.DeriveAgentID(coder.ID), openclaw.DeriveAgentID(deployer.ID)
 	for _, id := range []string{coderID, deployerID} {
-		if _, err := os.Lstat(filepath.Join(env.dir, "workspace-"+id, "runs", run.ID)); !os.IsNotExist(err) {
-			t.Fatalf("the succeeded run's folder is still in workspace %s: %v", id, err)
+		if _, err := os.Lstat(filepath.Join(env.dir, "workspace-"+id, "runs")); !os.IsNotExist(err) {
+			t.Fatalf("the agent workspace %s has a runs folder: %v", id, err)
 		}
 	}
 	want := []string{"set " + coderID + " session yuno-sandbox-go:latest bridge", "clear " + coderID,
@@ -188,9 +213,11 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 		t.Fatalf("holds left: %v", holds)
 	}
 
-	// The Deployer's open_merge_request, as the MCP handler would run it in the
-	// deployer's workspace (the fake provider reports branches from the bare repository).
-	deployerRun := filepath.Join(env.dir, "workspace-"+deployerID, "runs", run.ID)
+	// The Deployer's open_merge_request, as the MCP handler would run it in the deployer
+	// visit's workspace, restored as it stood (the fake provider reports branches from the
+	// bare repository).
+	deployerWS := t.TempDir()
+	deployerRun := filepath.Join(deployerWS, "runs", run.ID)
 	if err := os.MkdirAll(filepath.Dir(deployerRun), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +256,7 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := tool.Invoke(ctx, tools.Call{RunID: run.ID, Workspace: filepath.Join(env.dir, "workspace-"+deployerID), IdempotencyKey: key,
+	res, err := tool.Invoke(ctx, tools.Call{RunID: run.ID, Workspace: deployerWS, IdempotencyKey: key,
 		Input: json.RawMessage(`{"run_token":"r","title":"Edit the readme","description":"d"}`)})
 	if err != nil || res.IsError {
 		t.Fatalf("open_merge_request: %+v %v", res, err)

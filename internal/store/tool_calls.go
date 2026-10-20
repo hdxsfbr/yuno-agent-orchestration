@@ -66,14 +66,17 @@ type VisitAgent struct {
 	NodeID          string
 	AgentID         string
 	OpenClawAgentID string
+	// WorkspaceDir is the visit's private workspace (DESIGN 5.30), "" for a visit that
+	// recorded none.
+	WorkspaceDir string
 }
 
-// GetVisitAgent resolves a run_nodes id to its node and agent.
+// GetVisitAgent resolves a run_nodes id to its node, its agent and its workspace.
 func GetVisitAgent(ctx context.Context, q Querier, runNodeID string) (*VisitAgent, error) {
 	var v VisitAgent
-	var agentID, ocID *string
-	err := q.QueryRow(ctx, `SELECT rn.node_id, rn.agent_id, a.openclaw_agent_id
-		FROM run_nodes rn LEFT JOIN agents a ON a.id = rn.agent_id WHERE rn.id = $1`, runNodeID).Scan(&v.NodeID, &agentID, &ocID)
+	var agentID, ocID, ws *string
+	err := q.QueryRow(ctx, `SELECT rn.node_id, rn.agent_id, a.openclaw_agent_id, rn.workspace_dir
+		FROM run_nodes rn LEFT JOIN agents a ON a.id = rn.agent_id WHERE rn.id = $1`, runNodeID).Scan(&v.NodeID, &agentID, &ocID, &ws)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -85,6 +88,9 @@ func GetVisitAgent(ctx context.Context, q Querier, runNodeID string) (*VisitAgen
 	}
 	if ocID != nil {
 		v.OpenClawAgentID = *ocID
+	}
+	if ws != nil {
+		v.WorkspaceDir = *ws
 	}
 	return &v, nil
 }

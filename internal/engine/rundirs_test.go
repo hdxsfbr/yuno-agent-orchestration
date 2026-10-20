@@ -26,8 +26,9 @@ func (env *testEnv) plant(agent, runID string) string {
 
 func present(path string) bool { _, err := os.Lstat(path); return err == nil }
 
-// A run that ends succeeded has its folders removed from every workspace, including the
-// ones copied forward to later agents.
+// A run that ends succeeded has its visits' private workspaces removed (DESIGN 5.30 rule
+// 8), and a runs/<id>/ an agent workspace still holds from before 5.30; another run's
+// folder stays.
 func TestRunDirsRemovedWhenRunSucceeds(t *testing.T) {
 	env := newEnv(t)
 	ctx := context.Background()
@@ -39,19 +40,27 @@ func TestRunDirsRemovedWhenRunSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
-		writeFile(t, filepath.Join(env.dir, "workspace-"+sessionAgent(p.SessionKey), "runs", run.ID, "notes.md"), "n")
+		writeFile(t, filepath.Join(turnWS(env, p), "runs", run.ID, "notes.md"), "n")
 		go finishThenFinal(t, env, p, `{"ok":true}`)
 		return startedTurn(p)
 	}
 	other := env.plant("unrelated", "33333333-3333-4333-8333-333333333333")
+	old := env.plant(openclaw.DeriveAgentID(coder.ID), run.ID)
 	r := env.resume(env.e, run.ID)
 	if r.Status != store.RunSucceeded {
 		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
 	}
-	for _, a := range []*store.Agent{coder, reviewer} {
-		if present(env.runDirOf(openclaw.DeriveAgentID(a.ID), run.ID)) {
-			t.Errorf("agent %s still has the run's folder", a.Name)
+	nodes := runNodes(t, env, run.ID)
+	if len(nodes) != 2 {
+		t.Fatalf("visits = %v", visitsOf(nodes))
+	}
+	for _, n := range nodes {
+		if n.WorkspaceDir == nil || present(*n.WorkspaceDir) {
+			t.Errorf("visit %s: workspace %v still there", n.NodeID, n.WorkspaceDir)
 		}
+	}
+	if present(old) {
+		t.Error("the agent workspace's runs folder of the run was left")
 	}
 	if !present(other) {
 		t.Error("another run's folder was removed")

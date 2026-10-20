@@ -53,8 +53,9 @@ type Call struct {
 	IdempotencyKey string
 	// ToolCallID is the tool_calls row recording this call.
 	ToolCallID string
-	// OpenClawAgentID and Workspace locate the agent's OpenClaw workspace, where run
-	// artifacts live under runs/<run_id>/ (DESIGN section 4).
+	// OpenClawAgentID and Workspace locate the workspace the call's visit works in, where
+	// run artifacts live under runs/<run_id>/ (DESIGN section 4): the visit's private
+	// workspace for a run call (5.30), the agent's for a chat call.
 	OpenClawAgentID string
 	Workspace       string
 	// Chat marks a chat-time call (DESIGN 5.15): it carried a chat token, has no run or

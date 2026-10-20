@@ -741,7 +741,7 @@ func newRetryReviewFlow(t *testing.T, limits store.Limits) *retryReviewFlow {
 
 // path is a file in the run directory of the workspace the turn p works in.
 func (f *retryReviewFlow) path(p openclaw.ChatSendParams, rel string) string {
-	return filepath.Join(f.env.dir, "workspace-"+sessionAgent(p.SessionKey), "runs", f.run.ID, rel)
+	return filepath.Join(turnWS(f.env, p), "runs", f.run.ID, rel)
 }
 
 func (f *retryReviewFlow) found(visit string) string {

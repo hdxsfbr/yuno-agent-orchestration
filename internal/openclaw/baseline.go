@@ -133,9 +133,11 @@ func Baseline(in BaselineInputs) map[string]any {
 			"mode": "all",
 			// One container per session key: every run visit (yuno-<run>-<node>-<n>) starts
 			// a fresh one, so nothing installed in a container reaches another run. The
-			// workspace stays the agent's, mounted read-write at /workspace.
+			// agent's workspace is not mounted: each session gets a private workspace under
+			// <state>/sandboxes/, mounted at /workspace and seeded with the bootstrap files
+			// and skills, so no run or step sees another's files (DESIGN 5.30 rule 1, D-083).
 			"scope":           "session",
-			"workspaceAccess": "rw",
+			"workspaceAccess": "none",
 			// Session containers pile up: idle ones go after an hour, any after a day
 			// (agents.defaults.sandbox.prune: idleHours, maxAgeDays; gateway/config-agents/
 			// sandbox.md). agents.delete leaves a container behind [probed]; the gateway

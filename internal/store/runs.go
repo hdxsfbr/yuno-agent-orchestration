@@ -295,7 +295,8 @@ func RequeueStaleRuns(ctx context.Context, q Querier, staleAfter time.Duration) 
 // ---- run nodes --------------------------------------------------------------------
 
 const runNodeColumns = `id, run_id, node_id, agent_id, visit, iteration, status, messages, pending_tool_results, output,
-	failure_reason, session_key, openclaw_run_id, started_at, finished_at, question_id, parked_at, branch_id`
+	failure_reason, session_key, openclaw_run_id, started_at, finished_at, question_id, parked_at, branch_id,
+	workspace_dir, repo_sha`
 
 func CreateRunNode(ctx context.Context, q Querier, n *RunNode) error {
 	if n.ID == "" {
@@ -316,10 +317,54 @@ func CreateRunNode(ctx context.Context, q Querier, n *RunNode) error {
 	if len(n.Output) == 0 {
 		n.Output = json.RawMessage(`null`)
 	}
-	_, err := q.Exec(ctx, `INSERT INTO run_nodes (`+runNodeColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+	_, err := q.Exec(ctx, `INSERT INTO run_nodes (`+runNodeColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
 		n.ID, n.RunID, n.NodeID, n.AgentID, n.Visit, n.Iteration, n.Status, n.Messages, n.PendingToolResults, n.Output,
-		n.FailureReason, n.SessionKey, n.OpenClawRunID, n.StartedAt, n.FinishedAt, n.QuestionID, n.ParkedAt, n.BranchID)
+		n.FailureReason, n.SessionKey, n.OpenClawRunID, n.StartedAt, n.FinishedAt, n.QuestionID, n.ParkedAt, n.BranchID,
+		n.WorkspaceDir, n.RepoSHA)
 	return err
+}
+
+// SetRunNodeWorkspace records a visit's private workspace (DESIGN 5.30 rule 2), before
+// anything is written into it, so cleanup finds every folder a visit may have made.
+func SetRunNodeWorkspace(ctx context.Context, q Querier, id, dir string) error {
+	_, err := q.Exec(ctx, `UPDATE run_nodes SET workspace_dir=$2 WHERE id=$1`, id, dir)
+	return err
+}
+
+// SetRunNodeRepoSHA records the run repository commit a visit's checkout is at (DESIGN
+// 5.30 rule 4): the one it starts from, then the one it ends at.
+func SetRunNodeRepoSHA(ctx context.Context, q Querier, id, sha string) error {
+	_, err := q.Exec(ctx, `UPDATE run_nodes SET repo_sha=$2 WHERE id=$1`, id, sha)
+	return err
+}
+
+// RunWorkspaceDirs lists the private workspaces the visits of a run recorded (DESIGN 5.30
+// rule 8).
+func RunWorkspaceDirs(ctx context.Context, q Querier, runID string) ([]string, error) {
+	rows, err := q.Query(ctx, `SELECT workspace_dir FROM run_nodes WHERE run_id=$1 AND workspace_dir IS NOT NULL ORDER BY started_at NULLS LAST, id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+// WorkspaceOwners maps each of dirs that a visit recorded as its private workspace to the
+// visit's run (DESIGN 5.30 rule 8); a folder no visit recorded is not in the map.
+func WorkspaceOwners(ctx context.Context, q Querier, dirs []string) (map[string]string, error) {
+	rows, err := q.Query(ctx, `SELECT DISTINCT workspace_dir, run_id FROM run_nodes WHERE workspace_dir = ANY($1::text[])`, dirs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var dir, runID string
+		if err := rows.Scan(&dir, &runID); err != nil {
+			return nil, err
+		}
+		out[dir] = runID
+	}
+	return out, rows.Err()
 }
 
 func GetRunNode(ctx context.Context, q Querier, id string) (*RunNode, error) {

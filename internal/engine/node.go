@@ -73,10 +73,17 @@ type visit struct {
 	schema   *jsonschema.Schema
 	early    *outcome // set when the visit cannot start
 	task     string   // the rendered task; the protocol block is added per message
-	// carryFrom are the workspaces (OpenClaw agent ids) whose runs/<run_id>/ is copied
-	// into this agent's before the turn, oldest first (DESIGN 5.6 rule 13), each with
+	// carryFrom are the earlier visits whose runs/<run_id>/ is copied into this visit's
+	// workspace before the turn, oldest first (DESIGN 5.6 rule 13, 5.30 rule 5), each with
 	// whether its checkout stays behind (5.26 rule 10).
 	carryFrom []carrySource
+	// workspace is the visit's private workspace (DESIGN 5.30 rule 2), set once the agent is
+	// materialised; startSHA is the run repository commit its checkout starts from (rule
+	// 4), "" while it has none; checkout says the platform made the checkout (a clone, or
+	// built from startSHA), so it is the visit's to commit when it ends.
+	workspace string
+	startSHA  string
+	checkout  bool
 	// branch is the parallel branch this visit runs in (DESIGN 5.26 rule 4); nil outside a
 	// fork. A branch visit pauses its node, never the run (rule 7), parks through its
 	// branch (rule 8), and skipDiff says its generated diff.patch is not produced (rule 11).
@@ -256,7 +263,7 @@ func (v *visit) execute(ctx context.Context) outcome {
 	} else {
 		e.refreshWorkspace(v.agent, v.skills, ex)
 	}
-	if err := v.prepareRunDir(); err != nil {
+	if err := v.prepareRunDir(ctx); err != nil {
 		return failed(store.RunFailed, "run directory: "+err.Error())
 	}
 	if v.project != nil {
@@ -293,7 +300,7 @@ func (v *visit) execute(ctx context.Context) outcome {
 	e.tokens.add(v.token, &tokenEntry{
 		rc: RunContext{
 			RunID: v.run.ID, RunNodeID: v.rn.ID, NodeID: v.node.ID, AgentID: v.agent.ID,
-			OpenClawAgentID: v.ocID, OutputSchema: v.node.OutputSchema,
+			OpenClawAgentID: v.ocID, Workspace: v.workspace, OutputSchema: v.node.OutputSchema,
 			ToolAllowlist: v.agent.ToolAllowlist, InteractionRules: v.agent.InteractionRules,
 		},
 		v: v, schema: schema,
@@ -367,70 +374,111 @@ func (v *visit) abortStale(ctx context.Context) {
 
 // renderMemory writes the agent's newest facts into its MEMORY.md before the turn, so
 // OpenClaw's own memory loading sees them (DESIGN 5.10 rule 5 and implementation note).
-// A failure leaves the previous file and is logged; the turn still runs.
+// A failure leaves the previous file and is logged; the turn still runs. The agent's
+// MEMORY.md, rendered or not, is then copied into the visit's private workspace, since
+// OpenClaw seeds the other bootstrap files there but not this one (5.30 rule 3).
 func (v *visit) renderMemory(ctx context.Context) {
-	if !v.agent.MemoryPolicy.Enabled || v.ocID == "" {
+	if v.ocID == "" {
 		return
 	}
-	facts, err := memory.PromptFactsFor(ctx, v.e.deps.Pool, v.agent.ID, v.e.clock.Now())
-	if err == nil {
-		var edits map[string]store.AgentFileEdit
-		if edits, err = store.GetAgentFileEdits(ctx, v.e.deps.Pool, v.agent.ID); err == nil {
-			err = openclaw.WriteMemoryMD(v.e.deps.StateDir, v.ocID, openclaw.ComposeMemory(memory.RenderMemoryMD(facts), edits))
+	if v.agent.MemoryPolicy.Enabled {
+		facts, err := memory.PromptFactsFor(ctx, v.e.deps.Pool, v.agent.ID, v.e.clock.Now())
+		if err == nil {
+			var edits map[string]store.AgentFileEdit
+			if edits, err = store.GetAgentFileEdits(ctx, v.e.deps.Pool, v.agent.ID); err == nil {
+				err = openclaw.WriteMemoryMD(v.e.deps.StateDir, v.ocID, openclaw.ComposeMemory(memory.RenderMemoryMD(facts), edits))
+			}
+		}
+		if err != nil {
+			v.log.Warn("render MEMORY.md failed", "error", err)
 		}
 	}
-	if err != nil {
-		v.log.Warn("render MEMORY.md failed", "error", err)
+	if v.workspace == "" {
+		return
+	}
+	content, err := openclaw.ReadMemoryMD(v.e.deps.StateDir, v.ocID)
+	if err == nil {
+		err = openclaw.WriteMemoryMDAt(v.workspace, content)
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		v.log.Warn("copy MEMORY.md into the visit's workspace failed", "error", err)
 	}
 }
 
-// prepareRunDir creates runs/<run_id>/ in the agent's workspace (best effort) and
-// copies into it the run directories of the agents that worked on the run before, in
-// the walk's order so a later visit's file wins (DESIGN 5.6 rule 13). It runs once the
-// agent is materialised, when its workspace id is final; a failed copy fails the node.
-func (v *visit) prepareRunDir() error {
+// prepareRunDir records the visit's private workspace (DESIGN 5.30 rule 2), creates
+// runs/<run_id>/ in it and copies into it the run directories of the earlier visits the
+// carry rules name, in the walk's order so a later visit's file wins (5.6 rule 13; the
+// checkout is not copied, rule 5). The last of them whose checkout flows on names the
+// commit this visit's checkout starts from (rule 4). It runs once the agent is
+// materialised, when its workspace id, and so the session key, is final; a failed copy
+// fails the node.
+func (v *visit) prepareRunDir(ctx context.Context) error {
 	if v.e.deps.StateDir == "" {
 		return nil
 	}
-	if err := openclaw.EnsureRunDir(v.e.deps.StateDir, v.ocID, v.run.ID); err != nil {
+	ws := openclaw.SessionWorkspaceDir(v.e.deps.StateDir, v.ocID, v.key)
+	// Recorded before anything is written there, so cleanup finds it whatever happens next.
+	if err := store.SetRunNodeWorkspace(context.WithoutCancel(ctx), v.e.deps.Pool, v.rn.ID, ws); err != nil {
+		return fmt.Errorf("record the workspace: %w", err)
+	}
+	v.workspace, v.rn.WorkspaceDir = ws, &ws
+	if err := openclaw.EnsureRunDirAt(ws, v.run.ID); err != nil {
 		v.log.Warn("create run directory failed", "error", err)
 	}
 	for _, src := range v.carryFrom {
-		if src.ocID == v.ocID {
-			continue
+		if src.workspace == "" {
+			continue // a visit that ended before it had a workspace left no files
 		}
-		var skip []string
-		if src.skipRepo {
-			skip = []string{project.RepoDir}
-		}
-		n, err := openclaw.CopyRunDirExcept(v.e.deps.StateDir, src.ocID, v.ocID, v.run.ID, skip)
+		n, err := openclaw.CopyRunDirAt(src.workspace, ws, v.run.ID, []string{project.RepoDir})
 		if err != nil {
 			return fmt.Errorf("copy from %s: %w", src.ocID, err)
 		}
-		v.log.Info("run directory copied forward", "from", src.ocID, "files", n, "checkout_left_behind", src.skipRepo)
+		v.log.Info("run directory copied forward", "from", src.ocID, "visit", src.visitID, "files", n, "checkout_left_behind", src.skipRepo)
+		if !src.skipRepo && src.repoSHA != "" {
+			v.startSHA = src.repoSHA
+		}
+	}
+	if v.startSHA != "" {
+		// A visit that fails before its checkout is made names the commit it would have
+		// started from, so the next attempt starts there too.
+		v.setRepoSHA(ctx, v.startSHA)
 	}
 	return nil
 }
 
-// carrySource is one workspace the run directory is copied from before a visit: the
-// OpenClaw agent id, and whether its checkout (repo/) stays behind because the agent's
-// last visit was in a parallel branch the join does not name (DESIGN 5.26 rule 10).
-type carrySource struct {
-	ocID     string
-	skipRepo bool
+// setRepoSHA records the run repository commit the visit's checkout is at.
+func (v *visit) setRepoSHA(ctx context.Context, sha string) {
+	if err := store.SetRunNodeRepoSHA(context.WithoutCancel(ctx), v.e.deps.Pool, v.rn.ID, sha); err != nil {
+		v.log.Warn("record the checkout commit failed", "error", err)
+	}
+	v.rn.RepoSHA = &sha
 }
 
-// prepareProject clones the project repository into this agent's run directory when
-// the run has none yet (DESIGN 5.16 rule 3), reads the toolchain from the checkout and
-// selects the agent's sandbox for the visit (rule 7). A failure ends the visit, and the
-// run, before any turn starts.
+// carrySource is one earlier visit whose run directory is copied before a visit: the
+// OpenClaw agent id, the visit and its private workspace (DESIGN 5.30), the run
+// repository commit its checkout ended at, and whether that checkout (repo/) stays behind
+// because the visit was in a parallel branch the join does not name (5.26 rule 10).
+type carrySource struct {
+	ocID      string
+	visitID   string
+	workspace string
+	repoSHA   string
+	skipRepo  bool
+}
+
+// prepareProject clones the project repository into this visit's run directory when
+// the run has none yet (DESIGN 5.16 rule 3), or builds the checkout from the run
+// repository commit the carry rules named (5.30 rule 4), reads the toolchain from the
+// checkout and selects the agent's sandbox for the visit (rule 7). A failure ends the
+// visit, and the run, before any turn starts.
 func (v *visit) prepareProject(ctx context.Context) *outcome {
 	e := v.e
 	if e.deps.StateDir == "" {
 		return nil
 	}
-	ws := openclaw.WorkspaceDir(e.deps.StateDir, v.ocID)
+	ws := v.workspace
 	repo := filepath.Join(ws, project.RepoRel(v.run.ID))
+	runRepo := project.RunRepoPath(e.deps.StateDir, v.run.ID)
 	// A run that names a merge request works on that request's branch (DESIGN 5.22 rule 2):
 	// the record is read once per visit, for the clone and for the protocol paragraph of
 	// rule 5. Nothing checks its state here (rule 3, D-044).
@@ -470,6 +518,23 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 			o := failed(store.RunFailed, "project clone: "+err.Error())
 			return &o
 		}
+		// The clone's commit goes into the run repository, where the later steps' checkouts
+		// come from (DESIGN 5.30 rule 4); no turn has run in the clone yet.
+		cctx, done = v.boundedContext(ctx, project.GitTimeout)
+		err = project.InitRunRepo(cctx, runRepo)
+		if err == nil {
+			err = project.SaveRunBase(cctx, runRepo, repo, project.BaseRef(v.rn.ID))
+		}
+		done()
+		if err != nil {
+			if ctx.Err() != nil {
+				return &outcome{interrupted: true}
+			}
+			o := failed(store.RunFailed, "run repository: "+err.Error())
+			return &o
+		}
+		v.startSHA, v.checkout = sha, true
+		v.setRepoSHA(ctx, sha)
 		tc := project.Detect(repo)
 		end := e.clock.Now()
 		attrs := map[string]any{"repo": v.project.RepoURL, "branch": branch, "toolchain": tc.Name, "duration_ms": end.Sub(start).Milliseconds()}
@@ -492,6 +557,22 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 		v.refreshRun(ctx)
 		e.emit(ctx, v.run.ID, "run.status", map[string]any{"run": v.run})
 		e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("project repository cloned: %s (%s), toolchain %s", v.project.RepoURL, branch, tc.Name))
+	} else if v.startSHA != "" {
+		// A later step: its checkout is the commit the earlier steps left (DESIGN 5.30 rule 4).
+		cctx, done := v.boundedContext(ctx, project.GitTimeout)
+		err := checkoutInto(cctx, *v.project, ws, v.run.ID, runRepo, v.startSHA, branch)
+		done()
+		if err != nil {
+			if ctx.Err() != nil {
+				return &outcome{interrupted: true}
+			}
+			if res := v.preflight(ctx); res != nil {
+				return res
+			}
+			o := failed(store.RunFailed, "run repository: "+err.Error())
+			return &o
+		}
+		v.checkout = true
 	}
 	v.toolchain = project.Detect(repo)
 	if v.toolchain.Name != *v.run.Toolchain {
@@ -525,11 +606,36 @@ func (v *visit) boundedContext(ctx context.Context, d time.Duration) (context.Co
 
 // cloneInto clones branch of the project into runs/<run id>/repo of a workspace and
 // returns the commit the checkout is at (DESIGN 5.22 rule 2: the project's default branch,
-// or the source branch of the merge request the run updates). The run directory is
-// checked through an os.Root of the workspace (a link planted at runs or runs/<run id> is
-// refused, as the copy-forward does), and a repo entry left by an earlier attempt is
-// removed first.
+// or the source branch of the merge request the run updates).
 func cloneInto(ctx context.Context, pc project.Config, ws, runID, branch string) (string, error) {
+	dest, err := checkoutDest(ws, runID)
+	if err != nil {
+		return "", err
+	}
+	if err := pc.CloneBranch(ctx, dest, branch); err != nil {
+		return "", err
+	}
+	return pc.HeadSHA(ctx, dest)
+}
+
+// checkoutInto builds the checkout in runs/<run id>/repo of a workspace from commit of the
+// run repository, on branch (DESIGN 5.30 rule 4).
+func checkoutInto(ctx context.Context, pc project.Config, ws, runID, runRepo, commit, branch string) error {
+	if _, err := os.Stat(runRepo); errors.Is(err, fs.ErrNotExist) {
+		return errors.New("the run's repository is gone (a run that did not succeed keeps it seven days)")
+	}
+	dest, err := checkoutDest(ws, runID)
+	if err != nil {
+		return err
+	}
+	return pc.CheckoutRun(ctx, runRepo, commit, dest, branch)
+}
+
+// checkoutDest is where a checkout goes in a workspace: runs/<run id>/repo. The run
+// directory is checked through an os.Root of the workspace (a link planted at runs or
+// runs/<run id> is refused, as the copy-forward does), and a repo entry left by an
+// earlier attempt is removed first.
+func checkoutDest(ws, runID string) (string, error) {
 	root, err := os.OpenRoot(ws)
 	if err != nil {
 		return "", err
@@ -548,11 +654,42 @@ func cloneInto(ctx context.Context, pc project.Config, ws, runID, branch string)
 	if err := root.RemoveAll(filepath.Join(runRel, project.RepoDir)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return "", err
 	}
-	dest := filepath.Join(ws, runRel, project.RepoDir)
-	if err := pc.CloneBranch(ctx, dest, branch); err != nil {
-		return "", err
+	return filepath.Join(ws, runRel, project.RepoDir), nil
+}
+
+// commitTimeout bounds the commit of a visit's checkout (DESIGN 5.30 rule 4): a copy of the
+// working tree and a few local git commands.
+const commitTimeout = 2 * time.Minute
+
+// saveCheckout commits the visit's checkout to the run repository when the visit ends,
+// whatever its outcome (DESIGN 5.30 rule 4), and records the commit on the visit, so the
+// next visit's checkout starts from it. A visit without a checkout from the platform
+// (none, or one whose making failed) commits nothing and keeps the commit it was to start
+// from; one whose checkout is gone or is not a plain directory keeps the commit it started
+// from, with a log line. The error is the commit's own failure.
+func (v *visit) saveCheckout(ctx context.Context) error {
+	if !v.checkout || v.startSHA == "" || v.workspace == "" {
+		return nil
 	}
-	return pc.HeadSHA(ctx, dest)
+	root, err := project.OpenCheckout(v.workspace, v.run.ID)
+	if err != nil {
+		v.e.logEvent(ctx, v.run.ID, "warn", fmt.Sprintf("the checkout of %s visit %d was not saved (%v); the next step starts from the commit this one started from",
+			v.node.ID, v.rn.Visit, err))
+		return nil
+	}
+	defer root.Close()
+	cctx, cancel := context.WithTimeout(ctx, commitTimeout)
+	defer cancel()
+	sha, err := project.CommitCheckout(cctx, project.RunRepoPath(v.e.deps.StateDir, v.run.ID), root, v.startSHA,
+		project.VisitRef(v.rn.ID), fmt.Sprintf("%s visit %d", v.node.ID, v.rn.Visit))
+	if err != nil {
+		return err
+	}
+	if sha != v.startSHA {
+		v.log.Info("checkout committed to the run repository", "commit", sha, "parent", v.startSHA)
+	}
+	v.setRepoSHA(ctx, sha)
+	return nil
 }
 
 // taskMessage is the rendered node task plus the fixed protocol block (DESIGN 5.6
