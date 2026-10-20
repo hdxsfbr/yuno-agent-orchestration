@@ -96,3 +96,54 @@ func TestMaterializeChatAgentKeepsTokenOutOfLogs(t *testing.T) {
 		t.Fatalf("chat token leaked:\nlogs: %s\nview: %s", buf.String(), viewJSON)
 	}
 }
+
+// A chat token the model copied with a slip of one or two characters still names its
+// agent; three edits, or a slip that two agents' tokens are equally close to, do not.
+func TestResolveChatTokenCopyingSlip(t *testing.T) {
+	env := newEnv(t)
+	a := env.agent(nil)
+	tok := a.ChatToken
+	flip := func(s string, i int) string {
+		c := byte('a')
+		if s[i] == 'a' {
+			c = 'b'
+		}
+		return s[:i] + string(c) + s[i+1:]
+	}
+	for name, cand := range map[string]string{
+		"one changed": flip(tok, 10),
+		"one dropped": tok[:20] + tok[21:],
+		"two changed": flip(flip(tok, 5), 25),
+		"one added":   tok[:7] + "x" + tok[7:],
+	} {
+		cc, ok := env.e.ResolveChatToken(cand)
+		if !ok || cc.AgentID != a.ID {
+			t.Fatalf("%s: resolved %v %q", name, ok, cc.AgentID)
+		}
+	}
+	if _, ok := env.e.ResolveChatToken(flip(flip(flip(tok, 3), 15), 30)); ok {
+		t.Fatal("three edits resolved")
+	}
+	if _, ok := env.e.ResolveChatToken(tok[:10]); ok {
+		t.Fatal("a short prefix resolved")
+	}
+}
+
+func TestEditDistance(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		max  int
+		want int
+	}{
+		{"abcdef", "abcdef", 2, 0},
+		{"abcdef", "abxdef", 2, 1},
+		{"abcdef", "abdef", 2, 1},
+		{"abcdef", "xbcdey", 2, 2},
+		{"abcdef", "xycdez", 2, 3},
+		{"abcdef", "abcdefghi", 2, 3},
+	} {
+		if got := editDistance(c.a, c.b, c.max); got != c.want {
+			t.Fatalf("editDistance(%q, %q, %d) = %d, want %d", c.a, c.b, c.max, got, c.want)
+		}
+	}
+}

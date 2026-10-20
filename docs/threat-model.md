@@ -279,6 +279,12 @@ conversation is the Chief's own on Telegram, never a run token. The consequence:
 who holds that Telegram chat can approve what the operator can approve, so the chat is as
 sensitive as the web UI and the bearer token.
 
+**Chat tokens copied with a slip.** The model copies its chat token from `AGENTS.md` into
+every chat call and now and then gets a character wrong, which used to fail the call. A
+chat token that matches no agent exactly is accepted when it is within two single-character
+edits of exactly one agent's token (34 random characters, so a caller without the token
+cannot come that close); each such call is logged with the number of edits, never the token.
+
 **Injection path and the approval code.** The engine injects run outcomes, approval
 messages and run questions into the Chief's session as `[platform]` user turns. That text
 was written by models that read issues, merge requests and web pages, so it can carry an
