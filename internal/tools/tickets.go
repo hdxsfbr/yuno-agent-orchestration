@@ -18,16 +18,18 @@ import (
 
 	"yuno/internal/project"
 	"yuno/internal/store"
+	"yuno/internal/workflow"
 )
 
 // PublishTicketsName turns a plan's tickets into tracker issues grouped in waves (DESIGN
 // 5.29 rule 2, D-071 to D-078).
 const PublishTicketsName = "publish_tickets"
 
-// The caps of a plan (rule 2).
+// The caps of a plan (rule 2), shared with the waves check that runs before the plan is
+// approved.
 const (
-	MaxPlanTickets = 50
-	MaxPlanWaves   = 10
+	MaxPlanTickets = workflow.MaxPlanTickets
+	MaxPlanWaves   = workflow.MaxPlanWaves
 )
 
 // The ids of the plan pipeline's nodes whose outputs hold the plan (rule 2): the Planner's

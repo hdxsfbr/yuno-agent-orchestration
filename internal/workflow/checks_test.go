@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -81,5 +82,38 @@ func TestWavesPartitionCheckTicketIDs(t *testing.T) {
 	plain := map[string]json.RawMessage{"slicer": json.RawMessage(`{"tickets":[{"id":"T1","files":["a"]},{"id":"T2","files":["a"]},{"id":"T3"}]}`)}
 	if got := node.RunCheck(CheckWavesPartition, plain, json.RawMessage(`{"waves":[{"n":1,"tickets":["T1","T3"]},{"n":2,"tickets":["T2"]}]}`)); got != "" {
 		t.Fatalf("ids without a wave prefix: %q", got)
+	}
+}
+
+// The plan caps are applied before the plan is approved: a plan over them is sent back to
+// the waves agent, so publish_tickets never refuses an approved plan.
+func TestWavesPartitionCheckCaps(t *testing.T) {
+	node := &Node{ID: "waves", Kind: KindAgent, InputFrom: []string{"slicer"}, Checks: []string{CheckWavesPartition}}
+	plan := func(tickets, waves int) (map[string]json.RawMessage, json.RawMessage) {
+		var ts, ws []string
+		for i := 1; i <= tickets; i++ {
+			ts = append(ts, fmt.Sprintf(`{"id":"T%d"}`, i))
+		}
+		per := map[int][]string{}
+		for i := 1; i <= tickets; i++ {
+			per[(i-1)%waves+1] = append(per[(i-1)%waves+1], fmt.Sprintf(`"T%d"`, i))
+		}
+		for n := 1; n <= waves; n++ {
+			ws = append(ws, fmt.Sprintf(`{"n":%d,"tickets":[%s]}`, n, strings.Join(per[n], ",")))
+		}
+		return map[string]json.RawMessage{"slicer": json.RawMessage(`{"tickets":[` + strings.Join(ts, ",") + `]}`)},
+			json.RawMessage(`{"waves":[` + strings.Join(ws, ",") + `]}`)
+	}
+	state, result := plan(28, 15)
+	if got := node.RunCheck(CheckWavesPartition, state, result); got != "" {
+		t.Fatalf("28 tickets in 15 waves: %q", got)
+	}
+	state, result = plan(MaxPlanWaves+1, MaxPlanWaves+1)
+	if got := node.RunCheck(CheckWavesPartition, state, result); !strings.Contains(got, "at most 30") {
+		t.Fatalf("too many waves: %q", got)
+	}
+	state, result = plan(MaxPlanTickets+1, 5)
+	if got := node.RunCheck(CheckWavesPartition, state, result); !strings.Contains(got, "at most 100") {
+		t.Fatalf("too many tickets: %q", got)
 	}
 }

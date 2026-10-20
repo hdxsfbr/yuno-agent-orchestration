@@ -12,6 +12,13 @@ import (
 // partition of the tickets of an earlier node (DESIGN 5.28 rule 4).
 const CheckWavesPartition = "waves_partition"
 
+// The caps of a plan (DESIGN 5.29 rule 2). The waves check applies them before the plan
+// is approved, and publish_tickets applies them again, so an approved plan always publishes.
+const (
+	MaxPlanTickets = 100
+	MaxPlanWaves   = 30
+)
+
 // KnownChecks are the names a node's `checks` may hold; save refuses any other.
 var KnownChecks = map[string]bool{CheckWavesPartition: true}
 
@@ -85,6 +92,12 @@ func checkWavesPartition(n *Node, state map[string]json.RawMessage, result json.
 	}
 	if err := json.Unmarshal(result, &res); err != nil {
 		return "waves check: waves must be a list of {n, tickets}"
+	}
+	if len(tickets) > MaxPlanTickets {
+		return fmt.Sprintf("waves check: the plan has %d tickets; at most %d: merge tickets into larger slices", len(tickets), MaxPlanTickets)
+	}
+	if len(res.Waves) > MaxPlanWaves {
+		return fmt.Sprintf("waves check: the plan has %d waves; at most %d: put more independent tickets in the same wave", len(res.Waves), MaxPlanWaves)
 	}
 	files := map[string][]string{}
 	for _, t := range tickets {

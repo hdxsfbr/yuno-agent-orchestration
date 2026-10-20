@@ -3956,7 +3956,7 @@ Rules:
    issues with label `feature:<feature>`); a found issue is reused, so a retried visit
    creates no duplicates. It records each issue on its plan ticket (status `pending`) and
    a plan event `published`. No issue carries the intake label yet (D-077). The
-   approval message lists the count per wave and the labels. Caps: 50 tickets, 10 waves.
+   approval message lists the count per wave and the labels. Caps: 100 tickets, 30 waves, also applied by the waves check before the plan is approved.
 3. **Issue creation on both providers.** `IssueProvider.Create(title, body, labels)` and
    `FindByMarker(label, marker)`: GitLab `POST /projects/:id/issues` and `GET
    /projects/:id/issues?labels=&search=` (body search, then exact marker match);
