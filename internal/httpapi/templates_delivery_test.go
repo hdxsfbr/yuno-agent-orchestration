@@ -22,7 +22,9 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 	sfx := uniqueSuffix()
 	dir := t.TempDir()
 	keys := map[string]string{"plan_pipeline": "Plan pipeline", "wave_pipeline": "Wave pipeline", "ship_pipeline": "Ship pipeline"}
-	wantCost := map[string]float64{"plan_pipeline": 5, "wave_pipeline": 5, "ship_pipeline": 2}
+	wantCost := map[string]float64{"plan_pipeline": 5, "wave_pipeline": 20, "ship_pipeline": 2}
+	// A ticket's build takes many turns: the wave pipeline runs up to three hours.
+	wantDuration := map[string]int{"plan_pipeline": 3600, "wave_pipeline": 10800, "ship_pipeline": 3600}
 	agentIDs := map[string]string{} // renamed agent name → id
 	for key := range keys {
 		raw, err := os.ReadFile("../../templates/" + key + ".json")
@@ -72,7 +74,7 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 				t.Errorf("%s node %s = %+v", key, n.ID, n)
 			}
 		}
-		if def.Limits.MaxLoopVisits != 3 || def.Limits.MaxCostUSD != wantCost[key] || def.Limits.MaxDurationSeconds != 3600 || def.Limits.ApprovalTimeoutSeconds != 86400 {
+		if def.Limits.MaxLoopVisits != 3 || def.Limits.MaxCostUSD != wantCost[key] || def.Limits.MaxDurationSeconds != wantDuration[key] || def.Limits.ApprovalTimeoutSeconds != 86400 {
 			t.Errorf("%s limits = %+v", key, def.Limits)
 		}
 		if key == "wave_pipeline" {

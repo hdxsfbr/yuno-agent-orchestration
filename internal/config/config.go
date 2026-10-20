@@ -178,12 +178,12 @@ func FromEnv() Config {
 		EvalCasesDir:   env("EVAL_CASES_DIR", "evals/cases"),
 		EvalReportsDir: env("EVAL_REPORTS_DIR", "evals/reports"),
 
-		MaxSteps:              envInt("MAX_STEPS", 200),
-		MaxDurationSeconds:    envInt("MAX_DURATION_SECONDS", 3600),
-		MaxNodeIterations:     envInt("MAX_NODE_ITERATIONS", 50),
+		MaxSteps:              envInt("MAX_STEPS", 400),
+		MaxDurationSeconds:    envInt("MAX_DURATION_SECONDS", 10800),
+		MaxNodeIterations:     envInt("MAX_NODE_ITERATIONS", 120),
 		MaxLoopVisits:         envInt("MAX_LOOP_VISITS", 10),
 		MaxCostUSD:            envFloat("MAX_COST_USD", 20),
-		MaxToolCalls:          envInt("MAX_TOOL_CALLS", 300),
+		MaxToolCalls:          envInt("MAX_TOOL_CALLS", 1000),
 		ApprovalTimeoutMaxSec: envInt("APPROVAL_TIMEOUT_MAX_SECONDS", 604800),
 	}
 }
