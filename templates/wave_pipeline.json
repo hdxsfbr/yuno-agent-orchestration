@@ -98,7 +98,8 @@
             "verdict": {
               "type": "string",
               "enum": [
-                "ok"
+                "ok",
+                "rework"
               ]
             },
             "trace_path": {
@@ -108,6 +109,9 @@
             "feature": {
               "type": "string",
               "pattern": "^[a-z0-9-]{1,40}$"
+            },
+            "notes": {
+              "type": "string"
             }
           },
           "required": [

@@ -116,7 +116,7 @@ func NewOpenMergeRequest(cfg MergeRequestConfig) *Tool {
 		Describe: func(input json.RawMessage) string {
 			var in mergeRequestInput
 			_ = json.Unmarshal(input, &in)
-			return fmt.Sprintf("Open merge request %q (a pull request on GitHub) on the run's project", in.Title)
+			return fmt.Sprintf("Open merge request %q on the run's project", in.Title)
 		},
 		Exec: m.exec,
 	}
