@@ -4175,7 +4175,11 @@ when misplaced; T5.29.5 `escalate` fails the run with the reason, pauses, record
 notifies; T5.29.6 a failed ticket run escalates; T5.29.7 pause and resume API and
 events; T5.29.8 default-branch status on both; T5.29.9 the watcher releases wave 1 after
 the plan MR merges, ships a wave only when merged and green, holds while paused; T5.29.10
-`advance_wave` closes, releases the next wave and reports `last`; evals 026 (loop limit
+`advance_wave` closes, releases the next wave and reports `last`; T5.29.11 (D-084) the
+real `wave_pipeline` with the Doc Auditor asking: the run waits `waiting_approval` with the
+step parked, no state-schema failure, the answer wakes the audit, which finishes `rework`
+with the decision in `notes`, the Builder's next task carries it, and the loop runs through
+review, draft and manual test again to `succeeded`; evals 026 (loop limit
 escalation), 027 (PRD gap escalation), 028 (two waves auto-advance with the pause flag).
 
 Limitations: one open plan per project; main's status is read, not run, so a project
