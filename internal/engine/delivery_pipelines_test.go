@@ -114,6 +114,13 @@ func TestWavePipelineManualTest(t *testing.T) {
 	if m := sc.message("integrator_draft", 1); !strings.Contains(m, "draft true") {
 		t.Fatalf("integrator_draft task:\n%s", m)
 	}
+	// P9: the draft's description closes with how it was checked, from what the earlier
+	// steps reported.
+	for _, want := range []string{`"How it was checked:"`, "builder's whole suite passed: true", "code reviewer's verdict: approved"} {
+		if m := sc.message("integrator_draft", 1); !strings.Contains(m, want) {
+			t.Fatalf("integrator_draft task lacks %q:\n%s", want, m)
+		}
+	}
 	if m := sc.message("builder", 1); strings.Contains(m, "Bugs found") {
 		t.Fatalf("builder visit 1 mentions bugs:\n%s", m)
 	}
@@ -151,8 +158,31 @@ func TestWavePipelineManualTest(t *testing.T) {
 		!strings.Contains(m, `paths ["docs/plans/x"]`) {
 		t.Fatalf("integrator_ready task:\n%s", m)
 	}
+	// P9: marking it ready replaces the description, so this task carries the results again.
+	for _, want := range []string{`"How it was checked:"`, "builder's whole suite passed: true", "code reviewer's verdict: approved", "the operator's manual test, approved"} {
+		if m := sc.message("integrator_ready", 1); !strings.Contains(m, want) {
+			t.Fatalf("integrator_ready task lacks %q:\n%s", want, m)
+		}
+	}
 	if st := stateOf(t, r); st["integrator_ready"] == nil || st["doc_audit"] == nil {
 		t.Fatalf("state = %v", st)
+	}
+}
+
+// P9: a quick run hands the agent the operator's task and nothing else (the one-node
+// workflow has no earlier node, so no context block follows it): an Integrator started
+// this way learns of no test result unless the task states one.
+func TestQuickRunTaskIsAllTheAgentGets(t *testing.T) {
+	env := newEnv(t)
+	ag := env.agent(func(a *store.Agent) { a.Name = "Integrator" })
+	sc := env.script(map[string][]string{"agent": {`{"summary":"opened"}`}})
+	r := env.triggerAndRun(TriggerRequest{AgentID: ag.ID, Task: "Open a merge request for the export fix."})
+	if r.Status != store.RunSucceeded {
+		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+	m := sc.message("agent", 1)
+	if !strings.Contains(m, "Open a merge request for the export fix.") || strings.Contains(m, "Context from earlier nodes") {
+		t.Fatalf("quick run task:\n%s", m)
 	}
 }
 
