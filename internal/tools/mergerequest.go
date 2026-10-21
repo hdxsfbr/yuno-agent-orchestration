@@ -221,15 +221,23 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 		return Result{}, err
 	}
 	if !exists {
-		if _, err := pc.ProposePaths(ctx, checkout, branch, in.Title, in.Paths); err != nil {
+		proposal, err := pc.ProposePaths(ctx, checkout, branch, project.RunBase(run), in.Title, in.Paths)
+		if err != nil {
 			var missing *project.ErrPathMissing
-			if errors.Is(err, project.ErrNoChanges) || errors.As(err, &missing) {
+			var conflict *project.ErrConflict
+			if errors.Is(err, project.ErrNoChanges) || errors.As(err, &missing) || errors.As(err, &conflict) {
 				return Result{}, &ModelError{Message: err.Error()}
 			}
 			// A push the provider refused (a token without write access, a protected
 			// branch) or a network failure: the text names the git step, the token
 			// never appears in it (project.Config redacts git's output).
 			return Result{IsError: true, Text: "propose the changes: " + err.Error()}, nil
+		}
+		// The run's own commit is the base of its next push (DESIGN 5.16 rule 10, D-086).
+		if call.Tx != nil {
+			if err := store.SetRunCheckoutSHA(ctx, call.Tx, call.RunID, proposal.Base); err != nil {
+				return Result{}, fmt.Errorf("record the run's commit: %w", err)
+			}
 		}
 	}
 	draft := in.Draft != nil && *in.Draft
@@ -312,11 +320,12 @@ func withIssueCloses(description string, run *store.Run) string {
 // request's title and description stay as they were.
 //
 // updating is the run that names the request (runs.merge_request_id), nil on the same-run
-// path of 5.20 rule 2 (a run that opened the request it pushes to; L4 stays recorded for
-// it). The run's checkout_sha is the branch guard's base: the branch must still be at the
-// commit the run cloned it at, else the push is refused with the text of rule 4 and
-// nothing is pushed (D-050), and after a push the new commit becomes the run's
-// checkout_sha so that a later call passes the guard. A null checkout_sha (a run cloned
+// path of 5.20 rule 2 (a run that opened the request it pushes to). The run's checkout_sha
+// is the base its changes are counted from (5.16 rule 10, D-086). For a run that names the
+// request it is also the branch guard's: the branch must still be there, else the push is
+// refused with the text of rule 4 and nothing is pushed (D-050); on the same-run path a
+// branch that moved gets the run's changes per path. After a push the run's own commit
+// becomes its checkout_sha, the base of a later call. A null checkout_sha (a run cloned
 // before migration 0013) skips the guard.
 func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *project.Config, provider RequestProvider, rec *store.MergeRequest, in mergeRequestInput, checkout string, updating, run *store.Run) (Result, error) {
 	if rec.State != store.MergeRequestOpen {
@@ -325,13 +334,12 @@ func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *projec
 		return Result{}, &ModelError{Message: fmt.Sprintf("the run's %s is %s; nothing more can be pushed to it", rec.Label(), rec.State)}
 	}
 	out := mergeRequestOutput{Number: rec.Number, URL: rec.URL, Branch: rec.SourceBranch, Provider: rec.Provider, Replayed: true, Draft: rec.Draft}
-	base := ""
-	if updating != nil && updating.CheckoutSHA != nil {
-		base = *updating.CheckoutSHA
-	}
+	base := project.RunBase(run)
+	base.Guard = updating != nil
 	proposal, err := pc.ProposeOntoPaths(ctx, checkout, rec.SourceBranch, base, in.Title, in.Paths)
 	var moved *project.ErrBranchMoved
 	var missing *project.ErrPathMissing
+	var conflict *project.ErrConflict
 	switch {
 	case errors.As(err, &missing):
 		return Result{}, &ModelError{Message: missing.Error()}
@@ -341,11 +349,13 @@ func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *projec
 		// Nothing to push; a title, description or draft change still goes to the provider.
 	case errors.As(err, &moved):
 		return Result{}, &ModelError{Message: moved.Error()}
+	case errors.As(err, &conflict):
+		return Result{}, &ModelError{Message: conflict.Error()}
 	default:
 		return Result{IsError: true, Text: "propose the changes: " + err.Error()}, nil
 	}
-	if out.Updated && updating != nil && call.Tx != nil {
-		if err := store.SetRunCheckoutSHA(ctx, call.Tx, call.RunID, proposal.Commit); err != nil {
+	if out.Updated && call.Tx != nil {
+		if err := store.SetRunCheckoutSHA(ctx, call.Tx, call.RunID, proposal.Base); err != nil {
 			return Result{IsError: true, Text: "record the new checkout commit after the push: " + obs.Redact(err.Error()) +
 				"; the commit was pushed to " + rec.SourceBranch}, nil
 		}

@@ -4,6 +4,32 @@ Newest first. Each entry says what was decided, by whom, and why. Design rules t
 refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR under
 `docs/adr/`.
 
+## 2026-10-21
+
+**D-086 A merge request carries only the run's changes, counted from the commit the run
+cloned, merged per path onto the branch as it is.** (Andre, 2026-10-21: "Whole-tree commits
+from stale checkouts silently delete other tickets' work.") Seen live: ticket T2 was merged
+as !5, and a day later main had none of T2's files. A later ticket's run had cloned main
+before T2 landed, and `open_merge_request` cloned main again, replaced its whole tree with
+the checkout's and committed the difference, which deleted T2's files. The proposal now
+takes the run's base, `runs.checkout_sha` (the commit the first step cloned, at the step's
+start), and the run's changes are what differs between it and the checkout's working tree.
+When the branch is still at the base they are one commit on top, as before; when it moved,
+each path the run changed takes the run's version if the branch did not change it since,
+needs nothing if the branch has the same content, and is a conflict otherwise. A conflict
+pushes nothing and tells the agent which files conflict with which branch, so it can ask
+the operator. Without one, the pushed head merges the branch's head with the run's own
+commit (the base plus the run's changes), and that commit becomes the run's
+`checkout_sha`, so a later push of the same run counts from it and does not conflict with
+itself. A file the run never touched is never deleted, and a guard refuses a commit that
+would delete or change one anyway, naming the paths. Links and tracked files under the
+excluded directories, which the working-tree copy cannot see, keep the base's version. A
+run that names a request keeps D-050's guard: a commit on that branch it did not make is a
+person working on the same request, and the operator decides. Alternatives rejected: a
+rebase of the run's commit (rewrites what a reviewer may have seen, and conflicts would
+need resolving on the api side); line-level merges (a file both changed would hold
+content neither side tested). Design: DESIGN 5.16 rule 10, 5.30 rule 9.
+
 ## 2026-10-20
 
 **D-085 A tool call that waits for approval parks the step until the approval is decided.**

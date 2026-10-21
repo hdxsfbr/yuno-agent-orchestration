@@ -38,7 +38,7 @@ func TestProposePaths(t *testing.T) {
 	must(os.Remove(filepath.Join(checkout, "docs/plans/x/OLD.md")))
 	must(os.Remove(filepath.Join(checkout, "docs/other.md")))
 
-	prop, err := cfg.ProposePaths(ctx, checkout, "yuno/p1", "Plan", []string{"docs/plans/x", "docs/other.md"})
+	prop, err := cfg.ProposePaths(ctx, checkout, "yuno/p1", Base{}, "Plan", []string{"docs/plans/x", "docs/other.md"})
 	must(err)
 	if prop.Commit == "" || prop.Files != 2 {
 		t.Fatalf("proposal = %+v", prop)
@@ -59,16 +59,16 @@ func TestProposePaths(t *testing.T) {
 
 	// A path in neither the checkout nor the repository.
 	var missing *ErrPathMissing
-	if _, err := cfg.ProposePaths(ctx, checkout, "yuno/p2", "x", []string{"nope/none.md"}); !errors.As(err, &missing) {
+	if _, err := cfg.ProposePaths(ctx, checkout, "yuno/p2", Base{}, "x", []string{"nope/none.md"}); !errors.As(err, &missing) {
 		t.Fatalf("missing path: %v", err)
 	}
 	// Paths that change nothing.
-	if _, err := cfg.ProposePaths(ctx, checkout, "yuno/p3", "x", []string{"docs/plans/x"}); err != nil && !errors.Is(err, ErrNoChanges) {
+	if _, err := cfg.ProposePaths(ctx, checkout, "yuno/p3", Base{}, "x", []string{"docs/plans/x"}); err != nil && !errors.Is(err, ErrNoChanges) {
 		t.Fatalf("repeat: %v", err)
 	}
 	// A path through a link is refused and nothing is pushed.
 	must(os.Symlink("/etc", filepath.Join(checkout, "evil")))
-	if _, err := cfg.ProposePaths(ctx, checkout, "yuno/p4", "x", []string{"evil/hostname"}); err == nil {
+	if _, err := cfg.ProposePaths(ctx, checkout, "yuno/p4", Base{}, "x", []string{"evil/hostname"}); err == nil {
 		t.Fatal("a path through a link was accepted")
 	}
 	if slices.Contains(projecttest.Branches(t, bare), "yuno/p4") || slices.Contains(projecttest.Branches(t, bare), "yuno/p2") {
@@ -78,7 +78,7 @@ func TestProposePaths(t *testing.T) {
 	// ProposeOntoPaths adds only its paths on top of the branch.
 	write("docs/plans/x/PRD.md", "prd v2\n")
 	write("README.md", "# changed again\n")
-	if _, err := cfg.ProposeOntoPaths(ctx, checkout, "yuno/p1", "", "Revise", []string{"docs/plans/x/PRD.md"}); err != nil {
+	if _, err := cfg.ProposeOntoPaths(ctx, checkout, "yuno/p1", Base{}, "Revise", []string{"docs/plans/x/PRD.md"}); err != nil {
 		t.Fatal(err)
 	}
 	if at("docs/plans/x/PRD.md") != "prd v2\n" || at("README.md") != "# demo\n" {

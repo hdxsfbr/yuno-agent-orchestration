@@ -278,8 +278,10 @@ func TestOpenMergeRequestBranchGuard(t *testing.T) {
 	}
 }
 
-// T5.22.5 (the same-run path): a run that opened its own request and pushes onto it
-// again is not guarded and writes no checkout_sha (5.20 rule 2, L4 recorded).
+// T5.22.5 (the same-run path), D-086: a run that opened its own request and pushes onto it
+// again is not guarded, and a commit someone pushed to the branch meanwhile is kept: the
+// run's changes go onto the branch per path from the run's own commit, which each push
+// records as checkout_sha.
 func TestOpenMergeRequestSameRunPathIsUnguarded(t *testing.T) {
 	e := newRecordEnv(t, project.ProviderGitLab)
 	e.edit("README.md", "# demo\nv1\n")
@@ -287,17 +289,20 @@ func TestOpenMergeRequestSameRunPathIsUnguarded(t *testing.T) {
 		t.Fatalf("open: %+v %v", out, err)
 	}
 	branch := e.record().SourceBranch
+	if e.checkoutSHA(e.run) != e.tip(branch) {
+		t.Fatalf("after the first push checkout_sha = %s, want the pushed commit %s", e.checkoutSHA(e.run), e.tip(branch))
+	}
 	hand := pushByHand(t, e.bare, branch, "by-hand.txt", "someone else's work\n")
 	e.edit("README.md", "# demo\nv2\n")
 	out, got, err := e.open(e.key('b'), "Second title")
 	if err != nil || out.Result.IsError || !got.Replayed || !got.Updated {
 		t.Fatalf("same-run update: %+v %v", out, err)
 	}
-	if e.tip(branch) == hand || projecttest.FileAt(t, e.bare, branch, "by-hand.txt") != "" {
-		t.Fatal("the same-run path is expected to replace the tree (L4)")
+	if projecttest.FileAt(t, e.bare, branch, "by-hand.txt") != "someone else's work\n" || projecttest.FileAt(t, e.bare, branch, "README.md") != "# demo\nv2\n" {
+		t.Fatal("the same-run push lost the person's commit or the run's change")
 	}
-	if e.checkoutSHA(e.run) != "<null>" {
-		t.Fatalf("the same-run path wrote checkout_sha %s", e.checkoutSHA(e.run))
+	if projecttest.Git(t, e.bare, "rev-parse", branch+"^1") != hand || e.checkoutSHA(e.run) != projecttest.Git(t, e.bare, "rev-parse", branch+"^2") {
+		t.Fatalf("tip %s: first parent %s (want %s), checkout_sha %s", e.tip(branch), projecttest.Git(t, e.bare, "rev-parse", branch+"^1"), hand, e.checkoutSHA(e.run))
 	}
 }
 
