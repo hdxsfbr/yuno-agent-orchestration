@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/jackc/pgx/v5"
@@ -40,6 +41,44 @@ func LiveRunOnMergeRequest(ctx context.Context, q Querier, mergeRequestID, opene
 // SetTicketContentHash records the hash of the text the ticket's issue was written from.
 func SetTicketContentHash(ctx context.Context, q Querier, planID, ticketID, hash string) error {
 	return execPlanUpdate(ctx, q, `UPDATE plan_tickets SET content_hash=$3 WHERE plan_id=$1 AND ticket_id=$2`, planID, ticketID, hash)
+}
+
+// PlanEventFollowUp records a ticket that carries a revision's change to a merged or closed
+// ticket (DESIGN 5.29 rule 16): ticket_id is the follow-up, the detail names the ticket it
+// follows and the content hash of the revised text it carries.
+const PlanEventFollowUp = "follow_up"
+
+// FollowUp is one recorded follow-up: the ticket, the ticket it follows and the hash of the
+// revised text of that ticket it carries.
+type FollowUp struct {
+	TicketID string `json:"-"`
+	Follows  string `json:"follows"`
+	Hash     string `json:"hash"`
+}
+
+// ListFollowUps returns the plan's recorded follow-ups, oldest first. A follow-up that took
+// a further change in a later revision is recorded again; its last record is the one that
+// counts.
+func ListFollowUps(ctx context.Context, q Querier, planID string) ([]FollowUp, error) {
+	rows, err := q.Query(ctx, `SELECT ticket_id, detail FROM plan_events
+		WHERE plan_id=$1 AND kind=$2 AND ticket_id IS NOT NULL ORDER BY at, id`, planID, PlanEventFollowUp)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FollowUp
+	for rows.Next() {
+		var f FollowUp
+		var detail []byte
+		if err := rows.Scan(&f.TicketID, &detail); err != nil {
+			return nil, err
+		}
+		if json.Unmarshal(detail, &f) != nil || f.Follows == "" {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
 }
 
 // TicketContentHashes returns the recorded content hash per ticket id of the plan; a ticket

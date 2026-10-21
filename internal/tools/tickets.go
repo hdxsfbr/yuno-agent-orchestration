@@ -104,12 +104,22 @@ type publishTicketsOutput struct {
 	// in progress was built from the old text, so the operator requests changes (rule 16).
 	ChangedInFlight []string `json:"changed_in_flight,omitempty"`
 	Released        int      `json:"released,omitempty"`
+	// FollowUps are the tickets the platform added for changes to merged or closed tickets
+	// (rule 16).
+	FollowUps []followUpOut `json:"follow_ups,omitempty"`
 }
 
 type publishedTicketOut struct {
 	Ticket string `json:"ticket"`
 	Number int64  `json:"number"`
 	URL    string `json:"url"`
+}
+
+type followUpOut struct {
+	Ticket  string `json:"ticket"`
+	Follows string `json:"follows"`
+	Number  int64  `json:"number"`
+	URL     string `json:"url"`
 }
 
 // planIDNamespace derives plan ids, so that a visit retried after its transaction rolled
@@ -131,7 +141,8 @@ func NewPublishTickets(cfg PublishTicketsConfig) *Tool {
 			"labelled with its wave and feature, in wave order. Takes only the run_token; the platform reads the " +
 			"tickets and waves from the run's earlier steps, so nothing else is passed. Refuses when the project " +
 			"already has an open plan. When the run's input names a plan to revise, it amends that plan instead: new tickets " +
-			"get issues, changed tickets update theirs, dropped tickets are closed. Needs a human approval. Returns the plan id and each ticket's issue number " +
+			"get issues, changed tickets update theirs, dropped tickets are closed, and a change to a ticket that is already merged " +
+			"becomes a follow-up ticket with its own issue. Needs a human approval. Returns the plan id and each ticket's issue number " +
 			"and URL; if a human has not decided yet it returns status pending_approval: then end your turn " +
 			"without finishing, and the platform resumes you with the outcome; if they refused it returns " +
 			"status rejected with a reason.",

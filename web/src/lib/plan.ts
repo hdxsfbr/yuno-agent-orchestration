@@ -81,6 +81,10 @@ export function eventText(e: PlanEvent): { label: string; detail?: string } {
       const notes = typeof e.detail?.notes === "string" && e.detail.notes ? e.detail.notes : undefined;
       return { label: e.ticket_id ? `Changes requested on ticket ${e.ticket_id}` : "Changes requested", detail: notes };
     }
+    case "follow_up": {
+      const follows = typeof e.detail?.follows === "string" && e.detail.follows ? e.detail.follows : undefined;
+      return { label: e.ticket_id && follows ? `Follow-up ticket ${e.ticket_id} carries a change to ${follows}` : "Follow-up ticket added" };
+    }
     case "paused":
       return { label: "Waves paused", detail: reason };
     case "resumed":

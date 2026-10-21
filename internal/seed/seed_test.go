@@ -228,6 +228,11 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 			}
 		}
 	}
+	// DESIGN 5.29 rule 16: a revision names a change to a merged ticket as a follow-up ticket.
+	if planner, _ := findAgent(ctx, pool, "Planner"); !strings.Contains(planner.SystemPrompt, `"Follow-up to T<k>: `) ||
+		!strings.Contains(planner.SystemPrompt, "already merged stays exactly as it is") {
+		t.Error("the Planner prompt does not say how a change to a merged ticket is planned")
+	}
 	builder, _ := findAgent(ctx, pool, "Builder")
 	reviewer, _ := findAgent(ctx, pool, "Code Reviewer")
 	auditor, _ := findAgent(ctx, pool, "Doc Auditor")

@@ -434,4 +434,10 @@ describe("requesting changes", () => {
     expect(await screen.findByText("Changes requested on ticket T2")).not.toBeNull();
     expect(screen.getByText("Handle the empty query")).not.toBeNull();
   });
+
+  it("reads the follow_up event with the ticket it follows", async () => {
+    detail.events = [event({ id: "e4", kind: "follow_up", ticket_id: "T21", wave: 3, detail: { follows: "T8", hash: "abc" } })];
+    renderPlans();
+    expect(await screen.findByText("Follow-up ticket T21 carries a change to T8")).not.toBeNull();
+  });
 });
