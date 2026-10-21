@@ -3,6 +3,7 @@ package openclaw
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -89,6 +90,55 @@ func TestSetAndClearAgentSandbox(t *testing.T) {
 		if d, ok := defaults.(map[string]any); ok {
 			if _, touched := d["sandbox"]; touched {
 				t.Fatalf("defaults touched: %s", b)
+			}
+		}
+	}
+}
+
+// The P3 acceptance for configuration (DESIGN 5.30 rule 1): nothing the gateway runs
+// mounts the agent's own workspace. The defaults and every block the platform sets on an
+// agent, whatever the image and the network, say scope "session" and workspaceAccess
+// "none" and add no bind mounts of their own; an agent that was only materialised has no
+// block and so gets the defaults.
+func TestNoSandboxBlockMountsTheAgentsWorkspace(t *testing.T) {
+	m := newMatEnv(t)
+	ctx := context.Background()
+	// problem says what a sandbox block gets wrong; "" means nothing.
+	problem := func(sb map[string]any) string {
+		if sb["scope"] != "session" || sb["workspaceAccess"] != "none" {
+			return fmt.Sprintf("scope/workspaceAccess = %v/%v, want session/none", sb["scope"], sb["workspaceAccess"])
+		}
+		if docker, _ := sb["docker"].(map[string]any); docker["binds"] != nil {
+			return fmt.Sprintf("docker.binds = %v", docker["binds"])
+		}
+		return ""
+	}
+	defaults, _ := Baseline(inputs())["agents.defaults.sandbox"].(map[string]any)
+	if p := problem(defaults); p != "" {
+		t.Fatalf("defaults: %s", p)
+	}
+
+	a := testAgent()
+	if _, err := Materialize(ctx, m.gw, m.dir, a, nil); err != nil {
+		t.Fatal(err)
+	}
+	id := *a.OpenClawAgentID
+	entry := m.entry(t, id)
+	if sb, has := entry["sandbox"]; has {
+		t.Fatalf("a materialised agent has a sandbox block of its own: %v", sb)
+	}
+	if entry["workspace"] != WorkspaceDir(m.dir, id) {
+		t.Fatalf("workspace = %v, want the agent's own, which no sandbox mounts", entry["workspace"])
+	}
+
+	for _, image := range []string{"yuno-sandbox:latest", "yuno-sandbox-go:latest", "yuno-sandbox-node:latest", "yuno-sandbox-python:latest"} {
+		for _, network := range []bool{false, true} {
+			if err := SetAgentSandbox(ctx, m.gw, id, SandboxSpec{Image: image, Network: network}); err != nil {
+				t.Fatal(err)
+			}
+			sb, _ := m.entry(t, id)["sandbox"].(map[string]any)
+			if p := problem(sb); p != "" {
+				t.Errorf("%s, network %v: %s", image, network, p)
 			}
 		}
 	}

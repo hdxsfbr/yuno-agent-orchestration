@@ -1,3 +1,37 @@
+# Test results, 2026-10-21 (acceptance tests for run isolation, cleanup and libgomp; Andre's P3)
+
+P3: "a run cannot list or open another run's folder; libgomp is available without
+workarounds". D-082 and D-083 built it; this entry adds the tests that state the acceptance.
+The live evidence is the probe of 2026-10-20 (the entry below, "private step workspaces and
+the run repository"): on the running gateway a file placed in a session's private workspace
+before its first turn was visible to the agent, the agent's own workspace was not visible,
+and `libgomp` was present in the sandbox image.
+
+| Acceptance | Test |
+|---|---|
+| Two runs of one agent cannot reach each other's folders | `TestConcurrentRunsOfOneAgentDoNotShareAWorkspace` (engine): the workspaces the two visits recorded differ, neither lies inside the other, neither holds a path or file of the other run, and the agent's own workspace holds nothing |
+| Nothing mounts the agent's shared workspace | `TestNoSandboxBlockMountsTheAgentsWorkspace` (openclaw): the baseline defaults, a materialised agent's entry and every per-agent sandbox block (four images, network on and off) give `scope: session` and `workspaceAccess: none`, with no bind mounts; the baseline write test pins the same keys in the written file |
+| A succeeded run leaves only its artifacts | `TestSucceededRunLeavesOnlyItsArtifacts` (engine): `out/` files and `diff.patch` are kept, the steps' private workspaces (scratch files included) and the run repository are gone, nothing under the state directory names the run; `TestStoredArtifactsOutliveTheWorkspace` (artifacts, the real collector): the stored files are regular copies that stay readable after the workspace is deleted |
+| libgomp is available without workarounds | `TestSandboxImagesInstallLibgomp` (openclaw) reads `docker/sandbox.Dockerfile` and `docker/sandbox-python.Dockerfile` and fails if either stops installing `libgomp1` in its final image |
+
+Four of the five tests were shown to fail on broken code, one change at a time: the private
+workspace path returning the agent's workspace (the concurrent-runs and the cleanup tests
+failed); the workspace removal skipped, and the run repository removal skipped (the cleanup
+test failed on each); `workspaceAccess` set to `rw` in the defaults and to `ro` in the
+per-agent block (the configuration test failed on each); `libgomp1` removed from the Python
+Dockerfile (the image test failed). Every change was restored afterwards. The artifacts test
+guards a property the collector has by construction, since it copies each file, and was not
+mutated.
+
+Run on the development machine from `main` (commit `6cd0044`) plus these tests, in a
+throwaway container with a fresh database and no CPU limit:
+
+| Command | Result |
+|---|---|
+| `go build ./...`, `go vet ./...` | clean |
+| `go test -p 1 ./internal/... -count=1` | every package ok (new: the five tests above) |
+| `gofmt -l internal cmd`, staticcheck 2026.2.2 | clean |
+
 # Test results, 2026-10-20 (private step workspaces and the run repository; DESIGN 5.30, D-083)
 
 The probe behind D-083, run on the live local gateway (OpenClaw 2026.10.3) with
