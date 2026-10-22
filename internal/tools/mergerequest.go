@@ -75,16 +75,56 @@ type mergeRequestInput struct {
 // it with replayed, and with updated when it pushed a commit onto its branch. Since DESIGN
 // 5.29 rule 4 a request merged before the run's last push is answered by its follow-up
 // (follow_up), or, when nothing was left to push, by the merged request itself (merged).
+// Since DESIGN 5.28 rule 9 (D-089) a ticket run's answer names the plan documents its push
+// left out (left_out), with the notice that says where such notes go.
 type mergeRequestOutput struct {
-	Number   int64  `json:"number"`
-	URL      string `json:"url"`
-	Branch   string `json:"branch"`
-	Provider string `json:"provider"`
-	Replayed bool   `json:"replayed,omitempty"`
-	Updated  bool   `json:"updated,omitempty"`
-	Draft    bool   `json:"draft,omitempty"`
-	FollowUp bool   `json:"follow_up,omitempty"`
-	Merged   bool   `json:"merged,omitempty"`
+	Number   int64    `json:"number"`
+	URL      string   `json:"url"`
+	Branch   string   `json:"branch"`
+	Provider string   `json:"provider"`
+	Replayed bool     `json:"replayed,omitempty"`
+	Updated  bool     `json:"updated,omitempty"`
+	Draft    bool     `json:"draft,omitempty"`
+	FollowUp bool     `json:"follow_up,omitempty"`
+	Merged   bool     `json:"merged,omitempty"`
+	LeftOut  []string `json:"left_out,omitempty"`
+	Notice   string   `json:"notice,omitempty"`
+}
+
+// leftOut records on out the plan documents a ticket run's push left out, with the notice.
+func (out *mergeRequestOutput) leftOut(base project.Base, paths []string) {
+	if base.Ticket == nil || len(paths) == 0 {
+		return
+	}
+	out.LeftOut, out.Notice = paths, leftOutNotice(*base.Ticket, paths)
+}
+
+// leftOutNotice tells a ticket run which plan documents its push left out and where their
+// notes go instead (DESIGN 5.28 rule 9, D-089).
+func leftOutNotice(t project.TicketDocs, paths []string) string {
+	return "Left out of the merge request: " + strings.Join(paths, ", ") + ". A ticket's merge request carries no plan " +
+		"document of the feature but the ticket's own file, " + t.File() + ", because the tickets of a wave run in parallel. " +
+		"Write what the other documents need in that file under the heading \"## Notes for the plan documents\", naming the " +
+		"document and section of each note; the wave's ship run applies them."
+}
+
+// runBase is the base of the run's next proposal (project.RunBase) with the plan ticket the
+// run builds, when it builds one, so the proposal carries none of the feature's plan
+// documents but the ticket's own file (DESIGN 5.28 rule 9, D-089). Without a transaction no
+// ticket is read.
+func runBase(ctx context.Context, call Call, run *store.Run) (project.Base, error) {
+	base := project.RunBase(run)
+	if call.Tx == nil {
+		return base, nil
+	}
+	feature, ticket, err := store.TicketDocsOfRun(ctx, call.Tx, call.RunID)
+	if err != nil {
+		return base, fmt.Errorf("read the run's ticket: %w", err)
+	}
+	if ticket != "" {
+		base.Ticket = &project.TicketDocs{Feature: feature, Ticket: ticket}
+	}
+	return base, nil
 }
 
 // NewOpenMergeRequest builds open_merge_request: commit the run's checkout on the key's
@@ -114,7 +154,10 @@ func NewOpenMergeRequest(cfg MergeRequestConfig) *Tool {
 			"call of the same run that names draft also replaces the request's title and description. If the run's " +
 			"request was merged before this call, the platform opens a small follow-up request with what is left " +
 			"(the answer has follow_up true and the follow-up's number and URL), or, when nothing is left, answers " +
-			"with the merged request and merged true. Needs a human " +
+			"with the merged request and merged true. In the run of a plan ticket the request carries none of the " +
+			"feature's plan documents but the ticket's own docs/plans/<feature>/tickets/<ticket id>.md: changes to " +
+			"PRD.md, ARCHITECTURE.md, TASKS.md, WAVES.md or another ticket's file are left out of the push, and the " +
+			"answer lists them in left_out with a notice saying where such notes go. Needs a human " +
 			"approval unless the operator allowed it to run automatically. Returns the request's number and " +
 			"URL; pass paths (files or directories relative to the checkout root) to commit only those and leave " +
 			"the rest of the checkout out of the request; if a human has not decided yet it returns status " +
@@ -230,11 +273,20 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 	if err != nil {
 		return Result{}, err
 	}
+	var leftOut []string
+	base, err := runBase(ctx, call, run)
+	if err != nil {
+		return Result{}, err
+	}
 	if !exists {
-		proposal, err := pc.ProposePaths(ctx, checkout, branch, project.RunBase(run), in.Title, in.Paths)
+		proposal, err := pc.ProposePaths(ctx, checkout, branch, base, in.Title, in.Paths)
 		if err != nil {
 			var missing *project.ErrPathMissing
 			var conflict *project.ErrConflict
+			if errors.Is(err, project.ErrNoChanges) && len(proposal.LeftOut) > 0 && base.Ticket != nil {
+				return Result{}, &ModelError{Message: "the checkout has no changes to propose besides plan documents a ticket run " +
+					"does not change; nothing was pushed. " + leftOutNotice(*base.Ticket, proposal.LeftOut)}
+			}
 			if errors.Is(err, project.ErrNoChanges) || errors.As(err, &missing) || errors.As(err, &conflict) {
 				return Result{}, &ModelError{Message: err.Error()}
 			}
@@ -249,9 +301,11 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 				return Result{}, fmt.Errorf("record the run's commit: %w", err)
 			}
 		}
+		leftOut = proposal.LeftOut
 	}
 	draft := in.Draft != nil && *in.Draft
 	out := mergeRequestOutput{Branch: branch, Provider: string(pc.Provider), Draft: draft}
+	out.leftOut(base, leftOut)
 	open, err := provider.FindOpen(ctx, branch)
 	if err != nil {
 		return Result{}, err
@@ -458,24 +512,38 @@ func (m *mergeRequest) followUp(ctx context.Context, call Call, pc *project.Conf
 	if err != nil {
 		return Result{}, err
 	}
+	base, err := runBase(ctx, call, run)
+	if err != nil {
+		return Result{}, err
+	}
+	var leftOut []string
 	if !exists {
 		// Only the run's own changes, counted from its base, go onto the default branch (D-087):
 		// what the merge already carried is no change, and nothing else is touched.
-		if _, err := pc.ProposePaths(ctx, checkout, branch, project.RunBase(run), in.Title, in.Paths); err != nil {
+		proposal, err := pc.ProposePaths(ctx, checkout, branch, base, in.Title, in.Paths)
+		if err != nil {
 			var missing *project.ErrPathMissing
 			switch {
 			case errors.Is(err, project.ErrNoChanges):
-				return JSONResult(mergeRequestOutput{Number: merged.Number, URL: merged.URL, Branch: merged.SourceBranch,
-					Provider: merged.Provider, Replayed: true, Merged: true}), nil
+				out := mergeRequestOutput{Number: merged.Number, URL: merged.URL, Branch: merged.SourceBranch,
+					Provider: merged.Provider, Replayed: true, Merged: true}
+				out.leftOut(base, proposal.LeftOut)
+				return JSONResult(out), nil
 			case errors.As(err, &missing):
 				return Result{}, &ModelError{Message: err.Error()}
 			}
 			return Result{IsError: true, Text: "propose the changes: " + err.Error()}, nil
 		}
+		// The run's own commit is the base of its next push, onto the follow-up (D-087).
+		if err := store.SetRunCheckoutSHA(ctx, call.Tx, call.RunID, proposal.Base); err != nil {
+			return Result{}, fmt.Errorf("record the run's commit: %w", err)
+		}
+		leftOut = proposal.LeftOut
 	}
 	draft := in.Draft != nil && *in.Draft
 	title := followUpTitle(own.Title)
 	out := mergeRequestOutput{Branch: branch, Provider: string(pc.Provider), Draft: draft, FollowUp: true}
+	out.leftOut(base, leftOut)
 	open, err := provider.FindOpen(ctx, branch)
 	if err != nil {
 		return Result{}, err
@@ -556,7 +624,10 @@ func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *projec
 	}
 	out := mergeRequestOutput{Number: rec.Number, URL: rec.URL, Branch: rec.SourceBranch, Provider: rec.Provider, Replayed: true, Draft: rec.Draft,
 		FollowUp: followed != nil}
-	base := project.RunBase(run)
+	base, err := runBase(ctx, call, run)
+	if err != nil {
+		return Result{}, err
+	}
 	base.Guard = updating != nil
 	proposal, err := pc.ProposeOntoPaths(ctx, checkout, rec.SourceBranch, base, in.Title, in.Paths)
 	var moved *project.ErrBranchMoved
@@ -567,8 +638,10 @@ func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *projec
 		return Result{}, &ModelError{Message: missing.Error()}
 	case err == nil:
 		out.Updated = true
+		out.leftOut(base, proposal.LeftOut)
 	case errors.Is(err, project.ErrNoChanges):
 		// Nothing to push; a title, description or draft change still goes to the provider.
+		out.leftOut(base, proposal.LeftOut)
 	case errors.As(err, &moved):
 		return Result{}, &ModelError{Message: moved.Error()}
 	case errors.As(err, &conflict):

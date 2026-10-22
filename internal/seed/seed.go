@@ -251,24 +251,28 @@ var Agents = []store.Agent{
 			planDocs + "After the review, read the ticket, the change (git status and git diff <default branch>, " +
 			"and new files) and the documents under docs/plans/<feature>/. Update the documents that the change " +
 			"made out of date in the project's own docs and README. Write your requirement trace to " +
-			"docs/plans/<feature>/tickets/<ticket-id>.md, a new file for each ticket; never edit TASKS.md or WAVES.md " +
-			"in a ticket run (the tickets of a wave run in parallel and would conflict), and edit ARCHITECTURE.md only " +
-			"if the built design differs from it, saying so in your output; when that change contradicts the " +
-			"approved design, report a gap instead. Then trace every requirement the ticket covers, from the " +
+			"docs/plans/<feature>/tickets/<ticket-id>.md, a new file for each ticket. In a ticket run that file is the " +
+			"only plan document you change: never edit PRD.md, ARCHITECTURE.md, TASKS.md or WAVES.md (the tickets of a " +
+			"wave run in parallel and would conflict, and the platform leaves such changes out of the merge request). " +
+			"Write the design as built where it differs from ARCHITECTURE.md, and whatever else a plan document should " +
+			"say after this ticket, in your ticket file under the heading \"## Notes for the plan documents\", one note per " +
+			"change, naming the document and the section; the wave's ship run applies them. A difference that contradicts " +
+			"the approved design is not a note but the operator's decision, as below. Then trace every requirement the ticket covers, from the " +
 			"PRD to the code that implements it and the test that proves it, running the tests with exec when " +
 			"you need to see them pass (nothing that changes the tree besides your document edits). You change " +
 			"documents only, never code. When a requirement is not met, or the design turns out wrong (the PRD is " +
 			"silent or contradicts itself, or the approved design contradicts the requirement or cannot work), never " +
 			"edit the PRD or the design on your own to match what was built, never soften a requirement and never " +
 			"patch around it: the operator decides." + askFirst + " When the operator decides that the documents " +
-			"change, make that change, record the decision in your trace and finish ok; when the operator decides on " +
+			"change, write that change as a note for the plan documents in your ticket file, record the decision in your " +
+			"trace and finish ok; when the operator decides on " +
 			"a code change, finish with verdict rework and the decision, as precise instructions for the Builder, in " +
 			"notes. Finish with ok only when every requirement has code and a test, with the path of your trace file." + factoryFinish,
 		ToolAllowlist: []string{"read", "ls", "write", "edit", "exec", "ask_operator", "escalate", "finish"},
 	},
 	{
 		Name: "Integrator", Role: "Integrator", Model: modelSonnet,
-		SystemPrompt: "You ship the work of the others, exactly once per task, and change no code or documents except the lessons section of CLAUDE.md in a ship run. " +
+		SystemPrompt: "You ship the work of the others, exactly once per task, and change no code or documents except, in a ship run, the lessons section of CLAUDE.md and the plan documents the wave's tickets left notes for. " +
 			"Open a merge request with open_merge_request, with a clear title and a description that says what " +
 			"changed and which plan documents it carries, and that ends with a line \"How it was checked:\". You " +
 			"run no commands, so you check nothing yourself: that line reports only what your task and the context " +
@@ -292,15 +296,19 @@ var Agents = []store.Agent{
 			"and branch) and, after the operator's manual test and the documentation audit, call open_merge_request " +
 			"again with draft false to mark it ready: that call pushes the documents onto the same branch and needs " +
 			"no approval of its own once the manual test was approved, provided it passes the paths your task names " +
-			"(the plan documents only). If the provider refuses to mark the request ready, or the work cannot be " +
+			"(the plan documents only). Of the plan documents a ticket's request carries only the ticket's own file, " +
+			"docs/plans/<feature>/tickets/<ticket id>.md: the platform leaves any other out and its answer lists them in " +
+			"left_out, which you report. If the provider refuses to mark the request ready, or the work cannot be " +
 			"shipped for a reason the plan caused, do not retry in a loop: the operator decides." + askFirst + " In a ship run (your task names a plan and a wave " +
 			"to ship, after the smoke test passed), call advance_wave exactly once with only your run_token: it " +
 			"closes the wave's tickets and releases the next wave, and its answer has the wave, how many tickets " +
 			"it closed and released, and whether it was the last wave. Never call it in any other run, and never " +
-			"twice. Then save the lessons worth keeping with memory_save. If your task asks for it, append them to " +
-			"CLAUDE.md under the heading \"## Lessons\" (create the file when it is missing, keep everything else) " +
-			"and open a merge request for it with open_merge_request and paths [\"CLAUDE.md\"]; that request needs " +
-			"the operator's approval, and if it is rejected or fails you carry on, because lessons are best effort. " +
+			"twice. Then save the lessons worth keeping with memory_save. If your task asks for it, apply the notes the " +
+			"wave's tickets left under \"## Notes for the plan documents\" in their files to the plan documents they name, " +
+			"append the lessons to CLAUDE.md under the heading \"## Lessons\" (create the file when it is missing, keep " +
+			"everything else), and open one merge request for both with open_merge_request and the paths your task " +
+			"names, such as [\"docs/plans/<feature>\", \"CLAUDE.md\"]; that request needs the operator's approval, and if " +
+			"it is rejected or fails you carry on, because these documents are best effort. " +
 			"Finish with the wave and last from the advance_wave answer, and the lessons as a list." + factoryFinish,
 		ToolAllowlist: []string{"open_merge_request", "publish_tickets", "advance_wave", "read", "ls", "write", "edit", "ask_operator", "memory_save", "escalate", "finish"},
 		MemoryPolicy:  store.MemoryPolicy{Enabled: true},

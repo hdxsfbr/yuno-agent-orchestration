@@ -1,7 +1,8 @@
 // Package waves moves a plan's waves along by itself (DESIGN 5.29 rules 11 to 14): the
 // watcher releases wave 1 when the plan merge request merged, starts one ship run per wave
 // once its tickets merged and the default branch is green after them, and Advance, called
-// by the Integrator's advance_wave tool, closes a shipped wave and releases the next.
+// by the Integrator's advance_wave tool, closes a shipped wave and releases the next. While a
+// revision of the plan runs, no wave is released and no ship run started (D-089).
 package waves
 
 import (
@@ -193,6 +194,9 @@ func (s *Service) afterPlanMerge(ctx context.Context, plan *store.Plan, proj *st
 	if err != nil || len(all) == 0 {
 		return err
 	}
+	if revising, err := s.revising(ctx, s.Pool, plan); err != nil || revising {
+		return err
+	}
 	first := all[0].Wave // by wave
 	pc, err := s.config(ctx, proj)
 	if err != nil {
@@ -213,6 +217,9 @@ func (s *Service) afterPlanMerge(ctx context.Context, plan *store.Plan, proj *st
 		if paused, _, err := pausedIn(ctx, q, cur.ProjectID); err != nil || paused {
 			return err
 		}
+		if revising, err := s.revising(ctx, q, cur); err != nil || revising {
+			return err
+		}
 		if err := s.labelWave(ctx, s.issues(pc), proj.IntakeLabel, plan.ID, first); err != nil {
 			return err
 		}
@@ -228,6 +235,18 @@ func (s *Service) afterPlanMerge(ctx context.Context, plan *store.Plan, proj *st
 	s.Plans.Publish(plan.ID, plan.ProjectID)
 	s.log().Info("waves: first wave released", "plan_id", plan.ID, "wave", first)
 	return nil
+}
+
+// revising reports whether a revision of the plan is running: a run of its project whose
+// input revise_plan names it and that has not ended (rule 12, D-089). While one runs the
+// watcher releases no wave and starts no ship run for the plan; nothing is stored, so a
+// revision that fails or is cancelled holds nothing back once it ended.
+func (s *Service) revising(ctx context.Context, q store.Querier, plan *store.Plan) (bool, error) {
+	id, err := store.LiveRevisionRun(ctx, q, plan.ProjectID, plan.ID)
+	if err != nil {
+		return false, fmt.Errorf("look for a revision of the plan: %w", err)
+	}
+	return id != "", nil
 }
 
 // pausedIn reads the project's wave pause inside the caller's transaction and holds the row
@@ -296,7 +315,9 @@ func releaseTx(ctx context.Context, q store.Querier, planID string, wave int) (*
 // building is the watcher's look at a plan whose current wave is being built (rules 11
 // and 12): tickets whose merge request or issue ended without a merge escalate, the default
 // branch's status is read and recorded, and a wave whose tickets all merged, with the default
-// branch green after the newest merge, gets its ship run unless the project is paused.
+// branch green after the newest merge, gets its ship run unless the project is paused or a
+// revision of the plan is running. A wave advance_wave held back for a revision is released
+// once none runs (rule 14).
 func (s *Service) building(ctx context.Context, plan *store.Plan, proj *store.Project) error {
 	wave := plan.CurrentWave
 	tickets, err := store.ListWaveTickets(ctx, s.Pool, plan.ID, wave)
@@ -327,6 +348,15 @@ func (s *Service) building(ctx context.Context, plan *store.Plan, proj *store.Pr
 	if proj.WavesPaused {
 		return nil
 	}
+	revising, err := s.revising(ctx, s.Pool, plan)
+	if err != nil {
+		return err
+	}
+	if !revising {
+		if released, err := s.releaseHeld(ctx, plan, proj, pc, wave); err != nil || released {
+			return err
+		}
+	}
 	attempt := 1
 	if run, last, err := store.LatestShipRun(ctx, s.Pool, plan.ID, wave); err == nil {
 		if !store.IsTerminal(run.Status) {
@@ -343,10 +373,52 @@ func (s *Service) building(ctx context.Context, plan *store.Plan, proj *store.Pr
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	if !shippable(tickets, main) {
+	if revising || !shippable(tickets, main) {
 		return nil
 	}
 	return s.startShip(ctx, plan, proj, wave, attempt, tickets, main.URL)
+}
+
+// releaseHeld releases the current wave when advance_wave held it back because a revision of
+// the plan was running (rule 14, D-089) and it was not released since: as afterPlanMerge
+// does, the pause and the revision are read again under the plan lock, the issues labelled,
+// then the tickets set released and `wave_released` recorded. It reports whether it released.
+func (s *Service) releaseHeld(ctx context.Context, plan *store.Plan, proj *store.Project, pc *project.Config, wave int) (bool, error) {
+	if held, err := store.HeldWave(ctx, s.Pool, plan.ID, wave); err != nil || !held {
+		return false, err
+	}
+	if _, err := store.FindPlanEvent(ctx, s.Pool, plan.ID, store.PlanEventWaveReleased, wave, ""); err == nil {
+		return false, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return false, err
+	}
+	var ev *store.PlanEvent
+	err := s.inTx(ctx, func(q store.Querier) error {
+		cur, err := store.LockPlan(ctx, q, plan.ID)
+		if err != nil {
+			return err
+		}
+		if cur.Status != store.PlanBuilding || cur.CurrentWave != wave {
+			return nil
+		}
+		if paused, _, err := pausedIn(ctx, q, cur.ProjectID); err != nil || paused {
+			return err
+		}
+		if revising, err := s.revising(ctx, q, cur); err != nil || revising {
+			return err
+		}
+		if err := s.labelWave(ctx, s.issues(pc), proj.IntakeLabel, cur.ID, wave); err != nil {
+			return err
+		}
+		ev, err = releaseTx(ctx, q, cur.ID, wave)
+		return err
+	})
+	if err != nil || ev == nil {
+		return false, err
+	}
+	s.Plans.Publish(plan.ID, plan.ProjectID)
+	s.log().Info("waves: wave released after the plan's revision", "plan_id", plan.ID, "wave", wave)
+	return true, nil
 }
 
 // shippable is rule 11: every ticket merged and the default branch passed for the pipeline
@@ -443,10 +515,12 @@ func (s *Service) escalate(ctx context.Context, t store.WaveTicketMerge, reason 
 // finds the run and records it.
 func (s *Service) startShip(ctx context.Context, plan *store.Plan, proj *store.Project, wave, attempt int, tickets []store.WaveTicketMerge, mainURL string) error {
 	mergeRequests := []map[string]string{}
+	ids := []string{}
 	for _, t := range tickets {
 		if t.MRState == store.MergeRequestMerged {
 			mergeRequests = append(mergeRequests, map[string]string{"title": t.MRTitle, "url": t.MRURL})
 		}
+		ids = append(ids, t.TicketID)
 	}
 	wf, err := store.GetWorkflowByFromTemplate(ctx, s.Pool, ShipTemplateKey)
 	if errors.Is(err, store.ErrNotFound) {
@@ -466,8 +540,10 @@ func (s *Service) startShip(ctx context.Context, plan *store.Plan, proj *store.P
 	for _, t := range all {
 		last = max(last, t.Wave)
 	}
+	// The wave's tickets name their files, whose notes for the plan documents the ship run
+	// applies (rule 13, D-089).
 	in := map[string]any{"plan_id": plan.ID, "feature": plan.Feature, "wave": wave, "last_wave": last,
-		"merge_requests": mergeRequests}
+		"merge_requests": mergeRequests, "tickets": ids}
 	if mainURL != "" {
 		in["main_url"] = mainURL
 	}
@@ -509,7 +585,9 @@ func (s *Service) recordShipping(ctx context.Context, plan *store.Plan, wave int
 
 // Advance is tools.AdvanceWaveFunc (rule 14). It runs for the ship run runID: it closes the
 // wave's issues, sets its tickets closed and records `wave_done`, then releases the next
-// wave or, after the last, sets the plan accepting and records `accept_waiting`. It refuses
+// wave or, after the last, sets the plan accepting and records `accept_waiting`. While a
+// revision of the plan runs the next wave is not released: the plan moves to it, `wave_done`
+// names it as held_wave, and the watcher releases it once the revision ended. It refuses
 // when the run is not a ship run of an open plan that is shipping this wave, and while the
 // project's waves are paused. A second call for the same plan and wave returns the first
 // result and changes nothing: `wave_done` is the record. The tracker is written first and
@@ -604,6 +682,14 @@ func (s *Service) Advance(ctx context.Context, runID string) (tools.AdvanceResul
 				return &tools.AdvanceRefused{Reason: fmt.Sprintf("ticket %s of wave %d is %s, not merged; the wave cannot be closed yet", t.TicketID, wave, t.Status)}
 			}
 		}
+		// A revision of the plan that is running holds the next wave back: the wave closes,
+		// and the watcher releases the next one once the revision ended (D-089).
+		held := false
+		if next > 0 {
+			if held, err = s.revising(ctx, q, cur); err != nil {
+				return err
+			}
+		}
 		for _, t := range all {
 			if t.Wave != wave || t.IssueNumber == nil {
 				continue
@@ -612,12 +698,15 @@ func (s *Service) Advance(ctx context.Context, runID string) (tools.AdvanceResul
 				return fmt.Errorf("close the issue of ticket %s: %w", t.TicketID, err)
 			}
 		}
-		if next > 0 {
+		if next > 0 && !held {
 			if err := s.labelWave(ctx, prov, proj.IntakeLabel, planID, next); err != nil {
 				return err
 			}
 		}
 		res = tools.AdvanceResult{PlanID: planID, Wave: wave, Last: next == 0}
+		if held {
+			res.HeldWave = next
+		}
 		tickets, err := store.ListWaveTickets(ctx, q, planID, wave)
 		if err != nil {
 			return err
@@ -636,23 +725,29 @@ func (s *Service) Advance(ctx context.Context, runID string) (tools.AdvanceResul
 			if _, err := store.MovePlan(ctx, q, planID, store.PlanBuilding, next, store.PlanShipping); err != nil {
 				return err
 			}
-			if _, err := releaseTx(ctx, q, planID, next); err != nil {
-				return err
-			}
-			nt, err := store.ListWaveTickets(ctx, q, planID, next)
-			if err != nil {
-				return err
-			}
-			for _, t := range nt {
-				if t.Status == store.TicketReleased {
-					res.Released++
+			if !held {
+				if _, err := releaseTx(ctx, q, planID, next); err != nil {
+					return err
+				}
+				nt, err := store.ListWaveTickets(ctx, q, planID, next)
+				if err != nil {
+					return err
+				}
+				for _, t := range nt {
+					if t.Status == store.TicketReleased {
+						res.Released++
+					}
 				}
 			}
 		} else if _, err := store.MovePlan(ctx, q, planID, store.PlanAccepting, wave, store.PlanShipping); err != nil {
 			return err
 		}
-		raw, _ := json.Marshal(map[string]any{"plan_id": res.PlanID, "wave": res.Wave, "closed": res.Closed,
-			"released": res.Released, "last": res.Last, "run_id": runID})
+		detail := map[string]any{"plan_id": res.PlanID, "wave": res.Wave, "closed": res.Closed,
+			"released": res.Released, "last": res.Last, "run_id": runID}
+		if res.HeldWave > 0 {
+			detail["held_wave"] = res.HeldWave
+		}
+		raw, _ := json.Marshal(detail)
 		w := wave
 		done = &store.PlanEvent{PlanID: planID, Kind: store.PlanEventWaveDone, Wave: &w, Detail: raw}
 		if err := store.AddPlanEvent(ctx, q, done); err != nil {

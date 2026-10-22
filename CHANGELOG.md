@@ -5,6 +5,14 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- Ticket merge requests no longer change the plan's shared documents. A ticket's request
+  carries only its own `docs/plans/<feature>/tickets/<id>.md` among them; an edit to
+  `PRD.md`, `ARCHITECTURE.md`, `TASKS.md` or `WAVES.md` is left out, and the run is told
+  which files it left out. The Doc Auditor writes "as built" notes into the ticket's file,
+  and the wave's ship run applies them to the plan documents in the same merge request as
+  the lessons, which you approve. While a plan revision runs, no new wave is released and
+  no ship run starts for that plan; tickets already building carry on, and the waves go on
+  by themselves once the revision ends, even if it failed.
 - A conflict the documentation audit finds now asks you and waits; your decision goes back to the Builder instead of ending the ticket.
 - Each run step works in its own private workspace: runs no longer see or change each other's folders, finished runs' folders are deleted, and the Python sandbox has libgomp.
 

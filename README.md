@@ -143,8 +143,11 @@ typed in chat).
   different model) sends it back with comments up to three times; the Integrator opens a
   draft merge request so the branch exists, and you pull it and test it (the manual-test
   approval; rejecting it sends your notes back to the Builder); the Doc Auditor writes
-  the ticket's requirement trace and keeps the plan documents current; the Integrator
-  marks the merge request ready with the documents, under your manual-test approval.
+  the ticket's requirement trace, and notes on what the plan documents should say now, in
+  the ticket's own file (`docs/plans/<feature>/tickets/<id>.md`); the Integrator marks the
+  merge request ready with that file, under your manual-test approval. A ticket's merge
+  request never changes `PRD.md`, `ARCHITECTURE.md`, `TASKS.md` or `WAVES.md`: Yuno leaves
+  such edits out, since the wave's tickets build in parallel.
 - **Escalation**: an agent that finds an unmet requirement or a design the build proved
   wrong calls `escalate`; that, or any ticket run that fails (the review loop's limit, a
   rejection), stops the ticket with its reason, pauses the project's waves and tells you
@@ -152,23 +155,25 @@ typed in chat).
 - **Waves**: when the plan's merge request merges, Yuno labels wave 1's issues for intake.
   Once every ticket of a wave is merged and the default branch's pipeline passed after the
   last merge, it starts the `Ship pipeline` for that wave (never while the project is
-  paused). The project page shows each wave with its tickets, its ship run and main's
-  status.
+  paused or a revision of the plan runs). The project page shows each wave with its
+  tickets, its ship run and main's status.
 - **Ship** (`Ship pipeline`, one run per wave): you smoke test the deployed app (the
   smoke-test approval lists the wave's merge requests and main's pipeline); the
   Integrator saves the wave's lessons as project notes and calls `advance_wave`, which
   closes the wave's issues and releases the next wave. After the last wave you check the
   live app against `PRD.md` and accept the feature, which finishes the plan. Rejecting
-  either approval pauses the waves with your reason. The Integrator also proposes a small
-  merge request appending the wave's lessons to the repository's `CLAUDE.md`, which you
-  approve like any other.
+  either approval pauses the waves with your reason. The Integrator also proposes one
+  small merge request that applies the notes the wave's tickets left to the plan documents
+  and appends the wave's lessons to the repository's `CLAUDE.md`, which you approve like
+  any other.
 - **Changes requested**: a ticket with a merge request has a Request changes action on
   the project page; your notes start another Wave pipeline run on the same merge request.
 - **Revising a plan**: run `Plan pipeline` with `revise_plan` (the plan's id) and the
   change as the task. The agents amend the documents; the Integrator updates the changed
   tickets' issues, opens issues for new ones and closes dropped ones (finished waves are
-  left alone), resets the current wave's failed tickets and resumes the waves. This is
-  also how a ticket that escalated gets going again.
+  left alone), resets the current wave's failed tickets and resumes the waves. While the
+  revision runs, no new wave is released and no ship run starts for the plan; tickets
+  already building carry on. This is also how a ticket that escalated gets going again.
 
 The earlier templates (`dev_pipeline`, `research_pipeline`, `review_panel`) and their
 agents were retired with this change; their definitions are kept in `templates/legacy/`

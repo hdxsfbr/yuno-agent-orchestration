@@ -1,7 +1,7 @@
 {
   "key": "wave_pipeline",
   "name": "Wave pipeline",
-  "description": "Builds one ticket: the Builder writes the failing test first, then the code; the Code Reviewer sends it back until it is approved (bounded); the Integrator opens a draft merge request; the operator pulls the branch and runs the CI tasks locally (bugs go back to the Builder); the Doc Auditor updates the plan documents and traces the requirements, escalating a PRD gap or a wrong design instead of finishing; the Integrator then marks the merge request ready with code and documents.",
+  "description": "Builds one ticket: the Builder writes the failing test first, then the code; the Code Reviewer sends it back until it is approved (bounded); the Integrator opens a draft merge request; the operator pulls the branch and runs the CI tasks locally (bugs go back to the Builder); the Doc Auditor traces the requirements in the ticket's own file and notes there what the plan documents should say, for the wave's ship run to apply, escalating a PRD gap or a wrong design instead of finishing; the Integrator then marks the merge request ready with code and documents.",
   "definition": {
     "input_schema": {
       "type": "object",
@@ -157,6 +157,12 @@
           "properties": {
             "merge_request_url": {
               "type": "string"
+            },
+            "left_out": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             }
           },
           "required": [
@@ -335,7 +341,7 @@
           ],
           "additionalProperties": true
         },
-        "task": "Audit the documents against the finished, manually tested change for this ticket:\n\n{{.input.task}}\n\nThe builder reports: {{.state.builder.summary}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): the plan is in docs/plans/<feature>/ in the checkout; read it. Write your requirement trace to docs/plans/<feature>/tickets/<ticket-id>.md, a new file for this ticket. Never edit TASKS.md or WAVES.md in a ticket run (tickets of one wave run in parallel and would conflict). Edit ARCHITECTURE.md only if the built design differs from it. You may update the project's own docs and README so they describe what the code now does (edit only documents, never code). Then trace every requirement of the PRD that this ticket covers to the code and tests that satisfy it, in that file.\n\nIf a requirement cannot be met because the PRD is silent, ambiguous or contradicts itself, or the built or required design contradicts the approved ARCHITECTURE.md or cannot work, do not decide it yourself: ask the operator with ask_operator, naming the requirement and the section, with concrete options and \"Stop this ticket\". Carry out the answer. When the documents are to change, make the change, record the decision in your trace and finish \"ok\". When the code is to change, finish with verdict \"rework\" and the decision, as precise instructions for the Builder, in notes: the ticket goes back to the Builder. Call escalate only when the operator chooses to stop.\nFinish with verdict \"ok\" or \"rework\", trace_path (the path of the trace file you wrote), feature (the slug of the ticket's Feature line, exactly as written) and, for \"rework\", notes."
+        "task": "Audit the documents against the finished, manually tested change for this ticket:\n\n{{.input.task}}\n\nThe builder reports: {{.state.builder.summary}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): the plan is in docs/plans/<feature>/ in the checkout; read it. Write your requirement trace to docs/plans/<feature>/tickets/<ticket-id>.md, a new file for this ticket. That file is the only plan document you change: never edit PRD.md, ARCHITECTURE.md, TASKS.md or WAVES.md in a ticket run (tickets of one wave run in parallel and would conflict, and the platform leaves such changes out of the merge request). Write the design as built where it differs from ARCHITECTURE.md, and anything else a plan document should say after this ticket, in your ticket file under the heading \"## Notes for the plan documents\", one note per change, naming the document and the section; the wave's ship run applies them. You may update the project's own docs and README so they describe what the code now does (edit only documents, never code). Then trace every requirement of the PRD that this ticket covers to the code and tests that satisfy it, in that file.\n\nIf a requirement cannot be met because the PRD is silent, ambiguous or contradicts itself, or the built or required design contradicts the approved ARCHITECTURE.md or cannot work, do not decide it yourself: ask the operator with ask_operator, naming the requirement and the section, with concrete options and \"Stop this ticket\". Carry out the answer. When the documents are to change, write the change as a note under \"## Notes for the plan documents\" in your ticket file, record the decision in your trace and finish \"ok\". When the code is to change, finish with verdict \"rework\" and the decision, as precise instructions for the Builder, in notes: the ticket goes back to the Builder. Call escalate only when the operator chooses to stop.\nFinish with verdict \"ok\" or \"rework\", trace_path (the path of the trace file you wrote), feature (the slug of the ticket's Feature line, exactly as written) and, for \"rework\", notes."
       },
       {
         "id": "integrator_ready",
@@ -351,6 +357,13 @@
           "properties": {
             "merge_request_url": {
               "type": "string"
+            },
+            "left_out": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The plan documents the tool answer lists as left out of the merge request; omit when there are none"
             }
           },
           "required": [
@@ -358,7 +371,7 @@
           ],
           "additionalProperties": true
         },
-        "task": "Mark the merge request of this ticket ready for review, with the code and the updated documents together, using the open_merge_request tool with draft false and paths [\"docs/plans/{{.state.doc_audit.feature}}\"] (the plan documents of the feature, and nothing else):\n\n{{.input.task}}\n\nKeep the title from the ticket; description with the builder's summary ({{.state.builder.summary}}), the requirements traced by the audit (trace file {{.state.doc_audit.trace_path}}) and the manual test the operator approved{{with .state.integrator_draft}}{{if .branch}} on branch {{.branch}}{{end}}{{end}}. End the description with a last line \"How it was checked:\" with the results of the earlier steps (builder's whole suite passed: {{.state.builder.tests_passed}}; code reviewer's verdict: {{.state.code_review.verdict}}; the operator's manual test, approved). The call pushes those documents onto the draft's branch and marks it ready; the code is already on the branch. If the tool result says pending_approval, end your turn without finishing: the platform resumes you with the outcome. If the action was rejected or its approval expired, finish with an empty merge_request_url. Finish with the merge_request_url the tool returned."
+        "task": "Mark the merge request of this ticket ready for review, with the code and the updated documents together, using the open_merge_request tool with draft false and paths [\"docs/plans/{{.state.doc_audit.feature}}\"] (the plan documents of the feature, and nothing else; of them the request carries only the ticket's own file, and the platform leaves the others out):\n\n{{.input.task}}\n\nKeep the title from the ticket; description with the builder's summary ({{.state.builder.summary}}), the requirements traced by the audit (trace file {{.state.doc_audit.trace_path}}) and the manual test the operator approved{{with .state.integrator_draft}}{{if .branch}} on branch {{.branch}}{{end}}{{end}}. End the description with a last line \"How it was checked:\" with the results of the earlier steps (builder's whole suite passed: {{.state.builder.tests_passed}}; code reviewer's verdict: {{.state.code_review.verdict}}; the operator's manual test, approved). The call pushes those documents onto the draft's branch and marks it ready; the code is already on the branch. If the tool result says pending_approval, end your turn without finishing: the platform resumes you with the outcome. If the action was rejected or its approval expired, finish with an empty merge_request_url. Finish with the merge_request_url the tool returned, and, when its answer lists left_out, those paths as left_out."
       },
       {
         "id": "end",
