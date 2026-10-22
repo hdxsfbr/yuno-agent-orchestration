@@ -142,6 +142,11 @@ func TestWavePipelineDocAuditAsksThenSendsTheDecisionToTheBuilder(t *testing.T) 
 	if audit, _ := stateOf(t, r)["doc_audit"].(map[string]any); audit["verdict"] != "rework" || audit["notes"] != docAuditNotes {
 		t.Fatalf("state.doc_audit = %v", audit)
 	}
+	// D-090: the review of the rework checks the operator's decision, as a later round.
+	if m := sc.message("code_review", 2); !strings.Contains(m, "This is a later round") ||
+		!strings.Contains(m, "The operator decided after the documentation audit (item doc_audit): "+docAuditNotes+"\n") {
+		t.Fatalf("the second review does not check the decision:\n%s", m)
+	}
 
 	// The reworked change is reviewed, drafted and tested again, then audited without a conflict.
 	approveManualTest()

@@ -1,7 +1,7 @@
 {
   "key": "wave_pipeline",
   "name": "Wave pipeline",
-  "description": "Builds one ticket: the Builder writes the failing test first, then the code; the Code Reviewer sends it back until it is approved (bounded); the Integrator opens a draft merge request; the operator pulls the branch and runs the CI tasks locally (bugs go back to the Builder); the Doc Auditor traces the requirements in the ticket's own file and notes there what the plan documents should say, for the wave's ship run to apply, escalating a PRD gap or a wrong design instead of finishing; the Integrator then marks the merge request ready with code and documents.",
+  "description": "Builds one ticket: the Builder writes the failing test first, then the code; the Code Reviewer, who only reads, lists every finding in its first review and later rounds only check that each was fixed or declined for a reason that holds (bounded); the Integrator opens a draft merge request; the operator pulls the branch and runs the CI tasks locally (bugs go back to the Builder); the Doc Auditor traces the requirements in the ticket's own file and notes there what the plan documents should say, for the wave's ship run to apply, escalating a PRD gap or a wrong design instead of finishing; the Integrator then marks the merge request ready with code and documents.",
   "definition": {
     "input_schema": {
       "type": "object",
@@ -23,7 +23,8 @@
           "type": "object",
           "properties": {
             "summary": {
-              "type": "string"
+              "type": "string",
+              "description": "What you built or changed, and the result of the whole suite you ran last: how many tests passed, or which failed"
             },
             "files": {
               "type": "array",
@@ -33,6 +34,41 @@
             },
             "tests_passed": {
               "type": "boolean"
+            },
+            "test_command": {
+              "type": "string",
+              "description": "The exact command that ran the project's whole suite"
+            },
+            "responses": {
+              "type": "array",
+              "description": "One answer for each finding of the code review (R1, R2 ...) and each item the operator sent back (manual_test, doc_audit) that your task lists",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^(R[1-9][0-9]*|manual_test|doc_audit)$"
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "fixed",
+                      "declined"
+                    ]
+                  },
+                  "note": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "fixed: what you changed and the test that proves it; declined: why"
+                  }
+                },
+                "required": [
+                  "id",
+                  "action",
+                  "note"
+                ],
+                "additionalProperties": true
+              }
             }
           },
           "required": [
@@ -54,6 +90,57 @@
             },
             "comments": {
               "type": "string"
+            },
+            "findings": {
+              "type": "array",
+              "description": "Every finding of your first review, numbered R1, R2 ...; a later review copies them unchanged",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^R[1-9][0-9]*$"
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "text"
+                ],
+                "additionalProperties": true
+              }
+            },
+            "checks": {
+              "type": "array",
+              "description": "A later review's check of each finding and each item the operator sent back",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^(R[1-9][0-9]*|manual_test|doc_audit)$"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "done",
+                      "explained",
+                      "open"
+                    ]
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "status"
+                ],
+                "additionalProperties": true
+              }
             }
           },
           "required": [
@@ -189,7 +276,8 @@
           "type": "object",
           "properties": {
             "summary": {
-              "type": "string"
+              "type": "string",
+              "description": "What you built or changed, and the result of the whole suite you ran last: how many tests passed, or which failed"
             },
             "files": {
               "type": "array",
@@ -199,6 +287,41 @@
             },
             "tests_passed": {
               "type": "boolean"
+            },
+            "test_command": {
+              "type": "string",
+              "description": "The exact command that ran the project's whole suite"
+            },
+            "responses": {
+              "type": "array",
+              "description": "One answer for each finding of the code review (R1, R2 ...) and each item the operator sent back (manual_test, doc_audit) that your task lists",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^(R[1-9][0-9]*|manual_test|doc_audit)$"
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "fixed",
+                      "declined"
+                    ]
+                  },
+                  "note": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "fixed: what you changed and the test that proves it; declined: why"
+                  }
+                },
+                "required": [
+                  "id",
+                  "action",
+                  "note"
+                ],
+                "additionalProperties": true
+              }
             }
           },
           "required": [
@@ -208,7 +331,7 @@
           ],
           "additionalProperties": true
         },
-        "task": "Implement this ticket in the project checkout, tests first:\n\n{{.input.task}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): read that plan, docs/plans/<feature>/ in the checkout (PRD.md, ARCHITECTURE.md, TASKS.md, WAVES.md), for the context and follow its design. Work in this order: write the failing test for each acceptance test of the ticket, run the suite and see them fail for the right reason, then write the code until they pass, then run the whole suite. Stay inside the ticket's slice and files; ask the operator with ask_operator only when the ticket cannot be built as written.\n{{with .state.code_review}}{{if eq .verdict \"changes_requested\"}}\nThe code reviewer asked for changes. Address every point, with tests, before finishing:\n{{.comments}}\n{{end}}{{end}}{{with .state.manual_test}}{{if eq .decision \"rejected\"}}\nBugs found in the manual test:{{if .reason}}\n{{.reason}}\n{{end}} Reproduce each one with a failing test, fix it, and re-run the whole suite before finishing.\n{{end}}{{end}}{{with .state.doc_audit}}{{if eq .verdict \"rework\"}}\nThe operator decided, after the documentation audit: {{.notes}}\nMake that change, tests first, and re-run the whole suite before finishing.\n{{end}}{{end}}Finish with a summary, the files you created or changed (paths relative to the checkout) and whether the whole suite passes (tests_passed)."
+        "task": "Implement this ticket in the project checkout, tests first:\n\n{{.input.task}}\n\nThe ticket text names its feature (\"Feature: <slug>\"): read that plan, docs/plans/<feature>/ in the checkout (PRD.md, ARCHITECTURE.md, TASKS.md, WAVES.md), for the context and follow its design. Work in this order: write the failing test for each acceptance test of the ticket, run the suite and see them fail for the right reason, then write the code until they pass, then run the whole suite. Stay inside the ticket's slice and files; ask the operator with ask_operator only when the ticket cannot be built as written.\n{{with .state.code_review}}{{if eq .verdict \"changes_requested\"}}\nThe code reviewer asked for changes.{{if .findings}} Its findings:\n{{range .findings}}- {{.id}}: {{.text}}\n{{end}}{{with .checks}}Its check of your last answers:\n{{range .}}- {{.id}}: {{.status}}{{with .note}} ({{.}}){{end}}\n{{end}}{{end}}{{with .comments}}Its comments: {{.}}\n{{end}}Answer every finding by its id in responses: \"fixed\", with a note on what you changed and the test that proves it, or \"declined\", with the reason (the finding is wrong, outside the ticket's slice, or against the plan). A finding it checked as done or explained needs no new work: give your answer again. The reviewer checks these answers and asks for nothing new.\n{{else}} Address every point, with tests, before finishing:\n{{.comments}}\n{{end}}{{end}}{{end}}{{with .state.manual_test}}{{if eq .decision \"rejected\"}}\nBugs found in the manual test:{{if .reason}}\n{{.reason}}\n{{end}} Reproduce each one with a failing test, fix it, and re-run the whole suite before finishing; answer them in responses with the id manual_test.\n{{end}}{{end}}{{with .state.doc_audit}}{{if eq .verdict \"rework\"}}\nThe operator decided, after the documentation audit: {{.notes}}\nMake that change, tests first, and re-run the whole suite before finishing; answer it in responses with the id doc_audit.\n{{end}}{{end}}Run the project's whole suite last, after your final change: the code reviewer only reads, so your report is the test result. Finish with a summary that gives the suite's result (how many tests passed, or which failed), test_command (the exact command that ran the whole suite), the files you created or changed (paths relative to the checkout), whether the whole suite passes (tests_passed) and, when this task lists findings or the operator's items, responses."
       },
       {
         "id": "code_review",
@@ -229,6 +352,57 @@
             },
             "comments": {
               "type": "string"
+            },
+            "findings": {
+              "type": "array",
+              "description": "Every finding of your first review, numbered R1, R2 ...; a later review copies them unchanged",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^R[1-9][0-9]*$"
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "text"
+                ],
+                "additionalProperties": true
+              }
+            },
+            "checks": {
+              "type": "array",
+              "description": "A later review's check of each finding and each item the operator sent back",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^(R[1-9][0-9]*|manual_test|doc_audit)$"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "done",
+                      "explained",
+                      "open"
+                    ]
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "status"
+                ],
+                "additionalProperties": true
+              }
             }
           },
           "required": [
@@ -237,7 +411,7 @@
           ],
           "additionalProperties": true
         },
-        "task": "Review the change for this ticket:\n\n{{.input.task}}\n\nThe builder reports: {{.state.builder.summary}}\nFiles: {{range .state.builder.files}}{{.}} {{end}}\nTests passed: {{.state.builder.tests_passed}}\n\nIn the checkout run git status and git diff against the default branch, read the new files and run the test suite yourself. Check that a test exists for every acceptance test of the ticket and was written to fail first, that the code does what the ticket and docs/plans/ ask and nothing outside its slice, and that errors and edge cases are handled. Do not edit files. Finish with verdict \"approved\" when it is correct and the suite passes, otherwise \"changes_requested\" with specific, actionable comments."
+        "task": "Review the change for this ticket:\n\n{{.input.task}}\n\nThe builder reports: {{.state.builder.summary}}\nFiles: {{range .state.builder.files}}{{.}} {{end}}\nWhole suite passed (tests_passed): {{.state.builder.tests_passed}}{{with .state.builder.test_command}}, command: {{.}}{{end}}\n\nThe change is in runs/$RUN_ID/changes.diff, which the platform wrote before your turn: the run's changes against the branch it started from, new and deleted files included. Read it, and the files it touches in the checkout, with read and ls. Run nothing and change nothing: the Builder ran the suite, and its report above is the result.\n{{with .state.code_review}}\nThis is a later round: verify, do not review again. The findings of your first review:\n{{range .findings}}- {{.id}}: {{.text}}\n{{else}}(none{{with .comments}}; your last comments: {{.}}{{end}})\n{{end}}{{with .checks}}Your last check:\n{{range .}}- {{.id}}: {{.status}}{{with .note}} ({{.}}){{end}}\n{{end}}{{end}}The Builder's answers:\n{{range $.state.builder.responses}}- {{.id}}: {{.action}}{{with .note}} ({{.}}){{end}}\n{{else}}(none)\n{{end}}{{with $.state.manual_test}}{{if eq .decision \"rejected\"}}The operator's manual test sent bugs back (item manual_test):{{with .reason}} {{.}}{{end}}\n{{end}}{{end}}{{with $.state.doc_audit}}{{if eq .verdict \"rework\"}}The operator decided after the documentation audit (item doc_audit): {{.notes}}\n{{end}}{{end}}\nCheck these items and nothing else, by reading the change: done (the change does it), explained (the Builder declined it with a reason that holds; the operator's decision after the documentation audit is not the Builder's to decline) or open (not done, or the reason does not hold). An item your last check found done or explained stays so unless the change undid it. Raise nothing new: what your first review did not ask for is not asked for now. Finish with findings copied unchanged from your first review, checks with one entry per item (id, status, note), verdict \"approved\" when every item is done or explained and the Builder reports the whole suite passing, otherwise \"changes_requested\", and comments that name what is still open, or that the suite fails.{{else}}\nThis is your first review of this ticket and your only chance to ask for changes: later rounds only check what you ask for now. Read the plan in docs/plans/<feature>/ (the ticket names its feature) and check, by reading, that a meaningful test exists for every acceptance test of the ticket (it checks the behaviour the ticket asks for and would fail without the change), that the code does what the ticket and the plan ask and nothing outside its slice, and that errors and edge cases are handled. List every finding at once in findings, numbered R1, R2 and so on, each specific and actionable (the file and the problem); a whole suite the Builder reports failing is a finding too. Finish with verdict \"approved\" and no findings when the change is correct and the Builder reports the whole suite passing, otherwise \"changes_requested\" with the findings, and comments that sum them up.{{end}}"
       },
       {
         "id": "integrator_draft",

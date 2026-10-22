@@ -67,3 +67,64 @@ func TestBuilderAndScoutPromptsOnUnpinnedTools(t *testing.T) {
 		t.Error("the Builder prompt does not forbid changing unrelated code for a new release")
 	}
 }
+
+// D-090: the Code Reviewer only reads. It has no exec, reads the change from the changes
+// file the platform writes, judges the tests without running them, lists every finding at
+// once in its first review, and later only checks those and the operator's items, raising
+// nothing new; a failing suite the Builder reports sends the work back.
+func TestCodeReviewerOnlyReadsAndChecksItsFirstFindings(t *testing.T) {
+	a := shippedAgentDef(t, "Code Reviewer")
+	if slices.Contains(a.ToolAllowlist, "exec") || slices.ContainsFunc(a.ToolAllowlist, func(tool string) bool { return tool == "write" || tool == "edit" }) {
+		t.Errorf("the Code Reviewer holds a tool that runs or changes something: %v", a.ToolAllowlist)
+	}
+	if want := []string{"read", "ls", "read_merge_request", "ask_operator", "escalate", "finish"}; !slices.Equal(a.ToolAllowlist, want) {
+		t.Errorf("the Code Reviewer's tools = %v, want %v", a.ToolAllowlist, want)
+	}
+	for _, want := range []string{
+		"You only read: you run nothing, install nothing and never change a file",
+		"runs/<run id>/changes.diff",
+		"new and deleted files included",
+		"does a meaningful test exist for each acceptance criterion",
+		"You judge the tests by reading them and never run them",
+		"Your first review is your one chance to ask for changes: list every finding at once, numbered R1, R2",
+		"specific and actionable",
+		"A later review only verifies",
+		"bugs from the manual test, a decision after the documentation audit",
+		"done, explained (the Builder declined it with a reason that holds) or still open",
+		"copy your findings forward unchanged, and raise no new finding",
+		"Approve when every item is done or explained and the Builder reports the whole suite passing",
+		"the Builder reports the suite failing, which is verification, not a new finding",
+		"never rewrite",
+	} {
+		if !strings.Contains(a.SystemPrompt, want) {
+			t.Errorf("the Code Reviewer prompt lacks %q", want)
+		}
+	}
+	for _, gone := range []string{"git diff", "git status", "Run the project's tests yourself"} {
+		if strings.Contains(a.SystemPrompt, gone) {
+			t.Errorf("the Code Reviewer prompt still says %q", gone)
+		}
+	}
+}
+
+// D-090: the Builder runs the whole suite last, every round, and reports the command and the
+// result, and answers every numbered finding fixed or declined with the reason.
+func TestBuilderReportsTheSuiteAndAnswersEachFinding(t *testing.T) {
+	a := shippedAgentDef(t, "Builder")
+	if !slices.Contains(a.ToolAllowlist, "exec") {
+		t.Error("the Builder cannot run the suite")
+	}
+	for _, want := range []string{
+		"Run the project's whole suite as the last thing before you hand over, every round",
+		"the Code Reviewer only reads and runs nothing",
+		"the exact command in test_command",
+		"the pass count or the failures",
+		"answer every finding by its id in responses",
+		`"fixed" with a note on what you changed`,
+		`"declined" with the reason`,
+	} {
+		if !strings.Contains(a.SystemPrompt, want) {
+			t.Errorf("the Builder prompt lacks %q", want)
+		}
+	}
+}

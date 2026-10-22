@@ -6,6 +6,35 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-21
 
+**D-090 The Code Reviewer makes one review and then only checks it; it reads, it runs
+nothing.** (Andre, 2026-10-21: "The reviewer will make all of its observations on the first
+review it sends, and then additional follow-ups need to stick with those observations ... The
+coder should fix all of the requests, or explain why it shouldn't fix some of the requests";
+"the reviewer should only read stuff, not execute anything, change code, or do anything like
+that. Once the code is ready for review, the coder should have run those tests already.")
+Ticket runs failed at the review loop's limit, or ran out of rounds, because every round was
+a fresh review that found something new. Now the first review lists every finding at once,
+numbered R1, R2 and so on; the Builder answers each by its id, fixed or declined with the
+reason; a later review checks only those findings and what the operator sent back (manual
+test bugs, the audit's decision) as done, explained or open, copies the findings forward
+unchanged and raises nothing new. It approves when every item is done or explained and the
+Builder reports the whole suite passing. The Code Reviewer loses `exec`: it judges the code
+and the tests by reading, and the Builder runs the whole suite last and reports the command
+and the result. Without `exec` the reviewer cannot run `git diff`, so the platform writes the
+run's changes so far to `runs/<run id>/changes.diff` before a later step's turn, from the run
+repository (where the checkout's branch is, to the step's commit), outside the checkout and
+never carried forward. Built in the template and the prompts: the review task renders as a
+first review while `state.code_review` is absent and as a check once it is there, and the
+new output fields (`findings`, `checks`, `responses`, `test_command`) are optional, so
+`verdict` and `comments` stay required and the evals' scripts stay valid. The only engine
+change is the changes file. Alternatives rejected: the engine refusing a later review that
+adds a finding (the copy forward is the only signal, and the loop limit still bounds a
+reviewer that ignores the rule); copying the `diff.patch` artifact into the workspace (made
+after a visit, from `checkout_sha`, which a push moves, with the default branch's merge in it
+on a merge request run, and replaced by an agent's own `out/diff.patch`); keeping `exec` for
+the tests only (the allowlist has no per-command scope, and Andre wants the Builder's report
+to be the result). Design: DESIGN 5.28 rules 1 and 12, 5.29 rule 5, 5.30 rules 5 and 11.
+
 **D-089 A ticket run changes only its own ticket file among the plan documents; the wave's
 ship run applies the shared notes; a plan revision holds the waves.** (Andre, 2026-10-21:
 "Plan revisions and running waves edit the same documents.") Seen live: the plan revision

@@ -4024,7 +4024,8 @@ Rules:
    Architect (opus), Planner (opus), Builder (sonnet), Code Reviewer (opus), Doc Auditor
    (opus) and Integrator (sonnet), with the tools of the table in
    `docs/briefs/delivery-process/ARCHITECTURE.md` (wave 1 grants only existing tools;
-   `escalate`, `publish_tickets` and `advance_wave` are added in their waves). Scout and
+   `escalate`, `publish_tickets` and `advance_wave` are added in their waves; since D-090
+   the Code Reviewer has no `exec`, rule 12). Scout and
    Builder have memory on. The Chief of Staff is unchanged and stays bound to Telegram.
 2. **Retired agents and templates (D-071).** The seed no longer creates Coder, Reviewer,
    Deployer, Researcher, Critic, Writer and the three panel reviewers; `make seed` deletes
@@ -4138,6 +4139,36 @@ Rules:
    and so no context block), the line reads `How it was checked: Not run in this task;
    the project's CI checks this merge request.` The Integrator never writes `NOT VERIFIED`
    and never claims a check it was not told about.
+12. **The review loop converges (D-090).** Seen live: ticket runs ran out of review rounds,
+   and each round was a fresh review, free to ask for something new. The Code Reviewer only reads:
+   its tools are `read`, `ls`, `read_merge_request`, `ask_operator`, `escalate` and
+   `finish`, with no `exec`, so it runs, installs and changes nothing. It reads the change
+   from `runs/<run id>/changes.diff`, which the platform writes before a later step's turn
+   (5.30 rule 11), then the files the change touches and the plan documents, and judges
+   the code and the tests by reading: does a meaningful test exist for each acceptance
+   criterion. It does not run the tests. The Builder runs the project's whole suite as the
+   last thing before every hand-over and reports the exact command (`test_command`) and the
+   result (the pass count or the failures, in `summary`, and `tests_passed`). The first
+   review lists every finding at once, numbered `R1`, `R2` and so on, each specific and
+   actionable (`findings: [{id, text}]`). The Builder answers each by its id (`responses:
+   [{id, action: fixed | declined, note}]`): fixed, with what it changed, or declined, with
+   the reason. A later review only verifies: the findings of the first review, the
+   Builder's answers, and what the operator sent back (the bugs of a rejected manual test,
+   id `manual_test`; the decision after the documentation audit, id `doc_audit`), each
+   checked as `done`, `explained` (declined for a reason that holds; the operator's audit
+   decision is not the Builder's to decline) or `open` (`checks: [{id, status, note}]`).
+   It raises no new finding, and it copies `findings` forward unchanged, so the run's
+   state always holds the first review's list. It approves when every item is done or
+   explained and the Builder reports the whole suite passing; a suite the Builder reports
+   failing sends the work back as verification, not as a new finding. When the operator,
+   asked by the reviewer, decides on a code change, the decision is a finding in a first
+   review and the note of the item it settles in a later one. The new fields are optional,
+   so `verdict` and `comments` stay the required pair and earlier results stay valid; a
+   later round whose first review recorded no findings shows its comments instead.
+   Choice: a template rule (the task renders one way while `state.code_review` is absent
+   and the other once it is) rather than an engine rule, since the state already carries
+   everything both rounds need; the engine enforces neither the copy forward nor "nothing
+   new", which the loop limit still bounds.
 
 Edge cases: an operator who never answers the Analyst (the question parks and expires,
 5.24; the run fails "question unanswered"); a rejected design three times (the loop limit
@@ -4160,7 +4191,15 @@ for the whole checkout and for the feature's directory as paths, while the defau
 newer `ARCHITECTURE.md` stays; a call with only left-out changes opens nothing; with the
 default branch merged in, a left-out document takes the default branch's version and its
 markers do not block the push; a plan run writes all four documents; the Doc Auditor's
-prompt and task send notes to the ticket file and never edit the other documents.
+prompt and task send notes to the ticket file and never edit the other documents; T5.28.9
+(D-090) the Code Reviewer has no `exec` and its prompt says it only reads, lists every
+finding in its first review and later only verifies, and the Builder's prompt says it runs the
+whole suite last and answers each finding; both rounds' tasks render from state; a scripted
+ticket whose first review sends back R1 and R2, whose Builder fixes R1 and declines R2, gets
+a second review whose task holds exactly R1 and R2 and the two answers and which approves;
+the review after a rejected manual test, and after the audit's decision, checks the
+operator's item; the new output fields are optional and refused when malformed
+(`internal/engine/review_loop_test.go`, `internal/seed/prompts_test.go`).
 
 Limitations: one feature at a time per project (5.29); the plan documents are only as
 good as the agents' prompts; nothing checks that `TASKS.md` slices are really end to end.
@@ -4259,7 +4298,20 @@ Rules:
    code_review → `integrator_draft` (`open_merge_request` draft, output `{merge_request_url,
    branch}`) → approval `manual_test` (message: pull the branch, run the CI tasks;
    `on_reject` → builder, whose task shows the operator's notes as "bugs found") →
-   doc_audit → `integrator_ready` (`open_merge_request` with `draft: false`) → end. The
+   doc_audit → `integrator_ready` (`open_merge_request` with `draft: false`) → end.
+   The review rounds follow 5.28 rule 12 (D-090). `builder` outputs `{summary, files,
+   tests_passed, test_command?, responses?: [{id, action: fixed | declined, note}]}` and
+   `code_review` `{verdict, comments, findings?: [{id: R<n>, text}], checks?: [{id, status:
+   done | explained | open, note?}]}`, in the output schemas and the state schema alike.
+   The `code_review` task is the first review while `state.code_review` is absent: read
+   `changes.diff` and the files, list every finding at once. Once it is present, the task
+   is a later round: it lists the first review's findings from state (its comments when it
+   recorded none), the last check, the Builder's `responses` and, when present, the
+   operator's items (the rejected manual test's reason as `manual_test`, the audit's
+   `rework` notes as `doc_audit`), and asks to verify those only, copy `findings` forward
+   and raise nothing new. So the review after a rejected manual test or an audit's rework
+   is a later round too. The `builder` task lists the findings with their ids and the
+   reviewer's last check, and asks for one response per id, also for the operator's items. The
    `integrator_ready` call runs without its own tool approval when the run's
    `manual_test` approval was granted and the call only updates the run's existing MR
    (a per-node policy `auto_after: manual_test`, validated at save: the named node must
@@ -4590,7 +4642,8 @@ Rules:
    behind under 5.26 rule 10 brings none). Its `origin` stays the project, so
    `open_merge_request` pushes as before.
 5. **Other files.** Files outside `repo/` under `runs/<run id>/` are copied from the
-   carry sources' private workspaces, in the same order, as today.
+   carry sources' private workspaces, in the same order, as today, except `changes.diff`,
+   which each step gets of its own (rule 11).
 6. **Collection.** `out/` and the diff are collected from the private workspace (5.25).
 7. **Retry.** A retried visit starts from the same computed commit and copies, so it
    needs the run repository and the earlier steps' private workspaces, which are kept as
@@ -4623,6 +4676,22 @@ Rules:
     of 5.22 rule 13 uses it), so Scout and other steps can read `git log` and `git diff`
     against either. Fetches into one run repository are serialized, so two fork heads
     that clone at once do not race for its shallow file.
+11. **The run's changes as a file** (D-090). Before the first turn of a later step (one
+    whose checkout is built from a run repository commit) the platform writes
+    `runs/<run id>/changes.diff` in the step's workspace, outside `repo/`: the patch from
+    where the checkout's branch is (the commit the run cloned, or the platform's merge of
+    5.22 rule 13) to the step's commit, made in the run repository with `git diff
+    --no-color --no-ext-diff --no-textconv`. It shows edits, new and deleted files, what
+    `git status` and `git diff` show in the checkout, for a step that runs no commands
+    (the Code Reviewer, 5.28 rule 12). It is read-only, cut at 10 MiB with a marker line,
+    empty when nothing changed, never committed (it is not in the checkout), never
+    collected (it is not in `out/`) and never carried to the next step, which gets its
+    own; a file of that name an agent wrote is dropped the same way. A failure to make it
+    is a log line and leaves no file; the step still has the checkout. The first step has
+    none. Choice: made from the run repository rather than copied from the `diff.patch`
+    artifact (5.25 rule 3), because that one is made only after a visit, counts from
+    `checkout_sha`, which a push moves, includes the merge of the default branch on a
+    merge request run, and is replaced by an agent's own `out/diff.patch`.
 
 Edge cases: two runs of the same agent at once (different session keys, so different
 workspaces); a fork's branches (each branch's visits start from their own carry
@@ -4649,7 +4718,12 @@ base and Python sandbox Dockerfiles install `libgomp1` (`TestSandboxImagesInstal
 is in the first step's checkout and is the run's `checkout_sha` (rule 9); T5.30.12 the
 fetch deepens until a request's branch and main share history, every checkout built from
 the run repository has `origin/main` with history and no credential, and a run on main
-gets main's history (rule 10).
+gets main's history (rule 10); T5.30.13 a later step finds `changes.diff` with the earlier
+step's edit and new file, the first step finds none, a file of that name a step wrote is
+not carried, the patch after a clean merge holds only the agents' changes, a long one is
+cut with the marker, and the write never follows a link (rule 11;
+`TestLaterStepGetsTheRunsChanges`, `TestChangesFileIsNeverCarried`,
+`internal/project/runrepo_changes_test.go`).
 
 Limitations: the path rule is OpenClaw's internal behaviour, pinned by a test, not an API;
 on an OpenClaw upgrade the probe in `docs/test-results.md` is repeated.
