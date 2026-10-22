@@ -344,6 +344,56 @@ paths:
       responses:
         "200": { description: the file, content: { "*/*": { schema: { type: string, format: binary } } } }
         "404": { $ref: "#/components/responses/Error" }
+  /api/runs/diagnosis:
+    get:
+      tags: [runs]
+      operationId: listRunDiagnoses
+      x-yuno-risk: read
+      summary: What every run that has not ended is doing, from evidence
+      description: |
+        DESIGN 5.12, liveness from evidence. The RunDiagnosis of every queued, running and
+        waiting_approval run, newest first, at most 100, all checked at the same instant.
+      parameters:
+        - { name: project_id, in: query, description: "only the runs that work on this project; an unknown id lists none", schema: { type: string } }
+      responses:
+        "200":
+          description: diagnoses
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/RunDiagnosis" } } } }
+  /api/runs/{id}/diagnosis:
+    get:
+      tags: [runs]
+      operationId: getRunDiagnosis
+      x-yuno-risk: read
+      summary: What the run is doing, from evidence
+      description: |
+        DESIGN 5.12, liveness from evidence. A "running" status proves nothing; the liveness
+        rests on the timestamps each live step records (heartbeat, progress, what it waits
+        on, its open tool calls) and the thresholds in `thresholds`. Missing evidence never
+        reads as executing. A finished run reports its status as its liveness.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: diagnosis, content: { application/json: { schema: { $ref: "#/components/schemas/RunDiagnosis" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/runs/{id}/events/page:
+    get:
+      tags: [runs]
+      operationId: listRunEventsPage
+      x-yuno-risk: read
+      summary: The run's events, oldest first, a page at a time
+      description: |
+        DESIGN 5.12. The run's durable events (the ones its event stream sends) with a
+        sequence number above `after`, in ascending order; pass `next_after` back as `after`
+        for the next page. `event` keeps only the listed types. Each event's data is redacted
+        again before it is returned.
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: after, in: query, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: limit, in: query, description: "1 to 500; another value is 422", schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+        - { name: event, in: query, description: "event types separated by commas, e.g. log,tool_call", schema: { type: string } }
+      responses:
+        "200": { description: events, content: { application/json: { schema: { $ref: "#/components/schemas/RunEventsPage" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
 
   /api/approvals:
     get:
@@ -1648,6 +1698,99 @@ components:
           description: "DESIGN 5.20 rule 6: the request the run opened, or (DESIGN 5.22 rule 1) the one it names; absent when none"
         merge_request_id: { type: string, description: "DESIGN 5.22 rule 1: the merge request record the run updates (its branch was cloned); absent for a run that opens its own or none" }
         checkout_sha: { type: string, description: "DESIGN 5.22 rule 2: the commit the run's checkout was cloned at, moved to each commit the run pushed; absent for a run without a checkout" }
+    RunDiagnosis:
+      type: object
+      description: |
+        DESIGN 5.12, liveness from evidence. A live step's liveness, in order: no heartbeat is
+        unknown; a heartbeat older than worker_stale_s is stalled (the sweeper re-queues the
+        run); older than heartbeat_fresh_s is unknown; waiting on a person is waiting; on a
+        tool, executing until the oldest open call is older than tool_overdue_s, then stalled;
+        on the model, executing while the wait (restarted by progress) is at most
+        progress_fresh_s, waiting up to model_stall_s, then stalled; otherwise executing only
+        with progress within progress_fresh_s, else unknown. The run: a finished run reports
+        its status; queued is blocked (its project at a budget cap or its waves paused) or
+        waiting; waiting_approval is waiting; running is the worst of its live steps (stalled,
+        unknown, blocked, waiting, executing), or, between steps, executing while the run was
+        updated within heartbeat_fresh_s, unknown within worker_stale_s, stalled after.
+      required: [run_id, status, liveness, reason, checked_at, thresholds, nodes, pending]
+      properties:
+        run_id: { type: string }
+        status: { type: string, enum: [queued, running, waiting_approval, succeeded, failed, cancelled, timed_out] }
+        liveness: { type: string, enum: [executing, waiting, blocked, unknown, stalled, succeeded, failed, cancelled, timed_out], description: "a finished run's status is its liveness" }
+        reason: { type: string, description: "why, with the ages that prove it; a finished run's failure reason, empty for a success" }
+        checked_at: { type: string, format: date-time }
+        thresholds: { $ref: "#/components/schemas/LivenessThresholds" }
+        nodes: { type: array, items: { $ref: "#/components/schemas/NodeDiagnosis" }, description: "the run's live agent steps, one per visit (one per branch inside a fork)" }
+        pending: { type: array, items: { $ref: "#/components/schemas/PendingDiagnosis" }, description: "the run's undecided approvals and questions, oldest first" }
+    LivenessThresholds:
+      type: object
+      description: "The thresholds of DESIGN 5.12, in seconds; model_stall_s is MODEL_STALL_AFTER and worker_stale_s ENGINE_STALE_AFTER, 0 when the platform does not act on that silence."
+      required: [heartbeat_fresh_s, progress_fresh_s, model_stall_s, worker_stale_s, tool_overdue_s]
+      properties:
+        heartbeat_fresh_s: { type: integer }
+        progress_fresh_s: { type: integer }
+        model_stall_s: { type: integer }
+        worker_stale_s: { type: integer }
+        tool_overdue_s: { type: integer }
+    NodeDiagnosis:
+      type: object
+      required: [node_id, visit, branch_id, agent, status, liveness, reason, heartbeat_at, progress_at, waiting_on, model_wait_since, open_calls, last_event]
+      properties:
+        node_id: { type: string }
+        visit: { type: integer }
+        branch_id: { type: [string, "null"], description: "the parallel branch the visit runs in; null outside a fork" }
+        agent: { type: string, description: the agent's name }
+        status: { type: string, enum: [pending, running, waiting_approval] }
+        liveness: { type: string, enum: [executing, waiting, unknown, stalled] }
+        reason: { type: string }
+        heartbeat_at: { type: [string, "null"], format: date-time, description: "the worker's last tick (every 30 s); null when none was recorded" }
+        progress_at: { type: [string, "null"], format: date-time, description: "the step's last sign of life (a reply streaming in, a tool event, a new transcript entry), written at most every 30 s" }
+        waiting_on: { type: string, enum: ["", model, tool, human, setup], description: "empty: nothing the step can name (between turns, or the gateway away)" }
+        model_wait_since: { type: [string, "null"], format: date-time, description: "when the step began waiting on the model; null otherwise" }
+        open_calls: { type: array, items: { $ref: "#/components/schemas/OpenCallDiagnosis" } }
+        last_event:
+          description: "the newest event about this step (node.status, model_call, tool_call, approval); null when there is none"
+          oneOf:
+            - $ref: "#/components/schemas/EventRef"
+            - type: "null"
+    OpenCallDiagnosis:
+      type: object
+      required: [name, summary, started_at, age_s]
+      properties:
+        name: { type: string }
+        summary: { type: string, description: "the first 200 characters of the command or path, redacted; empty when the call has neither" }
+        started_at: { type: string, format: date-time }
+        age_s: { type: integer }
+    EventRef:
+      type: object
+      required: [seq, event, at]
+      properties:
+        seq: { type: integer }
+        event: { type: string }
+        at: { type: string, format: date-time }
+    PendingDiagnosis:
+      type: object
+      required: [approval_id, kind, requested_at, age_s]
+      properties:
+        approval_id: { type: string }
+        kind: { type: string }
+        requested_at: { type: string, format: date-time }
+        age_s: { type: integer }
+    RunEventsPage:
+      type: object
+      required: [events, next_after]
+      properties:
+        events:
+          type: array
+          items:
+            type: object
+            required: [seq, event, at, data]
+            properties:
+              seq: { type: integer }
+              event: { type: string }
+              at: { type: string, format: date-time }
+              data: { description: "the event's data, redacted" }
+        next_after: { type: integer, description: "the last sequence number returned, or `after` when the page is empty" }
     RunNode:
       type: object
       required: [id, run_id, node_id, visit, iteration, status]

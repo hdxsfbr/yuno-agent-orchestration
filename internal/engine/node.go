@@ -18,6 +18,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"yuno/internal/guardrails"
+	"yuno/internal/liveness"
 	"yuno/internal/memory"
 	ymodel "yuno/internal/model"
 	"yuno/internal/obs"
@@ -33,7 +34,7 @@ const (
 	maxContinueRetries = 3 // DESIGN 5.5 rule 3
 	maxSendAttempts    = 5 // DESIGN 5.5 rule 2
 	maxFinishAttempts  = 3 // DESIGN 5.6: refused finish submissions per visit
-	heartbeatEvery     = 30 * time.Second
+	heartbeatEvery     = liveness.HeartbeatEvery
 	quietCatchUp       = 30 * time.Second // re-read chat.history after this long without events
 	historyLimit       = 200
 	abortRPCTimeout    = 5 * time.Second
@@ -162,7 +163,13 @@ type visit struct {
 	// are its tool calls that started and have no result yet. A turn with an open call is
 	// waiting on a tool, never stalled.
 	progressAt time.Time
-	openCalls  map[string]bool
+	openCalls  map[string]*openCall
+
+	// The liveness evidence (DESIGN 5.12), owned by the visit goroutine: what the visit waits
+	// on now, since when it waits on the model, and what its row holds (written).
+	waitingOn      string
+	modelWaitSince time.Time
+	written        writtenEvidence
 
 	// Questions to the operator (DESIGN 5.24), owned by the visit goroutine: the visit's
 	// pending question (one at a time), the one its wait ended on with no decision (rule
@@ -197,7 +204,7 @@ func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.No
 		inputs: map[string]toolInput{}, pendingOutputs: map[string]json.RawMessage{},
 		approvals: map[string]*store.Approval{}, approvalSpans: map[string]string{},
 		toolBlocking: map[string]bool{}, platformSpans: map[string]string{}, parkedTools: map[string]*store.Approval{},
-		openCalls: map[string]bool{},
+		openCalls: map[string]*openCall{},
 		calls:     make(chan func()), loopDone: make(chan struct{}),
 		lastTouch: time.Now(), lastEventAt: time.Now(),
 	}
@@ -236,6 +243,7 @@ func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.No
 	if err := store.CreateRunNode(ctx, e.deps.Pool, v.rn); err != nil {
 		return nil, failed(store.RunFailed, "create node visit: "+err.Error())
 	}
+	v.startEvidence(ctx, now)
 	v.nodeSpan = e.startSpan(ctx, run.ID, &rootSpan, "node", node.ID, now, nil,
 		map[string]any{"agent_id": node.AgentID, "visit": v.rn.Visit, "session_key": v.key, "run_node_id": v.rn.ID})
 	e.emit(ctx, run.ID, "node.status", map[string]any{"node": v.rn})
@@ -995,15 +1003,17 @@ func (v *visit) awaitGateway(ctx context.Context) *outcome {
 		if res := v.preflight(ctx); res != nil {
 			return res
 		}
-		if time.Since(v.lastTouch) >= heartbeatEvery {
+		if time.Since(v.lastTouch) >= v.e.heartbeat {
 			v.touch(ctx)
 		}
 	}
 }
 
+// touch is the worker's heartbeat: the run's updated_at for the stale-run sweeper (DESIGN
+// 5.1 rule 8) and the visit's heartbeat_at (5.12), in one statement.
 func (v *visit) touch(ctx context.Context) {
 	v.lastTouch = time.Now()
-	if err := store.TouchRun(ctx, v.e.deps.Pool, v.run.ID); err != nil {
+	if err := store.TouchRunNode(ctx, v.e.deps.Pool, v.run.ID, v.rn.ID, v.e.clock.Now()); err != nil {
 		v.log.Warn("heartbeat failed", "error", err)
 	}
 }
@@ -1014,6 +1024,7 @@ func (v *visit) loop(ctx context.Context) outcome {
 	t := time.NewTicker(v.e.tickInterval)
 	defer t.Stop()
 	for v.result == nil {
+		v.recordEvidence(ctx)
 		select {
 		case <-ctx.Done():
 			return outcome{interrupted: true}
@@ -1155,15 +1166,15 @@ func (v *visit) onTranscript(ctx context.Context, raw json.RawMessage, messageID
 			if p.Type != "toolCall" || p.ID == "" {
 				continue
 			}
-			if current {
-				v.openCalls[p.ID] = true // until its toolResult entry
-			}
 			args := p.Arguments
 			if len(args) == 0 || string(args) == "null" {
 				args = json.RawMessage(`{}`)
 			}
 			args = obs.RedactJSON(args)
 			v.inputs[p.ID] = toolInput{input: args, modelCallID: mcID, at: asked}
+			if current {
+				v.noteOpenCall(p.ID, p.Name, asked, false) // until its toolResult entry
+			}
 			if st := v.tools[p.ID]; st != nil {
 				st.row.Input, st.row.ModelCallID = args, mcID
 				if err := store.SetToolCallInput(ctx, v.e.deps.Pool, st.row.ID, args, mcID); err != nil {
@@ -1370,7 +1381,13 @@ func (v *visit) onAgent(ctx context.Context, ae openclaw.AgentEvent) {
 		if ae.RunID == v.runID {
 			switch it.Phase {
 			case "start":
-				v.openCalls[it.ToolCallID] = true
+				started := v.e.clock.Now()
+				if it.StartedAt > 0 {
+					started = msTime(it.StartedAt)
+				} else if ae.TS > 0 {
+					started = msTime(ae.TS)
+				}
+				v.noteOpenCall(it.ToolCallID, it.Name, started, true)
 			case "end":
 				delete(v.openCalls, it.ToolCallID)
 			}
@@ -1981,7 +1998,7 @@ func (v *visit) onSignal(ctx context.Context) {
 
 func (v *visit) onTick(ctx context.Context) {
 	e := v.e
-	if time.Since(v.lastTouch) >= heartbeatEvery {
+	if time.Since(v.lastTouch) >= e.heartbeat {
 		v.touch(ctx)
 	}
 	if v.aborting != nil {
@@ -2314,6 +2331,7 @@ func (v *visit) finish(ctx context.Context, res outcome) {
 	}
 	if res.paused {
 		clear(v.toolBlocking)
+		v.recordEvidence(ctx) // waiting on a person, no live turn (DESIGN 5.12)
 		e.endSpan(ctx, v.nodeSpan, now, map[string]any{"status": store.NodeWaitingApproval, "parked": true, "steps": v.steps, "turns": v.turn})
 		return
 	}
