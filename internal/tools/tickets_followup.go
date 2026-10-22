@@ -15,8 +15,8 @@ import (
 // becomes a follow-up ticket with an issue of its own. The Planner may name the follow-up
 // itself ("Follow-up to T<k>: ..."); otherwise publish_tickets adds one.
 
-// followUpPrefix starts a follow-up's title, the Planner's and the platform's alike.
-const followUpPrefix = "Follow-up to "
+// ticketFollowUpPrefix starts a follow-up ticket's title, the Planner's and the platform's alike.
+const ticketFollowUpPrefix = "Follow-up to "
 
 // followUp is a follow-up ticket of a revision.
 type followUp struct {
@@ -34,7 +34,7 @@ type followUp struct {
 
 // isFollowUpOf reports whether a title names a follow-up of the ticket id.
 func isFollowUpOf(title, id string) bool {
-	p := strings.ToLower(followUpPrefix + id)
+	p := strings.ToLower(ticketFollowUpPrefix + id)
 	t := strings.ToLower(strings.TrimSpace(title))
 	if !strings.HasPrefix(t, p) {
 		return false
@@ -291,7 +291,7 @@ func (fu followUp) ticket(old string, mr *store.MergeRequest) planTicketIn {
 		b.WriteString("\n\n" + s)
 	}
 	t.ID = fu.id
-	t.Title = followUpPrefix + k + ": " + strings.TrimSpace(t.Title)
+	t.Title = ticketFollowUpPrefix + k + ": " + strings.TrimSpace(t.Title)
 	t.Slice = b.String()
 	return t
 }

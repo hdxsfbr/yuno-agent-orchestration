@@ -27,4 +27,8 @@ Behaviour changes operators notice, newest first. The design reasons are in
   loses that change: it becomes a new follow-up ticket ("Follow-up to T8: ...") with its own
   issue in the current wave, and the approval message names it. The merged ticket and its
   issue stay as they were.
+- A merge request now carries only what its run changed. Work that reached main after the
+  run started (another ticket's merge) is kept instead of being deleted by the run's
+  commit. When the run and main changed the same file, nothing is pushed and the agent is
+  told which files conflict, so it can ask you how to resolve them.
 

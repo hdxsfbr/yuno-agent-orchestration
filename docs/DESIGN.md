@@ -1349,14 +1349,40 @@ Rules:
     skipped (a retry after a partial failure); otherwise the api **never runs git inside
     the checkout** (a hook or a configuration entry an agent wrote there, such as a
     `pre-commit` hook or a `url.insteadOf` rewrite, would run on the api side or redirect
-    the push with its credentials): it clones the default branch again into a private
-    directory of its own, empties that working tree, copies the checkout's working tree
-    over it (regular files only, links skipped, `.git` and the excluded directories of
-    rule 3 left out), stages everything, and ends the call with the model-facing error
-    `the checkout has no changes to propose` when `git status` is clean; otherwise it
-    commits as `Yuno <yuno@localhost>` with the title as message (`--no-verify`, no
-    signing) and pushes `HEAD` to the branch from the api with the token (rule 4), then
-    removes the private directory; (c) an open merge request from that branch is
+    the push with its credentials) and **proposes only the run's changes** (D-087): it
+    clones the default branch as it is now (the head) into a private directory of its
+    own; takes the run's base, `runs.checkout_sha` (the commit the run cloned, then the
+    run's own commit after each push; a null one is the head), fetching it at depth 1
+    and checking it out when it is not the head; empties that working tree, copies the
+    checkout's working tree over it (regular files only, links skipped, `.git` and the
+    excluded directories of rule 3 left out) and stages it. The run's changes are the
+    paths that differ between the base and that index: added, modified and deleted,
+    except a path inside an excluded directory, a submodule, and the deletion of a path
+    the checkout still has as a link (or under one), which the copy cannot see and which
+    keep the base's version. None ends the call with the model-facing error `the
+    checkout has no changes to propose`. The run's own commit is the base with those
+    changes, as `Yuno <yuno@localhost>` with the title as message (no hooks, no
+    signing). When the head is the base, that commit is what is pushed. Otherwise the
+    branch moved since the run's checkout was made, and each changed path is weighed
+    against what the head did to it since the base: a path the head did not change takes
+    the run's version or deletion; a path both changed to the same content needs
+    nothing; a path both changed to different content, or a file the run writes where
+    the head made a directory (or under a path the head made a file), is a conflict. A
+    conflict pushes nothing and answers the model `these files conflict with changes on
+    <branch> made since this run's checkout: <paths>. Nothing was pushed. Ask the
+    operator how to resolve it, or finish and report the conflict` (twenty paths named,
+    the rest counted); with none, the pushed head is a merge commit `Merge "<title>"
+    with <branch>` whose parents are the head and the run's own commit and whose tree is
+    the head's with the run's changes, so a file the run never touched is the head's,
+    never deleted or reverted. A run whose every change the head already has pushes
+    nothing (`the checkout has no changes to propose`). Before the push a commit that
+    would delete or change a path outside the run's changes is refused with the paths
+    named (`the commit would delete <paths> ..., which this run did not change; nothing
+    was pushed`); by construction it never happens, and the guard keeps a regression
+    from losing work. The commit is pushed to the branch from the api with the token
+    (rule 4), the run's own commit is written to `runs.checkout_sha` in the side
+    effect's transaction (the base of the run's next push: the checkout matches it apart
+    from what the run changes later), and the private directory is removed; (c) an open merge request from that branch is
     returned with `replayed: true` (since 5.20 rule 2 a run has one request: a later
     call in the same run pushes onto its branch and returns it `updated`); otherwise one is opened against the default branch
     with the title and description, once the provider shows the branch: it is looked up
@@ -1370,8 +1396,11 @@ Rules:
     same call again skips the push (b). Output: `{number, url, branch, provider,
     replayed?}`. Registered always since 5.17 (a run without a project is told `this
     run has no project`); `gitlab_create_mr` stays for runs without a project. Commits an agent made
-    inside the sandbox are flattened: their working tree is what the one commit holds.
-    Since 5.22 the lookup of step (c) prefers the request the run names
+    inside the sandbox are flattened: their working tree is what the run's own commit
+    holds. A later call of the run that opened the request (5.20 rule 2) pushes onto its
+    branch the same way, from the run's own commit of the previous push, so a commit a
+    person pushed to that branch meanwhile is kept unless it changed a file the run
+    changes too. Since 5.22 the lookup of step (c) prefers the request the run names
     (`runs.merge_request_id`) and the push onto its branch is refused when the branch
     moved past the run's `checkout_sha` (5.22 rule 4); since 5.23 a run started from an
     issue gets `Closes #<n>` appended to the description when the request is created
@@ -1463,9 +1492,21 @@ the project is configured; `RunCreate.project` reaches the snapshot. T5.16.9 eve
 the sandbox images install is pinned to an exact version and every base image names a
 release line, and the Builder and Scout prompts tell them to install from the lockfile and
 to report an unpinned tool broken by a new release.
+T5.16.10 (D-087,
+against a local bare repository): main gains files and changes a file the run does not
+touch after the run's clone, and the run's request keeps both, deletes only what the run
+deleted and merges into main with both tickets' work; a file both changed is a conflict
+that pushes nothing and names the file, the same content on both sides is not one; a
+file against a directory is a conflict; a run's second push counts from its own commit
+(no conflict with itself) and keeps a person's commit on the branch; paths onto a moved
+branch; a link and a tracked file under `node_modules/` survive; the guard refuses a
+commit that deletes a path the run did not change; through the tool, the conflict text
+and `checkout_sha` moving to the run's own commit; the engine clones main as it is when
+the first step starts.
 
 Out of scope (more than one project per platform is 5.17): per-agent projects, branches other
-than the default as the base, rebases or conflict resolution, reviewing an existing
+than the default as the base, rebases or conflict resolution (since D-087 a conflict is
+found per path and reported, never resolved by the platform), reviewing an existing
 merge request, GitHub Apps (a token is the only credential), submodules.
 
 ### 5.17 Projects as records: several repositories, one named per run
@@ -2022,7 +2063,8 @@ Rules:
 
 As built (wave 8): a later push replaces the branch's tree with the run's checkout
 (5.16 rule 10), so a commit someone else made on that branch in between is reverted by
-it; 5.22 clones the branch instead. A 404 from the provider closes the record even when
+it; 5.22 clones the branch instead. Since D-087 a later push goes onto the branch per
+path from the run's own commit, so such a commit is kept. A 404 from the provider closes the record even when
 it is the token that lost access, and records older than 14 days are refreshed only by
 Sync on the page. The record is written through the side effect runner's transaction
 (`RunSideEffectTx` hands the tool the transaction as `Call.Tx`; a failing tool rolls the
@@ -2298,8 +2340,13 @@ Rules:
    built, L10): the approval card's sentence stays `Open merge request "<title>" (a pull
    request on GitHub) on the run's project`; the inbox's row links the run, whose header
    says which request it updates (rule 8). The same-run update path of 5.20 (a run that
-   opened its own request) is unchanged and L4 stays recorded for it: the guard is for
-   runs that cloned the branch they push to.
+   opened its own request) is unguarded: the guard is for runs that cloned the branch
+   they push to. Since D-087 that path pushes the run's changes onto the branch per path
+   (5.16 rule 10), which closes L4 for it too, and every push writes the run's own commit
+   to `checkout_sha`; on a guarded push the branch is at the base, so that commit is the
+   pushed one, as before. D-087 keeps this guard rather than merging per path: a commit
+   on the request's branch that this run did not make is a person working on the same
+   request, and the operator decides.
 5. **Agents are told through the task protocol block** (5.16 rule 9 amended). A visit of
    a run with `merge_request_id` gets, after the `Project repository:` line, whose
    `branch` names the source branch:
@@ -2449,7 +2496,7 @@ record is gone (the column is set null), and the schedule then fires without a r
 `open_merge_request` writes `checkout_sha` through the side effect's transaction (not
 outside it, as the consistency line said), so it commits or rolls back with the call; a
 null or empty `checkout_sha` skips the guard silently (the tool has no run log); the
-same-run path never writes it. `read_merge_request`'s cuts include the `…` and fall on a
+same-run path never wrote it before D-087 and writes the run's own commit since. `read_merge_request`'s cuts include the `…` and fall on a
 rune boundary; `threads_omitted` counts both the 50 cap and the byte-cap drops, so
 `unresolved_count = len(threads) + threads_omitted`; `path`, `line` and `created_at` are
 null when the provider has none; a refused GraphQL leaves `threads` and
@@ -3244,8 +3291,9 @@ Rules:
    removed. A non-empty patch is stored as the artifact `diff.patch` (`generated =
    true`, content type `text/x-patch`, cut at 10 MiB with the last line `# cut at 10
    MiB`); an empty one leaves an earlier generated `diff.patch` in place (after the
-   Deployer pushes, `checkout_sha` moves to the pushed commit, 5.22 rule 2, and the
-   checkout matches it; the stored patch is still what the run changed); a file the
+   Deployer pushes, `checkout_sha` moves to the run's own pushed commit, 5.16 rule 10
+   and 5.22 rule 4, and the checkout matches it; the stored patch is still what the run
+   changed, and a step after the push stores what changed since); a file the
    agent itself put at `out/diff.patch` wins and the generated one is skipped with a log
    line. Since 5.26 a branch visit's generated diff is produced only for the join's
    `checkout` branch (5.26 rule 11). A clone or fetch failure, or a checkout over 500 MiB (the working-tree copy
@@ -4374,6 +4422,17 @@ Rules:
    (from `run_nodes.workspace_dir`) and its run repository; the hourly sweep applies the
    D-082 retention to them. Folders under `sandboxes/` that belong to no recorded visit
    (the Chief's chat session among them) are never touched by the sweep.
+9. **The run's base on the project** (D-087). The run repository's commits are the
+   platform's and never pushed. What `open_merge_request` counts the run's changes from
+   (5.16 rule 10) is the commit the run cloned from the project: `runs.checkout_sha`,
+   written by the first step's clone (the commit of its `refs/bases/<visit>` and of that
+   visit's `run_nodes.repo_sha`; later visits' `repo_sha` are run repository commits),
+   then the run's own commit after each push. Every visit's checkout is that commit's
+   tree plus the run's changes so far, carried through the run repository, so the run's
+   changes are what differs between the base and the working tree, whichever step
+   pushes. The first step clones the default branch (or the request's branch, 5.22) when
+   it starts, not when the run is queued; later steps and retries never clone again, and
+   a branch that moved meanwhile is handled when the run pushes.
 
 Edge cases: two runs of the same agent at once (different session keys, so different
 workspaces); a fork's branches (each branch's visits start from their own carry
@@ -4396,7 +4455,8 @@ T5.30.9 a succeeded project run leaves only what the collector kept, its `out/` 
 `diff.patch`, with no private workspace, run repository or other trace of the run under
 the state directory (`TestSucceededRunLeavesOnlyItsArtifacts`), and stored artifacts are
 copies that outlive the workspace (`TestStoredArtifactsOutliveTheWorkspace`); T5.30.10 the
-base and Python sandbox Dockerfiles install `libgomp1` (`TestSandboxImagesInstallLibgomp`).
+base and Python sandbox Dockerfiles install `libgomp1` (`TestSandboxImagesInstallLibgomp`); T5.30.11 a commit main gains after the run is queued
+is in the first step's checkout and is the run's `checkout_sha` (rule 9).
 
 Limitations: the path rule is OpenClaw's internal behaviour, pinned by a test, not an API;
 on an OpenClaw upgrade the probe in `docs/test-results.md` is repeated.

@@ -13,10 +13,12 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"yuno/internal/obs"
+	"yuno/internal/store"
 )
 
 // Git operations the api runs on the platform side (DESIGN 5.16 rules 3, 4 and 10).
@@ -58,6 +60,11 @@ func (c Config) git(ctx context.Context, dir string, args ...string) ([]byte, er
 // gitEnv is git with env added to the command's environment (GIT_DIR, GIT_WORK_TREE and
 // GIT_INDEX_FILE for the run repository, DESIGN 5.30).
 func (c Config) gitEnv(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
+	return c.gitInput(ctx, dir, env, nil, args...)
+}
+
+// gitInput is gitEnv with stdin as the command's standard input (nil: none).
+func (c Config) gitInput(ctx context.Context, dir string, env []string, stdin []byte, args ...string) ([]byte, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, GitTimeout)
@@ -66,7 +73,9 @@ func (c Config) gitEnv(ctx context.Context, dir string, env []string, args ...st
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(append(baseEnv(), c.authEnv()...), env...)
-	cmd.Stdin = nil
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -163,11 +172,10 @@ func (c Config) HeadSHA(ctx context.Context, repo string) (string, error) {
 	return sha, nil
 }
 
-// ErrBranchMoved is ProposeOnto's answer when the branch it would push to is no longer at
-// the commit the run's checkout was cloned from (DESIGN 5.22 rule 4, D-050): someone
-// pushed to the branch since. Head is the commit the branch is at now, Base the one the
-// run expected. Nothing was copied or pushed; the operator starts a new run, which
-// clones the branch as it is.
+// ErrBranchMoved is a guarded proposal's answer when the branch it would push to is no
+// longer at the run's base (DESIGN 5.22 rule 4, D-050): someone pushed to the branch
+// since. Head is the commit the branch is at now, Base the one the run expected. Nothing
+// was copied or pushed; the operator starts a new run, which clones the branch as it is.
 type ErrBranchMoved struct {
 	Branch string
 	Head   string
@@ -179,34 +187,89 @@ func (e *ErrBranchMoved) Error() string {
 		"Finish and report it; a new run on the request starts from the branch as it is now"
 }
 
+// ErrConflict is a proposal's answer when files the run changed also changed on the branch
+// it goes onto since the run's base, to other content (rule 10, D-087). Nothing was pushed.
+// Branch is the branch they changed on, Paths the files, sorted.
+type ErrConflict struct {
+	Branch string
+	Paths  []string
+}
+
+// maxNamedPaths is how many paths an error names before it counts the rest.
+const maxNamedPaths = 20
+
+func (e *ErrConflict) Error() string {
+	return "these files conflict with changes on " + e.Branch + " made since this run's checkout: " + namePaths(e.Paths) +
+		". Nothing was pushed. Ask the operator how to resolve it, or finish and report the conflict"
+}
+
+// namePaths lists paths for an error text, the first maxNamedPaths of them.
+func namePaths(paths []string) string {
+	if len(paths) <= maxNamedPaths {
+		return strings.Join(paths, ", ")
+	}
+	return strings.Join(paths[:maxNamedPaths], ", ") + fmt.Sprintf(" and %d more", len(paths)-maxNamedPaths)
+}
+
 // Proposal is what a merge request's branch holds once Propose has pushed it.
 type Proposal struct {
 	Branch string
+	// Commit is the branch's new head.
 	Commit string
-	Files  int // files copied from the checkout
+	// Base is the run's own commit: the base's tree with the run's changes, so the checkout
+	// matches it apart from what the run changes later. It is the base of the run's next
+	// proposal (runs.checkout_sha). Commit itself when the branch was still at the base,
+	// else Commit's second parent (rule 10, D-087).
+	Base  string
+	Files int // files copied from the checkout
 }
 
-// ErrNoChanges is Propose's answer when the checkout equals the default branch.
+// Base is where a run's changes are counted from when they are proposed (rule 10, D-087).
+type Base struct {
+	// Commit is the project commit the checkout matches apart from what the run changed
+	// since: the commit the run cloned, then its own commit after each push
+	// (runs.checkout_sha, Proposal.Base). "" when it is not known: the branch's head as it
+	// is now stands in for it, and the whole working tree is the run's.
+	Commit string
+	// Guard refuses with *ErrBranchMoved when the branch is no longer at Commit (DESIGN 5.22
+	// rule 4), instead of merging the run's changes onto it per path.
+	Guard bool
+}
+
+// RunBase is the unguarded base of a run's next proposal: its checkout_sha.
+func RunBase(run *store.Run) Base {
+	if run == nil || run.CheckoutSHA == nil {
+		return Base{}
+	}
+	return Base{Commit: *run.CheckoutSHA}
+}
+
+// ErrNoChanges is Propose's answer when the checkout holds no change to propose.
 var ErrNoChanges = errors.New("the checkout has no changes to propose")
 
-// Propose publishes the working tree of an agent's checkout as one commit on branch
-// (rule 10): the api never runs git inside the checkout, where a hook or a
-// configuration entry an agent wrote would run on the api side. It clones the default
-// branch again into a private directory of its own, copies the checkout's working tree
-// over it (regular files only, links skipped, .git and the Excluded directories left
-// out), commits what differs as Yuno with message, and pushes HEAD to the branch with
-// the token. ErrNoChanges when nothing differs.
+// Propose publishes the run's changes in an agent's checkout as a new branch from the
+// default branch (rule 10), with the default branch's head as the base: ProposePaths with
+// an unknown base and no paths.
 func (c Config) Propose(ctx context.Context, checkout, branch, message string) (Proposal, error) {
-	return c.propose(ctx, checkout, c.DefaultBranch, branch, "", message, nil)
+	return c.propose(ctx, checkout, c.DefaultBranch, branch, Base{}, message, nil)
 }
 
-// ProposePaths is Propose for only the named paths: relative files or directories of the
-// checkout, already validated by the caller. The clone is not cleared and the rest of the
-// checkout is not copied; each path replaces its counterpart in the clone (a path the
-// checkout no longer has but the repository does is a deletion), and only those paths are
-// staged and committed. A path in neither is *ErrPathMissing. With no paths it is Propose.
-func (c Config) ProposePaths(ctx context.Context, checkout, branch, message string, paths []string) (Proposal, error) {
-	return c.propose(ctx, checkout, c.DefaultBranch, branch, "", message, paths)
+// ProposePaths publishes the run's changes in an agent's checkout (rule 10, D-087) on top of
+// the default branch as it is now and pushes them to branch. The api never runs git inside
+// the checkout, where a hook or a configuration entry an agent wrote would run on the api
+// side: propose works in a private clone. The run's changes are what differs between base
+// and the checkout's working tree, copied with the copy rule (regular files only, links
+// skipped, .git and the Excluded directories left out). When the default branch is still
+// at the base they are one commit on top of it; when it moved they go onto it per path
+// (see propose), so a file the run never touched is never deleted or reverted.
+//
+// With paths (relative files or directories of the checkout, already validated by the
+// caller) only those are the run's changes: each replaces its counterpart in the base (a
+// path the checkout no longer has but the base does is a deletion), and the rest of the
+// checkout stays out. A path in neither is *ErrPathMissing. ErrNoChanges when there is
+// nothing to push, *ErrConflict when the default branch changed the same files.
+func (c Config) ProposePaths(ctx context.Context, checkout, branch string, base Base, message string, paths []string) (Proposal, error) {
+	return c.propose(ctx, checkout, c.DefaultBranch, branch, base, message, paths)
 }
 
 // ErrPathMissing is ProposePaths' answer for a path that is neither in the checkout nor
@@ -217,32 +280,47 @@ func (e *ErrPathMissing) Error() string {
 	return "the path " + e.Path + " is not in the checkout; nothing was proposed"
 }
 
-// ProposeOnto is Propose for a run that has a request already (DESIGN 5.20 rule 2): it
-// clones the request's own source branch instead of the default one, copies the
-// checkout's working tree over it the same way, and commits what differs as one commit
-// on top of that branch with message, pushing HEAD back to it. ErrNoChanges when the
-// tree equals the branch: nothing is committed or pushed.
-//
-// base is the commit id the checkout was cloned from (the run's checkout_sha, DESIGN 5.22
-// rule 4), the branch guard: when it is not empty and the private clone's HEAD is another
-// commit, someone pushed to the branch since, and ProposeOnto returns *ErrBranchMoved
-// without copying or pushing anything (it refuses; it never merges or rebases, D-050).
-// An empty base skips the guard: the same-run path of DESIGN 5.20 rule 2 (a run that
-// opened its own request) and runs cloned before checkout_sha existed.
+// ProposeOnto is ProposeOntoPaths with no paths and the branch guard of DESIGN 5.22 rule 4:
+// base is the commit the run's checkout was cloned from (or last pushed), and a branch that
+// is no longer there answers *ErrBranchMoved without copying or pushing anything (D-050).
+// An empty base skips the guard and takes the branch's head as the base.
 func (c Config) ProposeOnto(ctx context.Context, checkout, branch, base, message string) (Proposal, error) {
-	return c.propose(ctx, checkout, branch, branch, base, message, nil)
+	return c.propose(ctx, checkout, branch, branch, Base{Commit: base, Guard: true}, message, nil)
 }
 
-// ProposeOntoPaths is ProposeOnto for only the named paths, as ProposePaths is to Propose.
-func (c Config) ProposeOntoPaths(ctx context.Context, checkout, branch, base, message string, paths []string) (Proposal, error) {
+// ProposeOntoPaths is ProposePaths for a run that has a request already (DESIGN 5.20 rule 2,
+// 5.22 rule 4): the run's changes go onto the request's own source branch and are pushed
+// back to it.
+func (c Config) ProposeOntoPaths(ctx context.Context, checkout, branch string, base Base, message string, paths []string) (Proposal, error) {
 	return c.propose(ctx, checkout, branch, branch, base, message, paths)
 }
 
-// propose clones the branch from into a private directory, replaces its working tree
-// with the checkout's, commits the difference and pushes HEAD to branch. A base that is
-// not empty must be the commit the clone is at (ErrBranchMoved otherwise). With paths,
-// only those paths are copied over the clone, staged and committed.
-func (c Config) propose(ctx context.Context, checkout, from, branch, base, message string, paths []string) (Proposal, error) {
+// propose clones the branch from into a private directory and pushes the run's changes onto
+// it as branch (rule 10, D-087):
+//
+//  1. The head is the clone's commit. A guarded base that is not the head is
+//     *ErrBranchMoved; an empty base is the head. A base that is not the head is fetched
+//     and checked out, so the clone holds the tree the run's checkout started from.
+//  2. The checkout is copied over it (the whole working tree, or the paths) and staged; the
+//     run's changes are the difference between the base and that index, path by path,
+//     less what the copy cannot speak for (keepRunChanges). None is ErrNoChanges.
+//  3. The run's own commit is the base with those changes. When the head is the base it is
+//     what is pushed, as before.
+//  4. Otherwise the branch moved since the base, and each changed path is weighed against
+//     what the branch did to it since: a path the branch did not change takes the run's
+//     version or deletion; a path both changed to the same content needs nothing; a path
+//     both changed to different content, or a file the run writes where the branch made a
+//     directory (or the reverse), is a conflict. Any conflict is *ErrConflict and nothing
+//     is pushed. Otherwise the head with the run's changes is a merge commit of the head and
+//     the run's own commit, and that is pushed; files the run did not change are the
+//     head's.
+//
+// Before the push, a commit that would delete or change a path outside the run's changes
+// is refused (checkTouched), so a regression shows instead of losing work.
+func (c Config) propose(ctx context.Context, checkout, from, branch string, base Base, message string, paths []string) (Proposal, error) {
+	if base.Commit != "" && !commitIDPattern.MatchString(base.Commit) {
+		return Proposal{}, fmt.Errorf("the base %q is not a full commit id", tail(base.Commit, 80))
+	}
 	private, err := os.MkdirTemp("", "yuno-propose-")
 	if err != nil {
 		return Proposal{}, err
@@ -252,13 +330,23 @@ func (c Config) propose(ctx context.Context, checkout, from, branch, base, messa
 	if err := c.CloneBranch(ctx, dest, from); err != nil {
 		return Proposal{}, err
 	}
-	if base != "" {
-		head, err := c.HeadSHA(ctx, dest)
-		if err != nil {
+	head, err := c.HeadSHA(ctx, dest)
+	if err != nil {
+		return Proposal{}, err
+	}
+	basis := base.Commit
+	if basis == "" {
+		basis = head
+	}
+	if basis != head {
+		if base.Guard {
+			return Proposal{}, &ErrBranchMoved{Branch: branch, Head: head, Base: basis}
+		}
+		if _, err := c.git(ctx, dest, "fetch", "--quiet", "--no-tags", "--depth", "1", "origin", basis); err != nil {
 			return Proposal{}, err
 		}
-		if head != base {
-			return Proposal{}, &ErrBranchMoved{Branch: branch, Head: head, Base: base}
+		if _, err := c.git(ctx, dest, "checkout", "--quiet", "--detach", basis); err != nil {
+			return Proposal{}, err
 		}
 	}
 	var n int
@@ -284,28 +372,288 @@ func (c Config) propose(ctx context.Context, checkout, from, branch, base, messa
 	if _, err := c.git(ctx, dest, addArgs...); err != nil {
 		return Proposal{}, err
 	}
-	status, err := c.git(ctx, dest, "status", "--porcelain")
+	staged, err := c.git(ctx, dest, "write-tree")
 	if err != nil {
 		return Proposal{}, err
 	}
-	if len(bytes.TrimSpace(status)) == 0 {
+	changes, err := c.treeChanges(ctx, dest, basis, strings.TrimSpace(string(staged)))
+	if err != nil {
+		return Proposal{}, err
+	}
+	if changes, err = keepRunChanges(checkout, changes); err != nil {
+		return Proposal{}, err
+	}
+	if len(changes) == 0 {
 		return Proposal{Branch: branch, Files: n}, ErrNoChanges
+	}
+	onto := changes
+	if basis != head {
+		theirs, err := c.treeChanges(ctx, dest, basis, head)
+		if err != nil {
+			return Proposal{}, err
+		}
+		var conflicts []string
+		if onto, conflicts = mergePaths(changes, theirs); len(conflicts) > 0 {
+			return Proposal{}, &ErrConflict{Branch: from, Paths: conflicts}
+		}
+		if len(onto) == 0 {
+			// The branch has every change of the run already.
+			return Proposal{Branch: branch, Files: n}, ErrNoChanges
+		}
 	}
 	if strings.TrimSpace(message) == "" {
 		message = "Changes proposed by Yuno"
 	}
-	if _, err := c.git(ctx, dest, "-c", "user.name="+CommitName, "-c", "user.email="+CommitEmail, "-c", "commit.gpgsign=false",
-		"commit", "--quiet", "--no-verify", "-m", message); err != nil {
-		return Proposal{}, err
-	}
-	sha, err := c.git(ctx, dest, "rev-parse", "HEAD")
+	index := filepath.Join(private, "index")
+	ownTree, err := c.applyChanges(ctx, dest, index, basis, changes)
 	if err != nil {
 		return Proposal{}, err
 	}
-	if _, err := c.git(ctx, dest, "push", "--quiet", "--", "origin", "HEAD:refs/heads/"+branch); err != nil {
+	own, err := c.commitTree(ctx, dest, ownTree, message, basis)
+	if err != nil {
 		return Proposal{}, err
 	}
-	return Proposal{Branch: branch, Commit: strings.TrimSpace(string(sha)), Files: n}, nil
+	if err := c.checkTouched(ctx, dest, basis, own, changes); err != nil {
+		return Proposal{}, err
+	}
+	pushed := own
+	if basis != head {
+		tree, err := c.applyChanges(ctx, dest, index, head, onto)
+		if err != nil {
+			return Proposal{}, err
+		}
+		subject, _, _ := strings.Cut(strings.TrimSpace(message), "\n")
+		if pushed, err = c.commitTree(ctx, dest, tree, "Merge \""+subject+"\" with "+from, head, own); err != nil {
+			return Proposal{}, err
+		}
+		if err := c.checkTouched(ctx, dest, head, pushed, onto); err != nil {
+			return Proposal{}, err
+		}
+	}
+	if _, err := c.git(ctx, dest, "push", "--quiet", "--no-verify", "--", "origin", pushed+":refs/heads/"+branch); err != nil {
+		return Proposal{}, err
+	}
+	return Proposal{Branch: branch, Commit: pushed, Base: own, Files: n}, nil
+}
+
+// treeChange is one path of `git diff-tree -r -z`: its mode and object id before and after,
+// mode 000000 for a path that is absent on that side.
+type treeChange struct {
+	path             string
+	oldMode, newMode string
+	oldID, newID     string
+}
+
+const (
+	absentMode  = "000000"
+	gitlinkMode = "160000"
+	zeroID      = "0000000000000000000000000000000000000000"
+)
+
+func (t treeChange) gone() bool { return t.newMode == absentMode }
+
+// sameResult tells whether two changes of a path leave it the same: the same mode and
+// content, or both a deletion.
+func (t treeChange) sameResult(o treeChange) bool {
+	return t.newMode == o.newMode && t.newID == o.newID
+}
+
+// treeChanges lists the paths that differ between two trees or commits of repo, renames as
+// a deletion and an addition.
+func (c Config) treeChanges(ctx context.Context, repo, from, to string) ([]treeChange, error) {
+	out, err := c.git(ctx, repo, "diff-tree", "-r", "-z", "--no-renames", "--no-commit-id", from, to)
+	if err != nil {
+		return nil, err
+	}
+	var changes []treeChange
+	fields := strings.Split(string(out), "\x00")
+	for i := 0; i+1 < len(fields); i += 2 {
+		meta := strings.Fields(strings.TrimPrefix(fields[i], ":"))
+		if len(meta) != 5 {
+			return nil, fmt.Errorf("git diff-tree: unexpected entry %q", tail(fields[i], 80))
+		}
+		changes = append(changes, treeChange{path: fields[i+1], oldMode: meta[0], newMode: meta[1], oldID: meta[2], newID: meta[3]})
+	}
+	return changes, nil
+}
+
+// keepRunChanges drops the changes the copy of the checkout cannot speak for (rule 10): a
+// path inside an Excluded directory, a submodule, and the deletion of a path the checkout
+// still has as a link, or under one, or as anything the copy skips. Those keep the base's
+// version.
+func keepRunChanges(checkout string, changes []treeChange) ([]treeChange, error) {
+	root, err := os.OpenRoot(checkout)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	skip := map[string]bool{".git": true}
+	for _, d := range Excluded {
+		skip[strings.TrimSuffix(d, "/")] = true
+	}
+	var kept []treeChange
+	for _, ch := range changes {
+		dirs := strings.Split(ch.path, "/")
+		dirs = dirs[:len(dirs)-1]
+		if slices.ContainsFunc(dirs, func(d string) bool { return skip[d] }) || ch.oldMode == gitlinkMode || ch.newMode == gitlinkMode {
+			continue
+		}
+		if ch.gone() {
+			absent, err := absentFrom(root, ch.path)
+			if err != nil {
+				return nil, err
+			}
+			if !absent {
+				continue
+			}
+		}
+		kept = append(kept, ch)
+	}
+	return kept, nil
+}
+
+// absentFrom tells whether the checkout lacks p for real: a part of it does not exist, a
+// part that should be a directory is not one, or p is now a directory. A link on the way,
+// or at p, is not an absence; nor is anything else at p, which the copy skipped.
+func absentFrom(root *os.Root, p string) (bool, error) {
+	parts := strings.Split(p, "/")
+	cur := ""
+	for i, part := range parts {
+		cur = path.Join(cur, part)
+		info, err := root.Lstat(cur)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return true, nil
+		case err != nil:
+			return false, err
+		case info.Mode()&fs.ModeSymlink != 0:
+			return false, nil
+		case i == len(parts)-1:
+			return info.IsDir(), nil
+		case !info.IsDir():
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// mergePaths is the per-path merge of propose's step 4: ours are the run's changes since the
+// base, theirs the branch's. It returns what to apply onto the branch and the paths that
+// conflict, sorted.
+func mergePaths(ours, theirs []treeChange) (onto []treeChange, conflicts []string) {
+	byPath := make(map[string]treeChange, len(theirs))
+	dirs := map[string]bool{} // directories the branch has files in that the base may not
+	for _, t := range theirs {
+		byPath[t.path] = t
+		if !t.gone() {
+			for d := path.Dir(t.path); d != "."; d = path.Dir(d) {
+				dirs[d] = true
+			}
+		}
+	}
+	for _, o := range ours {
+		if t, ok := byPath[o.path]; ok {
+			if !o.sameResult(t) {
+				conflicts = append(conflicts, o.path)
+			}
+			continue
+		}
+		if !o.gone() {
+			clash := dirs[o.path]
+			for d := path.Dir(o.path); d != "." && !clash; d = path.Dir(d) {
+				if t, ok := byPath[d]; ok && !t.gone() {
+					clash = true
+				}
+			}
+			if clash {
+				conflicts = append(conflicts, o.path)
+				continue
+			}
+		}
+		onto = append(onto, o)
+	}
+	slices.Sort(conflicts)
+	return onto, conflicts
+}
+
+// applyChanges is the tree of treeish with changes applied, built in the index file index of
+// repo: deletions first, so a path can turn from a file into a directory or back.
+func (c Config) applyChanges(ctx context.Context, repo, index, treeish string, changes []treeChange) (string, error) {
+	env := []string{"GIT_INDEX_FILE=" + index}
+	if _, err := c.gitEnv(ctx, repo, env, "read-tree", treeish); err != nil {
+		return "", err
+	}
+	var in bytes.Buffer
+	for _, ch := range changes {
+		if ch.gone() {
+			fmt.Fprintf(&in, "0 %s\t%s\x00", zeroID, ch.path)
+		}
+	}
+	for _, ch := range changes {
+		if !ch.gone() {
+			fmt.Fprintf(&in, "%s %s\t%s\x00", ch.newMode, ch.newID, ch.path)
+		}
+	}
+	if _, err := c.gitInput(ctx, repo, env, in.Bytes(), "update-index", "--add", "-z", "--index-info"); err != nil {
+		return "", err
+	}
+	out, err := c.gitEnv(ctx, repo, env, "write-tree")
+	return strings.TrimSpace(string(out)), err
+}
+
+// commitTree commits tree in repo as Yuno with message and parents, and returns its id.
+func (c Config) commitTree(ctx context.Context, repo, tree, message string, parents ...string) (string, error) {
+	args := []string{"-c", "user.name=" + CommitName, "-c", "user.email=" + CommitEmail, "-c", "commit.gpgsign=false", "commit-tree", tree}
+	for _, p := range parents {
+		args = append(args, "-p", p)
+	}
+	out, err := c.git(ctx, repo, append(args, "-m", message)...)
+	if err != nil {
+		return "", err
+	}
+	sha := strings.TrimSpace(string(out))
+	if !commitIDPattern.MatchString(sha) {
+		return "", fmt.Errorf("git commit-tree: %q is not a full commit id", tail(sha, 80))
+	}
+	return sha, nil
+}
+
+// checkTouched is the guardrail of rule 10 (D-087): the commit to (on top of from) may
+// change only the paths of changes, the run's. propose builds it so; a path outside them
+// (a deletion above all) refuses the push and names the paths.
+func (c Config) checkTouched(ctx context.Context, repo, from, to string, changes []treeChange) error {
+	got, err := c.treeChanges(ctx, repo, from, to)
+	if err != nil {
+		return err
+	}
+	ours := make(map[string]bool, len(changes))
+	for _, ch := range changes {
+		ours[ch.path] = true
+	}
+	var deleted, changed []string
+	for _, g := range got {
+		switch {
+		case ours[g.path]:
+		case g.gone():
+			deleted = append(deleted, g.path)
+		default:
+			changed = append(changed, g.path)
+		}
+	}
+	if len(deleted) == 0 && len(changed) == 0 {
+		return nil
+	}
+	text := "the commit would"
+	if len(deleted) > 0 {
+		text += " delete " + namePaths(deleted)
+		if len(changed) > 0 {
+			text += " and"
+		}
+	}
+	if len(changed) > 0 {
+		text += " change " + namePaths(changed)
+	}
+	return errors.New(text + ", which this run did not change; nothing was pushed")
 }
 
 // copyPaths replaces each path of dest (a fresh clone) with the same path of src (the
