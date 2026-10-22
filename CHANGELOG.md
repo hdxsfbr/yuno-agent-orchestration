@@ -5,6 +5,16 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- Runs can be paused, resumed with a note for the step, and steered with a message while
+  they work; a retry can start from an earlier step. Every cancel, pause, resume, retry and
+  steer is tracked from received to applied. A cancel counts as done only when the gateway
+  confirms the agent stopped, and a run cannot be retried or resumed until then. New run
+  status `paused`, with Pause, Resume and Steer in the run header.
+- Work can depend on other work: the Planner marks a ticket's `depends_on`, and you or the
+  Chief can make a merge request depend on another. The dependent waits until its
+  prerequisite is merged and green on the merge commit; then the platform brings it up to
+  date with main, waits for its CI to pass on the new commit, and lets it go by itself. A
+  merge request says what holds it (`blocked_by`).
 - The Chief of Staff can do anything the UI can, from chat. It looks up the API's actions
   and runs them through the same code the UI uses. Deleting things, granting tools,
   changing a project's repository or token, raising a budget, binding Telegram, merging a

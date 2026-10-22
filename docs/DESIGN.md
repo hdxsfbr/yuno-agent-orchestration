@@ -965,8 +965,7 @@ Rules:
 
 Edge cases: SSE clients that disconnect mid-run reconnect with `Last-Event-ID` and miss
 nothing (rule 3). A setup longer than H (a clone, a sandbox start) reads `unknown`
-until the first turn starts, because no tick runs during setup; 5.33 adds a setup
-heartbeat.
+until the first turn starts; 5.33 rule 9 gives setup its own heartbeat.
 
 Time: n/a.
 
@@ -5139,14 +5138,205 @@ TestPlatformCallBinary, TestPlatformCallActor.
 
 Out of scope: user accounts and roles (one operator); chat-token rotation.
 
-### 5.34 Dependencies, and merge requests on exact commits [decisions D-100]
+### 5.33 Recovery: commands, worker leases, pause, resume, retry from a step, steering [decision D-102]
 
-Purpose: dependent work waits until its prerequisite is merged and green on the exact
-commit; the platform brings a request up to date with the default branch; nothing is merged
-on a check of another commit. Rules 1 to 8 (dependency edges, the gate and the watcher)
-come with the wave that builds them; rules 9 to 15 are built.
+Purpose: the operator or the Chief stops, holds, restarts and redirects a run. Each request
+is tracked from receipt to outcome, and two workers never write one run (migration 0032,
+`engine/commands.go`, `store/commands.go`, `store/lease.go`).
 
 Rules:
+
+**Commands**
+
+1. `run_commands(id, run_id, kind, node_id, payload, actor, request_id, received_at,
+   acked_at, applied_at, outcome, detail)`.
+   - `kind` is one of cancel, pause, resume, retry or steer.
+   - `outcome` is one of pending, applied, rejected, failed or superseded.
+   - Times come from the database server's clock.
+2. The routes are `POST /api/runs/{id}/cancel`, `/pause`, `/resume` (`{note?}`, at most 2000
+   characters), `/retry` (`{from_node?, limits?}`) and `/steer` (`{node_id?, message}`, 1 to
+   4000 characters).
+   - Each answers 202 with the run, carrying the recorded `command`.
+   - A refusal is 409 with the command's detail and `details.command`.
+   - A command that could not be recorded is 503 `command_not_taken`.
+   - A body that fails validation (422) records no command.
+3. `GET /api/runs/{id}/commands` (newest first, at most 100) and `GET
+   /api/runs/{id}/commands/{cid}` (risk read; the commands are routine).
+4. Receipt, decision and (for a run no worker holds) outcome are one transaction holding
+   the run's row. Acknowledged means the lease holder took the command. Applied means its
+   effect is confirmed. Rejected means it is not valid in the run's state.
+5. A run no worker holds (queued, paused, parked, ended) has the command applied or
+   rejected at once (`acked_at = applied_at`). A held run's visits are woken, and each visit
+   also reads the run's pending commands every 2 s.
+6. Commands run in `received_at` order. A cancel supersedes the pause, resume and steer
+   commands still pending before it. Pause and resume while a cancel is pending are
+   rejected. When a run ends, its pending commands are settled.
+
+   Every change is a `run.command` event.
+
+**Leases**
+
+7. `runs.lease_epoch` goes up with every claim and every move to queued: a claim, a stale
+   re-queue (and the sweeper's "worker lost" failure), a retry, a resume, a parked run's
+   re-queue, and the re-queue after an approval node's decision. The worker carries its
+   epoch in a `store.Lease`.
+8. Fenced writes carry `AND lease_epoch = $epoch` in their own statement (for node and branch
+   rows, through their run):
+   - TransitionRun, PauseRunAt and ResumeRunAt;
+   - TouchRun and TouchRunNode (the heartbeat renews the lease);
+   - SetRunCurrentNode, SetRunStateNode and AddRunUsage;
+   - the visit's progress, finish, parks and evidence;
+   - SetBranchStatus and SetBranchCurrent;
+   - the checkout commit's `repo_sha` and `start_sha`;
+   - a command's acknowledgement.
+
+   Tool-call, model-call, span and event rows are records and are not fenced.
+9. A fenced write that touches nothing returns `ErrLeaseLost`. The visit then aborts its
+   turn, writes nothing more and stops ("worker lost its lease; stopped"). A branch that
+   loses its lease stops alone, and is not treated as a failure.
+   - A visit's setup (materialisation, clone, sandbox, the first send) has its own 30 s
+     heartbeat under the lease, until the event loop starts.
+
+**Cancel**
+
+10. A queued run, or any run no worker holds, is cancelled at once.
+11. A live run: the worker acknowledges and aborts the turn.
+    - The stop is confirmed by the turn's terminal chat event, by `chat.abort` answering
+      `aborted: false`, or, after `abortWait` (10 s), by `sessions.list` showing no active
+      run for the turn.
+    - Confirmed: the checkout is saved, the run goes `cancelled` with `cancel_state =
+      confirmed`, and the command is applied.
+    - Unconfirmed: the run goes `cancelled` with `cancel_state = unconfirmed`, and the
+      command stays acknowledged.
+    - The reconcile pass, on the 60 s sweeper tick, repeats the abort and the session check
+      until the gateway shows no active run. A gateway that is down confirms nothing.
+12. A run the stale sweeper re-queues or fails as "worker lost" gets `cancel_state =
+    unconfirmed` for its last turn. So does any run that ends with a turn not confirmed
+    stopped.
+13. Retry and resume answer 409 `cancel_unconfirmed` while `cancel_state = unconfirmed`. The
+    detail names the session and the turn. There is no force option.
+
+**Pause and resume**
+
+14. Pause on a live run:
+    - The worker acknowledges, aborts the turn (confirmed as in rule 11), saves the
+      checkout, parks the visit (`park_reason = paused`) and moves the run to the new
+      status `paused`, then lets it go.
+    - An unconfirmed stop fails the command, "could not confirm the turn stopped", and the
+      step goes on.
+    - A queued run is paused at once.
+    - Refused: a run waiting on an approval or a question; a paused or finished run; a run
+      being cancelled; a run whose parallel branches are running.
+15. Resume on a paused run:
+    - It closes the paused visit, re-queues the run (epoch + 1) and adds the paused time to
+      `paused_total_ms`. A pause does not count toward the time limit.
+    - The step's next visit continues from the paused visit's checkout, and its task gains
+      "The operator paused this step and resumed it." plus the note.
+    - A paused visit does not count toward `max_loop_visits`.
+    - Any other status: rejected, "the run is not paused".
+
+**Retry from a step**
+
+16. `from_node` must be a node this run visited, outside a fork branch ("from_node must be a
+    step this run reached", "retry the fork step instead").
+17. The retry:
+    - sets the current node to `from_node` and keeps the state;
+    - marks `retried_at` (D-093) on the latest visit of `from_node` and of every node
+      visited after it;
+    - starts the step from its latest visit's `start_sha`, which every visit now records
+      at its start;
+    - runs later steps again as the graph reaches them.
+
+    Every other retry precondition stands.
+
+**Steering**
+
+18. A steer names a step (`node_id`), or the run's one live visit.
+    - The visit acknowledges it and sends `chat.send` with `queueMode: "steer"`, the message
+      "Operator: <message>" and the key `<visit id>:steer:<command id>`; the turn id does not
+      change.
+    - It is applied when the user transcript entry appears.
+    - If the turn ends first, the message opens the step's next turn. A turn that ends
+      without a result while a message waits continues with it instead of failing.
+    - Refused: "nothing is running; retry or resume with a note"; "name the step: <ids>".
+
+**Diagnosis**
+
+The diagnosis (5.12 rule 9) gains `commands_pending` and `cancel_state`. A paused run and
+its paused step are `waiting`, "paused by the operator".
+
+Gateway behaviour: `hasActiveRun` and `chat.abort {aborted}` are probed. The array form of
+`activeRunIds`, the two fields on `sessions.list` rows, and steering at the next tool
+boundary come from [docs] gateway/protocol/rpc-session-control.md and concepts/messages.md;
+the steer is also matched by its text.
+
+Tests: TestCommandLifecycle, TestCancelQueued, TestCancelLiveConfirmedByEvent,
+TestCancelLiveConfirmedBySession, TestCancelUnconfirmedThenReconciled,
+TestCancelGatewayDownLeavesUnconfirmed, TestCancelRacingTheEnd,
+TestRetryRefusedUnconfirmedCancel, TestResumeRefusedUnconfirmedStop,
+TestSweeperLeavesUnconfirmed, TestLeaseFencing, TestBranchFencing, TestPauseResume,
+TestPauseOnWaitingRejected, TestPauseUnconfirmedFails, TestRetryFromStep,
+TestRetryFromStepRejected, TestSteerLive, TestSteerBetweenTurns, TestSteerRejected,
+TestCancelSupersedes, TestSetupHeartbeat, TestRunCommandReads, and the acceptance
+TestStalledStepRecovery (a hung turn is diagnosed stalled, its cancel is acknowledged and
+confirmed, the retry takes a new lease, and the hung visit's late write is refused).
+
+### 5.34 Dependencies, and merge requests on exact commits [decisions D-100, D-103]
+
+Purpose: dependent work waits until its prerequisite is merged and green on the exact
+commit; the platform brings a request up to date with the default branch and lets the work
+go by itself; nothing is merged on a check of another commit. No agent polls.
+
+Rules:
+
+1. **Edges.** `dependencies(dependent, prerequisite, source, created_by, satisfied_at,
+   reason, evaluated_at, cleared_at)` (migration 0033).
+   - The dependent is a plan ticket (`<plan id>/<ticket id>`) or a merge request record.
+   - It is unique per pair; a self-edge or an edge that would close a cycle is refused
+     ("would make a cycle: !31 -> !24 -> !17 -> !31").
+   - A request is held by its own edges and by the Planner's edges of the ticket it was
+     built for.
+2. **Planner edges.** The Planner sets ticket edges with `depends_on` in the slicer's tickets:
+   same or an earlier wave, known, no cycle. Otherwise `publish_tickets` refuses them.
+3. **Operator and Chief edges.** `GET` and `PUT /api/merge-requests/{id}/dependencies`
+   `{prerequisites: [id]}` (risk read and routine) replace the operator and Chief edges.
+   - 409 `dependency_cycle`; 422 for a self-edge, a request of another project, or no list.
+   - Planner edges are listed and marked not editable.
+   - `GET /api/merge-requests/{id}` gains `blocked_by: [{prerequisite, kind, label,
+     reason}]`.
+4. **Satisfied** (`internal/deps`): a merge-request prerequisite is merged, its `merge_sha`
+   is known, and the default branch's CI for exactly that commit passed
+   (`RequestProvider.CommitCI`). A project with no CI is satisfied 15 minutes after the
+   merge, with the note "no CI configured".
+   - A ticket prerequisite is satisfied through its merge request.
+   - A ticket closed without a merge never is. Its dependent ticket is escalated, and a
+     dependent merge request's operator is told once.
+   - A satisfied judgement is kept on the edge.
+5. **Reasons**, in order: "!17 is not merged"; "!17 merged; CI on <sha7> is
+   <pending|running|failed>"; "!17 merged; the merge commit is not known yet"; "!17 has not
+   been checked yet".
+6. **Holding tickets back.** A released wave's ticket with an unsatisfied prerequisite stays
+   `pending` and unlabelled in every release path. It is labelled once satisfied, and its
+   edges are then cleared.
+7. **Parking runs.** A run that would work on a held merge request is created `paused` with
+   park reason `dependency` and the reason; no worker is used. Its resume or retry is
+   refused, "blocked by <reason>; remove the dependency to override". The diagnosis reports
+   it as `blocked`.
+8. **The watcher** runs at the end of every merge-request sync pass, and right after a manual
+   sync that changed a prerequisite. For each held open request, once every prerequisite is
+   satisfied:
+   - It updates the request from the default branch with its recorded head as the expected
+     head (rules 9 and 10). The head it found or pushed is kept, so the update is not
+     repeated.
+   - It lets the request go when CI passes on exactly that head: the edges are cleared, the
+     paused dependency runs are re-queued with the note "Its prerequisite !17 is merged; the
+     platform merged main into this branch (<sha7>) and CI passed.", and
+     `merge_request.unblocked` is emitted.
+   - A CI failure, conflicts, or a prerequisite closed without merging keep the request
+     held. The operator is told once per commit, conflict or prerequisite, in the
+     conversation the request's run reports to.
+
+   Then the wave watcher releases the held tickets whose prerequisites are satisfied.
 
 9. **Update from the default branch.** `POST /api/merge-requests/{id}/update-from-default
    {expected_head_sha}` (risk routine), and later the watcher, use
@@ -5189,7 +5379,11 @@ Rules:
 Edge cases: an existing record keeps `ci_sha` null until its next sync, so it cannot merge
 for up to one sync interval after this release.
 
-Tests: TestUpdateFromDefault, TestUpdateFromDefaultRecords, TestUpdateFromDefaultEndpoint,
+Tests: TestDependencyEdges, TestPrerequisiteSatisfied, TestTicketNotReleasedUntilSatisfied,
+TestMergeRequestDependencyRoutes, TestResumeAfterCIOnNewSHA, TestCIFailedKeepsBlocked,
+TestDependentConflictsKeepBlocked, TestDependencyAcceptance (!24 waits for !17: !17 merges and
+passes on its merge commit, !24 is updated from main, passes on its new head, and is let go),
+TestUpdateFromDefault, TestUpdateFromDefaultRecords, TestUpdateFromDefaultEndpoint,
 TestStaleCheckInvalidated, TestOpenMergeRequestPushInvalidatesTheCheck,
 TestMergeSHAPersistedOnSync, TestMergeNeedsExactSHA, TestMergeRequestDiffChecksLog,
 TestGitLabWave3Requests, TestGitHubWave3Requests.

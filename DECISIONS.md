@@ -6,6 +6,42 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-22
 
+**D-103 Dependent work waits on its prerequisite's merge and green CI on the exact merge
+commit, is brought up to date by the platform, and resumes by itself.** (The PRD's
+requirement 4 and its acceptance: "Block !24 until !17 merges with green CI; automatically
+update from main, verify updated-SHA CI, then resume." Andre decided edges come from both
+the Planner and the operator or the Chief.)
+- **Edges.** Edges are rows: the Planner's `depends_on` between tickets, and the operator's
+  or Chief's edges between merge requests.
+- **The watcher.** It rides the merge-request sync tick (no webhooks, no agent polling).
+  - It judges prerequisites on the default branch's CI for exactly `merge_sha`.
+  - It updates the dependent with the expected head, and lets it go only when CI passed on
+    exactly the new head.
+  - It holds tickets back from intake, and parks runs on a held request.
+- **Rejected:** an agent waiting in its turn (it spends a builder's loop polling); wave
+  ordering alone (it cannot say "!24 after !17" inside a wave or across projects).
+
+Design: DESIGN 5.34 rules 1 to 8.
+
+**D-102 Recovery is commands from receipt to outcome, under worker leases.** (The PRD's
+requirement 3.)
+- **Commands.** Cancel, pause, resume, retry from a step, and steer are `run_commands`
+  rows, decided under the run's row lock.
+- **Leases.** A worker holds a run under an epoch that fences its writes in the same
+  statement. A worker that lost its run stops itself.
+- **Confirmed stops.** A stop counts as confirmed only on the gateway's word: a terminal
+  event, `aborted: false`, or the session check. A retry or resume waits for it, so two
+  writers never overlap; there is no force.
+- **Pause** parks the step under a new run status `paused`. **Resume** continues it from
+  the paused checkout with the operator's note.
+- **Steering** uses the gateway's own steer queue mode.
+- **Rejected:**
+  - leases with a time to live (the stale sweeper already is the expiry, and it moves the
+    epoch);
+  - a forced retry (it would allow two writers).
+
+Design: DESIGN 5.33.
+
 **D-101 Workflows keep every version, an old version can be restored, and an archived agent
 can be restored.** (Andre's PRD "Chief of Staff Platform Control", requirement 5,
 2026-10-22.)
