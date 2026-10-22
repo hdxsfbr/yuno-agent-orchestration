@@ -321,7 +321,11 @@ func TestAuditTargets(t *testing.T) {
 		{"POST", "/api/workflows/validate", "/api/workflows/validate", "/api/workflows", true},
 		{"POST", "/api/approvals/x1/approve", "/api/approvals/{id}/approve", "", false},
 		{"PUT", "/api/channels/telegram/binding", "/api/channels/telegram/binding", "", false},
-		{"POST", "/api/projects/p1/waves/pause", "/api/projects/{id}/waves/pause", "", false},
+		{"POST", "/api/projects/p1/waves/pause", "/api/projects/{id}/waves/pause", "/api/projects/p1", false},
+		{"POST", "/api/projects/p1/waves/resume", "/api/projects/{id}/waves/resume", "/api/projects/p1", false},
+		{"POST", "/api/projects/p1/intake/poll", "/api/projects/{id}/intake/poll", "/api/projects/p1", false},
+		{"POST", "/api/workflows/w1/versions/3/restore", "/api/workflows/{id}/versions/{version}/restore", "/api/workflows/w1", false},
+		{"POST", "/api/plans/pl1/tickets/T9/changes", "/api/plans/{id}/tickets/{ticket}/changes", "/api/plans/pl1", false},
 		{"POST", "/api/nowhere", "", "", false},
 	} {
 		route, target, collection := s.routeTarget(httptest.NewRequest(tc.method, tc.path, nil))

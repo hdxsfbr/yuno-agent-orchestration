@@ -180,6 +180,9 @@ func (s *Server) routeTarget(r *http.Request) (route, target string, collection 
 		return "", "", false
 	}
 	path := r.URL.EscapedPath()
+	if up, ok := auditTargetUp[route]; ok {
+		return route, trimSegments(path, up), false
+	}
 	if s.getRoute(path) == route {
 		return route, path, isCollection(route)
 	}
@@ -191,6 +194,30 @@ func (s *Server) routeTarget(r *http.Request) (route, target string, collection 
 		return route, parent, isCollection(parentRoute)
 	}
 	return route, "", false
+}
+
+// auditTargetUp names the action routes whose target is not their parent: the resource the
+// action changes sits that many segments up. A restore changes the workflow, not the
+// version it reads; waves, intake and ticket changes act on their project or plan, whose
+// parent segment has no GET route.
+var auditTargetUp = map[string]int{
+	"/api/workflows/{id}/versions/{version}/restore": 3,
+	"/api/projects/{id}/waves/pause":                 2,
+	"/api/projects/{id}/waves/resume":                2,
+	"/api/projects/{id}/intake/poll":                 2,
+	"/api/plans/{id}/tickets/{ticket}/changes":       3,
+}
+
+// trimSegments drops the last n segments of path.
+func trimSegments(path string, n int) string {
+	for ; n > 0; n-- {
+		i := strings.LastIndex(path, "/")
+		if i <= 0 {
+			return ""
+		}
+		path = path[:i]
+	}
+	return path
 }
 
 // getRoute is the pattern (without the method) of the GET route that serves path, "" when
