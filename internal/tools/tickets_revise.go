@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"yuno/internal/project"
 	"yuno/internal/store"
@@ -443,6 +444,12 @@ func (p *publishTickets) revise(ctx context.Context, q store.Querier, run *store
 		out.Dropped++
 	}
 
+	// The Planner's edges are the revised plan's (Chief platform control, DESIGN wave 3 rules 2
+	// and 7: a revision is how a Planner edge is removed).
+	if err := store.ReplacePlannerDependencies(ctx, q, stored.ProjectID, planID, plan.edges); err != nil {
+		return Result{}, err
+	}
+
 	// The plan resumes at its current wave: unpaused, and the wave re-released when it was
 	// released before.
 	rows, err = store.ListPlanTickets(ctx, q, planID)
@@ -505,13 +512,21 @@ func (p *publishTickets) revise(ctx context.Context, q store.Querier, run *store
 
 // rerelease labels the pending tickets of the wave with the intake label and sets them
 // released (rule 16); a label of an earlier attempt (failed, running) comes off. When the
-// wave had never been released it also records `wave_released`.
+// wave had never been released it also records `wave_released`. A ticket with a
+// prerequisite the watcher has not found satisfied stays pending, and the wave watcher
+// releases it once it is (Chief platform control, DESIGN wave 3 rule 6).
 func (p *publishTickets) rerelease(ctx context.Context, q store.Querier, issues IssueProvider, label, planID string, wave int, rows []store.PlanTicket, first bool, reset []string) (int, error) {
+	held, err := store.HeldTickets(ctx, q, planID)
+	if err != nil {
+		return 0, err
+	}
 	n := 0
+	var released []string
 	for _, t := range rows {
-		if t.Wave != wave || t.Status != store.TicketPending {
+		if t.Wave != wave || t.Status != store.TicketPending || held[t.TicketID] {
 			continue
 		}
+		released = append(released, t.TicketID)
 		if t.IssueNumber == nil {
 			return 0, fmt.Errorf("publish_tickets: ticket %s has no issue to release", t.TicketID)
 		}
@@ -530,6 +545,9 @@ func (p *publishTickets) rerelease(ctx context.Context, q store.Querier, issues 
 		} else if moved {
 			n++
 		}
+	}
+	if err := store.ClearTicketDependencies(ctx, q, planID, released, time.Now()); err != nil {
+		return 0, err
 	}
 	if first {
 		w := wave

@@ -1425,6 +1425,42 @@ paths:
         "409": { description: "merge_request_unreadable (the project's token cannot be read)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "422": { $ref: "#/components/responses/Error" }
         "502": { description: "provider_unavailable or provider_error", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/merge-requests/{id}/dependencies:
+    get:
+      tags: [merge-requests]
+      operationId: getMergeRequestDependencies
+      x-yuno-risk: read
+      summary: The request's prerequisites and what holds it
+      description: |
+        Chief platform control wave 3 rules 3 and 5. Lists the operator's and the Chief's
+        prerequisites and the Planner's edges of the request's plan ticket (not editable here),
+        each with the dependency watcher's last judgement; `blocked_by` names what holds the
+        request now, with the reason. No provider is asked.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: prerequisites, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequestDependencies" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [merge-requests]
+      operationId: putMergeRequestDependencies
+      x-yuno-risk: routine
+      summary: Replace the request's operator and Chief prerequisites
+      description: |
+        Chief platform control wave 3 rules 1 and 3. The listed merge requests of the same
+        project become the request's prerequisites set by the operator or the Chief; the
+        Planner's edges stay. The request then waits until each is merged and green on its
+        merge commit, is updated from the default branch by the platform, and is let go once
+        CI passed on its new head. A self-edge is a validation error; an edge that would close
+        a cycle is 409 `dependency_cycle` ("would make a cycle: !24 -> !17 -> !24").
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequestDependenciesInput" } } }
+      responses:
+        "200": { description: prerequisites after the change, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequestDependencies" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: "dependency_cycle (details {path})", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { $ref: "#/components/responses/Error" }
 
 components:
   securitySchemes:
@@ -1824,6 +1860,48 @@ components:
         merge_status: { type: string, description: "the provider's own word: GitLab's detailed_merge_status, GitHub's mergeable_state" }
         conflicts: { $ref: "#/components/schemas/MergeConflicts" }
         updated_from_default_at: { type: string, format: date-time, description: "when the platform last pushed an update from the default branch" }
+        blocked_by:
+          type: array
+          items: { $ref: "#/components/schemas/DependencyBlocker" }
+          description: "GET /api/merge-requests/{id} only: what holds the open request (Chief platform control wave 3 rule 5); absent when nothing does"
+    DependencyBlocker:
+      type: object
+      description: "A prerequisite that holds a request, with the reason: \"!17 is not merged\", \"!17 merged; CI on <sha7> is pending\", \"!17 merged; the merge commit is not known yet\", or, once all are satisfied, the platform's progress (conflicts with the default branch, CI on the updated head)."
+      required: [prerequisite, kind, label, reason]
+      properties:
+        prerequisite: { type: string, description: "the prerequisite's id: a merge request record, or <plan id>/<ticket id>" }
+        kind: { type: string, enum: [merge_request, ticket] }
+        label: { type: string, description: "as a person reads it: !17, #17 or T9" }
+        reason: { type: string }
+    MergeRequestDependency:
+      type: object
+      required: [id, prerequisite, kind, label, source, editable, created_by, created_at, satisfied]
+      properties:
+        id: { type: string }
+        prerequisite: { type: string }
+        kind: { type: string, enum: [merge_request, ticket] }
+        label: { type: string }
+        source: { type: string, enum: [planner, operator, chief] }
+        editable: { type: boolean, description: "false for the Planner's edges, which a plan revision changes" }
+        created_by: { type: object }
+        created_at: { type: string, format: date-time }
+        satisfied: { type: boolean }
+        satisfied_at: { type: string, format: date-time }
+        reason: { type: string, description: "why it is not satisfied, or the note of a satisfied one (no CI configured)" }
+        cleared_at: { type: string, format: date-time, description: "when the request was let go with this prerequisite satisfied" }
+    MergeRequestDependencies:
+      type: object
+      required: [merge_request_id, prerequisites, blocked_by]
+      properties:
+        merge_request_id: { type: string }
+        prerequisites: { type: array, items: { $ref: "#/components/schemas/MergeRequestDependency" } }
+        blocked_by: { type: array, items: { $ref: "#/components/schemas/DependencyBlocker" } }
+    MergeRequestDependenciesInput:
+      type: object
+      required: [prerequisites]
+      additionalProperties: false
+      properties:
+        prerequisites: { type: array, maxItems: 50, items: { type: string }, description: "merge request record ids of the same project; an empty list removes the operator's and the Chief's prerequisites" }
     MergeConflicts:
       type: object
       description: "What the last update from the default branch met: the files that conflict, when, and the default branch's commit it tried to merge."

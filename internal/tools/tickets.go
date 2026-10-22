@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -72,6 +73,9 @@ type planTicketIn struct {
 	Files      []string        `json:"files"`
 	Tests      json.RawMessage `json:"tests"`
 	Acceptance json.RawMessage `json:"acceptance_tests"` // fallback for tests
+	// DependsOn names the tickets of the plan whose merged work this one needs (Chief
+	// platform control, DESIGN wave 3 rule 2): each in the same or an earlier wave.
+	DependsOn []string `json:"depends_on,omitempty"`
 }
 
 // The checks of the tool (review L4): the feature slug of 5.28 and the longest ticket title
@@ -87,6 +91,9 @@ type publishPlan struct {
 	revise string
 	waves  [][]planTicketIn // index = wave - 1
 	count  int
+	// edges are the tickets' depends_on as [dependent, prerequisite] pairs, in plan order
+	// (DESIGN wave 3 rule 2).
+	edges [][2]string
 }
 
 // publishTicketsOutput is the tool's result.
@@ -273,7 +280,85 @@ func readPublishPlan(run *store.Run) (*publishPlan, error) {
 	if plan.count != len(byID) {
 		return nil, errors.New("some tickets are in no wave")
 	}
+	edges, err := ticketDependencies(plan.waves)
+	if err != nil {
+		return nil, err
+	}
+	plan.edges = edges
 	return plan, nil
+}
+
+// ticketDependencies reads and checks the tickets' depends_on (Chief platform control, DESIGN
+// wave 3 rules 1 and 2): each id is another ticket of the plan in the same or an earlier
+// wave, and the edges make no cycle. It returns them as [dependent, prerequisite] pairs.
+func ticketDependencies(waves [][]planTicketIn) ([][2]string, error) {
+	waveOf := map[string]int{}
+	for i, w := range waves {
+		for _, t := range w {
+			waveOf[t.ID] = i + 1
+		}
+	}
+	var edges [][2]string
+	next := map[string][]string{}
+	for _, w := range waves {
+		for _, t := range w {
+			seen := map[string]bool{}
+			for _, raw := range t.DependsOn {
+				dep := strings.TrimSpace(raw)
+				switch wv, ok := waveOf[dep]; {
+				case seen[dep]:
+					continue
+				case dep == t.ID:
+					return nil, fmt.Errorf("%s depends on itself", t.ID)
+				case !ok:
+					return nil, fmt.Errorf("%s depends on %s, which is not a ticket of the plan", t.ID, dep)
+				case wv > waveOf[t.ID]:
+					return nil, fmt.Errorf("%s depends on %s, which is in a later wave", t.ID, dep)
+				}
+				seen[dep] = true
+				edges = append(edges, [2]string{t.ID, dep})
+				next[t.ID] = append(next[t.ID], dep)
+			}
+		}
+	}
+	// An edge never points to a later wave, so a cycle lies within one wave; a depth-first
+	// walk finds it.
+	const (
+		unseen = iota
+		onPath
+		done
+	)
+	state := map[string]int{}
+	var path []string
+	var walk func(id string) []string
+	walk = func(id string) []string {
+		state[id] = onPath
+		path = append(path, id)
+		for _, dep := range next[id] {
+			switch state[dep] {
+			case onPath:
+				i := slices.Index(path, dep)
+				return append(slices.Clone(path[i:]), dep)
+			case unseen:
+				if c := walk(dep); c != nil {
+					return c
+				}
+			}
+		}
+		path = path[:len(path)-1]
+		state[id] = done
+		return nil
+	}
+	for _, w := range waves {
+		for _, t := range w {
+			if state[t.ID] == unseen {
+				if c := walk(t.ID); c != nil {
+					return nil, fmt.Errorf("the dependencies would make a cycle: %s", strings.Join(c, " -> "))
+				}
+			}
+		}
+	}
+	return edges, nil
 }
 
 func (p *publishTickets) exec(ctx context.Context, call Call) (Result, error) {
@@ -410,6 +495,10 @@ func (p *publishTickets) exec(ctx context.Context, call Call) (Result, error) {
 		}
 	}
 
+	// The Planner's edges, ticket to ticket (DESIGN wave 3 rule 2).
+	if err := store.ReplacePlannerDependencies(ctx, q, *run.ProjectID, planID, plan.edges); err != nil {
+		return Result{}, err
+	}
 	if stored.Status == store.PlanPublishing {
 		if err := store.SetPlanStatus(ctx, q, planID, store.PlanWaitingPlanMerge); err != nil {
 			return Result{}, err

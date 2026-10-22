@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"yuno/internal/deps"
 	"yuno/internal/engine"
 	"yuno/internal/plans"
 	"yuno/internal/project"
@@ -112,6 +113,184 @@ func (s *Service) requests(pc *project.Config) tools.RequestProvider {
 	return tools.ProviderFor(pc, s.Client)
 }
 
+// gate judges the prerequisites of the plans' tickets (Chief platform control, DESIGN wave 3
+// rules 4 and 6), reading a merge commit's CI through its project's provider.
+func (s *Service) gate() *deps.Gate {
+	return &deps.Gate{Pool: s.Pool, Provider: func(ctx context.Context, mr *store.MergeRequest) (*project.Config, tools.RequestProvider, error) {
+		proj, err := store.GetProject(ctx, s.Pool, mr.ProjectID)
+		if err != nil {
+			return nil, nil, err
+		}
+		pc, err := s.config(ctx, proj)
+		if err != nil {
+			return nil, nil, err
+		}
+		if pc.DefaultBranch == "" {
+			c := *pc
+			c.DefaultBranch = proj.DefaultBranch
+			pc = &c
+		}
+		return pc, s.requests(pc), nil
+	}}
+}
+
+// held judges the tickets of the wave that have prerequisites and returns the ones that are
+// not to be labelled for intake (DESIGN wave 3 rule 6): a prerequisite is not satisfied, or
+// could not be judged now (the next pass judges it again).
+func (s *Service) held(ctx context.Context, planID string, wave int) (map[string]bool, error) {
+	open, err := store.TicketsWithOpenDependencies(ctx, s.Pool, planID)
+	if err != nil || len(open) == 0 {
+		return nil, err
+	}
+	tickets, err := store.ListWaveTickets(ctx, s.Pool, planID, wave)
+	if err != nil {
+		return nil, err
+	}
+	held := map[string]bool{}
+	g := s.gate()
+	for _, t := range tickets {
+		if !open[t.TicketID] {
+			continue
+		}
+		st, err := g.Ticket(ctx, planID, t.TicketID)
+		if err != nil {
+			s.log().Warn("waves: judging a ticket's prerequisites failed; it waits for the next pass", "plan_id", planID,
+				"ticket", t.TicketID, "error", err)
+			held[t.TicketID] = true
+			continue
+		}
+		if !st.Satisfied {
+			held[t.TicketID] = true
+		}
+	}
+	return held, nil
+}
+
+// ReleaseSatisfied labels for intake the held tickets of every building plan whose
+// prerequisites are now satisfied (DESIGN wave 3 rules 6 and 8b); the dependency watcher
+// calls it on the merge request sync tick, and each pass of the wave watcher does too. A
+// failure on one plan leaves the others to their turn.
+func (s *Service) ReleaseSatisfied(ctx context.Context) error {
+	list, err := store.ListOpenPlans(ctx, s.Pool)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for i := range list {
+		plan := &list[i]
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if plan.Status != store.PlanBuilding {
+			continue
+		}
+		proj, err := store.GetProject(ctx, s.Pool, plan.ProjectID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if proj.DeletedAt != nil || proj.WavesPaused {
+			continue
+		}
+		if err := s.releaseSatisfied(ctx, plan, proj, nil); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// releaseSatisfied is rule 6 for one plan: each pending ticket of its current, released wave
+// that an edge holds is judged; the ones whose prerequisites are all satisfied are labelled
+// and set released, and their edges cleared, under the plan lock with the pause and the
+// revision read again, as a wave release does. A ticket whose prerequisite was closed
+// without merging can never be released: it is escalated, which tells the operator. pc is
+// the project's access, read here when nil and a ticket is ready.
+func (s *Service) releaseSatisfied(ctx context.Context, plan *store.Plan, proj *store.Project, pc *project.Config) error {
+	wave := plan.CurrentWave
+	if _, err := store.FindPlanEvent(ctx, s.Pool, plan.ID, store.PlanEventWaveReleased, wave, ""); errors.Is(err, store.ErrNotFound) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	open, err := store.TicketsWithOpenDependencies(ctx, s.Pool, plan.ID)
+	if err != nil || len(open) == 0 {
+		return err
+	}
+	tickets, err := store.ListWaveTickets(ctx, s.Pool, plan.ID, wave)
+	if err != nil {
+		return err
+	}
+	g := s.gate()
+	var ready []store.WaveTicketMerge
+	for _, t := range tickets {
+		if t.Status != store.TicketPending || !open[t.TicketID] {
+			continue
+		}
+		st, err := g.Ticket(ctx, plan.ID, t.TicketID)
+		switch {
+		case err != nil:
+			s.log().Warn("waves: judging a ticket's prerequisites failed; the next pass tries again", "plan_id", plan.ID,
+				"ticket", t.TicketID, "error", err)
+		case len(st.Closed) > 0:
+			s.escalate(ctx, t, st.Closed[0].Reason)
+		case st.Satisfied:
+			ready = append(ready, t)
+		}
+	}
+	if len(ready) == 0 {
+		return nil
+	}
+	if pc == nil {
+		if pc, err = s.config(ctx, proj); err != nil {
+			return fmt.Errorf("read the project's access: %w", err)
+		}
+	}
+	released := 0
+	err = s.inTx(ctx, func(q store.Querier) error {
+		cur, err := store.LockPlan(ctx, q, plan.ID)
+		if err != nil {
+			return err
+		}
+		if cur.Status != store.PlanBuilding || cur.CurrentWave != wave {
+			return nil
+		}
+		if paused, _, err := pausedIn(ctx, q, cur.ProjectID); err != nil || paused {
+			return err
+		}
+		if revising, err := s.revising(ctx, q, cur); err != nil || revising {
+			return err
+		}
+		prov := s.issues(pc)
+		var ids []string
+		for _, t := range ready {
+			if t.IssueNumber == nil {
+				return fmt.Errorf("ticket %s has no issue to release", t.TicketID)
+			}
+			if err := prov.SwapLabels(ctx, *t.IssueNumber, proj.IntakeLabel, ""); err != nil {
+				return fmt.Errorf("label the issue of ticket %s: %w", t.TicketID, err)
+			}
+			moved, err := store.MoveTicket(ctx, q, plan.ID, t.TicketID, store.TicketReleased, store.TicketPending)
+			if err != nil {
+				return err
+			}
+			if moved {
+				released++
+				ids = append(ids, t.TicketID)
+			}
+		}
+		return store.ClearTicketDependencies(ctx, q, plan.ID, ids, time.Now())
+	})
+	if err != nil || released == 0 {
+		return err
+	}
+	s.Plans.Publish(plan.ID, plan.ProjectID)
+	s.log().Info("waves: tickets released once their prerequisites were satisfied", "plan_id", plan.ID, "wave", wave, "count", released)
+	return nil
+}
+
 // Run passes every Interval until ctx ends, the first one at once (rule 12).
 func (s *Service) Run(ctx context.Context) {
 	interval := s.Interval
@@ -202,6 +381,10 @@ func (s *Service) afterPlanMerge(ctx context.Context, plan *store.Plan, proj *st
 	if err != nil {
 		return fmt.Errorf("read the project's access: %w", err)
 	}
+	held, err := s.held(ctx, plan.ID, first)
+	if err != nil {
+		return err
+	}
 	moved := false
 	err = s.inTx(ctx, func(q store.Querier) error {
 		cur, err := store.LockPlan(ctx, q, plan.ID)
@@ -220,13 +403,13 @@ func (s *Service) afterPlanMerge(ctx context.Context, plan *store.Plan, proj *st
 		if revising, err := s.revising(ctx, q, cur); err != nil || revising {
 			return err
 		}
-		if err := s.labelWave(ctx, s.issues(pc), proj.IntakeLabel, plan.ID, first); err != nil {
+		if err := s.labelWave(ctx, s.issues(pc), proj.IntakeLabel, plan.ID, first, held); err != nil {
 			return err
 		}
 		if moved, err = store.MovePlan(ctx, q, cur.ID, store.PlanBuilding, first, store.PlanWaitingPlanMerge); err != nil || !moved {
 			return err
 		}
-		_, err = releaseTx(ctx, q, cur.ID, first)
+		_, err = releaseTx(ctx, q, cur.ID, first, held)
 		return err
 	})
 	if err != nil || !moved {
@@ -264,14 +447,15 @@ func pausedIn(ctx context.Context, q store.Querier, projectID string) (paused bo
 
 // labelWave adds the project's intake label to the issue of each ticket of the wave that is
 // still pending or released (rule 12); adding a label an issue carries is fine, so a retry
-// repeats it. A ticket without an issue cannot be released.
-func (s *Service) labelWave(ctx context.Context, prov tools.IssueProvider, label string, planID string, wave int) error {
+// repeats it. A ticket without an issue cannot be released. A held ticket (an unsatisfied
+// prerequisite, Chief platform control DESIGN wave 3 rule 6) is not labelled.
+func (s *Service) labelWave(ctx context.Context, prov tools.IssueProvider, label string, planID string, wave int, held map[string]bool) error {
 	tickets, err := store.ListWaveTickets(ctx, s.Pool, planID, wave)
 	if err != nil {
 		return err
 	}
 	for _, t := range tickets {
-		if t.Status != store.TicketPending && t.Status != store.TicketReleased {
+		if t.Status != store.TicketPending && t.Status != store.TicketReleased || held[t.TicketID] {
 			continue
 		}
 		if t.IssueNumber == nil {
@@ -285,14 +469,23 @@ func (s *Service) labelWave(ctx context.Context, prov tools.IssueProvider, label
 }
 
 // releaseTx sets the wave's pending tickets released and records `wave_released` (once per
-// wave), in the caller's transaction. The event is nil when it was recorded already.
-func releaseTx(ctx context.Context, q store.Querier, planID string, wave int) (*store.PlanEvent, error) {
+// wave), in the caller's transaction. The event is nil when it was recorded already. A held
+// ticket stays pending until its prerequisites are satisfied (Chief platform control, DESIGN
+// wave 3 rule 6); the edges of the released ones are cleared.
+func releaseTx(ctx context.Context, q store.Querier, planID string, wave int, held map[string]bool) (*store.PlanEvent, error) {
 	tickets, err := store.ListWaveTickets(ctx, q, planID, wave)
 	if err != nil {
 		return nil, err
 	}
 	n := 0
+	var released []string
 	for _, t := range tickets {
+		if held[t.TicketID] {
+			continue
+		}
+		if t.Status == store.TicketPending || t.Status == store.TicketReleased {
+			released = append(released, t.TicketID)
+		}
 		moved, err := store.MoveTicket(ctx, q, planID, t.TicketID, store.TicketReleased, store.TicketPending)
 		if err != nil {
 			return nil, err
@@ -300,6 +493,9 @@ func releaseTx(ctx context.Context, q store.Querier, planID string, wave int) (*
 		if moved {
 			n++
 		}
+	}
+	if err := store.ClearTicketDependencies(ctx, q, planID, released, time.Now()); err != nil {
+		return nil, err
 	}
 	if _, err := store.FindPlanEvent(ctx, q, planID, store.PlanEventWaveReleased, wave, ""); err == nil {
 		return nil, nil
@@ -356,6 +552,11 @@ func (s *Service) building(ctx context.Context, plan *store.Plan, proj *store.Pr
 		if released, err := s.releaseHeld(ctx, plan, proj, pc, wave); err != nil || released {
 			return err
 		}
+		// Tickets of the wave held by a prerequisite are released once it is satisfied
+		// (Chief platform control, DESIGN wave 3 rule 6).
+		if err := s.releaseSatisfied(ctx, plan, proj, pc); err != nil {
+			return err
+		}
 	}
 	attempt := 1
 	if run, last, err := store.LatestShipRun(ctx, s.Pool, plan.ID, wave); err == nil {
@@ -392,8 +593,12 @@ func (s *Service) releaseHeld(ctx context.Context, plan *store.Plan, proj *store
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return false, err
 	}
+	held, err := s.held(ctx, plan.ID, wave)
+	if err != nil {
+		return false, err
+	}
 	var ev *store.PlanEvent
-	err := s.inTx(ctx, func(q store.Querier) error {
+	err = s.inTx(ctx, func(q store.Querier) error {
 		cur, err := store.LockPlan(ctx, q, plan.ID)
 		if err != nil {
 			return err
@@ -407,10 +612,10 @@ func (s *Service) releaseHeld(ctx context.Context, plan *store.Plan, proj *store
 		if revising, err := s.revising(ctx, q, cur); err != nil || revising {
 			return err
 		}
-		if err := s.labelWave(ctx, s.issues(pc), proj.IntakeLabel, cur.ID, wave); err != nil {
+		if err := s.labelWave(ctx, s.issues(pc), proj.IntakeLabel, cur.ID, wave, held); err != nil {
 			return err
 		}
-		ev, err = releaseTx(ctx, q, cur.ID, wave)
+		ev, err = releaseTx(ctx, q, cur.ID, wave, held)
 		return err
 	})
 	if err != nil || ev == nil {
@@ -649,6 +854,12 @@ func (s *Service) Advance(ctx context.Context, runID string) (tools.AdvanceResul
 		return zero, fmt.Errorf("read the project's access: %w", err)
 	}
 	prov := s.issues(pc)
+	var held map[string]bool
+	if next > 0 {
+		if held, err = s.held(ctx, planID, next); err != nil {
+			return zero, err
+		}
+	}
 
 	var res tools.AdvanceResult
 	var done, accept *store.PlanEvent
@@ -684,9 +895,9 @@ func (s *Service) Advance(ctx context.Context, runID string) (tools.AdvanceResul
 		}
 		// A revision of the plan that is running holds the next wave back: the wave closes,
 		// and the watcher releases the next one once the revision ended (D-089).
-		held := false
+		revisionHeld := false
 		if next > 0 {
-			if held, err = s.revising(ctx, q, cur); err != nil {
+			if revisionHeld, err = s.revising(ctx, q, cur); err != nil {
 				return err
 			}
 		}
@@ -698,13 +909,13 @@ func (s *Service) Advance(ctx context.Context, runID string) (tools.AdvanceResul
 				return fmt.Errorf("close the issue of ticket %s: %w", t.TicketID, err)
 			}
 		}
-		if next > 0 && !held {
-			if err := s.labelWave(ctx, prov, proj.IntakeLabel, planID, next); err != nil {
+		if next > 0 && !revisionHeld {
+			if err := s.labelWave(ctx, prov, proj.IntakeLabel, planID, next, held); err != nil {
 				return err
 			}
 		}
 		res = tools.AdvanceResult{PlanID: planID, Wave: wave, Last: next == 0}
-		if held {
+		if revisionHeld {
 			res.HeldWave = next
 		}
 		tickets, err := store.ListWaveTickets(ctx, q, planID, wave)
@@ -725,8 +936,8 @@ func (s *Service) Advance(ctx context.Context, runID string) (tools.AdvanceResul
 			if _, err := store.MovePlan(ctx, q, planID, store.PlanBuilding, next, store.PlanShipping); err != nil {
 				return err
 			}
-			if !held {
-				if _, err := releaseTx(ctx, q, planID, next); err != nil {
+			if !revisionHeld {
+				if _, err := releaseTx(ctx, q, planID, next, held); err != nil {
 					return err
 				}
 				nt, err := store.ListWaveTickets(ctx, q, planID, next)

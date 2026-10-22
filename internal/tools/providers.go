@@ -229,6 +229,10 @@ type RequestProvider interface {
 	// CIConfigured tells whether branch has a pipeline or check on any of its last 20
 	// commits (DESIGN wave 3 rule 4's "no CI configured" is its negation).
 	CIConfigured(ctx context.Context, branch string) (bool, error)
+	// CommitCI is the CI of exactly sha on ref (DESIGN wave 3 rule 4: a prerequisite's merge
+	// commit on the default branch): GitLab's newest pipeline of that sha on that ref, GitHub's
+	// check runs and combined status of the commit. State is one of the BranchStatus states.
+	CommitCI(ctx context.Context, ref, sha string) (BranchStatus, error)
 }
 
 // The states of a BranchStatus (DESIGN 5.29 rule 12).
