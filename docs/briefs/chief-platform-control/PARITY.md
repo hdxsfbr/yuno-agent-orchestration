@@ -96,11 +96,13 @@ such a test exists, so the mark is dropped when its wave lands. Every operation 
 | 31 | GET /api/runs | listRuns | — | list | read | TestPlatformParity |
 | 32 | POST /api/runs | createRun | delegate_task (no limits/model, no key) | limits, model, idempotency | routine; privileged with limits above the defaults (A5). `trigger=eval` and `script_id` are refused for the Chief (machine fields) | TestPlatformCallRefusesMachine, TestPrivilegedNeedsApproval |
 | 33 | GET /api/runs/{id} | getRun | run_status | — | read | TestPlatformParity |
-| 34 | POST /api/runs/{id}/cancel | cancelRun (202 before the worker stops) | — | request identity, acknowledgement (PRD 3) | routine; W2 turns it into a command with received/acked/applied | TestRunEndpoints; TestCommandLifecycle (wave 2), TestCancelLiveConfirmedByEvent (wave 2) |
-| 35 | POST /api/runs/{id}/retry | retryRun (whole run, from current_node) | — | a chosen step; refuse while a cancel is unconfirmed | routine; W2 adds `from_node` and the guard | TestRetryRunAccepts; TestRetryFromStep (wave 2), TestRetryRefusedUnconfirmedCancel (wave 2) |
-| — | **new** POST /api/runs/{id}/pause, /resume | — | — | run pause and resume (PRD 3) | routine, W2 | TestPauseResume (wave 2) |
-| — | **new** POST /api/runs/{id}/steer | — | — | operator text into a live step (PRD 3) | routine, W2 | TestSteerLive (wave 2) |
-| — | **new** GET /api/runs/{id}/commands[/{cid}] | — | — | command status (PRD 3) | read, W2 | TestCommandLifecycle (wave 2) |
+| 34 | POST /api/runs/{id}/cancel | cancelRun (a command: received, acknowledged, applied when the gateway confirms the stop) | — | — | routine, W2 | TestRunEndpoints, TestCommandLifecycle, TestCancelLiveConfirmedByEvent, TestCancelUnconfirmedThenReconciled |
+| 35 | POST /api/runs/{id}/retry | retryRun (a command; `from_node` picks the step; refused while a stop is unconfirmed) | — | — | routine, W2 | TestRetryRunAccepts, TestRetryFromStep, TestRetryRefusedUnconfirmedCancel |
+| 35a | **new** POST /api/runs/{id}/pause | pauseRun | — | run pause (PRD 3) | routine, W2 | TestPauseResume, TestPauseOnWaitingRejected |
+| 35b | **new** POST /api/runs/{id}/resume | resumeRun | — | run resume with a note (PRD 3) | routine, W2 | TestPauseResume, TestResumeRefusedUnconfirmedStop |
+| 35c | **new** POST /api/runs/{id}/steer | steerRun | — | operator text into a live step (PRD 3) | routine, W2 | TestSteerLive, TestSteerBetweenTurns |
+| 35d | **new** GET /api/runs/{id}/commands | listRunCommands | — | command status (PRD 3) | read, W2 | TestRunCommandReads |
+| 35e | **new** GET /api/runs/{id}/commands/{cid} | getRunCommand | — | one command's status (PRD 3) | read, W2 | TestRunCommandReads, TestCommandLifecycle |
 | 36 | GET /api/runs/{id}/trace | getTrace | run_status (subset) | full trace | read (large; the tool trims it) | TestPlatformParity |
 | 37 | GET /api/runs/{id}/artifacts | listArtifacts | run_status (names) | read | read | TestPlatformParity |
 | 38 | GET /api/runs/{id}/artifacts/{artifactId} | downloadArtifact | — | binary | read; the tool returns text up to 32 KiB and metadata for binaries | TestPlatformCallBinary, TestPlatformCallArtifacts |
