@@ -55,39 +55,6 @@ type mergeRequestRead struct {
 	BlockedBy []deps.Blocker `json:"blocked_by,omitempty"`
 }
 
-// blockedBy is what holds an open merge request (rule 5), as last recorded: each
-// prerequisite not satisfied with its reason; once all are satisfied and the request is not
-// let go yet, each with the watcher's reason (an update from the default branch to come,
-// conflicts, CI on the new head). A request that is not open is held by nothing.
-func blockedBy(ctx context.Context, q store.Querier, mr *store.MergeRequest, edges []store.Dependency) ([]deps.Blocker, error) {
-	if mr.State != store.MergeRequestOpen {
-		return []deps.Blocker{}, nil
-	}
-	st, err := deps.Stored(ctx, q, edges)
-	if err != nil {
-		return nil, err
-	}
-	if len(st.Blocked) > 0 || len(st.Open) == 0 {
-		if st.Blocked == nil {
-			st.Blocked = []deps.Blocker{}
-		}
-		return st.Blocked, nil
-	}
-	g, err := store.GetDependencyGate(ctx, q, mr.ID)
-	if err != nil {
-		return nil, err
-	}
-	reason := "the platform has not updated the branch from the default branch yet"
-	if g != nil && g.Reason != nil && *g.Reason != "" {
-		reason = *g.Reason
-	}
-	out := make([]deps.Blocker, len(st.Open))
-	for i, e := range st.Open {
-		out[i] = deps.Blocker{Prerequisite: e.PrerequisiteID, Kind: e.PrerequisiteKind, Label: st.Labels[i], Reason: reason}
-	}
-	return out, nil
-}
-
 // dependencies reads the prerequisites of a merge request for the routes.
 func (s *Server) dependencies(ctx context.Context, mr *store.MergeRequest) (dependenciesOut, error) {
 	edges, err := store.MergeRequestDependencies(ctx, s.pool, mr.ID)
@@ -112,7 +79,7 @@ func (s *Server) dependencies(ctx context.Context, mr *store.MergeRequest) (depe
 		}
 		out.Prerequisites = append(out.Prerequisites, d)
 	}
-	if out.BlockedBy, err = blockedBy(ctx, s.pool, mr, edges); err != nil {
+	if out.BlockedBy, err = deps.BlockedBy(ctx, s.pool, mr, edges); err != nil {
 		return dependenciesOut{}, err
 	}
 	return out, nil

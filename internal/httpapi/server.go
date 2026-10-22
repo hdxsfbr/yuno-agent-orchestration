@@ -253,10 +253,12 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	// The wave watcher (DESIGN 5.29 rule 12) releases and ships the waves of the open plans.
 	s.waves = &waves.Service{Pool: pool, Plans: s.plans, Projects: s.projects, Client: s.checkClient, Engine: eng,
 		Interval: cfg.WaveWatchInterval, Log: log}
-	// The sync's dependency watcher releases held tickets through the wave watcher (Chief
-	// platform control, DESIGN wave 3 rule 8b).
+	// The sync's dependency watcher releases held tickets through the wave watcher and
+	// re-queues the runs a dependent request held (Chief platform control, DESIGN wave 3
+	// rules 7 and 8).
 	mr := &mergereq.Sync{Pool: pool, Projects: s.projects, Client: s.checkClient, Reporter: eng,
-		Plans: s.plans, Events: rec, Tickets: s.waves, Interval: cfg.MergeRequestSyncInterval, Log: log}
+		Plans: s.plans, Events: rec, Tickets: s.waves, RequeueDependencyRuns: s.requeueDependencyRuns,
+		Interval: cfg.MergeRequestSyncInterval, Log: log}
 	if n, err := mr.Backfill(ctx); err == nil && n > 0 {
 		log.Info("merge requests backfilled from the trace", "count", n)
 	}

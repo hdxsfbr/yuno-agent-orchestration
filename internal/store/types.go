@@ -317,6 +317,13 @@ type Run struct {
 	// CancelState says whether the last turn of a stopped run is confirmed stopped (DESIGN
 	// W2 rules 11 to 13): "" when nothing was stopped, confirmed or unconfirmed.
 	CancelState string `db:"cancel_state" json:"cancel_state,omitempty"`
+	// ParkReason is RunParkDependency for a run created paused because its merge request's
+	// dependencies hold it (Chief platform control, DESIGN wave 3 rule 7), "" otherwise;
+	// ParkDetail is the reason it waits, as it read then. ResumeNote is the note its steps are
+	// told, until one succeeds, once the dependency watcher re-queued it (rule 8a).
+	ParkReason string  `db:"park_reason" json:"park_reason,omitempty"`
+	ParkDetail *string `db:"park_detail" json:"park_detail,omitempty"`
+	ResumeNote *string `db:"resume_note" json:"-"`
 	// AgentNames and Models are not columns; FillRunParticipants sets them for list views.
 	AgentNames []string `db:"-" json:"agent_names,omitempty"`
 	Models     []string `db:"-" json:"models,omitempty"`
@@ -409,6 +416,10 @@ type RunNode struct {
 
 // ParkPaused is run_nodes.park_reason of a visit the operator paused (DESIGN W2 rule 14).
 const ParkPaused = "paused"
+
+// RunParkDependency is runs.park_reason of a run created paused because the merge request it
+// would work on is held by its dependencies (Chief platform control, DESIGN wave 3 rule 7).
+const RunParkDependency = "dependency"
 
 // RunBranch is one branch of a fork visit (DESIGN 5.26 rule 3): the part of the run that
 // started at one outgoing edge of the fork and runs at the same time as its siblings

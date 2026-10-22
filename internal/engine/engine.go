@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"yuno/internal/deps"
 	"yuno/internal/guardrails"
 	"yuno/internal/obs"
 	"yuno/internal/openclaw"
@@ -551,6 +552,9 @@ func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow
 		logAttrs = append(logAttrs, "merge_request_id", id)
 	}
 	insert := func(tx pgx.Tx) error {
+		if err := e.parkOnDependencies(ctx, tx, run); err != nil {
+			return err
+		}
 		// An occurrence fired again must not count its own first run against the rate
 		// limit; the unique index settles a concurrent insert.
 		if trigger == store.TriggerSchedule && run.TriggerRef != nil {
@@ -610,8 +614,71 @@ func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow
 		return nil, fmt.Errorf("read run: %w", err)
 	}
 	e.emit(ctx, created.ID, "run.status", map[string]any{"run": created})
+	if created.ParkReason == store.RunParkDependency {
+		e.logEvent(ctx, created.ID, "info", "waiting for the merge request's prerequisites: "+strValue(created.ParkDetail),
+			append([]any{"workflow_id", wf.ID, "trigger", trigger}, logAttrs...)...)
+		return created, nil
+	}
 	e.log.Info("run queued", append([]any{"run_id", created.ID, "workflow_id", wf.ID, "trigger", trigger}, logAttrs...)...)
 	return created, nil
+}
+
+// parkOnDependencies is Chief platform control, DESIGN wave 3 rule 7, in the transaction
+// that inserts the run: a run that would work on a merge request its dependencies hold is
+// created paused, with park reason dependency and the reason, and no worker takes it until
+// the dependency watcher lets the request go and re-queues it (RequeueDependencyRuns). The
+// record's row is locked (FOR KEY SHARE) before its edges are read, so a watcher clearing
+// them (it holds the row FOR UPDATE) either comes first and the run is queued, or waits for
+// the insert and then finds the run to re-queue.
+func (e *Engine) parkOnDependencies(ctx context.Context, tx pgx.Tx, run *store.Run) error {
+	run.Status, run.ParkReason, run.ParkDetail = store.RunQueued, "", nil
+	if run.MergeRequestID == nil {
+		return nil
+	}
+	if err := store.LockMergeRequestShared(ctx, tx, *run.MergeRequestID); err != nil {
+		return err
+	}
+	reason, err := deps.Held(ctx, tx, *run.MergeRequestID)
+	if err != nil || reason == "" {
+		return err
+	}
+	run.Status, run.ParkReason, run.ParkDetail = store.RunPaused, store.RunParkDependency, &reason
+	return nil
+}
+
+// RequeueDependencyRuns is the dependency watcher's re-queue (Chief platform control, DESIGN
+// wave 3 rules 7 and 8a, mergereq.Sync.RequeueDependencyRuns): the runs parked on the merge
+// request mrID for its dependencies go to queued, lease epoch + 1, with note for their first
+// step. It returns them.
+func (e *Engine) RequeueDependencyRuns(ctx context.Context, mrID, note string) ([]store.Run, error) {
+	runs, err := store.RequeueDependencyRuns(ctx, e.deps.Pool, mrID, note)
+	if err != nil {
+		return nil, err
+	}
+	for i := range runs {
+		e.emit(ctx, runs[i].ID, "run.status", map[string]any{"run": &runs[i]})
+		e.logEvent(ctx, runs[i].ID, "info", note+" The run is queued.", "merge_request_id", mrID)
+	}
+	return runs, nil
+}
+
+// dependencyHold is rule 7's refusal of a retry or a resume of a run that works on a merge
+// request its dependencies hold, "" when nothing holds it. The request is the one the run
+// names or, for a run that names none, the one it opened: its next push goes there too.
+func dependencyHold(ctx context.Context, q store.Querier, run *store.Run) (string, error) {
+	mrID := strValue(run.MergeRequestID)
+	if mrID == "" {
+		opened, err := store.MergeRequestByRun(ctx, q, run.ID)
+		if err != nil || opened == nil {
+			return "", err
+		}
+		mrID = opened.ID
+	}
+	reason, err := deps.Held(ctx, q, mrID)
+	if err != nil || reason == "" {
+		return "", err
+	}
+	return deps.HeldDetail(reason), nil
 }
 
 // mergeRequestBusy is the 422 for a run request that lost the live-run index of DESIGN 5.22

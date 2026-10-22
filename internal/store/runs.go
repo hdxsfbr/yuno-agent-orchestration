@@ -21,7 +21,7 @@ const runColumns = `id, workflow_id, workflow_version, workflow_snapshot, trigge
 	limits, current_node, resume_node_visit_id, step_count, tool_call_count, attempt, cancel_requested, cancel_by,
 	failure_reason, cost_usd_micros, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, paused_at,
 	paused_total_ms, created_at, started_at, finished_at, updated_at, reported_at, toolchain, project_id, project_snapshot, retries,
-	merge_request_id, checkout_sha, merged_sha, lease_epoch, cancel_state`
+	merge_request_id, checkout_sha, merged_sha, lease_epoch, cancel_state, park_reason, park_detail, resume_note`
 
 // Constraint names of the partial unique indexes that refuse a second live run for the
 // same merge request (DESIGN 5.22 rule 1) or the same issue (5.23 rule 3).
@@ -68,6 +68,9 @@ func liveIndexError(err error) error {
 	return err
 }
 
+// CreateRun inserts a run, queued unless r says otherwise: a run on a merge request its
+// dependencies hold is created paused with ParkReason and ParkDetail (Chief platform
+// control, DESIGN wave 3 rule 7).
 func CreateRun(ctx context.Context, q Querier, r *Run) error {
 	if r.ID == "" {
 		r.ID = NewID()
@@ -88,11 +91,11 @@ func CreateRun(ctx context.Context, q Querier, r *Run) error {
 	r.CreatedAt, r.UpdatedAt = now, now
 	_, err := q.Exec(ctx, `INSERT INTO runs (id, workflow_id, workflow_version, workflow_snapshot, trigger, trigger_ref,
 		status, input, state, limits, attempt, created_at, updated_at, project_id, project_snapshot,
-		merge_request_id, checkout_sha)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+		merge_request_id, checkout_sha, park_reason, park_detail)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
 		r.ID, r.WorkflowID, r.WorkflowVersion, r.WorkflowSnapshot, r.Trigger, r.TriggerRef,
 		r.Status, r.Input, r.State, r.Limits, r.Attempt, r.CreatedAt, r.UpdatedAt, r.ProjectID, r.Project,
-		r.MergeRequestID, r.CheckoutSHA)
+		r.MergeRequestID, r.CheckoutSHA, r.ParkReason, r.ParkDetail)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" && (pgErr.ConstraintName == "runs_schedule_occurrence_idx" || pgErr.ConstraintName == "runs_plan_wave_idx") {
 		return ErrDuplicateTrigger

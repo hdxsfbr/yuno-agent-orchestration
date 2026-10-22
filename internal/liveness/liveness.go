@@ -237,9 +237,10 @@ func activityRule(n Node, th Thresholds, now time.Time) (string, string) {
 	return Executing, fmt.Sprintf("last activity %s ago", text(a))
 }
 
-// Run is what the run rule reads. Blocked is why a queued run cannot start ("" when
-// nothing blocks it); Pending are the run's pending approvals and questions, oldest first;
-// Nodes are the verdicts of its live visits.
+// Run is what the run rule reads. Blocked is why a queued run cannot start, or why a run
+// parked for its merge request's dependencies waits ("" when nothing blocks it); Pending are
+// the run's pending approvals and questions, oldest first; Nodes are the verdicts of its live
+// visits.
 type Run struct {
 	Status        string
 	FailureReason string
@@ -268,6 +269,11 @@ func ClassifyRun(r Run, th Thresholds, now time.Time) (string, string) {
 		}
 		return Waiting, waitingOn(r.Pending, now)
 	case store.RunPaused:
+		// Chief platform control, DESIGN wave 3 rule 7: held by its merge request's
+		// dependencies until the watcher re-queues it.
+		if r.Blocked != "" {
+			return Blocked, r.Blocked
+		}
 		// DESIGN W2 rule 14: no worker holds it until the operator resumes it.
 		if r.PausedAt != nil {
 			return Waiting, "paused by the operator " + text(age(now, *r.PausedAt)) + " ago; waiting for a resume"

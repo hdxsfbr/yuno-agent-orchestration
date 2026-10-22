@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"yuno/internal/deps"
 	"yuno/internal/mergereq"
 	"yuno/internal/obs"
 	"yuno/internal/project"
@@ -32,11 +33,31 @@ const (
 var mergeRequestStates = []string{store.MergeRequestOpen, store.MergeRequestMerged, store.MergeRequestClosed}
 
 // mergeSync is the sync the handlers refresh and report through: the server's project
-// resolver and provider client, and the engine as reporter when it can send platform
-// messages (the engine does; a server without one reports nothing).
+// resolver and provider client, the engine as reporter when it can send platform messages
+// (the engine does; a server without one reports nothing), and the re-queue of the runs a
+// dependent request held (requeueDependencyRuns).
 func (s *Server) mergeSync() *mergereq.Sync {
 	rep, _ := s.engine.(mergereq.Reporter)
-	return &mergereq.Sync{Pool: s.pool, Projects: s.projects, Client: s.checkClient, Reporter: rep, Events: s.rec, Log: s.log}
+	return &mergereq.Sync{Pool: s.pool, Projects: s.projects, Client: s.checkClient, Reporter: rep, Events: s.rec, Log: s.log,
+		RequeueDependencyRuns: s.requeueDependencyRuns}
+}
+
+// dependencyRequeuer is the engine's re-queue of the runs parked on a merge request for its
+// dependencies (Chief platform control, DESIGN wave 3 rule 7).
+type dependencyRequeuer interface {
+	RequeueDependencyRuns(ctx context.Context, mrID, note string) ([]store.Run, error)
+}
+
+// requeueDependencyRuns is the dependency watcher's hook (mergereq.Sync.RequeueDependencyRuns,
+// DESIGN wave 3 rules 7 and 8a): once the watcher let a dependent request go, its parked runs
+// are queued with the task note. An engine that cannot re-queue leaves them paused.
+func (s *Server) requeueDependencyRuns(ctx context.Context, rec *store.MergeRequest, note string) error {
+	rq, ok := s.engine.(dependencyRequeuer)
+	if !ok {
+		return nil
+	}
+	_, err := rq.RequeueDependencyRuns(ctx, rec.ID, note)
+	return err
 }
 
 func (s *Server) listMergeRequests(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +102,7 @@ func (s *Server) getMergeRequest(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "read the merge request's dependencies", err)
 		return
 	}
-	blocked, err := blockedBy(r.Context(), s.pool, mr, edges)
+	blocked, err := deps.BlockedBy(r.Context(), s.pool, mr, edges)
 	if err != nil {
 		s.internalError(w, r, "read the merge request's dependencies", err)
 		return

@@ -177,8 +177,9 @@ func PauseQueuedRun(ctx context.Context, q Querier, id string, at time.Time) (*R
 // ResumePausedRun re-queues a paused run (rule 15), in one statement: the lease epoch goes up
 // (rule 7), the paused interval is added to paused_total_ms (a pause does not count toward
 // the time limit), and the visit the pause parked, when there is one, is closed succeeded
-// without output and marked resumed with the note, so the step's next visit continues it.
-// ErrNotFound when the run is not paused.
+// without output and marked resumed with the note, so the step's next visit continues it. A
+// run parked for a dependency (Chief platform control, DESIGN wave 3 rule 7) loses its park
+// reason. ErrNotFound when the run is not paused.
 func ResumePausedRun(ctx context.Context, q Querier, id, note string, at time.Time) (*Run, error) {
 	return collectRun(q.Query(ctx, `WITH parked AS (
 			UPDATE run_nodes SET status=$5, finished_at=$3, resumed_at=$3, resume_note=$4
@@ -187,9 +188,36 @@ func ResumePausedRun(ctx context.Context, q Querier, id, note string, at time.Ti
 			RETURNING id)
 		UPDATE runs SET status=$8, lease_epoch=lease_epoch+1,
 			paused_total_ms = paused_total_ms + GREATEST(0, COALESCE(EXTRACT(EPOCH FROM ($3::timestamptz - paused_at)) * 1000, 0))::bigint,
-			paused_at=NULL, updated_at=now()
+			paused_at=NULL, park_reason='', park_detail=NULL, updated_at=now()
 		WHERE id=$1 AND status=$2 RETURNING `+runColumns,
 		id, RunPaused, at.UTC(), note, NodeSucceeded, ParkPaused, NodeWaitingApproval, RunQueued))
+}
+
+// RequeueDependencyRuns re-queues the runs of a merge request that were parked for its
+// dependencies (Chief platform control, DESIGN wave 3 rules 7 and 8a), in one statement:
+// the lease epoch goes up as for every move to queued (DESIGN W2 rule 7), the park reason
+// goes, and note is kept for the run's steps until one succeeds. Such a run was parked
+// before it started, so there is no paused interval to count. It returns the runs
+// re-queued, none when nothing waited.
+func RequeueDependencyRuns(ctx context.Context, q Querier, mrID, note string) ([]Run, error) {
+	rows, err := q.Query(ctx, `UPDATE runs SET status=$2, lease_epoch=lease_epoch+1, park_reason='', park_detail=NULL,
+		resume_note=$3, paused_at=NULL, updated_at=now()
+		WHERE merge_request_id=$1 AND status=$4 AND park_reason=$5 RETURNING `+runColumns,
+		mrID, RunQueued, note, RunPaused, RunParkDependency)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[Run])
+}
+
+// RunStepSucceeded reports whether a step of the run succeeded (a visit that succeeded and
+// was not a park closed on its decision or resume): the note of a run the dependency watcher
+// re-queued is for the steps before that.
+func RunStepSucceeded(ctx context.Context, q Querier, runID string) (bool, error) {
+	var yes bool
+	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM run_nodes WHERE run_id=$1 AND status=$2 AND parked_at IS NULL)`,
+		runID, NodeSucceeded).Scan(&yes)
+	return yes, err
 }
 
 // StepResumeNotes returns, oldest first, the resume notes of the step's visits the operator

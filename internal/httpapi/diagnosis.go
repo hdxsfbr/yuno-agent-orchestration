@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"yuno/internal/deps"
 	"yuno/internal/liveness"
 	"yuno/internal/obs"
 	"yuno/internal/project"
@@ -223,11 +224,21 @@ func nodeView(n store.LiveNode, v liveness.Verdict) nodeDiagnosis {
 
 // blockedRuns says why each queued run of a project cannot go on: the project has reached a
 // budget cap (the budget check's own refusal, DESIGN 5.19 rule 3), or its waves are paused
-// (5.29 rule 9). A run of a deleted project, or of none, is not blocked.
+// (5.29 rule 9). A run of a deleted project, or of none, is not blocked. A run parked for its
+// merge request's dependencies is blocked by what holds the request now (Chief platform
+// control, DESIGN wave 3 rule 7).
 func (s *Server) blockedRuns(ctx context.Context, runs []store.Run, now time.Time) (map[string]string, error) {
 	out := map[string]string{}
 	why := map[string]string{} // project id → reason, read once per project
 	for _, r := range runs {
+		if r.Status == store.RunPaused && r.ParkReason == store.RunParkDependency {
+			reason, err := parkedReason(ctx, s.pool, &r)
+			if err != nil {
+				return nil, err
+			}
+			out[r.ID] = reason
+			continue
+		}
 		if r.Status != store.RunQueued || r.ProjectID == nil {
 			continue
 		}
@@ -262,6 +273,19 @@ func (s *Server) blockedRuns(ctx context.Context, runs []store.Run, now time.Tim
 		}
 	}
 	return out, nil
+}
+
+// parkedReason is why a run parked for its merge request's dependencies still waits: what
+// holds the request, as the watcher last recorded it. A request nothing holds any more (the
+// dependency was removed) waits for a resume.
+func parkedReason(ctx context.Context, q store.Querier, r *store.Run) (string, error) {
+	if r.MergeRequestID != nil {
+		reason, err := deps.Held(ctx, q, *r.MergeRequestID)
+		if err != nil || reason != "" {
+			return reason, err
+		}
+	}
+	return "nothing holds its merge request any more; a resume starts it", nil
 }
 
 func seconds(d time.Duration) int64 { return int64(d / time.Second) }
