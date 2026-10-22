@@ -216,7 +216,7 @@ func TestTaskMessage(t *testing.T) {
 		"script_id: 001-quick-run-happy\n" +
 		"Work inside the directory runs/0199f0a2-0000-7000-8000-000000000001/ of your workspace.\n" +
 		"Deliverables: put files the operator should receive (reports, data, documents) under runs/0199f0a2-0000-7000-8000-000000000001/out/; the platform collects them when your step ends and shows them on the run page.\n" +
-		`When finished, call the tool yuno__finish with {"run_token": "r_abcdefghijklmnopqrstuvwx", "result": <object matching this JSON schema>}:` + "\n" +
+		`When finished, call the tool yuno__finish with {"run_token": "r_abcdefghijklmnopqrstuvwx", "result": "<JSON text of an object matching this JSON schema>"} (the result as a string, D-104):` + "\n" +
 		`{"type":"object"}`
 	if got := v.taskMessage(); got != want {
 		t.Fatalf("message:\n%s\nwant:\n%s", got, want)

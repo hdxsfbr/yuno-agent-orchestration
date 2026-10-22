@@ -918,7 +918,7 @@ func (v *visit) taskMessageWith(x project.Extras) string {
 		sb.WriteString(QuestionsParagraph(v.run.ID))
 	}
 	sb.WriteString(`When finished, call the tool yuno__finish with {"run_token": "` + v.token +
-		`", "result": <object matching this JSON schema>}:` + "\n")
+		`", "result": "<JSON text of an object matching this JSON schema>"} (the result as a string, D-104):` + "\n")
 	sb.Write(schema)
 	return sb.String()
 }

@@ -6,6 +6,28 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-22
 
+**D-104 `finish` takes the result as JSON text; the task message asks for it that way.**
+(Andre, 2026-10-22: "still barfing", on !24's Integrator run 01a16533. Its `finish` carried
+a correct `summary`, and the gateway answered `result.summary: schema is false; result: must
+not have additional properties`.)
+- **Cause.** On OpenAI's native route, OpenClaw forces strict tool schemas
+  (`resolveOpenAIStrictToolSetting`, no setting to turn it off). Strict mode closes every
+  object to its declared properties, so `finish`'s open `result` object could only ever be
+  `{}`, which Yuno then refused for its missing fields. Code mode's JavaScript bridge used
+  to carry the object past that check, so OpenAI agents finished until D-095 turned code
+  mode off. Claude, behind the api's proxy provider, was never strict.
+- **Fix.** `result` is now `anyOf [string, object]`. A string must be the JSON text of an
+  object, and it is parsed and then validated against the node's output schema as before.
+  The task message asks every agent for the string form, and a Claude or scripted agent's
+  object is still accepted.
+- **Failure.** A string that is not an object's JSON text is refused and counts toward the
+  finish attempts.
+- **Rejected:**
+  - publishing each node's output schema as the tool schema (one MCP tool list serves
+    every run);
+  - turning strict mode off (the gateway offers no switch);
+  - going back to code mode (D-095).
+
 **D-103 Dependent work waits on its prerequisite's merge and green CI on the exact merge
 commit, is brought up to date by the platform, and resumes by itself.** (The PRD's
 requirement 4 and its acceptance: "Block !24 until !17 merges with green CI; automatically

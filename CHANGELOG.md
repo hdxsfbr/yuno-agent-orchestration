@@ -5,6 +5,10 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- Agents on OpenAI models can finish their steps again. The gateway's strict tool schemas
+  emptied the result object of `finish`, so every OpenAI step that delivered a result was
+  refused once code mode was off. `finish` now takes the result as JSON text, which the
+  task message asks for.
 - Runs can be paused, resumed with a note for the step, and steered with a message while
   they work; a retry can start from an earlier step. Every cancel, pause, resume, retry and
   steer is tracked from received to applied. A cancel counts as done only when the gateway

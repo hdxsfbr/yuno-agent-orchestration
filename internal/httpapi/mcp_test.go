@@ -111,7 +111,7 @@ func TestMCPFinish(t *testing.T) {
 			wantText: "invalid run token", wantIsErr: true},
 		{name: "input violates the tool schema", args: map[string]any{"result": map[string]any{}},
 			wantText: "missing property 'run_token'", wantIsErr: true},
-		{name: "schema refusal with a token counts as an attempt", args: map[string]any{"run_token": "r_tok", "result": "done"},
+		{name: "schema refusal with a token counts as an attempt", args: map[string]any{"run_token": "r_tok", "result": 7},
 			wantText: "/result", wantIsErr: true, wantReject: true},
 		{name: "internal failure is opaque", args: map[string]any{"run_token": "r_tok", "result": map[string]any{}},
 			engineErr: errors.New("db: connection refused"), wantText: "internal error", wantIsErr: true, wantCall: true},

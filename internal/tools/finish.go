@@ -20,11 +20,19 @@ type AcceptFinishFunc func(ctx context.Context, runToken string, result json.Raw
 // the node's finish attempts (DESIGN 5.6). The model still sees the schema message.
 type RejectFinishFunc func(ctx context.Context, runToken, message string)
 
+// finishSchema takes the result as JSON text, or as an object. The text form is the one the
+// task message asks for (D-104): on OpenAI's native route the gateway makes every tool
+// schema strict, closing the open result object so that any field in it is refused
+// ("schema is false"), and only `{}` gets through; a string passes. Claude agents and
+// scripted runs may still send the object.
 var finishSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "run_token": {"type": "string", "description": "The run token from the task message (run_token: r_...)."},
-    "result": {"type": "object", "description": "The node's result. It must match the output schema given in the task message."}
+    "result": {
+      "description": "The node's result as JSON text: an object matching the output schema given in the task message, encoded as a string.",
+      "anyOf": [{"type": "string"}, {"type": "object"}]
+    }
   },
   "required": ["run_token", "result"],
   "additionalProperties": false
@@ -58,7 +66,14 @@ func NewFinish(accept AcceptFinishFunc, reject RejectFinishFunc) *Tool {
 			if err := json.Unmarshal(call.Input, &in); err != nil {
 				return Result{}, &ModelError{Message: "invalid input: " + err.Error()}
 			}
-			if err := accept(ctx, in.RunToken, in.Result); err != nil {
+			result, err := resultObject(in.Result)
+			if err != nil {
+				if reject != nil && in.RunToken != "" {
+					reject(ctx, in.RunToken, err.Error()) // a refused result counts as an attempt
+				}
+				return Result{}, err
+			}
+			if err := accept(ctx, in.RunToken, result); err != nil {
 				return Result{}, err
 			}
 			return Result{Output: acceptedResult}, nil
@@ -76,4 +91,18 @@ func NewFinish(accept AcceptFinishFunc, reject RejectFinishFunc) *Tool {
 		}
 	}
 	return t
+}
+
+// resultObject is the finish result as an object: the object itself, or the object a JSON
+// string holds (D-104). Anything else is the model's to correct.
+func resultObject(raw json.RawMessage) (json.RawMessage, error) {
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		return raw, nil // an object: the input schema allows no other kind
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &obj); err != nil || obj == nil {
+		return nil, &ModelError{Message: "result: a string result must be the JSON text of an object matching the output schema"}
+	}
+	return json.RawMessage(text), nil
 }

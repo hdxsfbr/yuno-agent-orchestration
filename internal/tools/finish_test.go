@@ -25,7 +25,11 @@ func TestFinishRun(t *testing.T) {
 		{name: "schema violation from engine", input: `{"run_token":"r_abc","result":{}}`, acceptErr: &ModelError{Message: "result: missing property 'summary'"}, wantText: "missing property 'summary'", wantIsErr: true, wantCall: true},
 		{name: "invalid token", input: `{"run_token":"r_nope","result":{}}`, acceptErr: &ModelError{Message: "invalid run token"}, wantText: "invalid run token", wantIsErr: true, wantCall: true},
 		{name: "missing run_token", input: `{"result":{}}`, wantText: "missing property 'run_token'", wantIsErr: true},
-		{name: "result not an object", input: `{"run_token":"r_abc","result":"done"}`, wantText: "at '/result'", wantIsErr: true},
+		// D-104: the result as JSON text, as strict OpenAI tool schemas allow.
+		{name: "result as JSON text", input: `{"run_token":"r_abc","result":"{\"ok\":true}"}`, wantText: `{"status":"accepted"}`, wantCall: true},
+		{name: "text that is not an object", input: `{"run_token":"r_abc","result":"done"}`, wantText: "JSON text of an object", wantIsErr: true},
+		{name: "text holding an array", input: `{"run_token":"r_abc","result":"[1]"}`, wantText: "JSON text of an object", wantIsErr: true},
+		{name: "result neither text nor object", input: `{"run_token":"r_abc","result":7}`, wantText: "at '/result'", wantIsErr: true},
 		{name: "extra property", input: `{"run_token":"r_abc","result":{},"note":"x"}`, wantText: "note", wantIsErr: true},
 		{name: "no arguments", input: ``, wantText: "invalid input", wantIsErr: true},
 		{name: "internal failure", input: `{"run_token":"r_abc","result":{}}`, acceptErr: internal, wantErr: true, wantCall: true},
@@ -63,7 +67,7 @@ func TestFinishRun(t *testing.T) {
 			if called != tc.wantCall {
 				t.Fatalf("accept called = %v, want %v", called, tc.wantCall)
 			}
-			if tc.name == "accepted" && (gotToken != "r_abc" || string(gotResult) != `{"ok":true}`) {
+			if (tc.name == "accepted" || tc.name == "result as JSON text") && (gotToken != "r_abc" || string(gotResult) != `{"ok":true}`) {
 				t.Fatalf("accept got token %q result %s", gotToken, gotResult)
 			}
 		})
@@ -181,18 +185,20 @@ func TestFinishReportsSchemaRejections(t *testing.T) {
 	})
 	tool, _ := r.Get(FinishName)
 	for _, in := range []string{
-		`{"run_token":"r_abc","result":"done"}`,
+		`{"run_token":"r_abc","result":7}`,
 		`{"run_token":"r_abc"}`,
-		`{"result":{}}`,              // no token: nothing to count against
-		`{"run_token":7,"result":1}`, // not a token
+		`{"result":{}}`,                         // no token: nothing to count against
+		`{"run_token":7,"result":1}`,            // not a token
+		`{"run_token":"r_abc","result":"done"}`, // text that is not an object (D-104)
 	} {
 		res, err := tool.Run(context.Background(), Call{Input: json.RawMessage(in)}, 1024)
 		if err != nil || !res.IsError {
 			t.Fatalf("%s: %+v %v", in, res, err)
 		}
 	}
-	if len(got) != 2 || got[0].token != "r_abc" || got[1].token != "r_abc" ||
-		!strings.Contains(got[0].msg, "/result") || !strings.Contains(got[1].msg, "result") {
+	if len(got) != 3 || got[0].token != "r_abc" || got[1].token != "r_abc" || got[2].token != "r_abc" ||
+		!strings.Contains(got[0].msg, "/result") || !strings.Contains(got[1].msg, "result") ||
+		!strings.Contains(got[2].msg, "JSON text of an object") {
 		t.Fatalf("rejections = %+v", got)
 	}
 }
