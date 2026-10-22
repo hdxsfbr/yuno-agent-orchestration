@@ -14,12 +14,37 @@ export class ApiError extends Error {
   }
 }
 
+/** Every request says it comes from the UI, so the audit log records the operator's changes as made in the UI. */
+export const clientHeaders = { "X-Yuno-Client": "web" } as const;
+
+const changingMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/** A random UUID. crypto.randomUUID needs a secure context (HTTPS or localhost); getRandomValues does not. */
+export function newIdempotencyKey(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+/** A change gets a fresh Idempotency-Key per call (one per click), so the API runs it once however often it is delivered. */
+const idempotencyHeaders = (method?: string): Record<string, string> =>
+  changingMethods.has((method ?? "GET").toUpperCase()) ? { "Idempotency-Key": newIdempotencyKey() } : {};
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const sent = getToken();
   const res = await fetch(path, {
     ...init,
     // A multipart body sets its own Content-Type (with the boundary).
-    headers: { ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }), ...authHeaders(sent), ...(init?.headers ?? {}) },
+    headers: {
+      ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+      ...clientHeaders,
+      ...idempotencyHeaders(init?.method),
+      ...authHeaders(sent),
+      ...(init?.headers ?? {}),
+    },
   });
   if (res.status === 401) reportUnauthorized(sent);
   if (res.status === 204) return undefined as T;
@@ -132,7 +157,7 @@ export function subscribe(
       tokenChanged = false;
       try {
         const res = await fetch(path, {
-          headers: { Accept: "text/event-stream", ...authHeaders(sent), ...(lastId ? { "Last-Event-ID": lastId } : {}) },
+          headers: { Accept: "text/event-stream", ...clientHeaders, ...authHeaders(sent), ...(lastId ? { "Last-Event-ID": lastId } : {}) },
           signal: controller.signal,
         });
         if (res.status === 401) reportUnauthorized(sent);
@@ -953,7 +978,7 @@ export const listRunArtifacts = async (runId: string) => (await api<Artifact[] |
  */
 export async function downloadArtifact(runId: string, artifactId: string): Promise<Blob> {
   const sent = getToken();
-  const res = await fetch(`/api/runs/${seg(runId)}/artifacts/${seg(artifactId)}`, { headers: authHeaders(sent) });
+  const res = await fetch(`/api/runs/${seg(runId)}/artifacts/${seg(artifactId)}`, { headers: { ...clientHeaders, ...authHeaders(sent) } });
   if (res.status === 401) reportUnauthorized(sent);
   if (res.status !== 200) {
     let err: { code?: string; message?: string; details?: unknown } | undefined;
@@ -1171,7 +1196,7 @@ export const skillExportUrl = (id: string) => `/api/skills/${seg(id)}/export`;
 /** The skill's bundle as a zip, fetched with the API token (a plain link could not send it). */
 export async function downloadSkillExport(id: string): Promise<Blob> {
   const sent = getToken();
-  const res = await fetch(skillExportUrl(id), { headers: authHeaders(sent) });
+  const res = await fetch(skillExportUrl(id), { headers: { ...clientHeaders, ...authHeaders(sent) } });
   if (res.status === 401) reportUnauthorized(sent);
   if (!res.ok) {
     let message = res.statusText;
