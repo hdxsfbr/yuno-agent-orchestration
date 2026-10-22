@@ -5,6 +5,29 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- The Chief of Staff can do anything the UI can, from chat. It looks up the API's actions
+  and runs them through the same code the UI uses. Deleting things, granting tools,
+  changing a project's repository or token, raising a budget, binding Telegram, merging a
+  merge request and cancelling a plan wait for your approval of that exact action: in the
+  Approvals page, or by sending the Chief the code it gives you.
+- Every change made through the API (UI, scripts, the Chief) is recorded in an audit log
+  with who made it, for whom, and the state before and after: `GET /api/audit`. A change is
+  refused when its record cannot be written.
+- A repeated change with the same `Idempotency-Key` is answered once and not done twice;
+  the UI sends one with every change. Reads carry an `ETag`, and `If-Match` refuses a write
+  over a newer version.
+- Runs say what they are doing: `GET /api/runs/{id}/diagnosis` reports each live step as
+  executing, waiting, blocked, unknown or stalled, with the heartbeat, progress, model wait
+  and open tool calls behind it. `GET /api/runs/{id}/events/page` pages a run's events.
+- Merge requests are checked on their exact head commit; a merge names that commit, and
+  `none` is accepted only when the project has no CI. The platform can bring a request up
+  to date with the default branch (`update-from-default`), and you can read its diff,
+  checks and job logs.
+- Workflows keep every version; you can read and restore one. An archived agent can be
+  restored.
+- `answer_question` passes an answer on only when your latest message says it or carries
+  the question's code.
+
 - A step whose agent read a binary file no longer stays "running" on the run page after
   the run ends.
 - Agents on OpenAI models call their tools directly again. The gateway had switched them

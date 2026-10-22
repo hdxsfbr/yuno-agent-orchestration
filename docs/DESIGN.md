@@ -891,9 +891,82 @@ Rules:
    a 500 ms server-side budget; `/api/status` is measured in the integration suite at p95.
 6. Every request log line has `request_id`, method, path, status, `duration_ms`; every
    engine log line has `run_id` and, when applicable, `node_id`.
+7. **Liveness evidence [decision D-099].** A run's status says where its state machine is,
+   not whether anything is happening. Each live agent visit writes evidence to its own
+   `run_nodes` row from its goroutine (`engine/evidence.go`, migration 0028):
+   - `heartbeat_at`: at the visit's start, then every 30 s in the same statement as the
+     run's `updated_at`;
+   - `progress_at`: the stall check's own clock (5.5 rule 6), stamped at the visit's start,
+     written with any other evidence write and on its own at most once per 30 s of the
+     engine's clock;
+   - `waiting_on`, written when it changes, by precedence `human` (paused on an exec
+     approval, a tool approval or a question) > `setup` (before the first turn) > `""`
+     (between turns, or the gateway connection is lost) > `tool` (a call of the live turn
+     is open) > `model`;
+   - `model_wait_since` (when `waiting_on` became `model`, else null);
+   - `open_calls` `[{id, name, started_at, summary}]` of the live turn, oldest first, with
+     `summary` the redacted first 200 characters of the call's `command`, `path` or
+     `file_path` on one line.
+
+   Fork, join and approval rows carry none and are not diagnosed; each branch visit is its
+   own row.
+8. **Liveness rules.** The thresholds, in seconds:
+
+   | Name | Value |
+   |---|---|
+   | H (heartbeat fresh) | 90 |
+   | P (progress fresh) | 120 |
+   | M | `MODEL_STALL_AFTER`, 600 |
+   | S | `ENGINE_STALE_AFTER`, 300 |
+   | T (tool overdue) | 1860 |
+
+   M or S at 0 means the rule that names it never says stalled. A live visit, evaluated in
+   order at `checked_at`:
+   - (0) parked (5.24 rule 5): `waiting` on its decision;
+   - (1) no `heartbeat_at`: `unknown`;
+   - (2) heartbeat older than S: `stalled`;
+   - (3) older than H: `unknown`;
+   - (4) `human`: `waiting`, naming the oldest pending decision and its age;
+   - (5) `tool`:
+     - the oldest open call older than T: `stalled`;
+     - otherwise `executing` ("running <name> <summary> for <age>");
+     - no open call, or one without a start: `unknown`;
+   - (6) `model`, counting from the later of `model_wait_since` and `progress_at`:
+     - at most P: `executing`;
+     - at most M: `waiting`;
+     - otherwise: `stalled`;
+     - no `model_wait_since`: `unknown`;
+   - (7) `setup` or `""`: `progress_at` within P is `executing`; otherwise `unknown`.
+
+   Missing telemetry never yields `executing`. A run's liveness:
+   - finished: its status;
+   - `queued`:
+     - `blocked` with the budget check's refusal text and/or "the project's waves are
+       paused" (reported; neither stops a claim of an already queued run);
+     - otherwise `waiting` since its last write;
+   - `waiting_approval`: `waiting` on its oldest pending decision;
+   - `running`:
+     - the worst of its live visits (stalled > unknown > blocked > waiting > executing;
+       ties go to the oldest visit), as "<node id>: <reason>";
+     - with none (between steps), `runs.updated_at` within H is `executing`, within S
+       `unknown`, older `stalled`.
+9. **Diagnosis and paged events** (`internal/liveness`, `httpapi/diagnosis.go`, all risk
+   `read`):
+   - `GET /api/runs/{id}/diagnosis` returns `{run_id, status, liveness, reason,
+     checked_at, thresholds, nodes: [{node_id, visit, branch_id, agent, status, liveness,
+     reason, heartbeat_at, progress_at, waiting_on, model_wait_since, open_calls:
+     [{name, summary, started_at, age_s}], last_event}], pending: [{approval_id, kind,
+     requested_at, age_s}]}`.
+   - `GET /api/runs/diagnosis?project_id=` returns the same for every queued, running and
+     waiting_approval run, newest first, at most 100.
+   - `GET /api/runs/{id}/events/page?after=&limit=&event=` returns `{events: [{seq, event,
+     at, data}], next_after}` in ascending order. `limit` is 1 to 500 (default 100;
+     anything else is 422), and every `data` passes `obs.RedactJSON` again on the way out.
 
 Edge cases: SSE clients that disconnect mid-run reconnect with `Last-Event-ID` and miss
-nothing (rule 3).
+nothing (rule 3). A setup longer than H (a clone, a sandbox start) reads `unknown`
+until the first turn starts, because no tick runs during setup; 5.33 adds a setup
+heartbeat.
 
 Time: n/a.
 
@@ -907,6 +980,8 @@ Tests: T5.12.1 span tree for a two-node run has the expected parent links. T5.12
 arithmetic for each priced model from a usage fixture. T5.12.3 `Last-Event-ID` replay
 returns the missed events in order. T5.12.4 redactor table test (API key, bot token, key
 names, nested JSON). T5.12.5 `/api/status` p95 < 500 ms over 200 requests in compose.
+Liveness: TestDiagnosisRules (both sides of H, P, M, S and T), TestDiagnosisRun,
+TestDiagnosisMissingTelemetry, TestEvidenceWritten, TestRunDiagnosis, TestRunEventsPage.
 
 Out of scope: OpenTelemetry export (the span table is shaped so an exporter is a small
 addition; the README says so).
@@ -4892,6 +4967,273 @@ before its first turn with the reason (`TestStepWithNoCommitToStartFromFailsBefo
 
 Limitations: the path rule is OpenClaw's internal behaviour, pinned by a test, not an API;
 on an OpenClaw upgrade the probe in `docs/test-results.md` is repeated.
+
+### 5.31 Audit, idempotency and versions [decision D-098]
+
+Purpose: every change to the platform is attributable and repeat-safe, whoever makes it:
+the UI, an API client, or an agent through its platform tools (5.32).
+
+Inputs: every `/api` request. The actor comes from `internal/actor`, set by the middleware
+for a request from the network and set in-process for an agent's dispatch.
+
+Rules:
+
+1. **Audit.** Every `/api` request with method POST, PUT, PATCH or DELETE, and every `/api`
+   request refused by auth, gets one row in `audit_events` (migration 0027). The row is
+   inserted before the handler runs, with outcome `started`, and completed after. When the
+   insert fails, the request is refused 503 `audit_unavailable` and does not run.
+   - **Columns:** `id`, `at`, `request_id`, `actor_kind`, `actor_id`, `actor_name`, `via`
+     (`ui` when the request sends `X-Yuno-Client: web`, `api`, `chief`), `on_behalf_of`,
+     `method`, `route` (the mux pattern without its method), `path`, `target`,
+     `idempotency_key`, `status`, `outcome`, `error_code`, `request` (redacted, at most
+     16 KiB), `before` and `after` (redacted, at most 64 KiB each), `approval_id`,
+     `evidence`, `duration_ms`.
+   - **Outcome:** `ok` (below 400), `denied` (401, 403, 412), `failed` (any other 4xx or
+     5xx), or what an inner layer wrote into the request's `actor.Note` (`denied`,
+     `pending_approval`, `replayed`). The note's error code, approval and evidence win.
+   - A handler that panics completes its row as a 500.
+   - A multipart or non-UTF-8 body is kept as `{content_type, bytes, sha256}`. A refused
+     request's body is not read.
+2. **Targets.** `target` is chosen in this order:
+   - the route's entry in the action table `auditTargetUp`: a workflow restore targets its
+     workflow; waves pause and resume and intake poll target the project; a ticket change
+     targets the plan;
+   - otherwise the path, when a GET route has the same pattern;
+   - otherwise the path without its last segment, when that has a GET route;
+   - otherwise "".
+
+   With a target, the audit reads it in-process (a GET through the routes, no middleware)
+   before and after the handler. A missing target reads as null, and a failed read as
+   `{"error": ...}`. A POST to a collection (a target pattern ending in a literal segment),
+   and a request with no target, have no before; their after is the response body.
+3. **Idempotency.** A mutating request with an `Idempotency-Key` (1 to 200 printable ASCII
+   characters) is keyed by actor (`operator` or `agent:<id>`), method and escaped path, with
+   the SHA-256 of its body.
+   - **First use** runs the handler. A response below 500 is kept (status, body up to
+     1 MiB, Content-Type, ETag, Location); a 5xx or a panic frees the key.
+   - **Same key and body:** the kept response with `Idempotency-Replayed: true`, audit
+     outcome `replayed`. A response over 1 MiB replays with no body.
+   - **Same key, other body:** 422 `idempotency_key_reused`.
+   - **Same key while the first still runs:** 409 `request_in_progress`.
+   - **Expiry:** keys last 24 hours. The retention sweep, every 10 minutes, deletes expired
+     keys and claims still running an hour after they were made.
+   - **Who sends keys:** the UI sends a fresh key with every change, plain API clients may
+     omit one, and an agent must send one (5.32 rule 3).
+4. **Versions.** Every `/api` GET 200 JSON response carries
+   `ETag: "<hex of the first 8 bytes of SHA-256 of the body>"`. Event streams, files and
+   errors pass through untouched.
+   - A PUT, PATCH or DELETE with `If-Match` takes the per-target lock (in this process),
+     reads the target and compares. A mismatch answers 412 `version_conflict` with
+     `details.current_etag`; a match runs the handler while holding the lock.
+   - `*`, quotes, `W/` and lists are accepted. With no target, `If-Match` is ignored.
+5. **Audit read.** `GET /api/audit?actor=&target=&outcome=&since=&cursor=&limit=` (risk
+   `read`) returns `{events, next_cursor}` newest first, with `limit` 1 to 200 (default 50)
+   and an opaque cursor.
+6. **Order:** recoverer → requestID → logging → auth (judges the bearer) → actor → audit →
+   auth's 401 → platform gate (5.32) → idempotency → If-Match and ETags → routes. The gate
+   sits outside idempotency, so a pending answer is never kept as a key's response.
+
+Edge cases:
+- A scanner without the bearer writes rows under `/api`; there is no rate cap.
+- A second api process would not share the If-Match lock (one process is deployed).
+
+Failure handling: a failed completion leaves the row `started`, which is the honest record.
+
+Tests: TestAuditRowPerMutation, TestAuditDenied, TestAuditFailClosed,
+TestAuditBeforeAfterRedacted, TestAuditTargets, TestAuditBodies, TestAuditList,
+TestIdempotencyReplay, TestIdempotencyMismatch, TestIdempotencyInProgress,
+TestIdempotency5xxNotStored, TestETagIfMatch412, TestETagIfMatchOK,
+TestVersionLockSerializes.
+
+### 5.32 Platform access for agents [decision D-097]
+
+Purpose: the Chief of Staff can take every operator action through the same handlers,
+validation and business logic the UI uses. A destructive or privileged action waits for the
+person's approval of that exact call. Brief: `docs/briefs/chief-platform-control/`
+(inventory in `PARITY.md`).
+
+Inputs: the contract `api/openapi.yaml` (embedded). Every operation has an `operationId`
+equal to its handler and an `x-yuno-risk`, one of `read`, `routine`, `destructive`,
+`privileged`, `dedicated` (with `x-yuno-tool`) or `machine`. The tool call's agent and
+conversation, whose `external_chat_id` names the person.
+
+Rules:
+
+1. Every route in `server.go` (recorded at registration) has exactly one documented
+   operation with its handler's name as `operationId` and a valid risk, and no documented
+   operation lacks a route (`TestPlatformParity`). `/healthz`, `/readyz`, `/mcp` and
+   `/model-proxy/*` need none.
+2. `platform_operations {query?, tag?}` (read_only, chat):
+   - With neither argument it returns the tags and their operation counts.
+   - Otherwise it returns at most 20 operations, each with its id, method, path, summary,
+     risk, parameters and request-body schema (two levels of `$ref`), and what it needs
+     (`idempotency_key`; `if_match` with the read to do first). `more` counts the rest.
+   - Machine operations are never listed. A dedicated one names its tool.
+3. `platform_call {operation_id, path_params?, query?, body?, idempotency_key?, if_match?}`
+   (computational, chat, never retried by the platform) builds the request from the
+   contract.
+   - It dispatches in-process through `Server.Handler()` with the server's own bearer and
+     the agent actor (`via=chief`, `on_behalf_of=telegram:<chat id>`), which the network
+     cannot set.
+   - The answer is `{status, request_id, etag?, idempotent_replayed?, body}`. The body is
+     redacted and the whole answer stays within 32 KiB. A binary body comes back as
+     `{content_type, bytes, sha256}`, and an error status is returned as data.
+4. **The platform gate** (5.31 rule 6) holds every request carrying an agent actor to the
+   operation's risk, found from the mux pattern:
+   - no operation or `machine`: 403 `not_available_to_agents` (also `POST /api/runs` with
+     `script_id` or `trigger: eval`);
+   - `dedicated`: 403 `use_dedicated_tool`;
+   - `read`: passes;
+   - otherwise:
+     - 428 `idempotency_key_required` without a key;
+     - 428 `if_match_required` for a PUT, PATCH or DELETE with a GET twin and no
+       `If-Match`;
+     - 413 above 4 MiB;
+     - 422 `secret_in_body` for a non-empty value under a secret key or a credential-shaped
+       string. `[redacted]` placeholders under secret keys are dropped, so a read written
+       back works.
+5. **Escalation.** The risk is raised to `privileged` when the call:
+   - creates an agent with tools or with interaction rules looser than the default
+     (guardrails only restrict and do not count);
+   - adds tools to an agent, or loosens its interaction rules, guardrails or exec policy;
+   - changes the calling agent itself (agent or agent file);
+   - changes a project's repository, provider or token, or raises or removes a budget cap;
+   - starts a run with limits above the platform defaults.
+
+   The reasons are written for the person.
+6. **Platform approvals.** A destructive or privileged call runs only with an approved,
+   unused approval bound to it.
+   - The approval has kind `platform`, no run, and
+     `binding = {agent_id, operation_id, path, body_sha256, idempotency_key}`. It expires
+     after 1 hour (migration 0029).
+   - Its message names the agent, the operation, the person, why it needs approval, the
+     redacted body and a redacted read of the target ("Now:").
+   - Calls with the same key and body find the newest approval for their binding:
+     - none: a new one is created (an advisory lock makes two first calls share it), and
+       the answer is `{status: "pending_approval", approval_id, code, expires_at}`;
+     - pending: the same pending answer;
+     - approved and unused: it is marked used, then the call passes;
+     - approved and used within 24 hours: the call passes, so idempotency replays;
+     - rejected: 403 `approval_rejected`;
+     - expired: 403 `approval_expired`, and it is marked spent, so the next call asks
+       again.
+   - The person approves in the UI, or by sending the code in Telegram (`decide_approval`,
+     D-081). `platform_call` never decides an approval.
+   - `DecideApproval` of a platform approval only records the decision.
+7. `answer_question` relays an answer only when it appears in the person's newest message
+   (ignoring case and spacing), or when that message holds the question's code; otherwise
+   "relay only what the person said". `run_status` shows the question's code.
+
+Edge cases:
+- With more than one allowed Telegram user, `on_behalf_of` is the agent's latest
+  conversation (5.15).
+- An approved call that meets a stale `If-Match` keeps its 412 under the key, so it needs a
+  new key and a new approval.
+
+Tests: TestPlatformParity, TestPlatformOperationsSearch, TestPlatformCallRead,
+TestPlatformCallRoutine, TestPlatformCallIfMatch, TestPlatformCallRefusesMachine,
+TestPlatformCallRefusesDedicated, TestPlatformCallRefusesSecrets,
+TestDestructiveNeedsApproval, TestPrivilegedNeedsApproval,
+TestPlatformApprovalRejectedExpired, TestAnswerQuestionNeedsPersonMessage,
+TestPlatformCallBinary, TestPlatformCallActor.
+
+Out of scope: user accounts and roles (one operator); chat-token rotation.
+
+### 5.34 Dependencies, and merge requests on exact commits [decisions D-100]
+
+Purpose: dependent work waits until its prerequisite is merged and green on the exact
+commit; the platform brings a request up to date with the default branch; nothing is merged
+on a check of another commit. Rules 1 to 8 (dependency edges, the gate and the watcher)
+come with the wave that builds them; rules 9 to 15 are built.
+
+Rules:
+
+9. **Update from the default branch.** `POST /api/merge-requests/{id}/update-from-default
+   {expected_head_sha}` (risk routine), and later the watcher, use
+   `(*mergereq.Sync).UpdateFromDefault`.
+   - It fetches the branch and the default branch into a throwaway bare repository with the
+     project's token.
+   - If the remote head differs from `expected_head_sha`, it answers 409
+     `merge_request_head_moved` `{current}`.
+   - It merges without a working tree:
+     - already contained: outcome `up_to_date`;
+     - conflicts: outcome `conflicts`, recorded on the request (`conflicts: {files, at,
+       base_sha}`), and nothing is pushed (answered 200);
+     - otherwise: a two-parent merge commit authored by the platform, outcome `updated`.
+10. The push is never forced, so a branch that moved since the fetch is refused by the
+    provider and reported as `merge_request_head_moved`.
+11. Every push the platform makes to a recorded request's branch updates the record in one
+    write: `head_sha` and `ci_sha` become the new commit, `ci_status` becomes `pending`,
+    and the pipeline is forgotten. That covers the update from the default branch and an
+    `open_merge_request` call on a recorded request. The update also sets
+    `updated_from_default_at` and emits `merge_request.updated`.
+12. CI on the new head is read by the next sync. The merge guard (rule 15) waits for it.
+13. A record's check is the check of exactly one commit. `ci_sha` is the commit
+    `ci_status` was read for; `ci_pipeline_id` and `ci_url` name the pipeline (GitLab) or
+    the deciding check (GitHub). `mergeable` says whether the branch merges without
+    conflicts (null while unknown), and `merge_status` is the provider's own word. The sync
+    reads GitLab with `pipelines?sha=<head>` and writes `merge_sha` for a merged request.
+14. Reads (risk read):
+    - `GET /api/merge-requests/{id}/diff`: redacted, at most 256 KiB, then `truncated`.
+    - `GET …/checks`: the pipeline or check-runs of the head, with jobs.
+    - `GET …/jobs/{job}/log?tail_bytes=`: a redacted tail, 64 KiB by default, 1 MiB at
+      most. Job ids are digits only. On GitHub it follows the log's redirect without the
+      token.
+15. **Merge guard.** `POST …/merge` needs `ci_status = passed` with `ci_sha = head_sha`,
+    or `none` on a project with no CI configured (no pipeline or check on the default
+    branch's last 20 commits).
+    - It sends the head as the provider's `sha`.
+    - A head that moved answers 409 `merge_request_head_moved`, and the record is
+      re-synced.
+
+Edge cases: an existing record keeps `ci_sha` null until its next sync, so it cannot merge
+for up to one sync interval after this release.
+
+Tests: TestUpdateFromDefault, TestUpdateFromDefaultRecords, TestUpdateFromDefaultEndpoint,
+TestStaleCheckInvalidated, TestOpenMergeRequestPushInvalidatesTheCheck,
+TestMergeSHAPersistedOnSync, TestMergeNeedsExactSHA, TestMergeRequestDiffChecksLog,
+TestGitLabWave3Requests, TestGitHubWave3Requests.
+
+### 5.35 Versions, restore and revert [decision D-101]
+
+Purpose: what an operator configures can be read back and rolled back, from the UI's API or
+from chat.
+
+Rules:
+
+1. `workflow_versions(workflow_id, version, name, description, definition, created_at,
+   created_by)`, primary key `(workflow_id, version)` (migration 0031), is written in the
+   same statement as every workflow create and update, by every caller: the API's create,
+   update and restore, the template loader, instantiation, the seed and quick-run
+   workflows.
+   - `created_by` is the request's actor, `{"kind":"platform"}` without one, and
+     `{"kind":"backfill"}` for the backfill.
+   - The backfill wrote each workflow's current version, and every version a run's snapshot
+     held: when runs disagree, the snapshot most runs hold, earliest on a tie, without
+     `run_overrides`. Versions no run held are lost, so the list can have gaps.
+2. `GET /api/workflows/{id}/versions` (newest first, no definitions) and `GET
+   /api/workflows/{id}/versions/{version}` (risk read).
+3. `POST /api/workflows/{id}/versions/{version}/restore {expected_version}` (risk routine):
+   - 422 when `expected_version` is missing;
+   - 412 `version_conflict` `{current_version}` when it is not current (checked again in
+     the writing statement);
+   - 409 `read_only` for platform-managed rows;
+   - 422 with a PUT's details when the version is not valid now;
+   - otherwise its name, description and definition become version current + 1.
+
+   Runs keep their snapshot.
+4. `POST /api/agents/{id}/restore` (risk privileged) clears `deleted_at` unless a live
+   agent holds the name (trimmed, case-insensitive), then re-materialises the agent.
+   - 409 `not_archived` for a live agent; 409 `name_taken` `{agent_id, agent_name}` when a
+     live agent holds the name.
+   - 502 `materialize_failed` leaves the agent restored.
+   - A Telegram binding released by the delete is not restored.
+   - `GET /api/agents?include_archived=true` adds archived agents with `archived_at`.
+6. Schedules pause and resume through `enabled`, and expose `tz` and `next_run_at`.
+
+Tests: TestWorkflowVersionsBackfill, TestWorkflowVersionAuthor, TestWorkflowVersionsWritten,
+TestWorkflowRestore, TestAgentRestore, TestScheduleEnabledTimezoneNextRun,
+TestSeedWritesWorkflowVersions.
 
 ## 6. HTTP API summary
 

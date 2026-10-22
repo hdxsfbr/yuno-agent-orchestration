@@ -6,6 +6,98 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-22
 
+**D-101 Workflows keep every version, an old version can be restored, and an archived agent
+can be restored.** (Andre's PRD "Chief of Staff Platform Control", requirement 5,
+2026-10-22.)
+- **Versions.** Old workflow versions survived only as run snapshots. `workflow_versions`
+  now holds one row per (workflow, version), written in the same statement as the
+  workflow. It was backfilled from the current rows and from every distinct run snapshot
+  (the one most runs hold when they disagree, without the run's overrides).
+- **Restore.** It writes an old version as current + 1 after the same validation a PUT
+  runs. An `expected_version` that is not current answers 412. Runs in flight keep their
+  snapshot.
+- **Agent restore.** It undoes the soft delete unless a live agent holds the name. It is
+  `privileged` for agents with tools, because restoring grants them again.
+- **Rejected:** restore by rewriting the version in place, which would break the pinning of
+  runs to a version number.
+
+Design: DESIGN 5.35.
+
+**D-100 A merge request's CI is the CI of exactly its head commit; the platform can update
+a request from the default branch without an agent; a merge names the commit it expects.**
+(The same PRD, requirement 4; the inventory found GitLab's check read as "the newest MR
+pipeline", whatever commit it ran on, and `merge_sha` never written by the sync.)
+- **What the record holds:** `ci_sha`, the pipeline, `mergeable`, the provider's merge
+  status and any conflicts. GitLab is read with `pipelines?sha=<head>`.
+- **Platform pushes reset the check.** Every push the platform makes to a recorded
+  request's branch resets the check (pending, `ci_sha` = the new head) in the same write
+  that records the head, so a stale "passed" never covers a new commit.
+- **Update from the default branch** merges in a throwaway repository with the project's
+  token, then pushes unforced from an expected head, so a branch that moved is refused,
+  not overwritten. Conflicts are recorded and nothing is pushed.
+- **The merge** needs passed CI on `ci_sha = head_sha` (or no CI configured at all) and
+  sends that SHA to the provider.
+- **Rejected:** rebasing (merge commits, as D-088), and a forced push.
+
+Design: DESIGN 5.34.
+
+**D-099 Liveness from evidence.** (The same PRD, requirement 2: "A running label never
+proves liveness; missing telemetry must not imply progress.")
+- **Evidence.** A live visit writes its heartbeat, progress, what it waits on and its open
+  tool calls to its own `run_nodes` row.
+- **Classifier.** A pure classifier (`internal/liveness`) turns them into executing,
+  waiting, blocked, unknown or stalled, with the reason and the ages, against H 90, P 120,
+  M (`MODEL_STALL_AFTER`), S (`ENGINE_STALE_AFTER`) and T 1860 seconds.
+- **Model wait.** The wait counts from the later of its start and the last progress, so
+  the diagnosis says what the stall check (D-094) will do.
+- **Rejected:** a separate heartbeat table (one more write path per tick), and deriving
+  liveness from `run_events` (no event says "nothing happened").
+
+Design: DESIGN 5.12 rules 7 to 9.
+
+**D-098 Every change through the API is audited before it runs, repeats are safe by key,
+and stale writes are refused by version.** (The same PRD, requirement 6.)
+- **Audit.** Every mutation, and every refused request, gets an `audit_events` row naming
+  the actor (the operator through the UI or the API, an agent and the person it acts for,
+  or anonymous). The row includes the redacted request and the redacted before and after
+  of its target. It is written before the change and completed after. If it cannot be
+  written, the change is refused (fail closed).
+- **Idempotency.** An `Idempotency-Key`, per actor, method and path and kept 24 hours,
+  replays the first answer.
+- **Versions.** `If-Match` against an ETag of the GET representation refuses a stale
+  write.
+- **Rejected:** per-table row versions. The ETag needs no schema change per resource and
+  is the same for every route an agent can call. The cost is a read of the target before
+  and after each change, and a per-target lock that holds in one process (the api is one
+  process).
+
+Design: DESIGN 5.31.
+
+**D-097 The Chief of Staff reaches every operator action through the API's own handlers.**
+(Andre, 2026-10-22: "we need to give more power to chief"; PRD "Chief of Staff Platform
+Control", requirements 1 and 6.)
+- **Two generic tools, not one per action.** `platform_operations` (discovery from
+  `api/openapi.yaml`) and `platform_call` run the real handlers in-process, with the agent
+  as the actor. Parity is by construction, and the inventory is
+  `docs/briefs/chief-platform-control/PARITY.md`.
+- **Risk classes.** Each operation's risk class sits in the contract, and a gate in the
+  middleware enforces it for agents only. The UI and API clients are unchanged.
+- **Approvals.** Destructive and privileged calls need a human approval of the exact call
+  (operation, path, body hash, idempotency key), relayed by code as `decide_approval`
+  already is.
+- **What is gated** (Andre's decision): deleting anything, granting tools or loosening
+  rules, repository, token or budget-raise changes, Telegram binding, merging a merge
+  request, and cancelling a plan. Everything else runs directly.
+- **`answer_question`** relays only what the person said.
+- **Rejected:**
+  - per-action tools, which drift from the API;
+  - approving by operation without the body, where an approval would cover a different
+    action;
+  - skipping the bearer check for in-process calls; the dispatcher sends the server's own
+    bearer instead, so authentication is unchanged.
+
+Design: DESIGN 5.32.
+
 **D-096 Text Yuno stores from agents loses its NUL characters: the redactor every stored
 string and JSON document passes through drops them.** (Found on run 01a16451, 2026-10-22: the
 run succeeded and its merge request was marked ready, but its documentation audit step
