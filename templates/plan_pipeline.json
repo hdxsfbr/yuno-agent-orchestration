@@ -516,12 +516,12 @@
       }
     ],
     "limits": {
-      "max_steps": 150,
-      "max_duration_seconds": 3600,
-      "max_node_iterations": 30,
+      "max_steps": 400,
+      "max_duration_seconds": 7200,
+      "max_node_iterations": 120,
       "max_loop_visits": 3,
-      "max_cost_usd": 5,
-      "max_tool_calls": 300,
+      "max_cost_usd": 10,
+      "max_tool_calls": 1000,
       "approval_timeout_seconds": 86400
     },
     "project": true

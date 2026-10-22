@@ -5,6 +5,9 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- The Plan and Ship pipelines allow more steps and tool calls (Ship: 60 iterations per
+  step; Plan: 120 and two hours), so agents on OpenAI models no longer run out of room
+  before finishing. Copies of these workflows you have not edited follow on the next deploy.
 - Agents on OpenAI models can finish their steps again. The gateway's strict tool schemas
   emptied the result object of `finish`, so every OpenAI step that delivered a result was
   refused once code mode was off. `finish` now takes the result as JSON text, which the

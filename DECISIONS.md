@@ -6,6 +6,20 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-22
 
+**D-105 The Plan and Ship pipelines get limits sized for OpenAI agents.** (Andre,
+2026-10-22, run 01a1657e: wave 5's ship run advanced the wave, then failed applying the
+wave's notes on "node iteration limit 10 exceeded", which paused the waves.)
+- **Cause.** The limits were sized for Claude and for code mode, where one model turn ran
+  many tool calls. With code mode off (D-095), every model round trip is an iteration, and
+  the Ship Integrator spent its 10 on reading the plan documents.
+- **New limits:**
+  - Ship pipeline: 150 steps, 60 iterations per node, 300 tool calls, $5.
+  - Plan pipeline: 400 steps, 120 iterations, 1000 tool calls, $10, 2 hours. Its 30
+    iterations had already stopped one plan run.
+  - The Wave pipeline already had 400, 120 and 1000 (D-084).
+- **Cost.** On the ChatGPT subscription the cost caps are estimates; they still bound a
+  runaway.
+
 **D-104 `finish` takes the result as JSON text; the task message asks for it that way.**
 (Andre, 2026-10-22: "still barfing", on !24's Integrator run 01a16533. Its `finish` carried
 a correct `summary`, and the gateway answered `result.summary: schema is false; result: must

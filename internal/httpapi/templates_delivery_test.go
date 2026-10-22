@@ -22,9 +22,9 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 	sfx := uniqueSuffix()
 	dir := t.TempDir()
 	keys := map[string]string{"plan_pipeline": "Plan pipeline", "wave_pipeline": "Wave pipeline", "ship_pipeline": "Ship pipeline"}
-	wantCost := map[string]float64{"plan_pipeline": 5, "wave_pipeline": 20, "ship_pipeline": 2}
-	// A ticket's build takes many turns: the wave pipeline runs up to three hours.
-	wantDuration := map[string]int{"plan_pipeline": 3600, "wave_pipeline": 10800, "ship_pipeline": 3600}
+	wantCost := map[string]float64{"plan_pipeline": 10, "wave_pipeline": 20, "ship_pipeline": 5} // D-105
+	// A ticket's build takes many turns: the wave pipeline runs up to three hours, a plan two.
+	wantDuration := map[string]int{"plan_pipeline": 7200, "wave_pipeline": 10800, "ship_pipeline": 3600}
 	agentIDs := map[string]string{} // renamed agent name → id
 	for key := range keys {
 		raw, err := os.ReadFile("../../templates/" + key + ".json")
