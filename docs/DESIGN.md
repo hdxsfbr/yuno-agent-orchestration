@@ -5222,7 +5222,8 @@ Rules:
    - otherwise its name, description and definition become version current + 1.
 
    Runs keep their snapshot.
-4. `POST /api/agents/{id}/restore` (risk privileged) clears `deleted_at` unless a live
+4. `POST /api/agents/{id}/restore` (risk routine; the platform gate makes it privileged
+   when the agent has tools, since restoring grants them again) clears `deleted_at` unless a live
    agent holds the name (trimmed, case-insensitive), then re-materialises the agent.
    - 409 `not_archived` for a live agent; 409 `name_taken` `{agent_id, agent_name}` when a
      live agent holds the name.

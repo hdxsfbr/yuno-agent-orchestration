@@ -119,11 +119,12 @@ func TestAgentRestore(t *testing.T) {
 		t.Fatalf("unknown agent: %d", code)
 	}
 
-	// Restoring an agent grants its tools again: privileged (rule A5 decides per call).
+	// Restoring is routine in the contract; the gate makes it privileged when the agent has
+	// tools (DESIGN 5.35 rule 4, TestPrivilegedNeedsApproval).
 	doc, err := openapi3.NewLoader().LoadFromData(api.OpenAPI)
 	mustDo(t, err)
 	op := doc.Paths.Find("/api/agents/{id}/restore")
-	if op == nil || op.Post == nil || op.Post.OperationID != "restoreAgent" || op.Post.Extensions["x-yuno-risk"] != "privileged" {
+	if op == nil || op.Post == nil || op.Post.OperationID != "restoreAgent" || op.Post.Extensions["x-yuno-risk"] != "routine" {
 		t.Fatalf("restore operation = %+v", op)
 	}
 }

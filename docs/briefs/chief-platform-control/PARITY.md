@@ -56,7 +56,7 @@ such a test exists, so the mark is dropped when its wave lands. Every operation 
 | 11 | GET /api/agents/{id} | getAgent | — | read, ETag | read, W1 | TestChiefAgentCRUD |
 | 12 | PUT /api/agents/{id} | updateAgent | — | update, version | routine; privileged when tools, rules, guardrails or the exec policy grow, or for the Chief's own agent (A5) | TestChiefAgentCRUD, TestPrivilegedNeedsApproval, TestAuditRevert |
 | 13 | DELETE /api/agents/{id} | deleteAgent (soft delete = archive) | — | archive | destructive | TestChiefAgentCRUD |
-| 13a | **new** POST /api/agents/{id}/restore | restoreAgent | — | undo an archive (PRD 5) | privileged (it grants the agent's tools again), W4 | TestAgentRestore |
+| 13a | **new** POST /api/agents/{id}/restore | restoreAgent | — | undo an archive (PRD 5) | routine; privileged when the agent has tools (restoring grants them again), W4 | TestAgentRestore, TestPrivilegedNeedsApproval |
 | 14 | POST /api/agents/{id}/materialize | materializeAgent | — | push again | routine | TestPlatformParity |
 | 15 | GET /api/agents/{id}/runtime | agentRuntime | — | read | read | TestPlatformParity |
 | 16 | GET /api/agents/{id}/files | listAgentFiles | — | read | read | TestPlatformParity |

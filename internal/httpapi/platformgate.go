@@ -357,6 +357,18 @@ func (s *Server) platformRisk(ctx context.Context, op *tools.PlatformOperation, 
 		if s.loosensRules(nil, in.InteractionRules) {
 			reasons = append(reasons, "it gives a new agent interaction rules looser than the default")
 		}
+	case "restoreAgent":
+		// Restoring gives the agent its tools back (DESIGN 5.35 rule 4): privileged when it
+		// has any, routine otherwise.
+		all, err := store.ListAgentsWithDeleted(ctx, s.pool)
+		if err != nil {
+			return "", nil, err
+		}
+		for _, a := range all {
+			if a.ID == params["id"] && len(a.ToolAllowlist) > 0 {
+				reasons = append(reasons, "it gives a restored agent its tools back")
+			}
+		}
 	case "updateAgent":
 		if params["id"] == who.ID {
 			reasons = append(reasons, "it changes the calling agent itself")

@@ -468,6 +468,13 @@ func TestPrivilegedNeedsApproval(t *testing.T) {
 		InteractionRules: map[string]string{"deploy_release": "require_approval"},
 		Guardrails:       store.Guardrails{MaxRunsPerHour: 5, BlockedTools: []string{"exec"}}, ExecPolicy: store.ExecPolicy{Security: "allowlist"}}
 	mustDo(t, store.CreateAgent(ctx, testPool, other))
+	// Archived agents, one with tools and one without (DESIGN 5.35 rule 4).
+	armed := &store.Agent{Name: "Armed-" + sfx, Model: "claude-opus-5-5", MaxTokens: defaultMaxTokens, ToolAllowlist: []string{"exec"}}
+	bare := &store.Agent{Name: "Bare-" + sfx, Model: "claude-opus-5-5", MaxTokens: defaultMaxTokens}
+	for _, a := range []*store.Agent{armed, bare} {
+		mustDo(t, store.CreateAgent(ctx, testPool, a))
+		mustDo(t, store.DeleteAgent(ctx, testPool, a.ID))
+	}
 	day, month := store.USDMicros(5_000_000), store.USDMicros(50_000_000)
 	proj := &store.Project{ID: store.NewID(), Name: "priv-" + sfx, RepoURL: "https://gitlab.test/group/priv-" + sfx + ".git", Provider: "gitlab",
 		DefaultBranch: "main", BudgetDayUSDMicros: &day, BudgetMonthUSDMicros: &month}
@@ -533,6 +540,8 @@ func TestPrivilegedNeedsApproval(t *testing.T) {
 		{"keeping the repository", "updateProject", "/api/projects/" + proj.ID, projectBody(func(m map[string]any) { m["description"] = "edited" }), false},
 		{"run limits above the defaults", "createRun", "/api/runs", map[string]any{"agent_id": other.ID, "task": "t", "limits": map[string]any{"max_steps": 100}}, true},
 		{"run limits within the defaults", "createRun", "/api/runs", map[string]any{"agent_id": other.ID, "task": "t", "limits": map[string]any{"max_steps": 10}}, false},
+		{"restoring an agent with tools", "restoreAgent", "/api/agents/" + armed.ID + "/restore", nil, true},
+		{"restoring an agent without tools", "restoreAgent", "/api/agents/" + bare.ID + "/restore", nil, false},
 	} {
 		op, ok := s.contract.Operation(tc.op)
 		if !ok {

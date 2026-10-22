@@ -236,7 +236,7 @@ paths:
     post:
       tags: [agents]
       operationId: restoreAgent
-      x-yuno-risk: privileged
+      x-yuno-risk: routine
       summary: Restore an archived agent and materialise it in OpenClaw again
       description: |
         Undoes DELETE /api/agents/{id}: the agent is live again with its id and configuration,
