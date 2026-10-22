@@ -666,16 +666,80 @@ Tests:
 Out of scope: forge webhooks (the sync tick is the trigger); rebasing (merge only, as D-088);
 required-check policies beyond "all checks for the SHA".
 
-## Wave 4: admin parity completion (outline)
+## Wave 4: admin parity completion
 
-- **Rollback:**
-  - `GET /api/workflows/{id}/versions` and `POST …/versions/{v}/restore`.
-  - `POST /api/audit/{id}/revert` for an agent, schedule, skill or project (tokens are
-    never reverted). It goes through the same handlers with `If-Match`.
-- Agent restore after archive. Schedules already pause through `enabled` and expose
-  `timezone` and `next_run_at`; confirm with tests.
-- **Chat acceptance:** create, read, update and delete agents, workflows and schedules from
-  chat, with persisted readback (GET after write). Unauthorized actions are refused and
-  audited.
-- Re-check `PARITY.md` against the code: every row covered with equivalent permissions and
-  outcomes.
+Purpose: everything an operator configures can be changed from chat, read back, and rolled
+back, with the same permissions as the UI.
+
+Inputs:
+- The routes;
+- `audit_events.before` and `after` (wave 1 B);
+- `runs.workflow_snapshot` (the only place old workflow versions survive today);
+- soft-deleted agents (`deleted_at`).
+
+Rules:
+1. Table `workflow_versions(workflow_id, version, name, description, definition jsonb,
+   created_at, created_by jsonb)`, primary key `(workflow_id, version)`.
+   - Workflow create and every update insert the new version, in the same transaction as
+     the workflow write.
+   - The migration backfills each workflow's current version and every distinct
+     `(workflow_id, workflow_version, workflow_snapshot)` held by a run, with
+     `created_by = {"kind":"backfill"}`.
+2. `GET /api/workflows/{id}/versions` returns versions newest first, without definitions;
+   `GET /api/workflows/{id}/versions/{v}` returns one with its definition (risk read).
+3. `POST /api/workflows/{id}/versions/{v}/restore {expected_version}` (risk routine):
+   - It validates version v's definition as a PUT would (DAG, agents present, schemas).
+     If it is invalid now, 422 with the validation errors.
+   - It writes the definition as a new version, current + 1.
+   - It answers 412 `version_conflict` when `expected_version` is not the current version.
+   - Runs in flight keep their snapshot, as they already do.
+4. `POST /api/agents/{id}/restore` undoes an archive: it clears `deleted_at` and
+   re-materialises.
+   - 409 `name_taken` when a live agent has the name.
+   - Risk is `privileged` when the agent's tool allowlist is not empty (rule A5: restoring
+     grants tools), and `routine` otherwise.
+   - `GET /api/agents?include_archived=true` lists archived agents with `archived_at`.
+5. `POST /api/audit/{id}/revert` (risk: that of the reverted operation, evaluated on the
+   revert's body by rule A5):
+   - Allowed for an audit row with outcome `ok`, method PUT, a target that is an agent,
+     schedule, skill or project, and a `before` value.
+   - It maps `before` to the route's input, with each resource's mapper: agent input
+     fields; schedule fields; skill fields; project fields **without** token fields
+     (tokens are never reverted; a change to the token alone answers 422 "nothing to
+     revert").
+   - It applies the result through the same handler with `If-Match` = the ETag of the
+     row's `after`. If the resource changed since, 412: "changed again since; revert the
+     later change first".
+   - Workflows use rule 3.
+6. Schedules already pause and resume through `enabled`, and expose `timezone` and
+   `next_run_at`. Tests confirm each of these through `platform_call`.
+7. **Chat acceptance, end to end** (`platform_call` through the tools and MCP wiring
+   against the real handlers):
+   - create, read, update and delete an agent, a workflow and a schedule, each followed by
+     a GET that shows the change (persisted readback);
+   - a privileged change without approval is refused and audited `denied` with the
+     actor;
+   - an anonymous request is refused 401 and audited;
+   - a revert restores an agent's prompt;
+   - a workflow restore pins in-flight runs.
+8. `PARITY.md` is re-checked against the code, and every row's "Acceptance" test exists.
+   `TestPlatformParity` covers the routes added in waves 1 to 4.
+
+Edge cases:
+- A revert of a create is not offered: delete is the undo, and it is destructive and needs
+  approval.
+- A revert of a delete is the restore route, for agents only. Workflows, schedules and skills
+  are recreated from their audit `before` with a POST: offered as "recreate" with the old
+  body, as a new id. Disclosed.
+
+Tests:
+- TestWorkflowVersionsBackfill, TestWorkflowVersionsWritten, TestWorkflowRestore (valid,
+  invalid now, version conflict, run pinned).
+- TestAgentRestore (name taken; tools make it privileged).
+- TestAuditRevert (agent, schedule, project without token; changed since; nothing to
+  revert).
+- TestChiefAgentCRUD, TestChiefWorkflowCRUD, TestChiefScheduleCRUD.
+- TestUnauthorizedAudited.
+
+Out of scope: user accounts and roles; rollback of skills' files (a skill revert restores its
+metadata; files are edited one by one).
