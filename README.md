@@ -539,6 +539,20 @@ run, and the Runs page marks delegated runs. Chat-time calls identify the agent 
 per-agent chat token written into its instructions (the gateway sends no caller identity);
 only those tools accept it, and it is redacted everywhere like run tokens.
 
+Beyond those tools the Chief can do anything the API can (DESIGN 5.32):
+- **`platform_operations`** finds an action in the API's own description.
+- **`platform_call`** runs it through the same handlers, validation and audit as the UI.
+  The Chief sends a key with every change, so a repeat is answered once, and the version it
+  read with every update, so it never overwrites a newer one.
+- **Approval:** deleting something, granting an agent tools or loosening its rules,
+  changing a project's repository or token, raising a budget, binding Telegram, merging a
+  merge request and cancelling a plan each wait for your approval of that exact action.
+  Approve on the Approvals page, or send the Chief the code it gives you.
+- **Audit:** every change, yours or the Chief's, is in the audit log (`GET /api/audit`)
+  with who made it and for whom.
+- **Live runs:** for a live run, ask the Chief what it is doing. It reads the run's
+  diagnosis: executing, waiting, blocked, unknown or stalled, with the evidence.
+
 ## Layout
 
 ```

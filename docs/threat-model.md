@@ -365,6 +365,47 @@ is one credential that applies to any repository on its host, so a repository ad
 chat (including by an injected instruction) gets whatever access that token has. Scope that
 token to the repositories you intend to add. Tokens never pass through chat.
 
+## The Chief's platform reach (D-097, D-098)
+
+The Chief of Staff can call any API operation the contract does not mark `machine`, through
+`platform_call` (DESIGN 5.32). Whoever holds its Telegram chat can therefore ask for any
+operator action. The chat was already as sensitive as the web UI (D-081); what changes is
+the reach, and these mitigations bound it:
+
+- **Refused outright:** `machine` operations (event streams, eval scripts, the zip upload),
+  and the fields `script_id` and `trigger: eval`. Approval decisions and answers are
+  `dedicated`: they go only through `decide_approval` and `answer_question`, which require
+  the person's own newest message (the code, or the answer itself).
+- **Repeat-safe and version-checked:** a change needs an idempotency key, and an update or
+  delete needs the version it read (`If-Match`).
+- **Approved by the person, call by call:**
+  - every `destructive` operation;
+  - every change that grants tools, loosens interaction rules, guardrails or exec policy,
+    or touches the Chief itself;
+  - changes to a project's repository, provider or token, and any budget raise;
+  - Telegram binding;
+  - run limits above the defaults.
+
+  The approval binds the operation, path, body hash and key, expires after an hour, and is
+  decided in the UI or by the person's code (D-081). `platform_call` never decides one.
+- **No secrets in either direction:** a body carrying a secret is refused, so the Chief
+  never sets a project token, and every answer is redacted.
+- **Attributed:** every request, allowed or refused, gets an audit row naming the agent
+  and the Telegram chat it acted for. The row is written before the change, and the change
+  is refused if it cannot be written (fail closed).
+- **Not settable from the network:** the agent actor is set only in-process. A network
+  request cannot claim to be an agent.
+- **Safe to read:** the run diagnosis shows the first 200 characters of each open call's
+  command, redacted twice. The paged events re-redact on the way out. A merge request's
+  diff and job logs are redacted, with the project token removed literally, and GitHub's
+  log redirect is followed without the token.
+
+Residual:
+- With more than one allowed Telegram user, `on_behalf_of` names the agent's latest
+  conversation, not necessarily the requester's.
+- A scanner without the bearer writes audit rows (no rate cap).
+- The `If-Match` lock holds in one process.
+
 ## Known limitations
 
 - Single operator, no authentication beyond the optional bearer token.
