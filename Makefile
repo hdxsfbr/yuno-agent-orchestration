@@ -173,7 +173,13 @@ tunnel: ## Expose the web port through a cloudflared quick tunnel (demo only)
 # A plain Docker host (a DigitalOcean droplet) runs the same compose file plus Caddy for TLS.
 # scripts/deploy/ holds the droplet creation, bootstrap, deploy and runner scripts.
 
-.PHONY: run-public caddy-logs deploy
+.PHONY: build-public run-public caddy-logs deploy
+
+build-public: export COMPOSE_PROFILES = public
+build-public: env ## Build every image run-public uses, without replacing a running container
+	$(COMPOSE) --profile build build sandbox-image sandbox-image-python sandbox-image-node sandbox-image-go
+	$(COMPOSE) build deploytarget openclaw api web
+	$(COMPOSE) pull --quiet postgres caddy || true
 
 run-public: export COMPOSE_PROFILES = public
 run-public: ## run, plus Caddy TLS for DOMAIN (needs DOMAIN in .env; WEB_BIND=127.0.0.1 on a public host)

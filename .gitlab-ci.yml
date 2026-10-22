@@ -68,5 +68,10 @@ deploy:
     - git fetch -q "https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" "$CI_COMMIT_SHA"
     - git clean -q -fd
     - git checkout -q -B deploy FETCH_HEAD
+    # Build first, then wait until no run is mid-step, then replace the containers: a run
+    # parked on an approval can resume during the build, and a restart under a working
+    # agent loses its step (scripts/deploy/wait-idle.sh).
+    - make build-public
+    - scripts/deploy/wait-idle.sh 1800 || true
     - make run-public
     - make smoke
