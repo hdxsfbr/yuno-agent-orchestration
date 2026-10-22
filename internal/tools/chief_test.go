@@ -216,7 +216,8 @@ func TestDelegateTask(t *testing.T) {
 		{"agent with an input", `{"agent_name":"Coder-` + sfx + `","task":"t","input":{}}`, errDelegateShape},
 		{"workflow without an input", `{"workflow_name":"Pipeline-` + sfx + `"}`, errDelegateShape},
 		{"workflow with a task", `{"workflow_name":"Pipeline-` + sfx + `","input":{},"task":"t"}`, errDelegateShape},
-		{"input not an object", `{"workflow_name":"Pipeline-` + sfx + `","input":"go"}`, "at '/input'"},
+		{"input not an object", `{"workflow_name":"Pipeline-` + sfx + `","input":7}`, "at '/input'"},
+		{"input text that is not an object", `{"workflow_name":"Pipeline-` + sfx + `","input":"go"}`, "JSON text of an object"},
 		{"unknown property", `{"agent_name":"a","task":"t","priority":1}`, "priority"},
 		{"unknown agent", `{"agent_name":"Nobody-` + sfx + `","task":"t"}`, "no agent named Nobody-" + sfx},
 		{"unknown workflow", `{"workflow_name":"Nothing-` + sfx + `","input":{}}`, "no workflow named Nothing-" + sfx},
@@ -246,8 +247,9 @@ func TestDelegateTask(t *testing.T) {
 		g.TriggerRef != "conversation:"+conv || g.CallerAgentID != chief.ID {
 		t.Fatalf("delegation = %+v", g)
 	}
-	// A workflow by name with its input; a call with no conversation has no ref.
-	res = invoke(t, tool, Call{AgentID: chief.ID, Chat: true, Input: json.RawMessage(`{"workflow_name":"pipeline-` + sfx + `","input":{"task":"x"}}`)})
+	// A workflow by name with its input, as JSON text (D-104); a call with no conversation has
+	// no ref.
+	res = invoke(t, tool, Call{AgentID: chief.ID, Chat: true, Input: json.RawMessage(`{"workflow_name":"pipeline-` + sfx + `","input":"{\"task\":\"x\"}"}`)})
 	if res.IsError {
 		t.Fatalf("workflow: %+v", res)
 	}

@@ -5070,7 +5070,8 @@ Rules:
    - Machine operations are never listed. A dedicated one names its tool.
 3. `platform_call {operation_id, path_params?, query?, body?, idempotency_key?, if_match?}`
    (computational, chat, never retried by the platform) builds the request from the
-   contract.
+   contract. `path_params`, `query` and `body` come as JSON text, or as objects for a
+   non-strict caller (D-104).
    - It dispatches in-process through `Server.Handler()` with the server's own bearer and
      the agent actor (`via=chief`, `on_behalf_of=telegram:<chat id>`), which the network
      cannot set.

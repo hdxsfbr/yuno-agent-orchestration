@@ -1049,7 +1049,9 @@ func TestShipPipelineStructure(t *testing.T) {
 			t.Errorf("input %s: declared %v, required %v", k, ok, slices.Contains(schema.Required, k))
 		}
 	}
-	if def.Limits.MaxSteps > 60 {
+	// Sized for OpenAI agents, which spend an iteration per model round trip (D-105), and
+	// still bounded: a ship run is a short step.
+	if def.Limits.MaxSteps > 150 || def.Limits.MaxNodeIterations < 60 || def.Limits.MaxCostUSD > 5 {
 		t.Fatalf("limits = %+v", def.Limits)
 	}
 	for i := range def.Nodes {

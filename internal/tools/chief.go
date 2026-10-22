@@ -77,7 +77,7 @@ var delegateTaskSchema = json.RawMessage(`{
     "agent_name": {"type": "string", "description": "The name of the agent to hand the task to, as list_agents shows it. Give agent_name with task, or workflow_name with input, never both."},
     "task": {"type": "string", "description": "With agent_name: the complete, self-contained task. The agent sees nothing of your conversation, so include every detail it needs."},
     "workflow_name": {"type": "string", "description": "The name of the workflow to run, as list_workflows shows it."},
-    "input": {"type": "object", "description": "With workflow_name: the workflow's input, matching the input_schema list_workflows shows for it."},
+    "input": {"description": "With workflow_name: the workflow's input as JSON text, an object encoded as a string (\"{\\\"task\\\": \\\"...\\\"}\"), matching the input_schema list_workflows shows for it.", "anyOf": [{"type": "string"}, {"type": "object"}]},
     "project": {"type": "string", "description": "The name of the project (a repository) the run works on, as list_projects shows it. Required for a workflow that works on a project repository, not accepted for one that does not; optional with agent_name."},
     "merge_request": {"type": "string", "description": "An existing merge request or pull request of the project to change, fix or continue instead of opening a new one: its number with or without ! or # (12, !12, #12) or its link. The run works on that request's branch. Needs project, the one the request belongs to."}
   },
@@ -342,6 +342,11 @@ func NewDelegateTask(d ChiefDeps) *Tool {
 			if err := json.Unmarshal(call.Input, &in); err != nil {
 				return Result{}, &ModelError{Message: "invalid input: " + err.Error()}
 			}
+			input, err := jsonText(in.Input, "input", true) // D-104
+			if err != nil {
+				return Result{}, err
+			}
+			in.Input = input
 			req, msg := delegationOf(in)
 			if msg != "" {
 				return Result{}, &ModelError{Message: msg}

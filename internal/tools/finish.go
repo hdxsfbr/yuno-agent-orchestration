@@ -96,13 +96,9 @@ func NewFinish(accept AcceptFinishFunc, reject RejectFinishFunc) *Tool {
 // resultObject is the finish result as an object: the object itself, or the object a JSON
 // string holds (D-104). Anything else is the model's to correct.
 func resultObject(raw json.RawMessage) (json.RawMessage, error) {
-	var text string
-	if json.Unmarshal(raw, &text) != nil {
-		return raw, nil // an object: the input schema allows no other kind
-	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(text), &obj); err != nil || obj == nil {
+	v, err := jsonText(raw, "result", true)
+	if err != nil {
 		return nil, &ModelError{Message: "result: a string result must be the JSON text of an object matching the output schema"}
 	}
-	return json.RawMessage(text), nil
+	return v, nil
 }

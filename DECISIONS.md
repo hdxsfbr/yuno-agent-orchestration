@@ -36,6 +36,13 @@ not have additional properties`.)
   object is still accepted.
 - **Failure.** A string that is not an object's JSON text is refused and counts toward the
   finish attempts.
+- **The other open objects.** The same holds for every tool parameter that is an open
+  object: `delegate_task`'s workflow `input`, and `platform_call`'s `path_params`, `query`
+  and `body`. Those reached the Chief as `{}`, so a workflow delegation had no input and
+  every call with a path or a body failed. Each now takes JSON text, read by the shared
+  `tools.jsonText`.
+- **Guard.** `TestToolSchemasTakeJSONText` fails on any tool parameter that is an open
+  object without a string form.
 - **Rejected:**
   - publishing each node's output schema as the tool schema (one MCP tool list serves
     every run);

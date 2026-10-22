@@ -5,6 +5,9 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- The Chief of Staff on OpenAI can fill in what its calls need again: a workflow's input
+  when it delegates, and the path, query and body of a platform call. The gateway's strict
+  tool schemas had emptied them, as they had `finish`'s result. They now go as JSON text.
 - The Plan and Ship pipelines allow more steps and tool calls (Ship: 60 iterations per
   step; Plan: 120 and two hours), so agents on OpenAI models no longer run out of room
   before finishing. Copies of these workflows you have not edited follow on the next deploy.

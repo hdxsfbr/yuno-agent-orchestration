@@ -100,9 +100,9 @@ var platformCallSchema = json.RawMessage(`{
   "type": "object",
   "properties": {` + tokenProperties + `
     "operation_id": {"type": "string", "minLength": 1, "description": "The operation to run, as platform_operations names it."},
-    "path_params": {"type": "object", "additionalProperties": {"type": ["string", "number"]}, "description": "A value for every {name} in the operation's path."},
-    "query": {"type": "object", "description": "Query parameters by name."},
-    "body": {"type": "object", "description": "The JSON request body, matching the operation's request_body."},
+    "path_params": {"description": "A value for every {name} in the operation's path, as JSON text: an object encoded as a string, such as \"{\\\"id\\\": \\\"01a...\\\"}\".", "anyOf": [{"type": "string"}, {"type": "object", "additionalProperties": {"type": ["string", "number"]}}]},
+    "query": {"description": "Query parameters by name, as JSON text: an object encoded as a string.", "anyOf": [{"type": "string"}, {"type": "object"}]},
+    "body": {"description": "The JSON request body, matching the operation's request_body, as JSON text: the body encoded as a string.", "anyOf": [{"type": "string"}, {"type": "object"}]},
     "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200, "description": "Required for everything but a read: a new key for each new action, the same key when you repeat that action (after an approval, or after a failure)."},
     "if_match": {"type": "string", "description": "The etag of your latest read of the target; required to update or delete something you can read."}
   },
@@ -356,12 +356,15 @@ type PlatformCallDeps struct {
 }
 
 type platformCallInput struct {
-	OperationID    string                     `json:"operation_id"`
-	PathParams     map[string]json.RawMessage `json:"path_params"`
-	Query          map[string]json.RawMessage `json:"query"`
-	Body           json.RawMessage            `json:"body"`
-	IdempotencyKey string                     `json:"idempotency_key"`
-	IfMatch        string                     `json:"if_match"`
+	OperationID string                     `json:"operation_id"`
+	PathParams  map[string]json.RawMessage `json:"-"`
+	Query       map[string]json.RawMessage `json:"-"`
+	Body        json.RawMessage            `json:"body"`
+	// The path parameters and the query as they came: JSON text or an object (D-104).
+	RawPathParams  json.RawMessage `json:"path_params"`
+	RawQuery       json.RawMessage `json:"query"`
+	IdempotencyKey string          `json:"idempotency_key"`
+	IfMatch        string          `json:"if_match"`
 }
 
 // NewPlatformCall builds platform_call (rules A3, A4, A8, A9).
@@ -369,8 +372,8 @@ func NewPlatformCall(d PlatformCallDeps) *Tool {
 	return &Tool{
 		Name: PlatformCallName,
 		Description: "Run one platform API operation, the way the web UI does, as yourself on behalf of the person. " +
-			"Find it with platform_operations first. Give operation_id, path_params, query and body as the operation " +
-			"describes them. Everything but a read needs idempotency_key: a new one for each new action, the same one " +
+			"Find it with platform_operations first. Give operation_id, and path_params, query and body as the operation " +
+			"describes them, each as JSON text (an object encoded as a string). Everything but a read needs idempotency_key: a new one for each new action, the same one " +
 			"when you repeat that action. To update or delete something, read it first and pass the etag of that read " +
 			"as if_match. A destructive or privileged action answers pending_approval with a code: give the person the " +
 			"code, and once they approve, repeat the same call with the same idempotency_key. Never put a token or " +
@@ -392,6 +395,9 @@ func execPlatformCall(ctx context.Context, d PlatformCallDeps, call Call) (Resul
 	var in platformCallInput
 	if err := json.Unmarshal(call.Input, &in); err != nil {
 		return Result{}, &ModelError{Message: "invalid input: " + err.Error()}
+	}
+	if err := in.readText(); err != nil {
+		return Result{}, err
 	}
 	c, err := Contract()
 	if err != nil {
@@ -669,4 +675,29 @@ func secretIn(v any, underSecretKey bool) bool {
 func credentialShaped(s string) bool {
 	s = strings.ReplaceAll(s, "\x00", "")
 	return obs.Redact(s) != s
+}
+
+// readText turns the arguments that may come as JSON text (D-104) into their values.
+func (in *platformCallInput) readText() error {
+	for _, a := range []struct {
+		field string
+		raw   json.RawMessage
+		into  *map[string]json.RawMessage
+	}{{"path_params", in.RawPathParams, &in.PathParams}, {"query", in.RawQuery, &in.Query}} {
+		v, err := jsonText(a.raw, a.field, true)
+		if err != nil {
+			return err
+		}
+		if len(v) > 0 {
+			if err := json.Unmarshal(v, a.into); err != nil {
+				return &ModelError{Message: a.field + ": " + err.Error()}
+			}
+		}
+	}
+	body, err := jsonText(in.Body, "body", false)
+	if err != nil {
+		return err
+	}
+	in.Body = body
+	return nil
 }
