@@ -1577,7 +1577,8 @@ Rules:
    missing or the setting is incomplete (a warning, as before).
 10. **Report-back.** The run report of 5.15 rule 9 ends with ` Merge request: <url>`
     (`Pull request:` for GitHub) when the run has an executed `open_merge_request`
-    call when the report is composed. A request opened by a late grant (5.3 rule 5)
+    call when the report is composed, followed by ` Follow-up: <url>` when the request
+    has a follow-up (5.29 rule 4; the newest). A request opened by a late grant (5.3 rule 5)
     after the run was reported gets one follow-up, `[platform] Run <id>: merge request
     opened after the run ended: <url>`, sent once into the same conversation
     (idempotency key `report-<run id>-effect-<tool call id>`, one attempt, no claim).
@@ -1924,7 +1925,10 @@ Rules:
    dedupes the identical call within one visit. Since 5.22 a run that names a request
    (`runs.merge_request_id`) pushes onto that record's branch under the branch guard of
    5.22 rule 4 and gets no record of its own: `merge_requests.run_id` stays the run that
-   opened the request.
+   opened the request. Since 5.29 rule 4 a run whose request was merged before its last
+   push also has follow-up records (`follow_up_of` names the record followed; unique
+   `run_id` holds among the records that follow none, and a record has one follow-up);
+   "the run's record" is still the one it opened.
 3. Sync: every `MERGE_REQUEST_SYNC_INTERVAL` the loop lists records with state `open`
    created in the last 14 days, oldest `synced_at` first with nulls first, at most 50 per
    pass, and refreshes each with a 10 s timeout. GitLab: `GET merge_requests/<iid>`
@@ -4024,6 +4028,32 @@ Rules:
    tree and marks it ready (GitLab: the title without the prefix; GitHub: the GraphQL
    `markPullRequestReadyForReview` mutation). A later call may also replace the title and
    description. The record gains `draft BOOLEAN`.
+   **Draft until the last push, and a follow-up when merged anyway** (run 01a15722, T1,
+   escalated because its merge request had been merged before the plan documents were
+   pushed). The wave pipeline opens its request as a draft and marks it ready only in the
+   final `integrator_ready` call. While a request is a draft its description starts with a
+   notice for the operator: `**Do not merge this merge request yet.** Yuno is still
+   working on it and will push more changes. It marks the merge request ready for review
+   once the last of them is pushed.` ("pull request" on GitHub); the ready call's
+   description has none. Both providers refuse to merge a draft, but a person can still
+   mark it ready and merge it. So every later call on the run's own request first reads
+   the request's state from the provider (`Details`), since the record is only as fresh as
+   the last sync: an open request gets the push, a closed one is refused as before, and a
+   merged one hands the rest to a follow-up. The call's changes, under the same paths rule,
+   go onto the call's own branch cut from the default branch, which holds the merged
+   request now, so only what the merge left out is in it; a request titled `Follow-up:
+   <the run's title>` is opened, its description starting `Follow-up to merge request
+   !<n> (<url>), which was merged before Yuno had pushed all of its changes. This merge
+   request holds the rest.`, and recorded as a record of the run whose `follow_up_of` names the merged
+   one (migration 0024). The answer is the follow-up's `{number, url, branch, provider}`
+   with `follow_up: true` instead of an error. A later call pushes onto the run's newest
+   follow-up while it is open, and a follow-up merged in turn gets a follow-up of its own.
+   When the default branch already holds everything the call proposes, nothing is pushed,
+   opened or recorded, and the answer is the merged request with `merged: true`. The run's
+   own record stays the one the run header, its plan ticket and `auto_after` read; the
+   follow-up is synced and can be merged like any record, and the run's report names it
+   after the request (`Follow-up: <url>`, 5.17 rule 10). A run that names a request (5.22)
+   is not covered: its merged request is refused as before.
 5. **The ticket pipeline with a manual test.** `wave_pipeline` becomes: builder ⇄
    code_review → `integrator_draft` (`open_merge_request` draft, output `{merge_request_url,
    branch}`) → approval `manual_test` (message: pull the branch, run the CI tasks;
@@ -4045,6 +4075,13 @@ Rules:
    says the draft merge request is missing, so there is no branch to test, and asks the
    operator to reject the step, which sends the ticket back to the Builder. The ready
    step's task names the branch only when there is one.
+   Choice for a follow-up (rule 4): a ready call that finds the request merged opens a new
+   request, which "only updates the run's existing MR" would gate. `auto_after` lets it
+   through on the ready call's own terms, when the call names paths and every one is under
+   `docs/` (so the run's own record, merged or not, counts as the request it updates):
+   the follow-up carries the documents the ready push would have added, and the manual
+   test covered the code that was merged. A follow-up that would push code or the whole
+   checkout stays gated, as the ready call would.
 6. **`escalate`** (computational, not gated, every factory agent in a project run):
    input `{reason, kind: prd_gap | design_wrong | loop_limit | other}`. The engine ends
    the calling run `failed` with `escalated (<kind>): <reason>` as soon as the call is
@@ -4203,7 +4240,14 @@ events; T5.29.8 default-branch status on both; T5.29.9 the watcher releases wave
 the plan MR merges, ships a wave only when merged and green, holds while paused; T5.29.10
 `advance_wave` closes, releases the next wave and reports `last`; T5.29.11 the draft
 step's output and state schemas refuse a status as the branch and a half-empty result, and
-the manual test without a draft says it is missing and names no branch; evals 026 (loop limit
+the manual test without a draft says it is missing and names no branch; T5.29.12 on a
+fake GitLab and a fake GitHub, a draft's description carries the do-not-merge notice and
+the ready one does not, a request merged before the ready call (the record still open)
+gets a follow-up holding only the files left, recorded and answered with `follow_up`, a
+later call pushes onto it, a merged request with nothing left is a no-op with `merged`, a
+request closed on the provider is refused; the store keeps one own record per run and one
+follow-up per record; `auto_after` lets a `docs/` follow-up through and gates one with
+code; the report names the newest follow-up; evals 026 (loop limit
 escalation), 027 (PRD gap escalation), 028 (two waves auto-advance with the pause flag).
 
 Limitations: one open plan per project; main's status is read, not run, so a project

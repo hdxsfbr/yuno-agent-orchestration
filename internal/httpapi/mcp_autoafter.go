@@ -28,7 +28,9 @@ func autoApprover(approvalNode string) string { return "auto_after:" + approvalN
 // decision does not count), and, for open_merge_request, the run already has a request to
 // update (a call that would create one stays gated) and the call names paths, every one
 // under docs/ (a call that would push the whole checkout, or code, stays gated; review
-// M1). Any doubt, including a database
+// M1). A request the operator merged before the call still counts: the call then opens its
+// follow-up (DESIGN 5.29 rule 4), a new request with those docs/ paths only, which the
+// manual-test approval covers as it covers the push it replaces. Any doubt, including a database
 // error, leaves the call gated. advance_wave passes only in a ship run (trigger plan, a
 // trigger_ref of the form plan:<id>:wave:<n>) whose calling node is covered by the
 // smoke_test approval (review L6).

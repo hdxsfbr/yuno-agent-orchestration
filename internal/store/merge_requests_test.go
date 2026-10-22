@@ -377,6 +377,57 @@ func TestFillRunMergeRequests(t *testing.T) {
 	mustDo(t, FillRunMergeRequests(ctx, pool, nil))
 }
 
+// DESIGN 5.29 rule 4: a follow-up is a second record of the run that names the record it
+// follows. The run's own record stays the one MergeRequestByRun and FillRunMergeRequests
+// answer, a record has at most one follow-up, a run still has one record of its own, and the
+// run's listing shows both.
+func TestFollowUpMergeRequests(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	p, run := mrProject(t, pool, "t-follow-up")
+	own := mrOf(p, run, 21)
+	if ok, err := InsertMergeRequest(ctx, pool, own); err != nil || !ok {
+		t.Fatalf("own record: %v %v", ok, err)
+	}
+	if fu, err := FollowUpMergeRequest(ctx, pool, own.ID); err != nil || fu != nil {
+		t.Fatalf("follow-up before one exists = %+v %v", fu, err)
+	}
+	fu := mrOf(p, run, 22)
+	fu.SourceBranch, fu.Title = "yuno/def", "Follow-up: Add a thing"
+	if ok, err := InsertFollowUpMergeRequest(ctx, pool, fu, own.ID); err != nil || !ok {
+		t.Fatalf("follow-up: %v %v", ok, err)
+	}
+	if ok, err := InsertFollowUpMergeRequest(ctx, pool, mrOf(p, run, 23), own.ID); err != nil || ok {
+		t.Fatalf("a second follow-up of the record = %v %v", ok, err)
+	}
+	if ok, err := InsertMergeRequest(ctx, pool, mrOf(p, run, 24)); err != nil || ok {
+		t.Fatalf("a second record of the run's own = %v %v", ok, err)
+	}
+	if got, err := FollowUpMergeRequest(ctx, pool, own.ID); err != nil || got == nil || got.ID != fu.ID || got.Number != 22 || got.RunID != run.ID {
+		t.Fatalf("follow-up = %+v %v", got, err)
+	}
+	if by, err := MergeRequestByRun(ctx, pool, run.ID); err != nil || by == nil || by.ID != own.ID {
+		t.Fatalf("by run = %+v %v", by, err)
+	}
+	runs := []Run{*run}
+	mustDo(t, FillRunMergeRequests(ctx, pool, runs))
+	if runs[0].MergeRequest == nil || runs[0].MergeRequest.ID != own.ID {
+		t.Fatalf("filled = %+v", runs[0].MergeRequest)
+	}
+	// A run that names the follow-up (an iteration on it, DESIGN 5.22) gets the follow-up.
+	other := mrRun(t, pool, p, nil)
+	other.MergeRequestID = &fu.ID
+	runs = []Run{*other, *run}
+	mustDo(t, FillRunMergeRequests(ctx, pool, runs))
+	if runs[0].MergeRequest == nil || runs[0].MergeRequest.ID != fu.ID || runs[1].MergeRequest == nil || runs[1].MergeRequest.ID != own.ID {
+		t.Fatalf("filled = %+v / %+v", runs[0].MergeRequest, runs[1].MergeRequest)
+	}
+	list, err := ListMergeRequests(ctx, pool, MergeRequestFilter{RunID: run.ID})
+	if err != nil || len(list) != 2 {
+		t.Fatalf("the run's merge requests = %+v %v", list, err)
+	}
+}
+
 // T5.20.8: the backfill makes a record of the newest executed call of each run that has a
 // project, skips runs without one, failed calls and calls it cannot read, and is
 // idempotent.

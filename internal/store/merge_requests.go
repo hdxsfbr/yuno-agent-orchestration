@@ -54,6 +54,28 @@ func collectMergeRequests(rows pgx.Rows) ([]MergeRequest, error) {
 // the project (the two unique indexes): ON CONFLICT DO NOTHING rather than an error, so
 // the surrounding transaction is not aborted.
 func InsertMergeRequest(ctx context.Context, q Querier, mr *MergeRequest) (inserted bool, err error) {
+	inserted, err = insertMergeRequest(ctx, q, mr, nil)
+	if err != nil || !inserted {
+		return inserted, err
+	}
+	// The run's plan ticket, if it builds one, is now in review (DESIGN 5.29 rule 10), in
+	// the transaction that wrote the record.
+	if _, _, err := LinkTicketMergeRequest(ctx, q, mr.RunID, mr.ID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// InsertFollowUpMergeRequest stores the follow-up of the record followed (DESIGN 5.29 rule
+// 4): a record of the same run that names it, written as InsertMergeRequest writes one. It
+// reports false, writing nothing, when the record followed has a follow-up already or the
+// provider's number is recorded for the project. The run's plan ticket keeps the request it
+// was built in.
+func InsertFollowUpMergeRequest(ctx context.Context, q Querier, mr *MergeRequest, followed string) (inserted bool, err error) {
+	return insertMergeRequest(ctx, q, mr, &followed)
+}
+
+func insertMergeRequest(ctx context.Context, q Querier, mr *MergeRequest, followUpOf *string) (inserted bool, err error) {
 	if mr.ID == "" {
 		mr.ID = NewID()
 	}
@@ -70,24 +92,16 @@ func InsertMergeRequest(ctx context.Context, q Querier, mr *MergeRequest) (inser
 	if mr.UpdatedAt.IsZero() {
 		mr.UpdatedAt = mr.CreatedAt
 	}
-	tag, err := q.Exec(ctx, `INSERT INTO merge_requests (`+mergeRequestColumnList+`)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+	tag, err := q.Exec(ctx, `INSERT INTO merge_requests (`+mergeRequestColumnList+`, follow_up_of)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
 		ON CONFLICT DO NOTHING`,
 		mr.ID, mr.ProjectID, mr.RunID, mr.Provider, mr.Number, mr.URL, mr.SourceBranch, mr.TargetBranch, mr.Title,
 		mr.State, mr.CIStatus, mr.HeadSHA, mr.UnresolvedThreads, mr.LastSyncError, mr.SyncedAt, mr.ReportedState, mr.MergedBy,
-		mr.CreatedAt, mr.UpdatedAt, mr.ClosedAt, mr.Draft)
+		mr.CreatedAt, mr.UpdatedAt, mr.ClosedAt, mr.Draft, followUpOf)
 	if err != nil {
 		return false, err
 	}
-	if tag.RowsAffected() != 1 {
-		return false, nil
-	}
-	// The run's plan ticket, if it builds one, is now in review (DESIGN 5.29 rule 10), in
-	// the transaction that wrote the record.
-	if _, _, err := LinkTicketMergeRequest(ctx, q, mr.RunID, mr.ID); err != nil {
-		return false, err
-	}
-	return true, nil
+	return tag.RowsAffected() == 1, nil
 }
 
 // GetMergeRequest returns a record by id, or ErrNotFound.
@@ -104,9 +118,21 @@ func GetMergeRequest(ctx context.Context, q Querier, id string) (*MergeRequest, 
 }
 
 // MergeRequestByRun returns the run's record, or nil when it has none (the answer
-// MergeRequestOfRun gave, which this replaces).
+// MergeRequestOfRun gave, which this replaces). It is the request the run opened, never a
+// follow-up of it (FollowUpMergeRequest).
 func MergeRequestByRun(ctx context.Context, q Querier, runID string) (*MergeRequest, error) {
-	rows, err := q.Query(ctx, `SELECT `+mergeRequestColumnList+` FROM merge_requests WHERE run_id=$1`, runID)
+	return oneMergeRequest(ctx, q, `SELECT `+mergeRequestColumnList+` FROM merge_requests WHERE run_id=$1 AND follow_up_of IS NULL`, runID)
+}
+
+// FollowUpMergeRequest returns the follow-up of a record (DESIGN 5.29 rule 4), or nil when
+// it has none.
+func FollowUpMergeRequest(ctx context.Context, q Querier, id string) (*MergeRequest, error) {
+	return oneMergeRequest(ctx, q, `SELECT `+mergeRequestColumnList+` FROM merge_requests WHERE follow_up_of=$1`, id)
+}
+
+// oneMergeRequest is the record a query answers, or nil when it answers none.
+func oneMergeRequest(ctx context.Context, q Querier, sql string, args ...any) (*MergeRequest, error) {
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -335,20 +361,28 @@ func FillRunMergeRequests(ctx context.Context, q Querier, runs []Run) error {
 			named = append(named, *runs[i].MergeRequestID)
 		}
 	}
-	rows, err := q.Query(ctx, `SELECT `+mergeRequestColumnList+` FROM merge_requests WHERE run_id = ANY($1) OR id = ANY($2)`,
-		ids, named)
+	// A run's own record is the one that follows none (a follow-up is listed with the run's
+	// merge requests, not in its header); a named record may be any.
+	rows, err := q.Query(ctx, `SELECT `+mergeRequestColumnList+`, follow_up_of IS NULL AS own FROM merge_requests
+		WHERE (run_id = ANY($1) AND follow_up_of IS NULL) OR id = ANY($2)`, ids, named)
 	if err != nil {
 		return err
 	}
-	list, err := collectMergeRequests(rows)
+	type listed struct {
+		MergeRequest
+		Own bool `db:"own"`
+	}
+	list, err := pgx.CollectRows(rows, pgx.RowToStructByName[listed])
 	if err != nil {
 		return err
 	}
 	byRun := make(map[string]*MergeRequest, len(list))
 	byID := make(map[string]*MergeRequest, len(list))
 	for i := range list {
-		byRun[list[i].RunID] = &list[i]
-		byID[list[i].ID] = &list[i]
+		if list[i].Own {
+			byRun[list[i].RunID] = &list[i].MergeRequest
+		}
+		byID[list[i].ID] = &list[i].MergeRequest
 	}
 	for i := range runs {
 		runs[i].MergeRequest = byRun[runs[i].ID]

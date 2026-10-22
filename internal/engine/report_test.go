@@ -459,6 +459,31 @@ func TestReportBackCarriesMergeRequest(t *testing.T) {
 	}
 }
 
+// DESIGN 5.29 rule 4: a run whose request was merged before its last push reports the
+// follow-up that holds the rest after its request, the newest when there are several.
+func TestReportBackNamesTheFollowUp(t *testing.T) {
+	f := newIterFixture(t)
+	env, ctx := f.env, context.Background()
+	opener := env.run(f.opener.ID)
+	opener.Status = store.RunSucceeded
+	if got, want := env.e.runReportText(ctx, opener), " Merge request: "+f.rec.URL; !strings.HasSuffix(got, want) {
+		t.Fatalf("without a follow-up: %q does not end with %q", got, want)
+	}
+	followed := f.rec
+	for _, n := range []int64{6, 7} {
+		fu := &store.MergeRequest{ProjectID: f.proj.ID, RunID: opener.ID, Provider: "gitlab", Number: n,
+			URL: fmt.Sprintf("https://gitlab.test/g/p/-/merge_requests/%d", n), SourceBranch: fmt.Sprintf("yuno/follow-up-%d", n),
+			TargetBranch: "main", Title: "Follow-up: Add the feature"}
+		if ok, err := store.InsertFollowUpMergeRequest(ctx, env.pool, fu, followed.ID); err != nil || !ok {
+			t.Fatalf("insert the follow-up: %v %v", ok, err)
+		}
+		followed = fu
+	}
+	if got, want := env.e.runReportText(ctx, opener), " Merge request: "+f.rec.URL+" Follow-up: https://gitlab.test/g/p/-/merge_requests/7"; !strings.HasSuffix(got, want) {
+		t.Fatalf("with follow-ups: %q does not end with %q", got, want)
+	}
+}
+
 // T5.17.7, DESIGN 5.17 rule 10: a merge request opened by a late grant after the run
 // was reported gets one follow-up into the conversation, under its own key.
 func TestLateMergeRequestFollowUp(t *testing.T) {

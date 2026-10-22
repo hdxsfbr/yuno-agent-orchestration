@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -87,7 +88,7 @@ func newFakeGitHub(t *testing.T, bare string) (*fakeGitHub, *httptest.Server) {
 		case r.Method == http.MethodGet && p == "/pulls":
 			var out []map[string]any
 			for _, pr := range g.pulls {
-				if "owner:"+pr["head"].(string) == r.URL.Query().Get("head") && r.URL.Query().Get("state") == "open" {
+				if "owner:"+pr["head"].(string) == r.URL.Query().Get("head") && r.URL.Query().Get("state") == "open" && pr["state"] == "open" {
 					out = append(out, pr)
 				}
 			}
@@ -112,14 +113,33 @@ func newFakeGitHub(t *testing.T, bare string) (*fakeGitHub, *httptest.Server) {
 			n := len(g.pulls) + 1
 			body["number"] = n
 			body["html_url"] = fmt.Sprintf("https://github.test/owner/demo/pull/%d", n)
+			body["state"] = "open"
 			g.pulls = append(g.pulls, body)
 			writeJSONTest(w, 201, body)
+		case r.Method == http.MethodGet && strings.HasPrefix(p, "/pulls/"):
+			// One pull request as created, in the state the test left it (merge).
+			n, err := strconv.Atoi(strings.TrimPrefix(p, "/pulls/"))
+			if err != nil || n < 1 || n > len(g.pulls) {
+				writeJSONTest(w, 404, map[string]string{"message": "Not Found"})
+				return
+			}
+			pr := g.pulls[n-1]
+			writeJSONTest(w, 200, map[string]any{"number": n, "node_id": fmt.Sprintf("PR_%d", n), "title": pr["title"], "body": pr["body"],
+				"state": pr["state"], "merged": pr["merged"] == true, "draft": pr["draft"] == true, "html_url": pr["html_url"],
+				"head": map[string]any{"ref": pr["head"]}, "base": map[string]any{"ref": pr["base"]}})
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	t.Cleanup(srv.Close)
 	return g, srv
+}
+
+// merge marks the nth pull request merged, as the operator merging it on GitHub would.
+func (g *fakeGitHub) merge(n int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.pulls[n-1]["state"], g.pulls[n-1]["merged"] = "closed", true
 }
 
 // staticProjects is a ProjectResolver that answers every run with one project, or

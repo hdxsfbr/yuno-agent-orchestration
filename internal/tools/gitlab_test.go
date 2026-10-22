@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -78,6 +79,13 @@ func scriptedRoute(w http.ResponseWriter, r *http.Request, route string, scripte
 	return true
 }
 
+// merge marks the nth merge request merged, as the operator merging it on GitLab would.
+func (g *fakeGitLab) merge(n int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.mrs[n-1]["state"] = "merged"
+}
+
 func (g *fakeGitLab) hasBranch(name string) bool {
 	if g.branchesFn != nil {
 		return slices.Contains(g.branchesFn(), name)
@@ -142,7 +150,7 @@ func newFakeGitLab(t *testing.T) (*fakeGitLab, *httptest.Server) {
 		case r.Method == http.MethodGet && p == "/merge_requests":
 			var out []map[string]any
 			for _, mr := range g.mrs {
-				if mr["source_branch"] == r.URL.Query().Get("source_branch") && r.URL.Query().Get("state") == "opened" {
+				if mr["source_branch"] == r.URL.Query().Get("source_branch") && r.URL.Query().Get("state") == "opened" && mr["state"] == "opened" {
 					out = append(out, mr)
 				}
 			}
@@ -166,8 +174,17 @@ func newFakeGitLab(t *testing.T) (*fakeGitLab, *httptest.Server) {
 			iid := len(g.mrs) + 1
 			body["iid"] = iid
 			body["web_url"] = fmt.Sprintf("https://gitlab.test/group/demo/-/merge_requests/%d", iid)
+			body["state"] = "opened"
 			g.mrs = append(g.mrs, body)
 			writeJSONTest(w, 201, body)
+		case r.Method == http.MethodGet && strings.HasPrefix(p, "/merge_requests/"):
+			// One merge request as created, in the state the test left it (merge).
+			n, err := strconv.Atoi(strings.TrimPrefix(p, "/merge_requests/"))
+			if err != nil || n < 1 || n > len(g.mrs) {
+				writeJSONTest(w, 404, map[string]string{"message": "404 Not found"})
+				return
+			}
+			writeJSONTest(w, 200, g.mrs[n-1])
 		default:
 			http.NotFound(w, r)
 		}

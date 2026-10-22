@@ -20,7 +20,7 @@ func TestUpdateRecordedRefusesAMergedOrClosedRequest(t *testing.T) {
 		{"github", store.MergeRequestClosed, "the run's pull request #12 is closed; nothing more can be pushed to it"},
 	} {
 		rec := &store.MergeRequest{Number: 12, Provider: tc.provider, State: tc.state, SourceBranch: "yuno/abc"}
-		_, err := m.updateRecorded(context.Background(), Call{}, &project.Config{Provider: project.Provider(tc.provider)}, nil, rec, mergeRequestInput{Title: "t"}, t.TempDir(), nil, nil)
+		_, err := m.updateRecorded(context.Background(), Call{}, &project.Config{Provider: project.Provider(tc.provider)}, nil, rec, mergeRequestInput{Title: "t"}, t.TempDir(), nil, nil, nil)
 		var me *ModelError
 		if !errors.As(err, &me) || me.Message != tc.want {
 			t.Fatalf("%s %s: err = %v, want model error %q", tc.provider, tc.state, err, tc.want)
