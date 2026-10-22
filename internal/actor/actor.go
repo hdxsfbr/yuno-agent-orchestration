@@ -47,6 +47,31 @@ func From(ctx context.Context) (Actor, bool) {
 	return a, ok
 }
 
+// Note is what an inner layer tells the audit row of its request (DESIGN 5.31 rule 1): the
+// platform gate's approval and evidence, or the outcome it decided ("denied",
+// "pending_approval"). The audit middleware puts an empty one in the context; nil outside
+// a request.
+type Note struct {
+	Outcome    string
+	ErrorCode  string
+	ApprovalID string
+	Evidence   map[string]any
+}
+
+type noteKey struct{}
+
+// WithNote returns ctx carrying a fresh note, and the note.
+func WithNote(ctx context.Context) (context.Context, *Note) {
+	n := &Note{}
+	return context.WithValue(ctx, noteKey{}, n), n
+}
+
+// NoteFrom returns the note of ctx's request, nil when it has none.
+func NoteFrom(ctx context.Context) *Note {
+	n, _ := ctx.Value(noteKey{}).(*Note)
+	return n
+}
+
 // Label is the actor as one string for logs and decided_by columns: "operator:ui",
 // "agent:<name>" (with " for telegram:<id>" when known), "anonymous".
 func (a Actor) Label() string {

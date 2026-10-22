@@ -82,9 +82,9 @@ Rules:
      Chief relays the code. Andre approves in the UI, or by sending the code in Telegram
      (then `decide_approval`, with its existing check that the code is in the person's
      newest message).
-   - A repeat with the same `idempotency_key` and the same body finds the approval: it is
-     approved and unused, so the approval is marked used in the same transaction, then the
-     call runs. Rejected: refused "rejected by <decided_by>". Expired: refused "expired;
+   - A repeat with the same `idempotency_key` and the same body finds the approval. If it
+     is approved and unused, it is marked used, then the call runs. If it is approved and
+     already used by this same key and body, the call passes to idempotency, which replays. Rejected: refused "rejected by <decided_by>". Expired: refused "expired;
      call again to ask again". Still pending: the same pending answer.
    - `platform_call` never decides an approval. `decide_approval` refuses a `platform`
      approval whose `agent_id` is the deciding agent unless the code is in the person's
@@ -189,6 +189,16 @@ Rules:
    - Without `If-Match` (the UI today) nothing changes. The Chief must send it (A3).
 5. **Audit read.** `GET /api/audit?actor=&target=&outcome=&since=&cursor=&limit=` returns
    rows newest first, with `limit` at most 200 and an opaque cursor.
+6. **Middleware order:** recoverer → requestID → logging → auth → actor (sets the operator
+   or anonymous actor when the context has none) → audit (creates the `actor.Note`) →
+   platform gate (agent actors only: rules A3, A5 and A6; it fills the note) →
+   idempotency → If-Match → mux.
+   - The gate sits outside idempotency, so a "pending_approval" answer is never stored as
+     the key's response.
+   - When a later repeat finds its approval already used by the same key and body, the gate
+     lets it through, and idempotency replays the stored response.
+   - The gate finds the operation from the route pattern (`mux.Handler(r)`) and the
+     contract.
 
 Edge cases:
 - An SSE or GET request is not audited.
