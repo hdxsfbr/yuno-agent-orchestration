@@ -285,12 +285,12 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 		v.task = task
 	}
 	if v.early == nil {
-		from, err := w.carrySources(ctx, v)
+		from, start, err := w.carrySources(ctx, v)
 		if err != nil {
 			o := failed(store.RunFailed, "run directory: "+err.Error())
 			v.early = &o
 		}
-		v.carryFrom = from
+		v.carryFrom, v.startSHA = from, start
 	}
 	if v.early == nil && w.def.Project {
 		// The project is the run's (DESIGN 5.17 rule 6): its snapshot plus the token read
@@ -398,14 +398,21 @@ func (w *walk) saveCheckoutOrLog(ctx context.Context, v *visit) {
 // sibling branches of the same fork visit (their files are partial and their own), and
 // the checkout (repo/) of an agent whose last visit was in a branch the join does not
 // name stays behind, so two working trees are never mixed.
-func (w *walk) carrySources(ctx context.Context, v *visit) ([]carrySource, error) {
+//
+// It also returns the run repository commit v's checkout starts from (5.30 rule 4): the
+// commit of the last source that brings repo/. A visit that left nothing is passed over as
+// if it had not run (5.30 rules 4 and 7): one that ended before it had a workspace (a
+// shutdown or a failed setup before it) is no file source, and one that recorded no commit
+// is no commit source, so neither hides what the visits before it left, from the next
+// attempt after a restart or a retry.
+func (w *walk) carrySources(ctx context.Context, v *visit) ([]carrySource, string, error) {
 	visits, err := store.ListRunNodes(ctx, w.e.deps.Pool, w.run.ID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	rows, err := store.ListRunBranches(ctx, w.e.deps.Pool, w.run.ID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	branches := map[string]store.RunBranch{}
 	for _, b := range rows {
@@ -422,36 +429,43 @@ func (w *walk) carrySources(ctx context.Context, v *visit) ([]carrySource, error
 			}
 		}
 	}
-	last := map[string]int{} // OpenClaw agent id -> index of its last earlier visit
-	var order []string
-	for i, n := range visits {
-		if n.ID == v.rn.ID || n.SessionKey == nil {
-			continue
+	// sources applies the rules above to the visits that left something for left to report:
+	// their workspace for the files, their commit for the checkout.
+	sources := func(left func(store.RunNode) string) []carrySource {
+		last := map[string]int{} // OpenClaw agent id -> index of its last earlier visit
+		for i, n := range visits {
+			if n.ID == v.rn.ID || n.SessionKey == nil || left(n) == "" {
+				continue
+			}
+			id := sessionAgent(*n.SessionKey)
+			if id == "" || siblingAgents[id] {
+				continue
+			}
+			last[id] = i
 		}
-		id := sessionAgent(*n.SessionKey)
-		if id == "" || siblingAgents[id] {
-			continue
+		own, ranBefore := last[v.ocID]
+		var out []carrySource
+		for id, i := range last {
+			if id != v.ocID && ranBefore && i < own {
+				continue
+			}
+			n := visits[i]
+			src := carrySource{ocID: id, visitID: n.ID, workspace: strValue(n.WorkspaceDir), repoSHA: strValue(n.RepoSHA)}
+			if bid := n.BranchID; id != v.ocID && bid != nil && (w.branch == nil || *bid != w.branch.ID) {
+				src.skipRepo = !w.checkoutBranch(branches[*bid])
+			}
+			out = append(out, src)
 		}
-		if _, ok := last[id]; !ok {
-			order = append(order, id)
-		}
-		last[id] = i
+		slices.SortFunc(out, func(a, b carrySource) int { return last[a.ocID] - last[b.ocID] })
+		return out
 	}
-	own, ranBefore := last[v.ocID]
-	var out []carrySource
-	for _, id := range order {
-		if id != v.ocID && ranBefore && last[id] < own {
-			continue
+	start := ""
+	for _, src := range sources(func(n store.RunNode) string { return strValue(n.RepoSHA) }) {
+		if !src.skipRepo {
+			start = src.repoSHA
 		}
-		n := visits[last[id]]
-		src := carrySource{ocID: id, visitID: n.ID, workspace: strValue(n.WorkspaceDir), repoSHA: strValue(n.RepoSHA)}
-		if bid := n.BranchID; id != v.ocID && bid != nil && (w.branch == nil || *bid != w.branch.ID) {
-			src.skipRepo = !w.checkoutBranch(branches[*bid])
-		}
-		out = append(out, src)
 	}
-	slices.SortFunc(out, func(a, b carrySource) int { return last[a.ocID] - last[b.ocID] })
-	return out, nil
+	return sources(func(n store.RunNode) string { return strValue(n.WorkspaceDir) }), start, nil
 }
 
 // checkoutBranch reports whether a branch is the one its join names as the checkout

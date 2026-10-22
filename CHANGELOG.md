@@ -5,6 +5,9 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- A step interrupted by a platform restart, or retried, gets its checkout back. A step whose
+  starting code cannot be found stops before the agent starts and says why, instead of
+  running without it.
 - Agents can run on OpenAI models with your ChatGPT/Codex subscription: sign the gateway in
   once with `docker exec -it yuno-openclaw openclaw models auth login --provider openai
   --device-code --agent main`, then pick `openai/gpt-6-astra`, `openai/gpt-5.6-terra` or

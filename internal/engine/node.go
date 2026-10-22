@@ -74,13 +74,13 @@ type visit struct {
 	early    *outcome // set when the visit cannot start
 	task     string   // the rendered task; the protocol block is added per message
 	// carryFrom are the earlier visits whose runs/<run_id>/ is copied into this visit's
-	// workspace before the turn, oldest first (DESIGN 5.6 rule 13, 5.30 rule 5), each with
-	// whether its checkout stays behind (5.26 rule 10).
+	// workspace before the turn, oldest first (DESIGN 5.6 rule 13, 5.30 rule 5).
 	carryFrom []carrySource
 	// workspace is the visit's private workspace (DESIGN 5.30 rule 2), set once the agent is
 	// materialised; startSHA is the run repository commit its checkout starts from (rule
-	// 4), "" while it has none; checkout says the platform made the checkout (a clone, or
-	// built from startSHA), so it is the visit's to commit when it ends.
+	// 4), named by the carry rules before the visit starts or by its clone, "" while it has
+	// none; checkout says the platform made the checkout (a clone, or built from startSHA),
+	// so it is the visit's to commit when it ends.
 	workspace string
 	startSHA  string
 	checkout  bool
@@ -414,13 +414,12 @@ func (v *visit) renderMemory(ctx context.Context) {
 	}
 }
 
-// prepareRunDir records the visit's private workspace (DESIGN 5.30 rule 2), creates
-// runs/<run_id>/ in it and copies into it the run directories of the earlier visits the
-// carry rules name, in the walk's order so a later visit's file wins (5.6 rule 13; the
-// checkout is not copied, rule 5). The last of them whose checkout flows on names the
-// commit this visit's checkout starts from (rule 4). It runs once the agent is
-// materialised, when its workspace id, and so the session key, is final; a failed copy
-// fails the node.
+// prepareRunDir records the visit's private workspace (DESIGN 5.30 rule 2) and the commit
+// its checkout starts from (rule 4, named by the carry rules), creates runs/<run_id>/ in
+// it and copies into it the run directories of the earlier visits the carry rules name, in
+// the walk's order so a later visit's file wins (5.6 rule 13; the checkout is not copied,
+// rule 5). It runs once the agent is materialised, when its workspace id, and so the
+// session key, is final; a failed copy fails the node.
 func (v *visit) prepareRunDir(ctx context.Context) error {
 	if v.e.deps.StateDir == "" {
 		return nil
@@ -431,27 +430,21 @@ func (v *visit) prepareRunDir(ctx context.Context) error {
 		return fmt.Errorf("record the workspace: %w", err)
 	}
 	v.workspace, v.rn.WorkspaceDir = ws, &ws
+	if v.startSHA != "" {
+		// A visit that fails before its checkout is made, a failed copy included, names the
+		// commit it would have started from, so the next attempt starts there too.
+		v.setRepoSHA(ctx, v.startSHA)
+	}
 	if err := openclaw.EnsureRunDirAt(ws, v.run.ID); err != nil {
 		v.log.Warn("create run directory failed", "error", err)
 	}
 	for _, src := range v.carryFrom {
-		if src.workspace == "" {
-			continue // a visit that ended before it had a workspace left no files
-		}
 		// The checkout moves through the run repository; the changes file is each step's own.
 		n, err := openclaw.CopyRunDirAt(src.workspace, ws, v.run.ID, []string{project.RepoDir, project.ChangesFile})
 		if err != nil {
 			return fmt.Errorf("copy from %s: %w", src.ocID, err)
 		}
 		v.log.Info("run directory copied forward", "from", src.ocID, "visit", src.visitID, "files", n, "checkout_left_behind", src.skipRepo)
-		if !src.skipRepo && src.repoSHA != "" {
-			v.startSHA = src.repoSHA
-		}
-	}
-	if v.startSHA != "" {
-		// A visit that fails before its checkout is made names the commit it would have
-		// started from, so the next attempt starts there too.
-		v.setRepoSHA(ctx, v.startSHA)
 	}
 	return nil
 }
@@ -464,10 +457,10 @@ func (v *visit) setRepoSHA(ctx context.Context, sha string) {
 	v.rn.RepoSHA = &sha
 }
 
-// carrySource is one earlier visit whose run directory is copied before a visit: the
-// OpenClaw agent id, the visit and its private workspace (DESIGN 5.30), the run
-// repository commit its checkout ended at, and whether that checkout (repo/) stays behind
-// because the visit was in a parallel branch the join does not name (5.26 rule 10).
+// carrySource is one earlier visit the carry rules name: the OpenClaw agent id, the visit
+// and its private workspace (DESIGN 5.30), the run repository commit its checkout ended
+// at, and whether that checkout (repo/) stays behind because the visit was in a parallel
+// branch the join does not name (5.26 rule 10).
 type carrySource struct {
 	ocID      string
 	visitID   string
@@ -480,7 +473,8 @@ type carrySource struct {
 // 5.16 rule 3): its branch and default branch are fetched with history into the run
 // repository and this visit's checkout is built from it (5.30 rules 4 and 10), with the
 // default branch merged in for a run on a merge request (5.22 rule 13). A later visit's
-// checkout is built from the run repository commit the carry rules named. It then reads the
+// checkout is built from the run repository commit the carry rules named; one for which
+// they name none while the run repository is there fails. It then reads the
 // toolchain from the checkout and selects the agent's sandbox for the visit (rule 7). A
 // failure ends the visit, and the run, before any turn starts.
 func (v *visit) prepareProject(ctx context.Context) *outcome {
@@ -640,6 +634,11 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 			}
 			v.conflicts = conflicts
 		}
+	} else if _, err := os.Stat(runRepo); err == nil {
+		// The run has a run repository, yet no earlier visit recorded a commit to start from
+		// (DESIGN 5.30 rules 4 and 7): the step does not start without its checkout.
+		o := failed(store.RunFailed, noStartCommit)
+		return &o
 	}
 	v.toolchain = project.Detect(repo)
 	if v.toolchain.Name != *v.run.Toolchain {
@@ -658,6 +657,10 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 	v.sandboxHeld = true
 	return nil
 }
+
+// noStartCommit is the failure of a later step of a project run that has a run repository
+// when no earlier visit recorded the commit its checkout starts from (DESIGN 5.30 rule 4).
+const noStartCommit = "run repository: no earlier step recorded a commit for this step's checkout to start from"
 
 // writeChanges writes the run's changes so far, from the run repository, to
 // runs/<run id>/changes.diff of a later step's workspace (DESIGN 5.30 rule 11), so an agent

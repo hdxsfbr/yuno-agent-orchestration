@@ -4691,14 +4691,28 @@ Rules:
    visit's checkout is a clone of the commit the carry rules name: the `repo_sha` of the
    last carry source that brings `repo/` (5.6 rule 13 order; a source whose checkout stays
    behind under 5.26 rule 10 brings none). Its `origin` stays the project, so
-   `open_merge_request` pushes as before.
+   `open_merge_request` pushes as before. The visit records that commit on its `repo_sha`
+   when it records its workspace, before any file is copied, so a visit that fails before
+   its checkout is made names the commit it would have started from. A visit that recorded
+   no commit (it stopped before that: a shutdown, or a setup step that failed, such as
+   materialising the agent on a restarting gateway) is passed over as if it had not run,
+   and for the files of rule 5 so is one that recorded no workspace: such a visit never
+   hides the commit and the files the visits before it left. A later visit of a run whose
+   run repository exists, for which these rules name no commit, fails before its first
+   turn with `run repository: no earlier step recorded a commit for this step's checkout to
+   start from`; it never runs without its checkout.
 5. **Other files.** Files outside `repo/` under `runs/<run id>/` are copied from the
    carry sources' private workspaces, in the same order, as today, except `changes.diff`,
    which each step gets of its own (rule 11).
 6. **Collection.** `out/` and the diff are collected from the private workspace (5.25).
-7. **Retry.** A retried visit starts from the same computed commit and copies, so it
-   needs the run repository and the earlier steps' private workspaces, which are kept as
-   D-082 keeps run folders (7 days for failed, timed-out and cancelled runs).
+7. **Retry and recovery.** A retried visit (5.21), and the visit that replaces one a lost
+   worker left (an api restart, 5.1 rule 8), start from the commit and the copies rules 4
+   and 5 compute, like any later visit, so they need the run repository and the earlier
+   steps' private workspaces, which are kept as D-082 keeps run folders (7 days for
+   failed, timed-out and cancelled runs). The visit being replaced counts like any other:
+   when it had its checkout, the next one starts from its commit (the one the shutdown
+   saved, or the one it started from when nothing was saved); when it stopped before it
+   had a workspace or a commit, it is passed over (rule 4).
 8. **Cleanup.** When a run succeeds the platform deletes its steps' private workspaces
    (from `run_nodes.workspace_dir`) and its run repository; the hourly sweep applies the
    D-082 retention to them. Folders under `sandboxes/` that belong to no recorded visit
@@ -4746,8 +4760,10 @@ Rules:
 
 Edge cases: two runs of the same agent at once (different session keys, so different
 workspaces); a fork's branches (each branch's visits start from their own carry
-sources); a visit that fails before its first turn (no commit; the next attempt starts
-from the same commit); a run that is not on a project (no run repository; rule 5 only).
+sources); a visit that fails or is interrupted before its first turn (it commits nothing;
+it recorded the commit it was to start from, or it is passed over, and either way the next
+attempt starts from the same commit); a run that is not on a project (no run repository;
+rule 5 only).
 
 Tests: T5.30.1 the path rule against the probe's two paths; T5.30.2 a two-step project
 run hands the Builder's change to the next step through the run repository with no
@@ -4774,7 +4790,13 @@ step's edit and new file, the first step finds none, a file of that name a step 
 not carried, the patch after a clean merge holds only the agents' changes, a long one is
 cut with the marker, and the write never follows a link (rule 11;
 `TestLaterStepGetsTheRunsChanges`, `TestChangesFileIsNeverCarried`,
-`internal/project/runrepo_changes_test.go`).
+`internal/project/runrepo_changes_test.go`); T5.30.14 a step the engine shut down under,
+during its turn or before it had a workspace, is run again after the reclaim with its
+checkout, at the interrupted visit's saved commit or at the earlier step's commit
+(`TestRecoveredStepGetsItsCheckout`); T5.30.15 the same for Retry of a step that failed
+during its turn or before it had a workspace (rule 7, `TestRetriedStepGetsItsCheckout`);
+T5.30.16 a later step of a run with a run repository and no commit to start from fails
+before its first turn with the reason (`TestStepWithNoCommitToStartFromFailsBeforeItsTurn`).
 
 Limitations: the path rule is OpenClaw's internal behaviour, pinned by a test, not an API;
 on an OpenClaw upgrade the probe in `docs/test-results.md` is repeated.

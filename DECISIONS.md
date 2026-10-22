@@ -6,6 +6,23 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-21
 
+**D-092 A step that replaces an interrupted or failed attempt gets its checkout from the
+commit the carry rules name, and a step with no commit to start from fails before its
+turn.** (Andre, 2026-10-21, after run 01a160c8: a deploy restarted the api during the
+documentation audit, and the audit visit the reclaim started had no checkout and could not
+work.) The carry rules took each agent's last visit as its source, whatever that visit had
+left. A visit stopped before it had a workspace or a commit (by a shutdown, or by a setup
+step that failed, such as materialising the agent on a restarting gateway) was its agent's
+last visit, so it hid the earlier visits' commit and files; with no commit named, the next
+visit, after the reclaim or a Retry, started with no checkout and nothing said so. Now a
+visit that recorded no commit is passed over for the checkout, and one that recorded no
+workspace for the files, so the next attempt starts where the earlier steps left off, or at
+the interrupted visit's own commit when it had one. The visit records the commit it starts
+from before anything is copied, and a later step of a run whose run repository exists, with
+no commit to start from, fails before its first turn with the reason. Alternatives rejected:
+cloning the project again for such a step (it would drop the run's changes so far without a
+word); letting it run without a checkout (what happened). Design: DESIGN 5.30 rules 4 and 7.
+
 **D-091 Agents can run on OpenAI models through the operator's own ChatGPT sign-in on the
 gateway, with OpenClaw's embedded runtime pinned.** (Andre, 2026-10-21: "Let Yuno use OpenAI
 models: support openai/* model names per agent." His Anthropic API credits ran out; he has a
