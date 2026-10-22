@@ -58,6 +58,7 @@ type Engine struct {
 	sweepInterval time.Duration // stale-run sweeper cadence
 	approvalSweep time.Duration // approval expiry sweeper cadence (DESIGN 5.2 rule 10)
 	tickInterval  time.Duration // limit checks while a turn runs
+	heartbeat     time.Duration // a live visit's heartbeat, real time (DESIGN 5.1 rule 8, 5.12)
 	abortWait     time.Duration // how long to wait for "aborted" after chat.abort
 	finishGrace   time.Duration // how long a turn may continue after finish was accepted
 	modelStall    time.Duration // how long a turn may wait on the model with nothing arriving; 0 never
@@ -87,6 +88,7 @@ func New(d Deps) *Engine {
 		sweepInterval: 60 * time.Second,
 		approvalSweep: 30 * time.Second,
 		tickInterval:  2 * time.Second,
+		heartbeat:     heartbeatEvery,
 		abortWait:     10 * time.Second,
 		finishGrace:   20 * time.Second,
 		modelStall:    d.Cfg.ModelStallAfter,

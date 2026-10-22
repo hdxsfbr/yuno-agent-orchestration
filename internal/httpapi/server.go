@@ -391,6 +391,10 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/runs/{id}/trace", s.getTrace)
 	mux.HandleFunc("GET /api/runs/{id}/artifacts", s.listArtifacts)
 	mux.HandleFunc("GET /api/runs/{id}/artifacts/{artifactId}", s.downloadArtifact)
+	// Liveness from evidence (DESIGN 5.12).
+	mux.HandleFunc("GET /api/runs/diagnosis", s.listRunDiagnoses)
+	mux.HandleFunc("GET /api/runs/{id}/diagnosis", s.getRunDiagnosis)
+	mux.HandleFunc("GET /api/runs/{id}/events/page", s.listRunEventsPage)
 
 	mux.HandleFunc("POST /api/evals/scripts", s.registerScript)
 
