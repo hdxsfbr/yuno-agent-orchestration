@@ -5,6 +5,8 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- A step whose agent read a binary file no longer stays "running" on the run page after
+  the run ends.
 - Agents on OpenAI models call their tools directly again. The gateway had switched them
   to an experimental "code mode" that made them poll long commands, such as a test suite,
   every 10 seconds, and delayed their calls to Yuno, `finish` included.

@@ -80,6 +80,20 @@ func TestRedactJSON(t *testing.T) {
 	}
 }
 
+// D-096: a NUL, which Postgres refuses in text and jsonb, is dropped from strings, keys and
+// invalid JSON alike.
+func TestRedactDropsNUL(t *testing.T) {
+	if got := Redact("bin\x00ary"); got != "binary" {
+		t.Errorf("Redact = %q", got)
+	}
+	if got := string(RedactJSON([]byte(`{"text":"a\u0000b","k\u0000":[1,"\u0000"]}`))); got != `{"k":[1,""],"text":"ab"}` {
+		t.Errorf("RedactJSON = %s", got)
+	}
+	if got := string(RedactJSON([]byte("not json \x00"))); got != `"not json "` {
+		t.Errorf("RedactJSON of a string = %s", got)
+	}
+}
+
 func TestLoggerRedacts(t *testing.T) {
 	var buf bytes.Buffer
 	h := &redactingHandler{inner: slog.NewJSONHandler(&buf, nil)}

@@ -6,6 +6,22 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-22
 
+**D-096 Text Yuno stores from agents loses its NUL characters: the redactor every stored
+string and JSON document passes through drops them.** (Found on run 01a16451, 2026-10-22: the
+run succeeded and its merge request was marked ready, but its documentation audit step
+stayed "running" on the run page.) A tool result in the audit's transcript held a NUL
+(`\u0000`), which Postgres refuses in `jsonb` and `text` ("unsupported Unicode escape
+sequence"). The node row is written whole, transcript included, so from that entry on every
+write of the row failed: its final status and output, and the `node.status` event. The run
+went on because the engine keeps the outcome in memory. Any agent that reads a binary or
+data file could hit it. `obs.Redact`, which the transcript mirror, tool outputs, run events
+and logs already call before storage, now drops NUL characters, and `RedactJSON` drops them
+from keys too. Nothing a person reads is lost: a NUL has no printed form. Alternatives
+rejected: escaping it as text (the transcript would show an escape the agent never saw);
+dropping the whole entry (the rest of the tool result is useful); storing the transcript
+apart from the status (the same NUL would still be refused, only in another write).
+Design: DESIGN 5.12 rule 4.
+
 **D-095 OpenAI agents run with OpenClaw's Code Mode off: their entry sets `codeMode: false`
 next to the runtime pin.** (Andre, 2026-10-22: "disable that code mode that is slowing
 things down", after run 01a16451's Builder step.) Once every agent moved to

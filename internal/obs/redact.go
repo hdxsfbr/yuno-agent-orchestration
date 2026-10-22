@@ -40,8 +40,11 @@ func IsSecretKey(key string) bool {
 	return secretKeyPattern.MatchString(key)
 }
 
-// Redact replaces credential-shaped substrings in s.
+// Redact replaces credential-shaped substrings in s and drops NUL characters, which
+// Postgres refuses in text and jsonb: one in a stored transcript entry made every later
+// write of its node row fail, its final status included (D-096).
 func Redact(s string) string {
+	s = strings.ReplaceAll(s, "\x00", "")
 	for _, re := range secretValuePatterns {
 		s = re.ReplaceAllString(s, Redacted)
 	}
@@ -49,8 +52,8 @@ func Redact(s string) string {
 }
 
 // RedactJSON walks a JSON document and redacts secret keys and credential-shaped
-// strings. Invalid JSON is treated as a string. The result is always valid JSON, with
-// numbers kept as written.
+// strings. Invalid JSON is treated as a string. The result is always valid JSON that
+// Postgres stores (no NUL in a key or a string), with numbers kept as written.
 func RedactJSON(raw []byte) []byte {
 	var v any
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -68,6 +71,7 @@ func redactValue(v any) any {
 	case map[string]any:
 		m := make(map[string]any, len(x))
 		for k, val := range x {
+			k = strings.ReplaceAll(k, "\x00", "")
 			if IsSecretKey(k) {
 				m[k] = Redacted
 				continue
