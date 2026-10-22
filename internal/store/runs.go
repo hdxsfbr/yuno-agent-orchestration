@@ -577,13 +577,13 @@ func ListAgentMessages(ctx context.Context, q Querier, runID string) ([]AgentMes
 }
 
 const approvalColumns = `id, run_id, run_node_id, tool_call_id, kind, node_id, message, status, external_id, requested_at,
-	decided_at, decided_by, reason, expires_at, options, answer`
+	decided_at, decided_by, reason, expires_at, options, answer, binding`
 
-// approvalSelect reads an approval for scanning. One raised in a conversation has no
-// run or run node (DESIGN 5.8 rule 5): they read as "", with conversation_id set.
+// approvalSelect reads an approval for scanning. One raised in a conversation, and a
+// platform approval (wave 1 A6), has no run or run node (DESIGN 5.8 rule 5): they read as "".
 const approvalSelect = `id, COALESCE(run_id, '') AS run_id, COALESCE(run_node_id, '') AS run_node_id, tool_call_id, kind,
 	node_id, message, options, status, external_id, requested_at, decided_at, decided_by, reason, answer, expires_at,
-	conversation_id, reported_at`
+	conversation_id, reported_at, binding, used_at`
 
 func InsertApproval(ctx context.Context, q Querier, a *Approval) error {
 	if a.ID == "" {
@@ -595,14 +595,15 @@ func InsertApproval(ctx context.Context, q Querier, a *Approval) error {
 	if a.RequestedAt.IsZero() {
 		a.RequestedAt = time.Now().UTC()
 	}
-	_, err := q.Exec(ctx, `INSERT INTO approvals (`+approvalColumns+`) VALUES ($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16)`,
+	_, err := q.Exec(ctx, `INSERT INTO approvals (`+approvalColumns+`) VALUES ($1,NULLIF($2,''),NULLIF($3,''),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,$17::jsonb)`,
 		a.ID, a.RunID, a.RunNodeID, a.ToolCallID, a.Kind, a.NodeID, a.Message, a.Status, a.ExternalID, a.RequestedAt,
-		a.DecidedAt, a.DecidedBy, a.Reason, a.ExpiresAt, optionsParam(a.Options), a.Answer)
+		a.DecidedAt, a.DecidedBy, a.Reason, a.ExpiresAt, optionsParam(a.Options), a.Answer, optionsParam(a.Binding))
 	return err
 }
 
-// optionsParam is the value of approvals.options: the JSON array of a question's
-// suggested answers, NULL (not an empty document) when it has none.
+// optionsParam is the value of a nullable jsonb column of approvals: options, the JSON
+// array of a question's suggested answers, or binding, a platform approval's call; NULL
+// (not an empty document) when it has none.
 func optionsParam(options json.RawMessage) any {
 	if len(options) == 0 {
 		return nil

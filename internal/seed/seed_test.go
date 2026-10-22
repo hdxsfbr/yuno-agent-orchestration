@@ -123,7 +123,8 @@ func TestSeedCreatesChief(t *testing.T) {
 		!chief.MemoryPolicy.Enabled || !strings.HasPrefix(chief.ChatToken, "c_") {
 		t.Fatalf("chief = %+v", chief)
 	}
-	want := []string{"add_project", "answer_question", "decide_approval", "delegate_task", "list_agents", "list_approvals", "list_projects", "list_workflows", "memory_recall", "memory_save", "read_merge_request", "run_status"}
+	want := []string{"add_project", "answer_question", "decide_approval", "delegate_task", "list_agents", "list_approvals", "list_projects", "list_workflows", "memory_recall", "memory_save",
+		"platform_call", "platform_operations", "read_merge_request", "run_status"}
 	got := slices.Sorted(slices.Values(chief.ToolAllowlist))
 	if !slices.Equal(got, want) || slices.Contains(chief.ToolAllowlist, "exec") {
 		t.Fatalf("chief tools = %v", chief.ToolAllowlist)
@@ -299,7 +300,9 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 	}
 	// D-081: the routing names the delivery workflows, never the retired Dev pipeline.
 	for _, phrase := range []string{"Plan pipeline", "revise_plan", "Never run the Ship pipeline by hand", "never start the Wave pipeline",
-		"Scout", "Architect", "Builder", "list_approvals", "decide_approval", "its code", "untrusted_content", "never ask the person for a token"} {
+		"Scout", "Architect", "Builder", "list_approvals", "decide_approval", "its code", "untrusted_content", "never ask the person for a token",
+		// Platform control: when to use platform_call, the key and etag rules, the approval relay.
+		"platform_operations", "platform_call", "idempotency_key: a new one for each new action", "if_match", "pending_approval"} {
 		if !strings.Contains(ChiefPrompt, phrase) {
 			t.Errorf("the Chief's prompt lacks %q", phrase)
 		}

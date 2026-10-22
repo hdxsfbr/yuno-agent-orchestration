@@ -9,6 +9,12 @@ info:
     Error schema. `/mcp` (Model Context Protocol, streamable HTTP) and `/model-proxy/*`
     (model provider proxy) are machine endpoints for the OpenClaw gateway and are not
     described here beyond their existence.
+
+    Every operation names its handler in `operationId` and what an agent's platform_call
+    of it needs in `x-yuno-risk`: `read` (nothing), `routine` (an Idempotency-Key, and
+    If-Match on an update or delete of something it can read), `destructive` and
+    `privileged` (a human approval of that exact call), `dedicated` (refused; the agent uses
+    the tool `x-yuno-tool` names) or `machine` (never offered to agents).
 servers:
   - url: /
 # Every /api operation carries the bearer scheme (optional while API_TOKEN is unset);
@@ -31,6 +37,8 @@ tags:
 paths:
   /healthz:
     get:
+      operationId: healthz
+      x-yuno-risk: machine
       tags: [ops]
       summary: Process liveness
       security: []
@@ -38,6 +46,8 @@ paths:
         "200": { description: ok, content: { text/plain: { schema: { type: string } } } }
   /readyz:
     get:
+      operationId: readyz
+      x-yuno-risk: machine
       tags: [ops]
       summary: Readiness (database reachable, gateway connected and scoped)
       security: []
@@ -46,13 +56,26 @@ paths:
         "503": { $ref: "#/components/responses/Error" }
   /openapi.yaml:
     get:
+      operationId: openapi
+      x-yuno-risk: read
       tags: [ops]
       summary: This document
       security: []
       responses:
         "200": { description: OpenAPI document, content: { application/yaml: { schema: { type: string } } } }
+  /api/openapi.yaml:
+    get:
+      operationId: apiOpenAPI
+      x-yuno-risk: read
+      tags: [ops]
+      summary: This document, under /api (open like /openapi.yaml)
+      security: []
+      responses:
+        "200": { description: OpenAPI document, content: { application/yaml: { schema: { type: string } } } }
   /api/status:
     get:
+      operationId: status
+      x-yuno-risk: read
       tags: [ops]
       summary: Platform status (500 ms server-side budget)
       responses:
@@ -61,6 +84,8 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Status" } } }
   /api/openclaw/status:
     get:
+      operationId: openclawStatus
+      x-yuno-risk: read
       tags: [ops]
       summary: Gateway connection state
       responses:
@@ -69,6 +94,8 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/OpenClawStatus" } } }
   /api/events:
     get:
+      operationId: eventsAll
+      x-yuno-risk: machine
       tags: [ops]
       summary: Server-sent events for every run
       description: |
@@ -87,11 +114,14 @@ paths:
         (`{conversation_id, tool_call}`: a ToolCall an agent made while chatting, with its
         chat token; platform-wide, no run; `conversation_id` is null when the agent had no
         conversation). An approval raised in a conversation has no run; its
-        approval.requested and approval.decided carry `conversation_id`.
+        approval.requested and approval.decided carry `conversation_id`. A platform approval
+        (kind `platform`) has no run either.
       responses:
         "200": { description: event stream, content: { text/event-stream: { schema: { type: string } } } }
   /api/runs/{id}/events:
     get:
+      operationId: eventsRun
+      x-yuno-risk: machine
       tags: [ops]
       summary: Server-sent events for one run
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -100,6 +130,8 @@ paths:
 
   /api/agents:
     get:
+      operationId: listAgents
+      x-yuno-risk: read
       tags: [agents]
       summary: List agents
       responses:
@@ -107,6 +139,8 @@ paths:
           description: agents
           content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/AgentListItem" } } } }
     post:
+      operationId: createAgent
+      x-yuno-risk: routine
       tags: [agents]
       summary: Create an agent and materialise it in OpenClaw
       requestBody:
@@ -119,12 +153,16 @@ paths:
   /api/agents/{id}:
     parameters: [ { $ref: "#/components/parameters/Id" } ]
     get:
+      operationId: getAgent
+      x-yuno-risk: read
       tags: [agents]
       summary: Get an agent
       responses:
         "200": { description: agent, content: { application/json: { schema: { $ref: "#/components/schemas/Agent" } } } }
         "404": { $ref: "#/components/responses/Error" }
     put:
+      operationId: updateAgent
+      x-yuno-risk: routine
       tags: [agents]
       summary: Replace an agent's configuration and re-materialise it
       requestBody:
@@ -136,6 +174,8 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
     delete:
+      operationId: deleteAgent
+      x-yuno-risk: destructive
       tags: [agents]
       summary: Soft-delete an agent (existing runs keep their snapshot)
       responses:
@@ -144,6 +184,8 @@ paths:
   /api/agents/{id}/files:
     parameters: [ { $ref: "#/components/parameters/Id" } ]
     get:
+      operationId: listAgentFiles
+      x-yuno-risk: read
       tags: [agents]
       summary: List the agent's workspace files with what is on disk and the operator's edits
       description: |
@@ -161,6 +203,8 @@ paths:
       - { $ref: "#/components/parameters/Id" }
       - { name: name, in: path, required: true, schema: { type: string } }
     put:
+      operationId: putAgentFile
+      x-yuno-risk: routine
       tags: [agents]
       summary: Store the operator's addition (generated file) or override (runtime file) and re-materialise
       description: |
@@ -181,6 +225,8 @@ paths:
         "502": { $ref: "#/components/responses/Error" }
   /api/agents/{id}/materialize:
     post:
+      operationId: materializeAgent
+      x-yuno-risk: routine
       tags: [agents]
       summary: Push the agent's configuration to OpenClaw now
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -190,6 +236,8 @@ paths:
         "502": { $ref: "#/components/responses/Error" }
   /api/agents/{id}/runtime:
     get:
+      operationId: agentRuntime
+      x-yuno-risk: read
       tags: [agents]
       summary: What OpenClaw currently holds for this agent
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -198,6 +246,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/agents/{id}/memory:
     get:
+      operationId: listAgentMemory
+      x-yuno-risk: read
       tags: [memory]
       summary: The agent's remembered facts, newest first
       description: |
@@ -211,6 +261,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/agents/{id}/memory/{factId}:
     delete:
+      operationId: deleteAgentMemory
+      x-yuno-risk: destructive
       tags: [memory]
       summary: Forget one fact
       parameters:
@@ -222,6 +274,8 @@ paths:
 
   /api/tools:
     get:
+      operationId: listTools
+      x-yuno-risk: read
       tags: [tools]
       summary: Tool registry (platform tools over MCP and the OpenClaw built-ins templates use)
       responses:
@@ -231,6 +285,8 @@ paths:
 
   /api/runs:
     get:
+      operationId: listRuns
+      x-yuno-risk: read
       tags: [runs]
       summary: List runs, newest first
       parameters:
@@ -245,6 +301,8 @@ paths:
           content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Run" } } } }
         "422": { $ref: "#/components/responses/Error" }
     post:
+      operationId: createRun
+      x-yuno-risk: routine
       tags: [runs]
       summary: Trigger a run (manual trigger)
       description: |
@@ -275,6 +333,8 @@ paths:
         "429": { $ref: "#/components/responses/Error" }
   /api/runs/{id}:
     get:
+      operationId: getRun
+      x-yuno-risk: read
       tags: [runs]
       summary: Get a run
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -283,6 +343,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/runs/{id}/cancel:
     post:
+      operationId: cancelRun
+      x-yuno-risk: routine
       tags: [runs]
       summary: Request cancellation
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -292,6 +354,8 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
   /api/runs/{id}/retry:
     post:
+      operationId: retryRun
+      x-yuno-risk: routine
       tags: [runs]
       summary: Retry a failed, timed-out or cancelled run from the step it stopped at
       description: |
@@ -310,6 +374,8 @@ paths:
         "429": { description: "project_budget_reached (DESIGN 5.19)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /api/runs/{id}/trace:
     get:
+      operationId: getTrace
+      x-yuno-risk: read
       tags: [runs]
       summary: Correlated trace (nodes, model calls, tool calls, spans, agent messages, approvals, side effects)
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -318,6 +384,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/runs/{id}/artifacts:
     get:
+      operationId: listArtifacts
+      x-yuno-risk: read
       tags: [runs]
       summary: The files the run delivered, by path
       description: |
@@ -331,6 +399,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/runs/{id}/artifacts/{artifactId}:
     get:
+      operationId: downloadArtifact
+      x-yuno-risk: read
       tags: [runs]
       summary: Download one artifact
       description: |
@@ -347,6 +417,8 @@ paths:
 
   /api/approvals:
     get:
+      operationId: listApprovals
+      x-yuno-risk: read
       tags: [approvals]
       summary: Approvals inbox, newest first, each with the tool call it gates
       parameters:
@@ -360,6 +432,9 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
   /api/approvals/{id}/approve:
     post:
+      operationId: approveApproval
+      x-yuno-risk: dedicated
+      x-yuno-tool: decide_approval
       tags: [approvals]
       summary: Approve a pending approval
       description: |
@@ -379,6 +454,9 @@ paths:
         "503": { $ref: "#/components/responses/Error" }
   /api/approvals/{id}/reject:
     post:
+      operationId: rejectApproval
+      x-yuno-risk: dedicated
+      x-yuno-tool: decide_approval
       tags: [approvals]
       summary: Reject a pending approval (for a question, decline to answer it)
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -393,6 +471,9 @@ paths:
         "503": { $ref: "#/components/responses/Error" }
   /api/approvals/{id}/answer:
     post:
+      operationId: answerApproval
+      x-yuno-risk: dedicated
+      x-yuno-tool: answer_question
       tags: [approvals]
       summary: Answer a pending question
       description: |
@@ -416,6 +497,8 @@ paths:
 
   /api/workflows:
     get:
+      operationId: listWorkflows
+      x-yuno-risk: read
       tags: [workflows]
       summary: List the operator's workflows (templates are listed under /api/workflow-templates)
       responses:
@@ -423,6 +506,8 @@ paths:
           description: workflows
           content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Workflow" } } } }
     post:
+      operationId: createWorkflow
+      x-yuno-risk: routine
       tags: [workflows]
       summary: Create a workflow (validated as /api/workflows/validate does)
       requestBody:
@@ -433,6 +518,8 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
   /api/workflows/validate:
     post:
+      operationId: validateWorkflow
+      x-yuno-risk: routine
       tags: [workflows]
       summary: Validate a definition without saving it
       description: |
@@ -447,12 +534,16 @@ paths:
   /api/workflows/{id}:
     parameters: [ { $ref: "#/components/parameters/Id" } ]
     get:
+      operationId: getWorkflow
+      x-yuno-risk: read
       tags: [workflows]
       summary: Get a workflow
       responses:
         "200": { description: workflow, content: { application/json: { schema: { $ref: "#/components/schemas/Workflow" } } } }
         "404": { $ref: "#/components/responses/Error" }
     put:
+      operationId: updateWorkflow
+      x-yuno-risk: routine
       tags: [workflows]
       summary: Replace a workflow; the version goes up by one (runs keep the version they started with)
       requestBody:
@@ -464,6 +555,8 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
     delete:
+      operationId: deleteWorkflow
+      x-yuno-risk: destructive
       tags: [workflows]
       summary: Soft-delete a workflow (existing runs keep their snapshot)
       responses:
@@ -472,6 +565,8 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
   /api/workflow-templates:
     get:
+      operationId: listTemplates
+      x-yuno-risk: read
       tags: [workflows]
       summary: Workflow templates loaded from templates/*.json at start
       responses:
@@ -480,6 +575,8 @@ paths:
           content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/WorkflowTemplate" } } } }
   /api/workflow-templates/{key}/instantiate:
     post:
+      operationId: instantiateTemplate
+      x-yuno-risk: routine
       tags: [workflows]
       summary: Copy a template into a new editable workflow
       description: |
@@ -498,6 +595,8 @@ paths:
 
   /api/evals/scripts:
     post:
+      operationId: registerScript
+      x-yuno-risk: machine
       tags: [runs]
       summary: Register a script for the deterministic scripted provider
       description: Used by the eval runner and tests. Replaces any script with the same id.
@@ -510,6 +609,8 @@ paths:
 
   /api/schedules:
     get:
+      operationId: listSchedules
+      x-yuno-risk: read
       tags: [schedules]
       summary: List schedules, oldest first
       responses:
@@ -517,6 +618,8 @@ paths:
           description: schedules
           content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Schedule" } } } }
     post:
+      operationId: createSchedule
+      x-yuno-risk: routine
       tags: [schedules]
       summary: Create a schedule
       description: |
@@ -536,12 +639,16 @@ paths:
   /api/schedules/{id}:
     parameters: [ { $ref: "#/components/parameters/Id" } ]
     get:
+      operationId: getSchedule
+      x-yuno-risk: read
       tags: [schedules]
       summary: Get a schedule
       responses:
         "200": { description: schedule, content: { application/json: { schema: { $ref: "#/components/schemas/Schedule" } } } }
         "404": { $ref: "#/components/responses/Error" }
     put:
+      operationId: updateSchedule
+      x-yuno-risk: routine
       tags: [schedules]
       summary: Change a schedule; fields left out keep their value (`{"enabled":false}` pauses it)
       description: next_run_at is recomputed from now and last_error is cleared.
@@ -553,6 +660,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
     delete:
+      operationId: deleteSchedule
+      x-yuno-risk: destructive
       tags: [schedules]
       summary: Delete a schedule (runs it created are kept)
       responses:
@@ -561,12 +670,16 @@ paths:
 
   /api/channels:
     get:
+      operationId: getChannels
+      x-yuno-risk: read
       tags: [channels]
       summary: Channels the platform binds agents to, with the Telegram binding
       responses:
         "200": { description: channels, content: { application/json: { schema: { $ref: "#/components/schemas/Channels" } } } }
   /api/channels/telegram/binding:
     put:
+      operationId: bindTelegram
+      x-yuno-risk: privileged
       tags: [channels]
       summary: Bind an agent to Telegram (one agent at a time)
       description: |
@@ -586,6 +699,8 @@ paths:
         "502": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
     delete:
+      operationId: unbindTelegram
+      x-yuno-risk: destructive
       tags: [channels]
       summary: Unbind Telegram and close it to direct messages
       responses:
@@ -593,6 +708,8 @@ paths:
         "502": { $ref: "#/components/responses/Error" }
   /api/conversations:
     get:
+      operationId: listConversations
+      x-yuno-risk: read
       tags: [channels]
       summary: Conversations mirrored from the bound agent's channel sessions, most recently active first
       parameters:
@@ -604,6 +721,8 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
   /api/conversations/{id}/messages:
     get:
+      operationId: listConversationMessages
+      x-yuno-risk: read
       tags: [channels]
       summary: A conversation's newest messages, oldest first
       description: |
@@ -621,6 +740,8 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
   /api/conversations/{id}/tool-calls:
     get:
+      operationId: listConversationToolCalls
+      x-yuno-risk: read
       tags: [channels]
       summary: The platform tool calls the conversation's agent made while chatting, oldest first
       description: |
@@ -641,6 +762,8 @@ paths:
 
   /api/skills:
     get:
+      operationId: listSkills
+      x-yuno-risk: read
       tags: [skills]
       summary: List skills by name
       responses:
@@ -648,6 +771,8 @@ paths:
           description: skills
           content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Skill" } } } }
     post:
+      operationId: createSkill
+      x-yuno-risk: routine
       tags: [skills]
       summary: Create a skill
       description: Agents list skills by name; each listed skill is written to the agent's workspace as skills/<name>/SKILL.md.
@@ -660,12 +785,16 @@ paths:
   /api/skills/{id}:
     parameters: [ { $ref: "#/components/parameters/Id" } ]
     get:
+      operationId: getSkill
+      x-yuno-risk: read
       tags: [skills]
       summary: Get a skill
       responses:
         "200": { description: skill, content: { application/json: { schema: { $ref: "#/components/schemas/Skill" } } } }
         "404": { $ref: "#/components/responses/Error" }
     put:
+      operationId: updateSkill
+      x-yuno-risk: routine
       tags: [skills]
       summary: Replace a skill and re-materialise the agents that use it
       description: |
@@ -681,6 +810,8 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
     delete:
+      operationId: deleteSkill
+      x-yuno-risk: destructive
       tags: [skills]
       summary: Delete a skill, remove it from every agent and re-materialise them
       responses:
@@ -690,6 +821,8 @@ paths:
 
   /api/skills/import:
     post:
+      operationId: importSkillZip
+      x-yuno-risk: machine
       tags: [skills]
       summary: Import a skill bundle from a zip
       description: |
@@ -717,6 +850,8 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
   /api/skills/import-git:
     post:
+      operationId: importSkillGit
+      x-yuno-risk: routine
       tags: [skills]
       summary: Import a skill bundle from a Git repository
       description: |
@@ -740,6 +875,8 @@ paths:
   /api/skills/{id}/files:
     parameters: [ { $ref: "#/components/parameters/Id" } ]
     get:
+      operationId: listSkillFiles
+      x-yuno-risk: read
       tags: [skills]
       summary: List a skill's bundle files (path, size, mode)
       description: DESIGN 5.27 rule 11. SKILL.md is the skill's body and is not listed.
@@ -751,6 +888,8 @@ paths:
       - { $ref: "#/components/parameters/Id" }
       - { name: path, in: path, required: true, schema: { type: string }, description: "the file's relative path, url-encoded (slashes as %2F or literal)" }
     get:
+      operationId: getSkillFile
+      x-yuno-risk: read
       tags: [skills]
       summary: Read a text file of the bundle
       description: DESIGN 5.27 rule 11. UTF-8 text up to 256 KiB; a binary or larger file is 415.
@@ -759,6 +898,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "415": { $ref: "#/components/responses/Error" }
     put:
+      operationId: putSkillFile
+      x-yuno-risk: routine
       tags: [skills]
       summary: Replace (or create) a text file of the bundle and re-materialise the agents that use the skill
       description: DESIGN 5.27 rules 5 and 11. The path is checked as in an import; caps apply. 502 as for a skill update.
@@ -773,6 +914,8 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
     delete:
+      operationId: deleteSkillFile
+      x-yuno-risk: destructive
       tags: [skills]
       summary: Delete a file of the bundle and re-materialise the agents that use the skill
       description: DESIGN 5.27 rule 11.
@@ -783,6 +926,8 @@ paths:
   /api/skills/{id}/export:
     parameters: [ { $ref: "#/components/parameters/Id" } ]
     get:
+      operationId: exportSkill
+      x-yuno-risk: read
       tags: [skills]
       summary: Export the bundle as a zip (SKILL.md and its files, modes kept)
       description: DESIGN 5.27 rule 11.
@@ -792,6 +937,8 @@ paths:
 
   /api/projects:
     get:
+      operationId: listProjects
+      x-yuno-risk: read
       tags: [projects]
       summary: List projects by name, each with its newest run
       description: The git token is never returned; `token_set` says one is stored.
@@ -800,6 +947,8 @@ paths:
           description: projects
           content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/Project" } } } }
     post:
+      operationId: createProject
+      x-yuno-risk: routine
       tags: [projects]
       summary: Create a project
       description: |
@@ -817,12 +966,16 @@ paths:
   /api/projects/{id}:
     parameters: [ { $ref: "#/components/parameters/Id" } ]
     get:
+      operationId: getProject
+      x-yuno-risk: read
       tags: [projects]
       summary: Get a project
       responses:
         "200": { description: project, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
         "404": { $ref: "#/components/responses/Error" }
     put:
+      operationId: updateProject
+      x-yuno-risk: routine
       tags: [projects]
       summary: Replace a project's settings
       description: A missing or empty `token` keeps the stored one; a new one replaces it. Runs in flight read the token when they clone or push, so a replacement applies to them.
@@ -835,6 +988,8 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
     delete:
+      operationId: deleteProject
+      x-yuno-risk: destructive
       tags: [projects]
       summary: Delete a project
       description: A soft delete; runs that name the project keep their snapshot of its settings, and a run in flight still clones and pushes.
@@ -843,6 +998,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/projects/{id}/check:
     post:
+      operationId: checkProject
+      x-yuno-risk: routine
       tags: [projects]
       summary: Verify the stored token against the provider, without a clone
       description: |
@@ -856,6 +1013,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/projects/{id}/intake/poll:
     post:
+      operationId: pollIntake
+      x-yuno-risk: routine
       tags: [projects]
       summary: Poll the project's issue intake now
       description: |
@@ -871,6 +1030,8 @@ paths:
         "409": { description: "intake_disabled: the project's intake is off", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /api/projects/{id}/plans:
     get:
+      operationId: listPlans
+      x-yuno-risk: read
       tags: [projects]
       summary: The project's plans, newest first
       description: "DESIGN 5.29 rules 1 and 9: every plan of the project, finished ones included."
@@ -880,6 +1041,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/plans/{id}:
     get:
+      operationId: getPlan
+      x-yuno-risk: read
       tags: [projects]
       summary: A plan with its tickets and events
       description: "DESIGN 5.29 rule 9: the plan, its tickets by wave and its events newest first (the newest 100)."
@@ -889,6 +1052,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/plans/{id}/cancel:
     post:
+      operationId: cancelPlan
+      x-yuno-risk: destructive
       tags: [projects]
       summary: Cancel an open plan
       description: |
@@ -906,6 +1071,8 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
   /api/plans/{id}/tickets/{ticket}/changes:
     post:
+      operationId: requestChanges
+      x-yuno-risk: routine
       tags: [projects]
       summary: Request changes on a ticket's merge request
       description: |
@@ -930,6 +1097,8 @@ paths:
         "503": { $ref: "#/components/responses/Error" }
   /api/projects/{id}/waves/pause:
     post:
+      operationId: pauseWaves
+      x-yuno-risk: routine
       tags: [projects]
       summary: Pause the project's waves
       description: |
@@ -946,6 +1115,8 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
   /api/projects/{id}/waves/resume:
     post:
+      operationId: resumeWaves
+      x-yuno-risk: routine
       tags: [projects]
       summary: Resume the project's waves
       description: "DESIGN 5.29 rule 9. Clears the pause and its reason; records a `resumed` event on the open plan, if any. Resuming a project that is not paused succeeds."
@@ -955,6 +1126,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/projects/{id}/facts:
     get:
+      operationId: listProjectFacts
+      x-yuno-risk: read
       tags: [projects]
       summary: The project's live notes, newest first
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -963,6 +1136,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/projects/{id}/facts/{factId}:
     delete:
+      operationId: deleteProjectFact
+      x-yuno-risk: destructive
       tags: [projects]
       summary: Delete a project note
       parameters:
@@ -973,6 +1148,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/merge-requests:
     get:
+      operationId: listMergeRequests
+      x-yuno-risk: read
       tags: [merge-requests]
       summary: Merge requests the platform opened, newest first
       parameters:
@@ -985,6 +1162,8 @@ paths:
         "422": { $ref: "#/components/responses/Error" }
   /api/merge-requests/{id}:
     get:
+      operationId: getMergeRequest
+      x-yuno-risk: read
       tags: [merge-requests]
       summary: One merge request record
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -993,6 +1172,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/merge-requests/{id}/sync:
     post:
+      operationId: syncMergeRequest
+      x-yuno-risk: routine
       tags: [merge-requests]
       summary: Refresh the record from the provider now
       description: DESIGN 5.20 rule 3. Provider errors are recorded on the record (`last_sync_error`), not HTTP errors.
@@ -1002,6 +1183,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /api/merge-requests/{id}/merge:
     post:
+      operationId: mergeMergeRequest
+      x-yuno-risk: destructive
       tags: [merge-requests]
       summary: Merge the request on the provider
       description: |
@@ -1739,7 +1922,7 @@ components:
         run_id: { type: string }
         run_node_id: { type: string }
         tool_call_id: { type: string }
-        kind: { type: string, enum: [exec, tool, node, question], description: "question: a run asks the operator something and waits for the answer (DESIGN 5.24). It is answered through /answer, or declined through /reject; approved means answered." }
+        kind: { type: string, enum: [exec, tool, node, question, platform], description: "question: a run asks the operator something and waits for the answer (DESIGN 5.24). It is answered through /answer, or declined through /reject; approved means answered. platform: an agent asks to run one destructive or privileged API operation (its platform_call); it has no run, so run_id and run_node_id are empty." }
         node_id: { type: string }
         message: { type: string, description: "the gated command or call, the node's message, or the question's text" }
         options: { type: array, items: { type: string }, description: "question only: the answers the agent suggested, 2 to 5; an answer need not be one of them" }
@@ -1752,6 +1935,16 @@ components:
         reason: { type: string }
         expires_at: { type: string, format: date-time }
         conversation_id: { type: string, description: "set, with run_id and run_node_id empty, for an exec approval raised in a conversation" }
+        binding:
+          type: object
+          description: "platform only: the one call the approval allows; the agent's repeat of exactly this call runs once it is approved"
+          properties:
+            agent_id: { type: string }
+            operation_id: { type: string }
+            path: { type: string, description: "the request path with its query" }
+            body_sha256: { type: string }
+            idempotency_key: { type: string }
+        used_at: { type: string, format: date-time, description: "platform only: when the agent's repeat spent the approval (approved: the call ran; expired: the agent was told it expired)" }
         reported_at: { type: string, format: date-time, description: "when the approval was announced in the conversation that delegated its run; absent otherwise" }
     Trace:
       type: object

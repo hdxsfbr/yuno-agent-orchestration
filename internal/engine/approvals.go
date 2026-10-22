@@ -285,6 +285,10 @@ func (e *Engine) DecideApproval(ctx context.Context, approvalID, decision, by, r
 		return e.decideTool(ctx, a, status, by, reason, true)
 	case store.ApprovalKindNode:
 		return e.decideNode(ctx, a, status, by, reason)
+	case store.ApprovalKindPlatform:
+		// Nothing waits on a platform approval: the agent's repeat of the call reads the
+		// decision (wave 1 A6), so the decision is only recorded.
+		return e.recordDecision(ctx, a, status, by, reason)
 	case store.ApprovalKindQuestion:
 		// A question is answered (AnswerQuestion) or declined; approving it says nothing
 		// (DESIGN 5.24 rule 3).
@@ -664,7 +668,8 @@ func (e *Engine) sweepApprovals(ctx context.Context) {
 			e.sweepToolApproval(ctx, a)
 			continue
 		}
-		// A conversation's approval has no run to fail.
+		// A conversation's approval and a platform approval (wave 1 A6) have no run to
+		// fail; a platform approval's repeat reads the expiry.
 		if _, ok := e.expireApproval(ctx, a, "approval expired"); ok && a.RunID != "" {
 			e.failRun(ctx, a.RunID, "approval expired")
 		}

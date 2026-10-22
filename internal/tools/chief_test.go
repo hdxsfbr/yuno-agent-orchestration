@@ -317,7 +317,7 @@ func TestDelegationLimiterRelease(t *testing.T) {
 func TestRunStatus(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
-	tool := NewRunStatus(pool, "")
+	tool := NewRunStatus(pool, "", nil)
 	if res := invoke(t, tool, Call{Input: json.RawMessage(`{"chat_token":"x","run_id":"no-such-run"}`)}); !res.IsError || res.Text != "no run no-such-run" {
 		t.Fatalf("unknown = %+v", res)
 	}
@@ -535,7 +535,7 @@ func TestRunStatusProjectAndMergeRequest(t *testing.T) {
 	settings := play.Settings()
 	_, err := pool.Exec(ctx, `UPDATE runs SET project_id=$2, project_snapshot=$3 WHERE id=$1`, f.run.ID, play.ID, settings)
 	must(t, err)
-	tool := NewRunStatus(pool, "")
+	tool := NewRunStatus(pool, "", nil)
 	res := invoke(t, tool, Call{Input: json.RawMessage(`{"run_id":"` + f.run.ID + `"}`)})
 	var out map[string]any
 	must(t, json.Unmarshal(res.Output, &out))
@@ -716,7 +716,7 @@ func TestRunStatusRoleAndIssue(t *testing.T) {
 	})
 	status := func(run *store.Run) map[string]any {
 		t.Helper()
-		res := invoke(t, NewRunStatus(pool, ""), Call{Input: json.RawMessage(`{"run_id":"` + run.ID + `"}`)})
+		res := invoke(t, NewRunStatus(pool, "", nil), Call{Input: json.RawMessage(`{"run_id":"` + run.ID + `"}`)})
 		if res.IsError {
 			t.Fatalf("run_status: %+v", res)
 		}
@@ -800,7 +800,7 @@ func TestListProjectsIntake(t *testing.T) {
 func TestRunStatusQuestion(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
-	tool := NewRunStatus(pool, "")
+	tool := NewRunStatus(pool, "", nil)
 	f := newFixture(t, pool, nil)
 	asked := time.Date(2026, 10, 18, 9, 30, 15, 0, time.UTC)
 
@@ -826,7 +826,7 @@ func TestRunStatusQuestion(t *testing.T) {
 	out := status()
 	question, _ := out["question"].(map[string]any)
 	if out["status"] != store.RunWaitingApproval || question["id"] != q.ID || question["text"] != "Which greeting language?" ||
-		question["asked_at"] != "2026-10-18T09:30:15Z" || len(question) != 4 {
+		question["asked_at"] != "2026-10-18T09:30:15Z" || question["code"] != ApprovalCode(nil, q.ID) || len(question) != 5 {
 		t.Fatalf("waiting on a question = %v", out)
 	}
 	if opts, _ := question["options"].([]any); len(opts) != 2 || opts[0] != "Python" || opts[1] != "Go" {
@@ -840,7 +840,7 @@ func TestRunStatusQuestion(t *testing.T) {
 	// A question without options has no options key.
 	_, err = pool.Exec(ctx, `UPDATE approvals SET options = NULL WHERE id = $1`, q.ID)
 	must(t, err)
-	if question, _ = status()["question"].(map[string]any); question["id"] != q.ID || question["options"] != nil || len(question) != 3 {
+	if question, _ = status()["question"].(map[string]any); question["id"] != q.ID || question["options"] != nil || len(question) != 4 {
 		t.Fatalf("question without options = %v", question)
 	}
 
@@ -869,7 +869,7 @@ func TestRunStatusQuestion(t *testing.T) {
 func TestRunStatusArtifacts(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
-	tool := NewRunStatus(pool, "")
+	tool := NewRunStatus(pool, "", nil)
 	f := newFixture(t, pool, nil)
 	status := func() (map[string]any, string) {
 		t.Helper()
@@ -930,7 +930,7 @@ func TestRunStatusArtifacts(t *testing.T) {
 func TestRunStatusBranches(t *testing.T) {
 	pool := needDB(t)
 	ctx := context.Background()
-	tool := NewRunStatus(pool, "")
+	tool := NewRunStatus(pool, "", nil)
 	if !strings.Contains(tool.Description, "the branches it runs in parallel") {
 		t.Fatalf("description = %q", tool.Description)
 	}

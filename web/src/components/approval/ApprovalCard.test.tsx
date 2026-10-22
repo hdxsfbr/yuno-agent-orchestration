@@ -427,3 +427,40 @@ describe("an approval of a ship run", () => {
     expect(api.made("GET", /^\/api\/runs/)).toHaveLength(0);
   });
 });
+
+describe("an agent's platform action", () => {
+  const platform = (over: Partial<Approval> = {}): Approval =>
+    question({
+      id: "p1",
+      kind: "platform",
+      run_id: "",
+      run_node_id: "",
+      node_id: "",
+      options: undefined,
+      message:
+        "Chief of Staff asks to run deleteAgent: DELETE /api/agents/a1 (Soft-delete an agent).\nIt needs your approval because it deletes, cancels or merges something.",
+      ...over,
+    });
+
+  it("shows what the agent asks to do, with no run or step to link to", () => {
+    const card = renderCard(platform(), { showRun: true });
+    expect(card.getByText("Platform action")).not.toBeNull();
+    expect(card.getByText(/asks to run deleteAgent: DELETE \/api\/agents\/a1/)).not.toBeNull();
+    expect(card.queryByText("Run")).toBeNull();
+    expect(card.queryByText("Raised in")).toBeNull();
+    expect(card.queryByText("Node")).toBeNull();
+    expect(card.queryByRole("link")).toBeNull();
+    expect(card.getByText("Expires")).not.toBeNull();
+  });
+
+  it("is approved or rejected like any approval, never answered or approved always", async () => {
+    api.on("POST", "/api/approvals/p1/approve", () => platform({ status: "approved", decided_at: "2026-10-18T10:05:00Z", decided_by: "api" }));
+    const card = renderCard(platform(), { showRun: true });
+    expect(card.queryByRole("button", { name: "Approve always" })).toBeNull();
+    expect(card.queryByRole("textbox", { name: "Your answer" })).toBeNull();
+    expect(button(card, "Reject")).not.toBeNull();
+    fireEvent.click(button(card, "Approve"));
+    await waitFor(() => expect(onDecided).toHaveBeenCalledTimes(1));
+    expect(api.made("POST", "/api/approvals/p1/approve")).toHaveLength(1);
+  });
+});

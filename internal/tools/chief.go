@@ -32,10 +32,11 @@ const (
 )
 
 // ChatToolNames are the tools callable with a chat token (DESIGN 5.15 rule 2, 5.17 rule
-// 8, 5.22 rule 6, 5.24 rule 9, D-081), sorted. The registry marks the same tools Chat; a test
-// keeps the two in step.
+// 8, 5.22 rule 6, 5.24 rule 9, D-081, platform control A2 and A3), sorted. The registry marks
+// the same tools Chat; a test keeps the two in step.
 var ChatToolNames = []string{AddProjectName, AnswerQuestionName, DecideApprovalName, DelegateTaskName, ListAgentsName, ListApprovalsName,
-	ListProjectsName, ListWorkflowsName, MemoryRecallName, MemorySaveName, ReadMergeRequestName, RunStatusName}
+	ListProjectsName, ListWorkflowsName, MemoryRecallName, MemorySaveName, PlatformCallName, PlatformOperationsName,
+	ReadMergeRequestName, RunStatusName}
 
 // IsChatTool reports whether name (with or without the platform prefix) is
 // chat-capable.
@@ -672,8 +673,9 @@ func workflowByName(ctx context.Context, pool *pgxpool.Pool, name string) (*stor
 	return nil, &ModelError{Message: "no workflow named " + want}
 }
 
-// NewRunStatus builds run_status (DESIGN 5.15 rule 8).
-func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
+// NewRunStatus builds run_status (DESIGN 5.15 rule 8). codeKey keys the code its question
+// shows, the one answer_question accepts as the person's evidence (platform control A7).
+func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string, codeKey []byte) *Tool {
 	return &Tool{
 		Name: RunStatusName,
 		Description: "Check on a platform run: its status, timing, steps, tool calls, cost, its final state when it " +
@@ -761,7 +763,9 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string) *Tool {
 				// DESIGN 5.24 rule 11: the question the run waits on, next to the entry above.
 				for i := range pending {
 					if pending[i].Kind == store.ApprovalKindQuestion {
-						out["question"] = questionView(&pending[i])
+						q := questionView(&pending[i])
+						q["code"] = ApprovalCode(codeKey, pending[i].ID)
+						out["question"] = q
 						break
 					}
 				}

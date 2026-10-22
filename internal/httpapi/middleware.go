@@ -14,7 +14,9 @@ import (
 )
 
 func (s *Server) withMiddleware(next http.Handler) http.Handler {
-	return s.recoverer(s.requestID(s.logging(s.auth(next))))
+	// The platform gate sits after auth (and the audit's actor and note, DESIGN B6) and
+	// before idempotency.
+	return s.recoverer(s.requestID(s.logging(s.auth(s.platformGate(next)))))
 }
 
 func (s *Server) requestID(next http.Handler) http.Handler {

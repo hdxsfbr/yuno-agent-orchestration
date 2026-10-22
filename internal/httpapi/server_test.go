@@ -136,7 +136,7 @@ func TestListTools(t *testing.T) {
 	// answer_question its ninth (5.24 rule 9); ask_operator is a run tool (5.24 rule 1).
 	want := "platform:add_project platform:advance_wave platform:answer_question platform:ask_operator platform:decide_approval platform:delegate_task platform:deploy_release platform:escalate platform:finish platform:http_fetch platform:list_agents platform:list_approvals " +
 		"platform:list_projects platform:list_workflows platform:memory_recall platform:memory_save " +
-		"platform:open_merge_request platform:publish_tickets platform:read_merge_request platform:run_status " +
+		"platform:open_merge_request platform:platform_call platform:platform_operations platform:publish_tickets platform:read_merge_request platform:run_status " +
 		"openclaw:apply_patch openclaw:edit openclaw:exec openclaw:ls openclaw:process openclaw:read openclaw:write"
 	if strings.Join(names, " ") != want {
 		t.Fatalf("tools = %v", names)
@@ -164,9 +164,12 @@ func TestListTools(t *testing.T) {
 		"memory_recall":      {"read_only", "postgres", 5, true, true},
 		"memory_save":        {"computational", "postgres", 5, false, true},
 		"open_merge_request": {"side_effecting", "external", 120, false, false},
-		"publish_tickets":    {"side_effecting", "external", 300, false, false},
-		"read_merge_request": {"read_only", "external", 15, true, true},
-		"run_status":         {"read_only", "postgres", 5, false, true},
+		// Platform control A2 and A3: the Chief's way to every operation of the API.
+		"platform_call":       {"computational", "local_service", 60, false, true},
+		"platform_operations": {"read_only", "none", 5, false, true},
+		"publish_tickets":     {"side_effecting", "external", 300, false, false},
+		"read_merge_request":  {"read_only", "external", 15, true, true},
+		"run_status":          {"read_only", "postgres", 5, false, true},
 	}
 	var chat []string
 	for _, tv := range got {
