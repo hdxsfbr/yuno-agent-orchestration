@@ -157,6 +157,13 @@ type visit struct {
 	lastTouch      time.Time
 	lastEventAt    time.Time
 
+	// The model-stall check (DESIGN 5.5 rule 6), owned by the visit goroutine: progressAt is
+	// when the current turn last showed a sign of life on the engine's clock, and openCalls
+	// are its tool calls that started and have no result yet. A turn with an open call is
+	// waiting on a tool, never stalled.
+	progressAt time.Time
+	openCalls  map[string]bool
+
 	// Questions to the operator (DESIGN 5.24), owned by the visit goroutine: the visit's
 	// pending question (one at a time), the one its wait ended on with no decision (rule
 	// 4: parked-on), and a decision that reached the live visit for its turn's end (rule 5 (b)).
@@ -190,7 +197,8 @@ func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.No
 		inputs: map[string]toolInput{}, pendingOutputs: map[string]json.RawMessage{},
 		approvals: map[string]*store.Approval{}, approvalSpans: map[string]string{},
 		toolBlocking: map[string]bool{}, platformSpans: map[string]string{}, parkedTools: map[string]*store.Approval{},
-		calls: make(chan func()), loopDone: make(chan struct{}),
+		openCalls: map[string]bool{},
+		calls:     make(chan func()), loopDone: make(chan struct{}),
 		lastTouch: time.Now(), lastEventAt: time.Now(),
 	}
 	v.cancelCtx, v.cancelSignal = context.WithCancel(context.Background())
@@ -895,6 +903,7 @@ func (v *visit) startTurn(ctx context.Context, message string) *outcome {
 	v.runIDs[key] = true
 	v.rn.OpenClawRunID = &v.runID
 	v.saveNode(ctx)
+	clear(v.openCalls) // an earlier turn's calls ended with it
 	var lastErr error
 	for attempt := 1; attempt <= maxSendAttempts; attempt++ {
 		if res := v.preflight(ctx); res != nil {
@@ -913,6 +922,7 @@ func (v *visit) startTurn(ctx context.Context, message string) *outcome {
 				v.saveNode(ctx)
 			}
 			e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("turn %d started", v.turn), "openclaw_run_id", v.runID)
+			v.progressAt = e.clock.Now()
 			if r.Status == "ok" {
 				// The gateway deduplicated the key: the run already happened (a retry after a
 				// lost response). Its events are gone, so read the outcome from the history.
@@ -1070,6 +1080,9 @@ func (v *visit) handle(ctx context.Context, ev openclaw.Event) {
 			return
 		}
 		v.lastEventAt = time.Now()
+		if ce.RunID == v.runID {
+			v.progressAt = v.e.clock.Now() // a streamed reply is progress
+		}
 		v.onChat(ctx, ce)
 	case "agent":
 		var ae openclaw.AgentEvent
@@ -1077,6 +1090,9 @@ func (v *visit) handle(ctx context.Context, ev openclaw.Event) {
 			return
 		}
 		v.lastEventAt = time.Now()
+		if ae.RunID == v.runID {
+			v.progressAt = v.e.clock.Now() // reasoning and text deltas included
+		}
 		v.onAgent(ctx, ae)
 	case "session.message":
 		var sm struct {
@@ -1117,7 +1133,9 @@ func (v *visit) onTranscript(ctx context.Context, raw json.RawMessage, messageID
 			return
 		}
 		v.seenMsgs[id] = true
+		v.progressAt = v.e.clock.Now() // a new entry, live or found by a catch-up
 	}
+	current := meta.RunID == "" || meta.RunID == v.runID
 	if h.Role == "assistant" && h.Usage != nil {
 		v.steps++
 		v.rn.Iteration = v.steps // persisted with the transcript entry by mirror
@@ -1136,6 +1154,9 @@ func (v *visit) onTranscript(ctx context.Context, raw json.RawMessage, messageID
 		for _, p := range h.Parts() {
 			if p.Type != "toolCall" || p.ID == "" {
 				continue
+			}
+			if current {
+				v.openCalls[p.ID] = true // until its toolResult entry
 			}
 			args := p.Arguments
 			if len(args) == 0 || string(args) == "null" {
@@ -1158,6 +1179,7 @@ func (v *visit) onTranscript(ctx context.Context, raw json.RawMessage, messageID
 			v.checkAndAbort(ctx)
 		}
 	case "toolResult":
+		delete(v.openCalls, h.ToolCallID)
 		v.toolResult(ctx, h)
 	}
 }
@@ -1344,6 +1366,14 @@ func (v *visit) onAgent(ctx context.Context, ae openclaw.AgentEvent) {
 		var it openclaw.AgentItem
 		if json.Unmarshal(ae.Data, &it) != nil || it.ToolCallID == "" || (it.Kind != "" && it.Kind != "tool") {
 			return
+		}
+		if ae.RunID == v.runID {
+			switch it.Phase {
+			case "start":
+				v.openCalls[it.ToolCallID] = true
+			case "end":
+				delete(v.openCalls, it.ToolCallID)
+			}
 		}
 		if isPlatformTool(it.Name) {
 			v.platformToolSpan(ctx, it, ae.TS)
@@ -1987,7 +2017,67 @@ func (v *visit) onTick(ctx context.Context) {
 		if e.clock.Now().Sub(at) > e.finishGrace {
 			v.startAbort(ctx, succeeded(out))
 		}
+		return
 	}
+	v.checkStall(ctx)
+}
+
+// checkStall restarts a turn whose model reply stopped coming (DESIGN 5.5 rule 6). OpenClaw
+// gives a turn 48 hours and has no idle limit on a model stream, so a request the provider
+// never answers would hold the step until the run's time limit. A turn is stalled when it
+// is live, no tool call of it is open (a test suite under exec or a gated call may take
+// long) and nothing arrived for the stall window: no chat or agent event of the turn and no
+// new transcript entry. The history is read first, so a reply whose events were lost is not
+// taken for a stall. The turn is aborted and continued in a new turn from the retry budget
+// of model errors (rule 3); the node fails when it is spent.
+func (v *visit) checkStall(ctx context.Context) {
+	e := v.e
+	stalled := func() bool {
+		return e.modelStall > 0 && v.turnLive && v.runID != "" && !v.disconnected && v.aborting == nil &&
+			v.result == nil && !v.closing && len(v.openCalls) == 0 && e.clock.Now().Sub(v.progressAt) >= e.modelStall
+	}
+	if !stalled() {
+		return
+	}
+	v.lastEventAt = time.Now()
+	v.catchUp(ctx)
+	if !stalled() {
+		return
+	}
+	window := stallText(e.modelStall)
+	actx, cancel := context.WithTimeout(ctx, abortRPCTimeout)
+	_, err := openclaw.ChatAbort(actx, e.deps.Gateway, v.key, v.runID)
+	cancel()
+	if err != nil {
+		v.log.Warn("chat.abort of a stalled turn failed", "openclaw_run_id", v.runID, "error", err)
+		v.progressAt = e.clock.Now() // tried again after another window
+		return
+	}
+	// The aborted turn's terminal event names its run id, which is no longer the visit's
+	// current one once the next turn starts, so onChat ignores it.
+	v.turnLive = false
+	if v.errorRetries >= maxContinueRetries {
+		v.end(ctx, failed(store.RunFailed, "model reply stalled for "+window))
+		return
+	}
+	v.errorRetries++
+	e.logEvent(ctx, v.run.ID, "warn", fmt.Sprintf("model reply stalled for %s; continuing in a new turn, retry %d of %d",
+		window, v.errorRetries, maxContinueRetries))
+	if res := v.startTurn(ctx, "Continue."); res != nil {
+		v.end(ctx, *res)
+	}
+}
+
+// stallText is the stall window for the log and the failure reason: "10 minutes", or the
+// duration as Go writes it when it is not whole minutes.
+func stallText(d time.Duration) string {
+	switch {
+	case d == time.Minute:
+		return "1 minute"
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%d minutes", d/time.Minute)
+	}
+	return d.String()
 }
 
 // reattach renews the session subscription after a reconnect, replays approvals the
@@ -2005,6 +2095,7 @@ func (v *visit) reattach(ctx context.Context) {
 		return
 	}
 	e.logEvent(ctx, v.run.ID, "info", "gateway connection restored; session re-attached")
+	v.progressAt = e.clock.Now() // the time away is not the model's
 	for _, raw := range res.ApprovalReplay.Approvals {
 		sa := openclaw.SessionApprovalEvent{SessionKey: v.key, Phase: "terminal"}
 		if json.Unmarshal(raw, &sa.Approval) != nil || sa.Approval.ID == "" {

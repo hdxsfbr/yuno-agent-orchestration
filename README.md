@@ -256,7 +256,9 @@ human before the agent continues with `pending_approval`, default 540), `TOOL_OU
 provider, default 120 s) and `INTAKE_POLL_INTERVAL` (how often projects with issue intake
 enabled are polled for labelled issues, default 120 s). `ARTIFACT_DIR` (where the api
 keeps the files runs deliver, the `artifacts` volume) and `ARTIFACT_TTL_DAYS` (how long
-after a run finished they are kept, default 30; 0 keeps them). The memory tools need the
+after a run finished they are kept, default 30; 0 keeps them). `MODEL_STALL_AFTER` (how
+long a step may wait on the model's reply with nothing arriving and no tool running before
+its turn is stopped and continued, default 10m; 0 turns it off). The memory tools need the
 agent's `memory_policy.enabled`.
 Secrets never go in the repository; the log handler redacts anything shaped like a
 provider key (Anthropic or OpenRouter), a bot token, a run token or a bearer token, in

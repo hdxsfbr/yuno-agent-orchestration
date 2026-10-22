@@ -5,6 +5,10 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- A step whose model stops answering no longer sits "running" for hours. After 10 minutes
+  with no reply and no tool running, the turn is stopped and the agent continues where it
+  was, up to three times; then the step fails with "model reply stalled for 10 minutes".
+  Set `MODEL_STALL_AFTER` to change the wait, or to `0` to turn it off.
 - Retrying a step starts it fresh: answers you gave the failed attempt are not replayed.
   Neither are your decisions on its tool approvals. The retried step is told you retried
   it after it failed, and it may ask you its questions again.
