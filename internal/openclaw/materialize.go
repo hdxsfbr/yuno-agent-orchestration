@@ -314,7 +314,14 @@ func desiredEntry(a *store.Agent, skillNames []string) map[string]any {
 		// may select the Codex app-server runtime, which disables user MCP servers while a
 		// sandbox is active: yuno__finish and every platform tool would be gone [docs:
 		// gateway/sandboxing/docker-backend.md]. The embedded runtime keeps them [probed].
-		entry["models"] = map[string]any{ModelRef(a.Model): map[string]any{"agentRuntime": map[string]any{"id": "openclaw"}}}
+		// Code Mode stays off (D-095): under its "auto" default the embedded runtime hides
+		// every tool behind a JavaScript exec with a 10 s budget per call [docs:
+		// tools/code-mode/configuration.md], so a test suite becomes a loop of wait calls
+		// and a platform call queues behind a running command.
+		entry["models"] = map[string]any{ModelRef(a.Model): map[string]any{
+			"agentRuntime": map[string]any{"id": "openclaw"},
+			"codeMode":     false,
+		}}
 	}
 	if len(skillNames) > 0 {
 		s := make([]any, len(skillNames))

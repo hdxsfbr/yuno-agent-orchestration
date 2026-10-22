@@ -6,6 +6,24 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-22
 
+**D-095 OpenAI agents run with OpenClaw's Code Mode off: their entry sets `codeMode: false`
+next to the runtime pin.** (Andre, 2026-10-22: "disable that code mode that is slowing
+things down", after run 01a16451's Builder step.) Once every agent moved to
+`openai/gpt-6-astra`, OpenClaw's Code Mode engaged by itself: its default is `"auto"`, which
+turns it on for the models the provider catalog flags as preferred, and the OpenAI models
+are flagged on the embedded runtime D-091 pins. The Claude agents never had it, because the
+api's proxy provider carries no such flag. Engaged, the model sees only `exec` (a JavaScript
+program calling the hidden tools) and `wait`, each call with a 10 s budget. On run 01a16451
+the second Builder visit made 62 `wait` calls (8.8 minutes) and 11 sleep calls in 107
+model iterations, its `finish` reached the api 79 s after the agent made it and a memory
+save 4.7 minutes after, both queued behind the test suite running in the same program
+runtime. Off, the agent calls its tools directly again: a shell command blocks until it
+ends, as on Claude. The setting is per agent and per model, so it changes nothing for a
+Claude agent and needs no gateway-wide switch; it is part of the entry, so each OpenAI
+agent re-materialises once. Alternative rejected: the gateway-wide `tools.codeMode: false`
+(it would also cover agents Yuno does not manage, and the per-model field is what the
+OpenClaw docs name for opting one model out). Design: DESIGN 5.14 rule 14.
+
 **D-094 A turn whose model reply never comes is aborted after `MODEL_STALL_AFTER` (10
 minutes) without progress and no tool call open, and continued in a new turn from the
 model-error retry budget.** (Andre, 2026-10-22, after run 01a16451: its Builder's last tool

@@ -28,9 +28,10 @@ func TestModelRef(t *testing.T) {
 	}
 }
 
-// An OpenAI agent's entry names the ref as its primary and pins the embedded runtime for
-// it; thinkingDefault, reasoningDefault off and params.maxTokens are written as for a
-// Claude agent. A Claude agent's entry carries no models key.
+// An OpenAI agent's entry names the ref as its primary, pins the embedded runtime for it
+// and turns Code Mode off for it (D-095); thinkingDefault, reasoningDefault off and
+// params.maxTokens are written as for a Claude agent. A Claude agent's entry carries no
+// models key.
 func TestDesiredEntryOpenAI(t *testing.T) {
 	a := testAgent()
 	a.MaxTokens = 4096
@@ -49,7 +50,7 @@ func TestDesiredEntryOpenAI(t *testing.T) {
 	}
 	models, _ := e["models"].(map[string]any)
 	pin, _ := models["openai/gpt-6-astra"].(map[string]any)
-	if len(models) != 1 || pin["agentRuntime"].(map[string]any)["id"] != "openclaw" {
+	if len(models) != 1 || pin["agentRuntime"].(map[string]any)["id"] != "openclaw" || pin["codeMode"] != false {
 		t.Fatalf("models = %v", e["models"])
 	}
 	if e["thinkingDefault"] != "low" || e["reasoningDefault"] != "off" || e["params"].(map[string]any)["maxTokens"] != 4096 {
