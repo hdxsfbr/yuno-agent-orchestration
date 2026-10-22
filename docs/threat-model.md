@@ -400,6 +400,16 @@ the reach, and these mitigations bound it:
   diff and job logs are redacted, with the project token removed literally, and GitHub's
   log redirect is followed without the token.
 
+- Recovery (D-102) is `routine` for the Chief. A steer puts the operator's or the
+  Chief's own text into a live agent turn: it is prefixed "Operator: ", redacted like an
+  answer, and recorded with its actor and request id. A worker that lost its run cannot
+  write over the new one, because its writes are fenced by the lease epoch. A run whose
+  last turn was not confirmed stopped cannot be retried or resumed until the gateway
+  confirms it.
+- The dependency watcher (D-103) pushes to a dependent's branch with the project's token,
+  never forced, and only from the record's head as the expected head. Dependencies accept
+  only merge requests of the dependent's own project.
+
 Residual:
 - With more than one allowed Telegram user, `on_behalf_of` names the agent's latest
   conversation, not necessarily the requester's.
