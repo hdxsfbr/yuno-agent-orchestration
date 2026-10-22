@@ -229,7 +229,9 @@ func TestProjectRunClonesCarriesAndProposes(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/repository/branches/"):
-			name := strings.TrimPrefix(r.URL.Path, "/api/v4/projects/g%2Fp/repository/branches/")
+			// The tool looks the branch up again after the push, so the fake must find it: the
+			// name is what follows the route in the escaped path, its slashes encoded.
+			_, name, _ := strings.Cut(r.URL.EscapedPath(), "/repository/branches/")
 			if !slices.Contains(projecttest.Branches(t, bare), strings.ReplaceAll(name, "%2F", "/")) {
 				w.WriteHeader(404)
 				_, _ = w.Write([]byte(`{"message":"404 Branch Not Found"}`))

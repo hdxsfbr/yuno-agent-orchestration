@@ -21,12 +21,16 @@ import (
 // fakeGitHub implements the slice of the GitHub REST API the tool uses, and counts the
 // writes. Branches are reported from the bare repository the test pushes to.
 type fakeGitHub struct {
-	mu       sync.Mutex
-	bare     string
-	pulls    []map[string]any
-	auth     string
-	failPR   int
-	branches func() []string
+	mu     sync.Mutex
+	bare   string
+	pulls  []map[string]any
+	auth   string
+	failPR int
+	// branchLag answers the next lookups of a branch other than main 404, and prLag the
+	// next pull request creations 422 with the head invalid, as the GitLab fake's lags.
+	branchLag int
+	prLag     int
+	branches  func() []string
 	// refuse answers every request 401; noPush reports permissions.push false (the
 	// project check, DESIGN 5.17 rule 5).
 	refuse bool
@@ -71,7 +75,11 @@ func newFakeGitHub(t *testing.T, bare string) (*fakeGitHub, *httptest.Server) {
 				"permissions": map[string]bool{"admin": false, "push": !g.noPush, "pull": true}})
 		case r.Method == http.MethodGet && strings.HasPrefix(p, "/branches/"):
 			name := unescape(strings.TrimPrefix(p, "/branches/"))
-			if !slices.Contains(g.branches(), name) {
+			lagging := g.branchLag > 0 && name != "main"
+			if lagging {
+				g.branchLag--
+			}
+			if lagging || !slices.Contains(g.branches(), name) {
 				writeJSONTest(w, 404, map[string]string{"message": "Branch not found"})
 				return
 			}
@@ -91,6 +99,12 @@ func newFakeGitHub(t *testing.T, bare string) (*fakeGitHub, *httptest.Server) {
 			if g.failPR > 0 {
 				g.failPR--
 				writeJSONTest(w, 502, map[string]string{"message": "bad gateway"})
+				return
+			}
+			if g.prLag > 0 {
+				g.prLag--
+				writeJSONTest(w, 422, map[string]any{"message": "Validation Failed",
+					"errors": []map[string]string{{"resource": "PullRequest", "field": "head", "code": "invalid"}}})
 				return
 			}
 			var body map[string]any

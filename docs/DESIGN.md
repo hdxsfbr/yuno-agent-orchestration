@@ -1359,7 +1359,15 @@ Rules:
     removes the private directory; (c) an open merge request from that branch is
     returned with `replayed: true` (since 5.20 rule 2 a run has one request: a later
     call in the same run pushes onto its branch and returns it `updated`); otherwise one is opened against the default branch
-    with the title and description. Output: `{number, url, branch, provider,
+    with the title and description, once the provider shows the branch: it is looked up
+    through `branchExists` before the create, up to five times with waits of 1, 2, 4 and
+    8 s, and a create refused for a missing source branch (GitLab's 400 naming
+    `source_branch` with `does not exist`, GitHub's 422 with `head` invalid) waits and
+    tries again the same way, since a push git reports done can be missing from the
+    provider's merge request API for a moment (GitLab refreshes the branch list that API
+    checks after the push, not with it). A branch the provider never shows ends the call
+    with a model-facing error naming the branch and the provider, nothing opened; the
+    same call again skips the push (b). Output: `{number, url, branch, provider,
     replayed?}`. Registered always since 5.17 (a run without a project is told `this
     run has no project`); `gitlab_create_mr` stays for runs without a project. Commits an agent made
     inside the sandbox are flattened: their working tree is what the one commit holds.
@@ -1409,7 +1417,10 @@ left out of the copy and excluded by rule 3's local exclude file, never committe
 agent commits in the sandbox: the working tree is what counts, flattened into the
 platform's one commit (rule 10). The provider refuses the merge request (a branch
 protection, a duplicate title): the branch stays pushed and the error reaches the model;
-a retry under the same key skips the commit and push (rule 10b). Two project runs on
+a retry under the same key skips the commit and push (rule 10b). The provider does not
+show the pushed branch yet (run 01a15a66: GitLab's HTTP 400 `source_branch does not
+exist` right after the push): the call waits for it (rule 10c) instead of failing on the
+first answer. Two project runs on
 one agent at once: rule 7's holds. A run cancelled during the clone: the git process is
 killed with the visit's context and the run ends `cancelled`.
 
@@ -1440,7 +1451,10 @@ fake gateway: the sandbox patch for `go` with network on carries the derived ima
 `replacePaths`; holds of two visits clear once. T5.16.5 the tool against the httptest
 GitLab fake: branch and merge request created, a second call replays, a retry after a
 failed request skips the commit; the GitHub fake: pull request created with `head`
-`<owner>:<branch>`, replay found through `pulls?head=`. T5.16.6 redaction of GitLab and
+`<owner>:<branch>`, replay found through `pulls?head=`; on both fakes a branch the API
+shows late and a create refused for it once open one request after the waits, and a branch
+never shown is the model error with no request, the same call again opening it without a
+second push. T5.16.6 redaction of GitLab and
 GitHub token shapes and basic auth headers in logs, spans and tool rows; the tool's
 stored input and output carry no token. T5.16.7 UI: the run header shows the toolchain
 badge and the merge request link from the tool output; the list shows the badge; no link
@@ -4061,6 +4075,18 @@ Rules:
    `manual_test` approval was granted and the call only updates the run's existing MR
    (a per-node policy `auto_after: manual_test`, validated at save: the named node must
    be an approval node that precedes it); every other call stays gated.
+   `integrator_draft`'s result is the request the tool returned, `merge_request_url` an
+   http(s) URL and `branch` a name without spaces, or both empty when opening it was
+   rejected or its approval expired. Its output schema and the state schema refuse a status
+   (`pending_approval`, `rejected`, `expired`) as the branch, a URL that is not one, and one
+   of the two without the other (run 01a15a66 finished with branch `pending_approval`).
+   Choice: the empty pair stays allowed rather than a URL being required, because since
+   D-085 the step waits for the approval's outcome, and a refused draft must still have a
+   truthful finish; a required URL would push the Integrator to invent one. The
+   `manual_test` message names the branch and the URL only when both are set; otherwise it
+   says the draft merge request is missing, so there is no branch to test, and asks the
+   operator to reject the step, which sends the ticket back to the Builder. The ready
+   step's task names the branch only when there is one.
 6. **`escalate`** (computational, not gated, every factory agent in a project run):
    input `{reason, kind: prd_gap | design_wrong | loop_limit | other}`. The engine ends
    the calling run `failed` with `escalated (<kind>): <reason>` as soon as the call is
@@ -4221,7 +4247,9 @@ the plan MR merges, ships a wave only when merged and green, holds while paused;
 real `wave_pipeline` with the Doc Auditor asking: the run waits `waiting_approval` with the
 step parked, no state-schema failure, the answer wakes the audit, which finishes `rework`
 with the decision in `notes`, the Builder's next task carries it, and the loop runs through
-review, draft and manual test again to `succeeded`; evals 026 (loop limit
+review, draft and manual test again to `succeeded`; T5.29.12 the draft step's output and
+state schemas refuse a status as the branch and a half-empty result, and the manual test
+without a draft says it is missing and names no branch; evals 026 (loop limit
 escalation), 027 (PRD gap escalation), 028 (two waves auto-advance with the pause flag).
 
 Limitations: one open plan per project; main's status is read, not run, so a project

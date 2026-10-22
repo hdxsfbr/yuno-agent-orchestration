@@ -24,6 +24,11 @@ type fakeGitLab struct {
 	commits  []map[string]any
 	token    string
 	failMR   int // answer the next MR creations with 500
+	// branchLag answers the next lookups of a branch other than main 404, and mrLag the
+	// next MR creations 400 "source_branch does not exist": a push the API does not show
+	// yet.
+	branchLag int
+	mrLag     int
 	// branchesFn, when set, answers branch lookups from a repository the test pushes
 	// to with git (open_merge_request) instead of the map.
 	branchesFn func() []string
@@ -113,7 +118,11 @@ func newFakeGitLab(t *testing.T) (*fakeGitLab, *httptest.Server) {
 				"permissions": map[string]any{"project_access": map[string]any{"access_level": level}, "group_access": nil}})
 		case r.Method == http.MethodGet && strings.HasPrefix(p, "/repository/branches/"):
 			name := unescape(strings.TrimPrefix(p, "/repository/branches/"))
-			if !g.hasBranch(name) {
+			lagging := g.branchLag > 0 && name != "main"
+			if lagging {
+				g.branchLag--
+			}
+			if lagging || !g.hasBranch(name) {
 				writeJSONTest(w, 404, map[string]string{"message": "404 Branch Not Found"})
 				return
 			}
@@ -145,6 +154,11 @@ func newFakeGitLab(t *testing.T) (*fakeGitLab, *httptest.Server) {
 			if g.failMR > 0 {
 				g.failMR--
 				writeJSONTest(w, 500, map[string]string{"message": "boom"})
+				return
+			}
+			if g.mrLag > 0 {
+				g.mrLag--
+				writeJSONTest(w, 400, map[string]any{"message": map[string]any{"source_branch": []string{"does not exist"}}})
 				return
 			}
 			var body map[string]any

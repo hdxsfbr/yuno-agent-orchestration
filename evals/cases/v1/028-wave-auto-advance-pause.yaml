@@ -159,8 +159,8 @@ project:
               args:
                 run_token: "$RUN_TOKEN"
                 result:
-                  merge_request_url: the draft merge request of this run
-                  branch: the branch of the draft merge request
+                  merge_request_url: http://forgefake:8090/eval/greeting/-/merge_requests/2
+                  branch: yuno/greeting-t1
           - text: The draft merge request is open and the result has been submitted.
           # doc_audit, after the manual test
           - tool:
@@ -251,8 +251,8 @@ project:
               args:
                 run_token: "$RUN_TOKEN"
                 result:
-                  merge_request_url: the draft merge request of this run
-                  branch: the branch of the draft merge request
+                  merge_request_url: http://forgefake:8090/eval/greeting/-/merge_requests/3
+                  branch: yuno/greeting-t2
           - text: The draft merge request is open and the result has been submitted.
           # doc_audit, after the manual test
           - tool:

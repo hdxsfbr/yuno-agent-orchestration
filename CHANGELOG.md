@@ -21,3 +21,4 @@ Behaviour changes operators notice, newest first. The design reasons are in
   when a new release of an unpinned lint or test tool breaks the project they report it
   and propose pinning the tool in the project, instead of changing unrelated code. The
   sandbox images already pin every tool they install; a test now keeps it that way.
+- Opening a merge request no longer fails when GitLab or GitHub is slow to show the branch Yuno just pushed: Yuno waits for the branch, and names it if it never appears. The manual test step names the branch to pull only when the draft merge request exists; otherwise it tells you the draft is missing instead of showing a placeholder.

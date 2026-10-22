@@ -186,6 +186,95 @@ func TestQuickRunTaskIsAllTheAgentGets(t *testing.T) {
 	}
 }
 
+// wavePipelineDef reads the shipped wave pipeline's definition as it is.
+func wavePipelineDef(t *testing.T) *workflow.Definition {
+	t.Helper()
+	raw, err := os.ReadFile("../../templates/wave_pipeline.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tpl struct {
+		Definition workflow.Definition `json:"definition"`
+	}
+	if err := json.Unmarshal(raw, &tpl); err != nil {
+		t.Fatal(err)
+	}
+	return &tpl.Definition
+}
+
+// P6: the draft step's result is the merge request the tool returned, or nothing at all
+// when opening it was rejected or its approval expired. A status in place of the branch or
+// the url (run 01a15a66 finished with branch "pending_approval"), or one of the two without
+// the other, is refused, by the step's output schema and by the state schema alike.
+func TestWavePipelineDraftResultIsARealRequest(t *testing.T) {
+	def := wavePipelineDef(t)
+	node, _ := def.Node("integrator_draft")
+	var state struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if node == nil || json.Unmarshal(def.StateSchema, &state) != nil || state.Properties["integrator_draft"] == nil {
+		t.Fatalf("integrator_draft %+v, state schema %s", node, def.StateSchema)
+	}
+	for name, raw := range map[string]json.RawMessage{"output schema": node.OutputSchema, "state schema": state.Properties["integrator_draft"]} {
+		s, err := compileSchema(raw)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, tc := range []struct {
+			result string
+			ok     bool
+		}{
+			{draftMR1, true},
+			{`{"merge_request_url":"","branch":""}`, true},
+			{`{"merge_request_url":"https://git.example/mr/1","branch":"pending_approval"}`, false},
+			{`{"merge_request_url":"","branch":"pending_approval"}`, false},
+			{`{"merge_request_url":"pending_approval","branch":"pending_approval"}`, false},
+			{`{"merge_request_url":"https://git.example/mr/1","branch":"rejected"}`, false},
+			{`{"merge_request_url":"https://git.example/mr/1","branch":""}`, false},
+			{`{"merge_request_url":"","branch":"yuno/t1-endpoint"}`, false},
+			{`{"merge_request_url":"https://git.example/mr/1","branch":"the branch of the draft"}`, false},
+		} {
+			if got := validateOutput(s, json.RawMessage(tc.result)); (got == "") != tc.ok {
+				t.Errorf("%s: %s: %q, want valid %v", name, tc.result, got, tc.ok)
+			}
+		}
+		if got := validateOutput(s, json.RawMessage(`{"merge_request_url":"https://git.example/mr/1","branch":"pending_approval"}`)); !strings.Contains(got, "/branch") {
+			t.Errorf("%s: the refusal of a status does not name the branch: %q", name, got)
+		}
+	}
+}
+
+// P6: the manual test names the branch only when the draft merge request exists. When
+// opening it was rejected or its approval expired, the message says the draft is missing
+// and names no branch, and the ready step's task names none either.
+func TestWavePipelineManualTestWithoutADraft(t *testing.T) {
+	env := newEnv(t)
+	wf := templatePipeline(t, env, "wave_pipeline.json")
+	env.script(map[string][]string{
+		"builder": {builderOK}, "code_review": {reviewYes}, "integrator_draft": {`{"merge_request_url":"","branch":""}`},
+	})
+	r := env.triggerAndRun(TriggerRequest{WorkflowID: wf.ID, Input: json.RawMessage(waveTicket)})
+	if r.Status != store.RunWaitingApproval || deref(r.CurrentNode) != "manual_test" {
+		t.Fatalf("run = %s at %s %q", r.Status, deref(r.CurrentNode), deref(r.FailureReason))
+	}
+	a := pendingApproval(t, env, r.ID)
+	if !strings.Contains(a.Message, "The draft merge request is missing") || strings.Contains(a.Message, "Pull branch") ||
+		strings.Contains(a.Message, "pending_approval") {
+		t.Fatalf("manual_test message:\n%s", a.Message)
+	}
+
+	ready, _ := wavePipelineDef(t).Node("integrator_ready")
+	for state, want := range map[string]string{
+		`{"integrator_draft":{"merge_request_url":"","branch":""},"doc_audit":{"feature":"x","trace_path":"t.md"}}`:                                "the manual test the operator approved. ",
+		`{"integrator_draft":{"merge_request_url":"https://git.example/mr/1","branch":"yuno/t1"},"doc_audit":{"feature":"x","trace_path":"t.md"}}`: "the manual test the operator approved on branch yuno/t1. ",
+	} {
+		task, err := workflow.Render(ready.Task, json.RawMessage(waveTicket), json.RawMessage(state))
+		if err != nil || !strings.Contains(task, want) {
+			t.Fatalf("integrator_ready task for %s (%v):\n%s", state, err, task)
+		}
+	}
+}
+
 // DESIGN 5.29 rules 5 and 7: rejecting the manual test again and again is bounded by
 // max_loop_visits through the builder.
 func TestWavePipelineManualTestRejectionsAreBounded(t *testing.T) {

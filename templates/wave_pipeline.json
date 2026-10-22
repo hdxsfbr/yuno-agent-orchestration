@@ -66,17 +66,48 @@
           "type": "object",
           "properties": {
             "merge_request_url": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^(https?://\\S+)?$",
+              "description": "The url the tool returned; empty only when opening the draft merge request was rejected or its approval expired"
             },
             "branch": {
               "type": "string",
-              "minLength": 1
+              "pattern": "^\\S*$",
+              "not": {
+                "enum": [
+                  "pending_approval",
+                  "rejected",
+                  "expired"
+                ]
+              },
+              "description": "The branch the tool returned; empty only when opening the draft merge request was rejected or its approval expired"
             }
           },
           "required": [
             "merge_request_url",
             "branch"
           ],
+          "if": {
+            "properties": {
+              "merge_request_url": {
+                "const": ""
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "branch": {
+                "maxLength": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "branch": {
+                "minLength": 1
+              }
+            }
+          },
           "additionalProperties": true
         },
         "manual_test": {
@@ -214,26 +245,57 @@
           "type": "object",
           "properties": {
             "merge_request_url": {
-              "type": "string"
+              "type": "string",
+              "pattern": "^(https?://\\S+)?$",
+              "description": "The url the tool returned; empty only when opening the draft merge request was rejected or its approval expired"
             },
             "branch": {
               "type": "string",
-              "minLength": 1
+              "pattern": "^\\S*$",
+              "not": {
+                "enum": [
+                  "pending_approval",
+                  "rejected",
+                  "expired"
+                ]
+              },
+              "description": "The branch the tool returned; empty only when opening the draft merge request was rejected or its approval expired"
             }
           },
           "required": [
             "merge_request_url",
             "branch"
           ],
+          "if": {
+            "properties": {
+              "merge_request_url": {
+                "const": ""
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "branch": {
+                "maxLength": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "branch": {
+                "minLength": 1
+              }
+            }
+          },
           "additionalProperties": true
         },
-        "task": "Open the merge request for this ticket as a draft, with the code, using the open_merge_request tool with draft true:\n\n{{.input.task}}\n\nTitle from the ticket; description with the builder's summary ({{.state.builder.summary}}) and a last line \"How it was checked:\" with the results of the earlier steps (builder's whole suite passed: {{.state.builder.tests_passed}}; code reviewer's verdict: {{.state.code_review.verdict}}). It stays a draft: the operator tests the branch by hand next, and the plan documents are added after that. If the run already has a merge request (the operator sent the work back), the tool pushes the new work onto it. If the tool result says pending_approval, end your turn without finishing: the platform resumes you with the outcome. If the action was rejected or its approval expired, finish with empty merge_request_url and branch. Finish with the merge_request_url and the branch the tool returned."
+        "task": "Open the merge request for this ticket as a draft, with the code, using the open_merge_request tool with draft true:\n\n{{.input.task}}\n\nTitle from the ticket; description with the builder's summary ({{.state.builder.summary}}) and a last line \"How it was checked:\" with the results of the earlier steps (builder's whole suite passed: {{.state.builder.tests_passed}}; code reviewer's verdict: {{.state.code_review.verdict}}). It stays a draft: the operator tests the branch by hand next, and the plan documents are added after that. If the run already has a merge request (the operator sent the work back), the tool pushes the new work onto it. If the tool result says pending_approval, end your turn without finishing: the platform resumes you with the outcome. If the action was rejected or its approval expired, finish with empty merge_request_url and branch. Finish with the merge_request_url and the branch the tool returned, never a status such as pending_approval in their place."
       },
       {
         "id": "manual_test",
         "kind": "approval",
         "on_reject": "builder",
-        "message": "Pull branch {{.state.integrator_draft.branch}} and run the CI tasks locally (the project's build, lint and test commands), then try the change by hand. Draft merge request: {{.state.integrator_draft.merge_request_url}}\nApprove when it works. Reject with the bugs you found: they go back to the Builder."
+        "message": "{{$draft := .state.integrator_draft}}{{if and $draft $draft.branch $draft.merge_request_url}}Pull branch {{$draft.branch}} and run the CI tasks locally (the project's build, lint and test commands), then try the change by hand. Draft merge request: {{$draft.merge_request_url}}\nApprove when it works. Reject with the bugs you found: they go back to the Builder.{{else}}The draft merge request is missing: opening it was rejected or its approval expired, so there is no branch to test. Reject this step to send the ticket back to the Builder; the draft merge request is then opened again for your approval.{{end}}"
       },
       {
         "id": "doc_audit",
@@ -296,7 +358,7 @@
           ],
           "additionalProperties": true
         },
-        "task": "Mark the merge request of this ticket ready for review, with the code and the updated documents together, using the open_merge_request tool with draft false and paths [\"docs/plans/{{.state.doc_audit.feature}}\"] (the plan documents of the feature, and nothing else):\n\n{{.input.task}}\n\nKeep the title from the ticket; description with the builder's summary ({{.state.builder.summary}}), the requirements traced by the audit (trace file {{.state.doc_audit.trace_path}}), the manual test the operator approved on branch {{.state.integrator_draft.branch}} and a last line \"How it was checked:\" with the results of the earlier steps (builder's whole suite passed: {{.state.builder.tests_passed}}; code reviewer's verdict: {{.state.code_review.verdict}}; the operator's manual test, approved). The call pushes those documents onto the draft's branch and marks it ready; the code is already on the branch. If the tool result says pending_approval, end your turn without finishing: the platform resumes you with the outcome. If the action was rejected or its approval expired, finish with an empty merge_request_url. Finish with the merge_request_url the tool returned."
+        "task": "Mark the merge request of this ticket ready for review, with the code and the updated documents together, using the open_merge_request tool with draft false and paths [\"docs/plans/{{.state.doc_audit.feature}}\"] (the plan documents of the feature, and nothing else):\n\n{{.input.task}}\n\nKeep the title from the ticket; description with the builder's summary ({{.state.builder.summary}}), the requirements traced by the audit (trace file {{.state.doc_audit.trace_path}}) and the manual test the operator approved{{with .state.integrator_draft}}{{if .branch}} on branch {{.branch}}{{end}}{{end}}. End the description with a last line \"How it was checked:\" with the results of the earlier steps (builder's whole suite passed: {{.state.builder.tests_passed}}; code reviewer's verdict: {{.state.code_review.verdict}}; the operator's manual test, approved). The call pushes those documents onto the draft's branch and marks it ready; the code is already on the branch. If the tool result says pending_approval, end your turn without finishing: the platform resumes you with the outcome. If the action was rejected or its approval expired, finish with an empty merge_request_url. Finish with the merge_request_url the tool returned."
       },
       {
         "id": "end",

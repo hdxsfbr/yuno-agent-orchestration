@@ -42,6 +42,9 @@ type MergeRequestConfig struct {
 	APIBase  string
 	RepoPath string
 	Client   *http.Client
+	// Sleep waits between the looks for a pushed branch (create); nil is a real,
+	// cancellable wait.
+	Sleep func(ctx context.Context, d time.Duration) error
 }
 
 // The title is capped at 72 characters, a commit subject (DESIGN 5.17 rule 11).
@@ -241,7 +244,7 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 	if open != nil {
 		out.Number, out.URL, out.Replayed = open.Number, open.URL, true
 	} else {
-		ref, err := provider.Create(ctx, branch, pc.DefaultBranch, in.Title, withIssueCloses(in.Description, run), draft)
+		ref, err := m.create(ctx, pc, provider, branch, in.Title, withIssueCloses(in.Description, run), draft)
 		if err != nil {
 			return Result{}, err
 		}
@@ -253,6 +256,83 @@ func (m *mergeRequest) run(ctx context.Context, call Call, pc *project.Config, p
 		}
 	}
 	return JSONResult(out), nil
+}
+
+// branchLooks is how many times create looks for the pushed branch on the provider before
+// it gives up; the waits between the looks are Backoff's 1, 2, 4 and 8 s.
+const branchLooks = 5
+
+// create opens the request for a branch the call pushed (or found pushed) once the
+// provider shows that branch (DESIGN 5.16 rule 10). A push that git reports done can still
+// be missing from the provider's API for a moment: GitLab refreshes the branch list that
+// its merge request API checks after the push rather than with it, and answers a create in
+// between with HTTP 400 "source_branch does not exist". So the branch is looked up through
+// the API first, and a create refused for a missing source branch is tried again after the
+// next wait. A branch the provider still does not show is a model error that names it, with
+// nothing opened; the call's key is then free, and the same call again finds the branch
+// and does not push it twice.
+func (m *mergeRequest) create(ctx context.Context, pc *project.Config, provider RequestProvider, branch, title, description string, draft bool) (*RequestRef, error) {
+	for n := 1; ; n++ {
+		exists, err := provider.BranchExists(ctx, branch)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			ref, err := provider.Create(ctx, branch, pc.DefaultBranch, title, description, draft)
+			if !missingSourceBranch(err) {
+				return ref, err
+			}
+		}
+		if n >= branchLooks {
+			return nil, &ModelError{Message: fmt.Sprintf("the branch %s was pushed, but %s does not show it, so no %s was opened. "+
+				"Call open_merge_request again with the same input; if it fails the same way, tell the operator that %s does not show "+
+				"the branches pushed to the project's repository", branch, providerName(pc), pc.RequestName(), providerName(pc))}
+		}
+		if err := m.sleep(ctx, Backoff(n)); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// missingSourceBranch reports whether a create was refused because the provider does not
+// know the source branch: GitLab's 400 (or 422) naming source_branch with "does not
+// exist", GitHub's 422 whose errors name the head field as invalid.
+func missingSourceBranch(err error) bool {
+	var se *errAPIStatus
+	if !errors.As(err, &se) {
+		return false
+	}
+	switch se.status {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity:
+	default:
+		return false
+	}
+	text := strings.ToLower(se.plain)
+	gitlab := (strings.Contains(text, "source_branch") || strings.Contains(text, "source branch")) && strings.Contains(text, "does not exist")
+	github := strings.Contains(text, `"field":"head"`) && strings.Contains(text, `"code":"invalid"`)
+	return gitlab || github
+}
+
+// providerName is the provider as the texts the model and the operator read name it.
+func providerName(pc *project.Config) string {
+	if pc.Provider == project.ProviderGitHub {
+		return "GitHub"
+	}
+	return "GitLab"
+}
+
+func (m *mergeRequest) sleep(ctx context.Context, d time.Duration) error {
+	if m.cfg.Sleep != nil {
+		return m.cfg.Sleep(ctx, d)
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // cleanPaths validates the paths of a call (pathcheck.Valid), cleans them to slash form
