@@ -298,7 +298,7 @@ func TestProjectCloneFailureFailsTheRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := env.resume(env.e, run.ID)
-	if r.Status != store.RunFailed || !strings.HasPrefix(deref(r.FailureReason), "project clone: git clone") {
+	if r.Status != store.RunFailed || !strings.HasPrefix(deref(r.FailureReason), "project clone: git fetch: fatal: couldn't find remote ref refs/heads/release") {
 		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
 	}
 	if strings.Contains(deref(r.FailureReason), testProjectToken) {

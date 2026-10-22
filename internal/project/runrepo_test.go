@@ -15,31 +15,39 @@ import (
 const runRepoRunID = "0199f0a2-0000-7000-8000-0000000000aa"
 
 // runRepoFixture is a project whose remote is a local bare repository reached over
-// file:// (so the clone is shallow at depth 1, as over https), a state directory, and the
-// first step's clone in its workspace with the run repository holding its commit.
+// file:// (so fetches are shallow, as over https), a state directory, and the first step's
+// checkout in its workspace, built from the run repository after the fetch of the project.
 type runRepoFixture struct {
 	cfg     Config
+	bare    string
 	state   string
 	runRepo string
 	base    string
+	fetched Fetched
 }
 
 func newRunRepoFixture(t *testing.T, files map[string]string) *runRepoFixture {
 	t.Helper()
-	bare := projecttest.BareRepo(t, files)
+	return newRunRepoFixtureOn(t, projecttest.BareRepo(t, files), "main")
+}
+
+// newRunRepoFixtureOn is newRunRepoFixture for a bare repository made already, the first
+// step's checkout on branch.
+func newRunRepoFixtureOn(t *testing.T, bare, branch string) *runRepoFixture {
+	t.Helper()
 	f := &runRepoFixture{cfg: Config{RepoURL: "file://" + bare, Token: "glpat-not-a-real-token-0", DefaultBranch: "main", Provider: ProviderGitLab},
-		state: t.TempDir()}
+		bare: bare, state: t.TempDir()}
 	f.runRepo = RunRepoPath(f.state, runRepoRunID)
 	ctx := context.Background()
 	repo := f.checkoutPath("ws1")
 	must(t, os.MkdirAll(filepath.Dir(repo), 0o755))
-	must(t, f.cfg.Clone(ctx, repo))
+	must(t, InitRunRepo(ctx, f.runRepo))
 	var err error
-	if f.base, err = f.cfg.HeadSHA(ctx, repo); err != nil {
+	if f.fetched, err = f.cfg.FetchRun(ctx, f.runRepo, "visit-1", branch); err != nil {
 		t.Fatal(err)
 	}
-	must(t, InitRunRepo(ctx, f.runRepo))
-	must(t, SaveRunBase(ctx, f.runRepo, repo, BaseRef("visit-1")))
+	f.base = f.fetched.Base
+	must(t, f.cfg.CheckoutRun(ctx, f.runRepo, f.base, repo, branch))
 	return f
 }
 

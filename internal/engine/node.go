@@ -98,6 +98,9 @@ type visit struct {
 	// mergeRequest is the record the run names and updates (DESIGN 5.22 rule 1), read once
 	// in prepareProject: nil for a run that names none.
 	mergeRequest *store.MergeRequest
+	// conflicts are the files of the checkout that hold conflict markers from the merge of
+	// the default branch into the request's branch (DESIGN 5.22 rule 13), for the task.
+	conflicts []string
 
 	events <-chan openclaw.Event
 	unsub  func()
@@ -472,11 +475,13 @@ type carrySource struct {
 	skipRepo  bool
 }
 
-// prepareProject clones the project repository into this visit's run directory when
-// the run has none yet (DESIGN 5.16 rule 3), or builds the checkout from the run
-// repository commit the carry rules named (5.30 rule 4), reads the toolchain from the
-// checkout and selects the agent's sandbox for the visit (rule 7). A failure ends the
-// visit, and the run, before any turn starts.
+// prepareProject clones the project repository when the run has no checkout yet (DESIGN
+// 5.16 rule 3): its branch and default branch are fetched with history into the run
+// repository and this visit's checkout is built from it (5.30 rules 4 and 10), with the
+// default branch merged in for a run on a merge request (5.22 rule 13). A later visit's
+// checkout is built from the run repository commit the carry rules named. It then reads the
+// toolchain from the checkout and selects the agent's sandbox for the visit (rule 7). A
+// failure ends the visit, and the run, before any turn starts.
 func (v *visit) prepareProject(ctx context.Context) *outcome {
 	e := v.e
 	if e.deps.StateDir == "" {
@@ -510,9 +515,22 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 		branch = v.mergeRequest.SourceBranch
 	}
 	if v.run.Toolchain == nil {
-		cctx, done := v.boundedContext(ctx, project.GitTimeout)
+		// The project's branch, and its default branch, are fetched with history into the run
+		// repository, where every step's checkout comes from (DESIGN 5.30 rules 4 and 10); the
+		// first step's checkout is built from it like a later one's.
 		start := e.clock.Now()
-		sha, err := cloneInto(cctx, *v.project, ws, v.run.ID, branch)
+		cctx, done := v.boundedContext(ctx, project.GitTimeout)
+		err := project.InitRunRepo(cctx, runRepo)
+		done()
+		if err != nil {
+			if ctx.Err() != nil {
+				return &outcome{interrupted: true}
+			}
+			o := failed(store.RunFailed, "run repository: "+err.Error())
+			return &o
+		}
+		cctx, done = v.boundedContext(ctx, project.GitTimeout)
+		fetched, err := v.project.FetchRun(cctx, runRepo, v.rn.ID, branch)
 		done()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -524,13 +542,9 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 			o := failed(store.RunFailed, "project clone: "+err.Error())
 			return &o
 		}
-		// The clone's commit goes into the run repository, where the later steps' checkouts
-		// come from (DESIGN 5.30 rule 4); no turn has run in the clone yet.
+		sha := fetched.Base
 		cctx, done = v.boundedContext(ctx, project.GitTimeout)
-		err = project.InitRunRepo(cctx, runRepo)
-		if err == nil {
-			err = project.SaveRunBase(cctx, runRepo, repo, project.BaseRef(v.rn.ID))
-		}
+		err = checkoutInto(cctx, *v.project, ws, v.run.ID, runRepo, sha, branch)
 		done()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -541,6 +555,29 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 		}
 		v.startSHA, v.checkout = sha, true
 		v.setRepoSHA(ctx, sha)
+		// A run on a merge request starts from its branch with the default branch merged in
+		// (DESIGN 5.22 rule 13); the agents resolve what conflicts.
+		var merged project.PreMerge
+		if v.mergeRequest != nil {
+			cctx, done = v.boundedContext(ctx, project.GitTimeout)
+			merged, err = v.project.MergeDefault(cctx, repo, runRepo, v.rn.ID, fetched)
+			done()
+			switch {
+			case errors.Is(err, project.ErrNoMergeBase):
+				e.logEvent(ctx, v.run.ID, "warn", fmt.Sprintf("%s was not merged into %s: %v", v.project.DefaultBranch, branch, err))
+			case err != nil:
+				if ctx.Err() != nil {
+					return &outcome{interrupted: true}
+				}
+				o := failed(store.RunFailed, "project merge: "+err.Error())
+				return &o
+			}
+			if merged.Commit != "" {
+				v.startSHA = merged.Commit
+				v.setRepoSHA(ctx, merged.Commit)
+			}
+			v.conflicts = merged.Conflicts
+		}
 		tc := project.Detect(repo)
 		end := e.clock.Now()
 		attrs := map[string]any{"repo": v.project.RepoURL, "branch": branch, "toolchain": tc.Name, "duration_ms": end.Sub(start).Milliseconds()}
@@ -554,6 +591,12 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 			o := failed(store.RunFailed, "record checkout sha: "+err.Error())
 			return &o
 		}
+		if merged.Merged != "" {
+			if err := store.SetRunMergedSHA(context.WithoutCancel(ctx), e.deps.Pool, v.run.ID, merged.Merged); err != nil {
+				o := failed(store.RunFailed, "record merged sha: "+err.Error())
+				return &o
+			}
+		}
 		if err := store.SetRunToolchain(context.WithoutCancel(ctx), e.deps.Pool, v.run.ID, tc.Name); err != nil {
 			o := failed(store.RunFailed, "record toolchain: "+err.Error())
 			return &o
@@ -563,6 +606,12 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 		v.refreshRun(ctx)
 		e.emit(ctx, v.run.ID, "run.status", map[string]any{"run": v.run})
 		e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("project repository cloned: %s (%s), toolchain %s", v.project.RepoURL, branch, tc.Name))
+		switch {
+		case len(merged.Conflicts) > 0:
+			e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("merged %s into %s: conflicts in %s", v.project.DefaultBranch, branch, strings.Join(merged.Conflicts, ", ")))
+		case merged.Merged != "":
+			e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("merged %s into %s: no conflicts", v.project.DefaultBranch, branch))
+		}
 	} else if v.startSHA != "" {
 		// A later step: its checkout is the commit the earlier steps left (DESIGN 5.30 rule 4).
 		cctx, done := v.boundedContext(ctx, project.GitTimeout)
@@ -579,6 +628,16 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 			return &o
 		}
 		v.checkout = true
+		if v.run.MergedSHA != nil {
+			// The merge of 5.22 rule 13 is not pushed yet: say which files still need resolving.
+			cctx, done = v.boundedContext(ctx, project.GitTimeout)
+			conflicts, err := project.ConflictMarkers(cctx, runRepo, v.startSHA)
+			done()
+			if err != nil {
+				v.log.Warn("look for conflict markers failed", "error", err)
+			}
+			v.conflicts = conflicts
+		}
 	}
 	v.toolchain = project.Detect(repo)
 	if v.toolchain.Name != *v.run.Toolchain {
@@ -610,22 +669,9 @@ func (v *visit) boundedContext(ctx context.Context, d time.Duration) (context.Co
 	}
 }
 
-// cloneInto clones branch of the project into runs/<run id>/repo of a workspace and
-// returns the commit the checkout is at (DESIGN 5.22 rule 2: the project's default branch,
-// or the source branch of the merge request the run updates).
-func cloneInto(ctx context.Context, pc project.Config, ws, runID, branch string) (string, error) {
-	dest, err := checkoutDest(ws, runID)
-	if err != nil {
-		return "", err
-	}
-	if err := pc.CloneBranch(ctx, dest, branch); err != nil {
-		return "", err
-	}
-	return pc.HeadSHA(ctx, dest)
-}
-
 // checkoutInto builds the checkout in runs/<run id>/repo of a workspace from commit of the
-// run repository, on branch (DESIGN 5.30 rule 4).
+// run repository, on branch (DESIGN 5.30 rules 4 and 10: the project's default branch, or
+// the source branch of the merge request the run updates, 5.22 rule 2).
 func checkoutInto(ctx context.Context, pc project.Config, ws, runID, runRepo, commit, branch string) error {
 	if _, err := os.Stat(runRepo); errors.Is(err, fs.ErrNotExist) {
 		return errors.New("the run's repository is gone (a run that did not succeed keeps it seven days)")
@@ -755,7 +801,7 @@ func (v *visit) taskMessageWith(x project.Extras) string {
 		if v.mergeRequest != nil {
 			// After the repository line, before the sandbox network line.
 			first, rest, _ := strings.Cut(text, "\n")
-			text = first + "\n" + mergeRequestParagraph(v.mergeRequest) + rest
+			text = first + "\n" + mergeRequestParagraph(v.mergeRequest) + v.mergeParagraph() + rest
 		}
 		sb.WriteString(text)
 	}
@@ -778,6 +824,23 @@ func mergeRequestParagraph(mr *store.MergeRequest) string {
 	return "Merge request: this run updates " + mr.Label() + " (" + mr.URL + "), whose branch " + mr.SourceBranch +
 		" is the checkout. Read it first with read_merge_request when you have that tool and address its unresolved threads; " +
 		"the platform pushes your working tree onto that branch as a new commit when open_merge_request is called.\n"
+}
+
+// mergeParagraph is the paragraph of DESIGN 5.22 rule 13 for a run whose checkout has the
+// default branch merged in and not pushed yet: the files that still hold conflict markers,
+// when there are any. Empty for a run with no such merge.
+func (v *visit) mergeParagraph() string {
+	if v.run.MergedSHA == nil || v.project == nil {
+		return ""
+	}
+	def, branch := v.project.DefaultBranch, v.mergeRequest.SourceBranch
+	if len(v.conflicts) == 0 {
+		return "Merge: the platform merged origin/" + def + " into " + branch + " in the checkout before the run's first step; " +
+			"open_merge_request pushes it as a merge commit with your changes.\n"
+	}
+	return "Merge: the platform merged origin/" + def + " into " + branch + " in the checkout before the run's first step, and these " +
+		"files have conflicts: " + strings.Join(v.conflicts, ", ") + ". Resolve the conflict markers in each of them first, keeping " +
+		"what both sides meant; open_merge_request pushes the result as a merge commit and refuses while a marker is left.\n"
 }
 
 // remaining is the time left before the run's deadline.

@@ -1244,7 +1244,11 @@ Rules:
    of 5.6 rule 13, which carries the checkout (its `.git` included) to each later agent.
    Since 5.22 a run that names a merge request (`runs.merge_request_id`) clones the
    record's source branch instead of the default one, and every project run records the
-   clone's `HEAD` as `runs.checkout_sha` (5.22 rule 2).
+   clone's `HEAD` as `runs.checkout_sha` (5.22 rule 2). Since D-088 the clone is the fetch
+   of 5.30 rule 10: the branch, and the default branch when it is another one, go into the
+   run repository with history, the checkout is built from there with no credential, and
+   a run on a merge request starts with the default branch merged in (5.22 rule 13). A
+   clone failure is then `project clone: git fetch: <redacted git error>`.
 4. **The token never leaves the api.** The api's own git processes receive it as an
    `http.extraheader` configuration entry passed through `GIT_CONFIG_COUNT`/`KEY`/`VALUE`
    environment variables (`Authorization: Basic base64(<user>:<token>)`, user `oauth2`
@@ -2312,6 +2316,9 @@ Rules:
    error>` before any turn, as any clone failure does. After the clone the engine
    records the checkout's `HEAD` as `runs.checkout_sha` (every project run, named request
    or not: `git rev-parse HEAD` in the fresh clone), the base rule 4 compares against.
+   Since D-088 the clone is the fetch of 5.30 rule 10 (the source branch and the default
+   branch, with history, into the run repository; `checkout_sha` is the source branch's
+   commit it fetched), followed by the merge of rule 13.
 3. **Between the queue and the clone** the record may turn merged or closed (a sync, a
    merge on the provider). The clone proceeds (D-044: refused at queue time only): the
    branch usually still exists, and when the provider deleted it the clone fails as rule
@@ -2346,7 +2353,9 @@ Rules:
    to `checkout_sha`; on a guarded push the branch is at the base, so that commit is the
    pushed one, as before. D-087 keeps this guard rather than merging per path: a commit
    on the request's branch that this run did not make is a person working on the same
-   request, and the operator decides.
+   request, and the operator decides. Since D-088 a run whose checkout has the default
+   branch merged in (rule 13, `runs.merged_sha`) pushes its commit with that default
+   branch commit as a second parent, a real merge, and the push clears `merged_sha`.
 5. **Agents are told through the task protocol block** (5.16 rule 9 amended). A visit of
    a run with `merge_request_id` gets, after the `Project repository:` line, whose
    `branch` names the source branch:
@@ -2359,7 +2368,8 @@ Rules:
    ```
 
    One paragraph, two sentences, before the sandbox network line; a run without a named
-   request gets no such lines.
+   request gets no such lines. Since D-088 the `Merge:` paragraph of rule 13 follows it
+   while the run has a merge to push.
 6. **`read_merge_request`**, a platform tool (5.7 table): risk `read_only`, hits
    `external`, timeout 15 s, `Untrusted` output, chat-capable (5.15 rule 2 amended:
    `ChatToolNames` gains it, so the seeded Chief of Staff carries it); registered always
@@ -2473,6 +2483,46 @@ Rules:
     it plus the count of runs that updated it, linking to the runs list filtered by
     `merge_request_id`. The runs list shows `!12` after the project name for a run that
     names a request. No developer commentary in product copy.
+13. **The default branch is merged in before the first turn** (D-088, Andre 2026-10-21:
+    "Runs updating an MR cannot see the target branch, so agents cannot resolve
+    conflicts"). The run's first step fetches the source branch and the default branch
+    with history into the run repository (5.30 rule 10), so the checkout has
+    `origin/<default branch>` with the history down to the two branches' merge base,
+    and no credential. Before the first turn the platform merges `origin/<default
+    branch>` into the source branch in that fresh checkout (`git merge --no-ff`, as
+    Yuno, no hooks):
+    - the branch has the default branch's commit already: nothing is merged;
+    - clean: the checkout is at the merge commit, which the run repository records as
+      `refs/merges/<visit>`, so later steps' checkouts start from it and show only what
+      the agents changed since; log line `merged <default> into <branch>: no conflicts`;
+    - conflict: the checkout is left mid-merge with the conflict markers in the files,
+      log line `merged <default> into <branch>: conflicts in <files>`;
+    - no merge base within 2000 commits of either branch: nothing is merged, warn line
+      `<default> was not merged into <branch>: ...`; any other merge failure fails the run
+      before any turn with `project merge: <error>`.
+    When something was merged the run records that default branch commit as
+    `runs.merged_sha` (the source branch's commit stays `checkout_sha`), and each visit
+    gets, after the `Merge request:` paragraph:
+
+    ```
+    Merge: the platform merged origin/<default> into <branch> in the checkout before the
+    run's first step; open_merge_request pushes it as a merge commit with your changes.
+    ```
+    or, while files the run changed hold conflict markers (the merge's own list for the
+    first step; later steps look for marker lines in the files their commit changed since
+    the clone, in the run repository): `Merge: the platform merged origin/<default> into
+    <branch> in the checkout before the run's first step, and these files have conflicts:
+    <files>. Resolve the conflict markers in each of them first, keeping what both sides
+    meant; open_merge_request pushes the result as a merge commit and refuses while a
+    marker is left.` The push (rule 4, 5.16 rule 10) makes the run's commit a merge of
+    the source branch and `merged_sha`, so the provider sees the conflict resolved and
+    the request merges into the default branch cleanly; it answers `these files still
+    have conflict markers: <files>. Resolve them, then propose again; nothing was pushed`
+    while a changed file holds a marker line, and refuses `paths` while the merge is
+    pending (the merge goes with the whole tree). The run's `diff.patch` (5.25) is against
+    `checkout_sha`, so it shows what the merge brought too. The agents can read
+    `origin/<default branch>` and its history (`git log`, `git diff`); they cannot fetch
+    or push, and the platform's merge is the one the push carries.
 
 As built (wave 9): the queue-time check is `engine.MergeRequestForRequest`, skipped when
 the project check already failed (so `the workflow does not use a project` is not repeated
@@ -2562,7 +2612,8 @@ Tests: T5.22.1 queue-time checks, one case per text of rule 1 in order (no proje
 unknown id, another project, merged, closed, named by a live run, the opening run live),
 and the happy path writing `runs.merge_request_id`; the retry refusal through the index.
 T5.22.2 engine, with the local bare repository: a run naming a request clones the source
-branch (the branch's file is there, the default branch's later commit is not), records
+branch (the branch's file is there; since rule 13 the default branch's later commit is
+merged in, with `merged_sha` recorded), records
 the branch and the number on the span and `checkout_sha` equal to the branch head; a
 deleted branch fails the run with `project clone:`. T5.22.3 the protocol paragraph on a
 named-request visit and its absence otherwise. T5.22.4 `open_merge_request` on a
@@ -2592,10 +2643,21 @@ chat-capable. T5.22.12 seed and reset carry the prompt texts and the allowlists;
 template's deployer task names both statuses. T5.22.13 UI: the selector in both run
 dialogs and the schedule form (absent without a project, "None" by default, open records
 only), the header line, the card line, the Runs column, the `!12` in the runs list.
+T5.22.14 (rule 13, against a local bare repository): a request whose branch and main
+changed the same file; the first step's checkout has `origin/main` with history, main
+merged in and the markers in the file, and its task names the file; the agent's edit
+reaches the next step, whose task says the merge is pending without conflicts;
+`open_merge_request` pushes a merge commit of the branch and main, the branch then merges
+into main without a conflict, and `merged_sha` is cleared; the push refuses a file with
+markers left and refuses `paths`; a clean merge starts later checkouts from the merge
+commit; a branch ahead of main merges nothing; no merge base within the limit merges
+nothing; markers in a file the run did not change are not reported. T5.22.15 the tool,
+through the executor: a pending merge is pushed as a merge commit and clears `merged_sha`.
 
 Out of scope: resolving threads on the provider after a fix (the reviewer does it),
-replying to individual threads, rebasing onto a moved default branch or merging the
-branch that moved (D-050: refuse), picking a request another run is updating (refused),
+replying to individual threads, rebasing onto a moved default branch, merging a request's
+branch that moved (D-050: refuse; the default branch is merged in at the start, rule 13,
+D-088), resolving a conflict on the platform's side, picking a request another run is updating (refused),
 reading a request of a project the caller did not name, more than one request per run,
 a record for the updating run (the request stays the opening run's), webhooks.
 
@@ -4404,8 +4466,9 @@ Rules:
    today (`MEMORY.md`, which OpenClaw does not copy, and any other per-visit file).
 4. **The run repository.** A project run has a bare repository
    `<state>/yuno-runs/<run id>.git`, owned by the platform. The first step that needs the
-   checkout gets it as today (a clone of the project with the token, or of the merge
-   request's branch, 5.22). When a visit ends, whatever its outcome, the platform commits
+   checkout fetches the project's branch (the default one, or the merge request's, 5.22)
+   into it with the token and history (rule 10) and gets its checkout built from there,
+   like a later step's. When a visit ends, whatever its outcome, the platform commits
    the checkout's changes (the `Excluded` directories left out) as `<node> visit <n>` and
    records the commit as `refs/visits/<visit id>` and on `run_nodes.repo_sha`. A later
    visit's checkout is a clone of the commit the carry rules name: the `repo_sha` of the
@@ -4433,6 +4496,19 @@ Rules:
    pushes. The first step clones the default branch (or the request's branch, 5.22) when
    it starts, not when the run is queued; later steps and retries never clone again, and
    a branch that moved meanwhile is handled when the run pushes.
+10. **History in every checkout** (D-088). The first step's fetch (rule 4) takes the run's
+    branch and, when it is not the default branch, the default branch too, 100 commits
+    deep, into the run repository as `refs/bases/<visit>` and `refs/defaults/<visit>`;
+    for two branches it deepens 100 commits at a time, by commit id so the recorded
+    commits stay put, until their merge base is in it or 2000 commits are, or the history
+    is complete. The token goes to these fetches alone, through the environment (5.16 rule
+    4); no credential is written anywhere, and none reaches the sandbox: the agent cannot
+    fetch or push. Every checkout built from the run repository, the first included, gets
+    its branch's history, `origin/<branch>` at the commit the run cloned and
+    `origin/<default branch>` at the default branch's commit with its history (the merge
+    of 5.22 rule 13 uses it), so Scout and other steps can read `git log` and `git diff`
+    against either. Fetches into one run repository are serialized, so two fork heads
+    that clone at once do not race for its shallow file.
 
 Edge cases: two runs of the same agent at once (different session keys, so different
 workspaces); a fork's branches (each branch's visits start from their own carry
@@ -4456,7 +4532,10 @@ T5.30.9 a succeeded project run leaves only what the collector kept, its `out/` 
 the state directory (`TestSucceededRunLeavesOnlyItsArtifacts`), and stored artifacts are
 copies that outlive the workspace (`TestStoredArtifactsOutliveTheWorkspace`); T5.30.10 the
 base and Python sandbox Dockerfiles install `libgomp1` (`TestSandboxImagesInstallLibgomp`); T5.30.11 a commit main gains after the run is queued
-is in the first step's checkout and is the run's `checkout_sha` (rule 9).
+is in the first step's checkout and is the run's `checkout_sha` (rule 9); T5.30.12 the
+fetch deepens until a request's branch and main share history, every checkout built from
+the run repository has `origin/main` with history and no credential, and a run on main
+gets main's history (rule 10).
 
 Limitations: the path rule is OpenClaw's internal behaviour, pinned by a test, not an API;
 on an OpenClaw upgrade the probe in `docs/test-results.md` is repeated.

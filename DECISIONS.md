@@ -6,6 +6,25 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-21
 
+**D-088 A run's checkout has the default branch's history, and a run on a merge request
+starts with the default branch merged in.** (Andre, 2026-10-21: "Runs updating an MR cannot
+see the target branch, so agents cannot resolve conflicts.") Seen live: a Builder asked to
+resolve the conflicts on !9 had a shallow clone of the request's branch with one commit, and
+`git fetch origin main` failed for want of credentials; a Scout could not read history
+either. The first step now fetches the run's branch and the default branch into the run
+repository with the token, 100 commits deep and deeper until the two share history (at most
+2000), and every checkout is built from there with `origin/<default branch>` and the
+history, and no credential. For a run on a merge request the platform merges
+`origin/<default branch>` into the request's branch in that fresh checkout before the first
+turn: a clean merge is the checkout's start; a conflict leaves the markers, and the task
+names the files to resolve. The run records the merged commit, and its push makes it the
+second parent of the run's commit, so the request's branch gets a real merge the provider
+sees as resolving the conflict (a plain tree commit could still conflict); the push refuses
+while a changed file holds a marker, and refuses `paths` while the merge is pending.
+Alternatives rejected: a read-only credential helper in the sandbox (the token must stay on
+the platform side, D-037); the agent running the merge itself (it could not fetch, and the
+platform would not know the merge's parent). Design: DESIGN 5.22 rule 13, 5.30 rule 10.
+
 **D-086 A merge request merged before the run's last push gets a follow-up, not an error.**
 (Andre, 2026-10-21: "keep the MR as a draft ... until the run's final push is done, and say
 so in the MR. If the MR was merged anyway, automatically open a small follow-up MR with the

@@ -359,10 +359,11 @@ func cloneSpanAttrs(t *testing.T, env *testEnv, runID string) map[string]any {
 	return attrs
 }
 
-// T5.22.2, DESIGN 5.22 rule 2: a run that names a request clones the request's source
-// branch (its file is there, the default branch's later commit is not), the span and the
-// log line name the branch and the number, and checkout_sha is the branch head. A run that
-// names none keeps the default branch and records its head too (every project run).
+// T5.22.2, DESIGN 5.22 rules 2 and 13: a run that names a request clones the request's
+// source branch (its file is there) and merges the default branch into it before the first
+// turn (main's later commit is there too, and the run records it as merged_sha), the span
+// and the log lines name the branch and the number, and checkout_sha is the branch head. A
+// run that names none keeps the default branch and records its head too (every project run).
 func TestIterationRule2CloneChecksOutTheRequestBranch(t *testing.T) {
 	f := newIterFixture(t)
 	env, ctx := f.env, context.Background()
@@ -380,11 +381,15 @@ func TestIterationRule2CloneChecksOutTheRequestBranch(t *testing.T) {
 	if r.Status != store.RunSucceeded {
 		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
 	}
-	if seen.feature != "the branch's work\n" || seen.later != "" || seen.readme != "# demo\n" {
-		t.Fatalf("the clone at the first turn: %+v, want the branch's file and not main's later commit", seen)
+	if seen.feature != "the branch's work\n" || seen.later != "main moved on\n" || seen.readme != "# demo\n" {
+		t.Fatalf("the clone at the first turn: %+v, want the branch's file with main's later commit merged in", seen)
 	}
-	if r.CheckoutSHA == nil || *r.CheckoutSHA != branchHead {
-		t.Fatalf("checkout_sha = %v, want the branch head %s", r.CheckoutSHA, branchHead)
+	if r.CheckoutSHA == nil || *r.CheckoutSHA != branchHead || r.MergedSHA == nil || *r.MergedSHA != mainHead {
+		t.Fatalf("checkout_sha = %v (want the branch head %s), merged_sha = %v (want main's head %s)", r.CheckoutSHA, branchHead, r.MergedSHA, mainHead)
+	}
+	if n := env.count(`SELECT count(*) FROM run_events WHERE run_id=$1 AND event='log' AND data::text LIKE $2`, run.ID,
+		"%merged main into "+iterBranch+": no conflicts%"); n != 1 {
+		t.Fatalf("merge log lines = %d", n)
 	}
 	if r.MergeRequestID == nil || *r.MergeRequestID != f.rec.ID || r.Toolchain == nil || *r.Toolchain != "go" {
 		t.Fatalf("run = %v toolchain %v", r.MergeRequestID, r.Toolchain)
@@ -577,7 +582,7 @@ func TestIterationRule3StateChangeAfterQueueingStillClones(t *testing.T) {
 		}
 		f.setState(state)
 		r, seen := runSeeing(t, env, run.ID)
-		if r.Status != store.RunSucceeded || seen.feature != "the branch's work\n" || seen.later != "" {
+		if r.Status != store.RunSucceeded || seen.feature != "the branch's work\n" || seen.later != "main moved on\n" {
 			t.Fatalf("%s after queueing: run = %s %q, clone %+v", state, r.Status, deref(r.FailureReason), seen)
 		}
 		if head := projecttest.Git(t, f.bare, "rev-parse", iterBranch); r.CheckoutSHA == nil || *r.CheckoutSHA != head {

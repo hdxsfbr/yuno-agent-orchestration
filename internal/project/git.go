@@ -127,8 +127,9 @@ func (c Config) Clone(ctx context.Context, dest string) error {
 }
 
 // CloneBranch is Clone for any branch of the repository: still one branch at depth 1
-// (--single-branch), with the token handled as in rule 4. A run that updates a merge
-// request clones the request's source branch with it (DESIGN 5.22 rule 2).
+// (--single-branch), with the token handled as in rule 4. Propose and Diff clone the branch
+// they work on with it into their private directories; a run's own checkout comes from the
+// run repository instead (DESIGN 5.30 rule 10).
 func (c Config) CloneBranch(ctx context.Context, dest, branch string) error {
 	if _, err := c.git(ctx, filepath.Dir(dest), "clone", "--quiet", "--depth", "1", "--single-branch",
 		"--branch", branch, "--", c.RepoURL, filepath.Base(dest)); err != nil {
@@ -234,14 +235,30 @@ type Base struct {
 	// Guard refuses with *ErrBranchMoved when the branch is no longer at Commit (DESIGN 5.22
 	// rule 4), instead of merging the run's changes onto it per path.
 	Guard bool
+	// Merged is the default branch's commit the platform merged into the checkout before
+	// the run's first turn (runs.merged_sha, DESIGN 5.22 rule 13): the run's own commit gets
+	// it as its second parent, so the push is a real merge. "" when there is none.
+	Merged string
 }
 
-// RunBase is the unguarded base of a run's next proposal: its checkout_sha.
+// RunBase is the unguarded base of a run's next proposal: its checkout_sha and merged_sha.
 func RunBase(run *store.Run) Base {
-	if run == nil || run.CheckoutSHA == nil {
-		return Base{}
+	var b Base
+	if run != nil && run.CheckoutSHA != nil {
+		b.Commit = *run.CheckoutSHA
 	}
-	return Base{Commit: *run.CheckoutSHA}
+	if run != nil && run.MergedSHA != nil {
+		b.Merged = *run.MergedSHA
+	}
+	return b
+}
+
+// ErrMarkers is a proposal's answer when files the run changed still hold conflict markers
+// from the merge of DESIGN 5.22 rule 13. Nothing was pushed.
+type ErrMarkers struct{ Paths []string }
+
+func (e *ErrMarkers) Error() string {
+	return "these files still have conflict markers: " + namePaths(e.Paths) + ". Resolve them, then propose again; nothing was pushed"
 }
 
 // ErrNoChanges is Propose's answer when the checkout holds no change to propose.
@@ -317,9 +334,21 @@ func (c Config) ProposeOntoPaths(ctx context.Context, checkout, branch string, b
 //
 // Before the push, a commit that would delete or change a path outside the run's changes
 // is refused (checkTouched), so a regression shows instead of losing work.
+//
+// A base with a merged commit (DESIGN 5.22 rule 13, D-088) is a run whose checkout has the
+// default branch merged in: its changes since the base include that merge, its own commit
+// has the merged commit as a second parent, so the branch gets a real merge, and it is
+// proposed whole (paths are refused) and only once no changed file holds a conflict marker
+// (*ErrMarkers).
 func (c Config) propose(ctx context.Context, checkout, from, branch string, base Base, message string, paths []string) (Proposal, error) {
-	if base.Commit != "" && !commitIDPattern.MatchString(base.Commit) {
-		return Proposal{}, fmt.Errorf("the base %q is not a full commit id", tail(base.Commit, 80))
+	for _, id := range []string{base.Commit, base.Merged} {
+		if id != "" && !commitIDPattern.MatchString(id) {
+			return Proposal{}, fmt.Errorf("the base %q is not a full commit id", tail(id, 80))
+		}
+	}
+	if base.Merged != "" && len(paths) > 0 {
+		return Proposal{}, errors.New("this run merged " + c.DefaultBranch + " into the checkout, and the merge goes with the whole " +
+			"working tree: call again without paths; nothing was pushed")
 	}
 	private, err := os.MkdirTemp("", "yuno-propose-")
 	if err != nil {
@@ -386,6 +415,20 @@ func (c Config) propose(ctx context.Context, checkout, from, branch string, base
 	if len(changes) == 0 {
 		return Proposal{Branch: branch, Files: n}, ErrNoChanges
 	}
+	parents := []string{basis}
+	if base.Merged != "" {
+		marked, err := markerFiles(ctx, dest, nil, strings.TrimSpace(string(staged)), changes)
+		if err != nil {
+			return Proposal{}, err
+		}
+		if len(marked) > 0 {
+			return Proposal{}, &ErrMarkers{Paths: marked}
+		}
+		if _, err := c.git(ctx, dest, "fetch", "--quiet", "--no-tags", "--depth", "1", "origin", base.Merged); err != nil {
+			return Proposal{}, err
+		}
+		parents = append(parents, base.Merged)
+	}
 	onto := changes
 	if basis != head {
 		theirs, err := c.treeChanges(ctx, dest, basis, head)
@@ -409,7 +452,7 @@ func (c Config) propose(ctx context.Context, checkout, from, branch string, base
 	if err != nil {
 		return Proposal{}, err
 	}
-	own, err := c.commitTree(ctx, dest, ownTree, message, basis)
+	own, err := c.commitTree(ctx, dest, ownTree, message, parents...)
 	if err != nil {
 		return Proposal{}, err
 	}

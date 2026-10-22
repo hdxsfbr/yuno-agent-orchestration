@@ -300,6 +300,10 @@ type Run struct {
 	// the base the branch guard compares against. A full 40-hex id, nil before the clone
 	// and for a run cloned before migration 0013.
 	CheckoutSHA *string `db:"checkout_sha" json:"checkout_sha,omitempty"`
+	// MergedSHA is the default branch commit the platform merged into the checkout of a run
+	// on a merge request before its first turn (DESIGN 5.22 rule 13): the second parent of the
+	// run's next push, which clears it. Nil when nothing was merged.
+	MergedSHA *string `db:"merged_sha" json:"-"`
 	// AgentNames and Models are not columns; FillRunParticipants sets them for list views.
 	AgentNames []string `db:"-" json:"agent_names,omitempty"`
 	Models     []string `db:"-" json:"models,omitempty"`
