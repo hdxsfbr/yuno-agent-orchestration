@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -206,15 +207,28 @@ func sortedKeys(m map[string]string) []string {
 
 // agentListItem is an agent in GET /api/agents (AgentListItem): channels are the ones it
 // answers, from the channel bindings rather than the form's setting, and activity counts
-// its node visits in flight (audit #17, #18).
+// its node visits in flight (audit #17, #18). ArchivedAt is set on an archived agent,
+// listed with include_archived=true (DESIGN W4 rule 4).
 type agentListItem struct {
 	store.Agent
-	Activity store.AgentActivity `json:"activity"`
+	Activity   store.AgentActivity `json:"activity"`
+	ArchivedAt *time.Time          `json:"archived_at,omitempty"`
 }
 
 func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	agents, err := store.ListAgents(ctx, s.pool)
+	list := store.ListAgents
+	if v := r.URL.Query().Get("include_archived"); v != "" {
+		archived, err := strconv.ParseBool(v)
+		if err != nil {
+			writeValidation(w, "invalid request", fieldErrors{{Path: "include_archived", Message: "must be true or false"}})
+			return
+		}
+		if archived {
+			list = store.ListAgentsWithDeleted
+		}
+	}
+	agents, err := list(ctx, s.pool)
 	if err != nil {
 		s.internalError(w, r, "list agents", err)
 		return
@@ -235,7 +249,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		if a.Channels == nil {
 			a.Channels = []string{}
 		}
-		items[i] = agentListItem{Agent: a, Activity: activity[a.ID]}
+		items[i] = agentListItem{Agent: a, Activity: activity[a.ID], ArchivedAt: a.DeletedAt}
 	}
 	writeJSON(w, http.StatusOK, items)
 }
@@ -375,6 +389,53 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// restoreAgent undoes deleteAgent (DESIGN W4 rule 4): the archived agent is live again with
+// its id and configuration, and is materialised in OpenClaw (same 502 rule as create). A
+// Telegram binding it had stays released. 409 not_archived for a live agent; 409
+// name_taken when a live agent has its name.
+func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	err := store.RestoreAgent(r.Context(), s.pool, id)
+	switch {
+	case errors.Is(err, store.ErrAgentNotArchived):
+		writeError(w, http.StatusConflict, "not_archived", "the agent is not archived", nil)
+		return
+	case errors.Is(err, store.ErrAgentNameTaken):
+		s.agentNameTaken(w, r, id)
+		return
+	case err != nil:
+		s.storeError(w, r, "agent", err)
+		return
+	}
+	saved, ok := s.materializeSaved(w, r, id)
+	if !ok {
+		return
+	}
+	if !s.withBindings(r.Context(), w, r, saved) {
+		return
+	}
+	writeJSON(w, http.StatusOK, saved)
+}
+
+// agentNameTaken answers 409 name_taken naming the live agent that holds the archived
+// agent's name.
+func (s *Server) agentNameTaken(w http.ResponseWriter, r *http.Request, archivedID string) {
+	archived, err := store.GetAgentForRun(r.Context(), s.pool, archivedID)
+	if err != nil {
+		s.storeError(w, r, "agent", err)
+		return
+	}
+	var details any
+	if live, err := store.LiveAgentNamed(r.Context(), s.pool, archived.Name); err == nil {
+		details = map[string]string{"agent_id": live.ID, "agent_name": live.Name}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.internalError(w, r, "find agent by name", err)
+		return
+	}
+	writeError(w, http.StatusConflict, "name_taken",
+		fmt.Sprintf("a live agent is named %q; rename or archive it before restoring this one", archived.Name), details)
 }
 
 func (s *Server) materializeAgent(w http.ResponseWriter, r *http.Request) {

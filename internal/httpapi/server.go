@@ -362,6 +362,7 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/agents/{id}/runtime", s.agentRuntime)
 	mux.HandleFunc("GET /api/agents/{id}/files", s.listAgentFiles)
 	mux.HandleFunc("PUT /api/agents/{id}/files/{name}", s.putAgentFile)
+	mux.HandleFunc("POST /api/agents/{id}/restore", s.restoreAgent)
 
 	mux.HandleFunc("GET /api/tools", s.listTools)
 
@@ -376,6 +377,9 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/workflows/{id}", s.getWorkflow)
 	mux.HandleFunc("PUT /api/workflows/{id}", s.updateWorkflow)
 	mux.HandleFunc("DELETE /api/workflows/{id}", s.deleteWorkflow)
+	mux.HandleFunc("GET /api/workflows/{id}/versions", s.listWorkflowVersions)
+	mux.HandleFunc("GET /api/workflows/{id}/versions/{version}", s.getWorkflowVersion)
+	mux.HandleFunc("POST /api/workflows/{id}/versions/{version}/restore", s.restoreWorkflowVersion)
 	mux.HandleFunc("GET /api/workflow-templates", s.listTemplates)
 	mux.HandleFunc("POST /api/workflow-templates/{key}/instantiate", s.instantiateTemplate)
 

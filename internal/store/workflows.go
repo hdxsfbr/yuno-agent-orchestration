@@ -14,6 +14,8 @@ import (
 const workflowColumns = `id, name, description, definition, version, template_key, created_at, updated_at, deleted_at,
 	from_template, seeded_hash`
 
+// CreateWorkflow stores a new workflow and its first version in one statement (DESIGN W4
+// rule 1).
 func CreateWorkflow(ctx context.Context, q Querier, w *Workflow) error {
 	if w.ID == "" {
 		w.ID = NewID()
@@ -26,8 +28,9 @@ func CreateWorkflow(ctx context.Context, q Querier, w *Workflow) error {
 	}
 	now := time.Now().UTC()
 	w.CreatedAt, w.UpdatedAt = now, now
-	_, err := q.Exec(ctx, `INSERT INTO workflows (`+workflowColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10)`,
-		w.ID, w.Name, w.Description, w.Definition, w.Version, w.TemplateKey, w.CreatedAt, w.UpdatedAt, w.FromTemplate, w.SeededHash)
+	_, err := q.Exec(ctx, `WITH w AS (INSERT INTO workflows (`+workflowColumns+`) VALUES ($2,$3,$4,$5,$6,$7,$8,$9,NULL,$10,$11)
+		RETURNING id, version, name, description, definition, updated_at)`+versionInsert,
+		versionAuthor(ctx), w.ID, w.Name, w.Description, w.Definition, w.Version, w.TemplateKey, w.CreatedAt, w.UpdatedAt, w.FromTemplate, w.SeededHash)
 	return err
 }
 
@@ -76,11 +79,13 @@ func ListWorkflows(ctx context.Context, q Querier) ([]Workflow, error) {
 }
 
 // UpdateWorkflow replaces name, description and definition and bumps the version
-// (DESIGN section 4: runs pin workflow_version).
+// (DESIGN section 4: runs pin workflow_version), writing the new version in the same
+// statement (DESIGN W4 rule 1).
 func UpdateWorkflow(ctx context.Context, q Querier, w *Workflow) error {
 	w.UpdatedAt = time.Now().UTC()
-	rows, err := q.Query(ctx, `UPDATE workflows SET name=$2, description=$3, definition=$4, version=version+1, updated_at=$5
-		WHERE id=$1 AND deleted_at IS NULL RETURNING version`, w.ID, w.Name, w.Description, w.Definition, w.UpdatedAt)
+	rows, err := q.Query(ctx, `WITH w AS (UPDATE workflows SET name=$3, description=$4, definition=$5, version=version+1, updated_at=$6
+		WHERE id=$2 AND deleted_at IS NULL RETURNING id, version, name, description, definition, updated_at)`+versionInsert,
+		versionAuthor(ctx), w.ID, w.Name, w.Description, w.Definition, w.UpdatedAt)
 	if err != nil {
 		return err
 	}

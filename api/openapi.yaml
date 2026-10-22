@@ -102,10 +102,17 @@ paths:
     get:
       tags: [agents]
       summary: List agents
+      description: |
+        Live agents, oldest first. With `include_archived=true` the archived (deleted)
+        agents are listed too, each with `archived_at`; POST /api/agents/{id}/restore brings
+        one back.
+      parameters:
+        - { name: include_archived, in: query, schema: { type: boolean, default: false } }
       responses:
         "200":
           description: agents
           content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/AgentListItem" } } } }
+        "422": { $ref: "#/components/responses/Error" }
     post:
       tags: [agents]
       summary: Create an agent and materialise it in OpenClaw
@@ -178,6 +185,26 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "413": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+  /api/agents/{id}/restore:
+    post:
+      tags: [agents]
+      operationId: restoreAgent
+      x-yuno-risk: privileged
+      summary: Restore an archived agent and materialise it in OpenClaw again
+      description: |
+        Undoes DELETE /api/agents/{id}: the agent is live again with its id and configuration,
+        and is pushed to OpenClaw. A Telegram binding it had is not restored; bind it again on
+        the Channels page. 409 `not_archived` for an agent that is not archived; 409
+        `name_taken` when a live agent has the same name, ignoring case (`details:
+        {agent_id, agent_name}` of that agent). When the agent could not be pushed to
+        OpenClaw it stays restored and the answer is 502 `materialize_failed`. Restoring an
+        agent with tools grants those tools again, so the operation is privileged.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: agent, content: { application/json: { schema: { $ref: "#/components/schemas/Agent" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
   /api/agents/{id}/materialize:
     post:
@@ -470,6 +497,60 @@ paths:
         "204": { description: deleted }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /api/workflows/{id}/versions:
+    parameters: [ { $ref: "#/components/parameters/Id" } ]
+    get:
+      tags: [workflows]
+      operationId: listWorkflowVersions
+      x-yuno-risk: read
+      summary: The workflow's saved versions, newest first, without their definitions
+      description: |
+        Every create, update and restore saves a version. Of the versions written before
+        versions were kept, only the one current then and the older ones a run held were
+        recovered (`created_by.kind` is `backfill`), so the list can have gaps.
+      responses:
+        "200":
+          description: versions
+          content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/WorkflowVersionSummary" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/workflows/{id}/versions/{version}:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - { name: version, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    get:
+      tags: [workflows]
+      operationId: getWorkflowVersion
+      x-yuno-risk: read
+      summary: One saved version of the workflow, with its definition
+      responses:
+        "200": { description: version, content: { application/json: { schema: { $ref: "#/components/schemas/WorkflowVersion" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+  /api/workflows/{id}/versions/{version}/restore:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - { name: version, in: path, required: true, schema: { type: integer, minimum: 1 } }
+    post:
+      tags: [workflows]
+      operationId: restoreWorkflowVersion
+      x-yuno-risk: routine
+      summary: Make an earlier version current again, as a new version
+      description: |
+        The version's name, description and definition are saved as a new version, the
+        current one plus one; runs already started keep the version they started with.
+        `expected_version` is the workflow's current version as the caller read it: 412
+        `version_conflict` (`details: {current_version}`) when it is not current any more.
+        The definition is checked as PUT /api/workflows/{id} checks one, against today's
+        agents: 422 with one detail per problem when it would not be accepted now. 409
+        `read_only` for a workflow the platform manages.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/WorkflowRestore" } } }
+      responses:
+        "200": { description: workflow, content: { application/json: { schema: { $ref: "#/components/schemas/Workflow" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
   /api/workflow-templates:
     get:
       tags: [workflows]
@@ -1531,6 +1612,10 @@ components:
               properties:
                 running: { type: integer, minimum: 0 }
                 waiting_approval: { type: integer, minimum: 0 }
+            archived_at:
+              type: string
+              format: date-time
+              description: When the agent was archived (deleted); present only on archived agents, listed with include_archived=true.
     AgentRuntime:
       type: object
       description: The agent as OpenClaw holds it after materialisation.
@@ -1887,6 +1972,42 @@ components:
         from_template: { type: string, description: "the key of the template the workflow was instantiated from; absent for workflows built from scratch" }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    WorkflowVersionSummary:
+      type: object
+      description: A saved version of a workflow, as the version list shows it.
+      required: [workflow_id, version, name, description, created_at, created_by]
+      properties:
+        workflow_id: { type: string }
+        version: { type: integer }
+        name: { type: string }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+        created_by:
+          type: object
+          description: |
+            Who saved the version: the caller (`kind` operator or agent, with `id`, `name`,
+            `via` and `on_behalf_of` as known); `{"kind":"platform"}` for a version the
+            platform wrote itself (the seed, the template loader, a quick-run workflow);
+            `{"kind":"backfill"}` for a version recovered when versions started to be kept.
+            A recovered version older than the current one is the definition as a run ran it,
+            with that run's limits, under the workflow's current name and description.
+          required: [kind]
+          properties:
+            kind: { type: string }
+    WorkflowVersion:
+      description: A saved version of a workflow with its definition.
+      allOf:
+        - $ref: "#/components/schemas/WorkflowVersionSummary"
+        - type: object
+          required: [definition]
+          properties:
+            definition: { $ref: "#/components/schemas/WorkflowDefinition" }
+    WorkflowRestore:
+      type: object
+      required: [expected_version]
+      additionalProperties: false
+      properties:
+        expected_version: { type: integer, minimum: 1, description: "the workflow's current version as the caller read it" }
     WorkflowValidateRequest:
       type: object
       required: [definition]
