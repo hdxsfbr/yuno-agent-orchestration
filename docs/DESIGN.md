@@ -356,6 +356,20 @@ Rules:
    only retried after the idempotency key is recorded (5.4), never before approval. A
    non-JSON body from an external service is a permanent error, not transient.
 5. Every attempt is a span and a `warn` log line.
+6. A turn whose model reply stops coming is continued like a retryable error. OpenClaw
+   gives a turn 48 hours (`agents.defaults.timeoutSeconds`) and has no idle limit on a
+   model stream **[docs]**, so a provider request that is never answered would hold the
+   step until the run's time limit. While a turn is live, a chat or agent event of the
+   turn (text and reasoning deltas included) or a new transcript entry is progress. A tool
+   call the transcript or the item events show started, without its result, is open: the
+   turn is waiting on the tool, which may take long (a test suite under `exec`, a gated
+   call waiting up to `MCP_TOOL_WAIT`), and is never stalled. With no call open and no
+   progress for `MODEL_STALL_AFTER` (default 10 min; 0 turns the check off), the engine
+   reconciles from `chat.history` first, then aborts the turn with `chat.abort` and
+   continues in a new turn with `Continue.`, from the budget of 3 that rule 3 uses. The
+   aborted turn's late terminal event names a run id that is no longer the visit's current
+   one and is ignored. When the budget is spent the node fails with reason `model reply
+   stalled for <window>`. A reconnect (rule 1) starts a new window.
 
 Edge cases: a wait longer than the time remaining times the run out (5.2). Failure
 handling: after the last attempt a model failure fails the node with reason
@@ -363,7 +377,10 @@ handling: after the last attempt a model failure fails the node with reason
 which may try something else. Tests: T5.5.1 disconnect mid-run →
 reattach, no duplicate turn. T5.5.2 `chat.send` RPC failure twice then success → one run.
 T5.5.3 provider 529 twice then success → three turns, one node. T5.5.4 non-retryable error
-→ node failed with reason. T5.5.5 deadline nearer than backoff → timed_out.
+→ node failed with reason. T5.5.5 deadline nearer than backoff → timed_out. T5.5.6 no reply
+after a tool result for the stall window → the turn aborted and continued, one node. T5.5.7
+a tool call open past the stall window → no abort. T5.5.8 every turn stalls → three
+continues, then the node fails with `model reply stalled for 10 minutes`.
 
 ### 5.6 Workflow graph, conditions and typed state
 

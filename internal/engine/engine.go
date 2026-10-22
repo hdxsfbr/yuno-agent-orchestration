@@ -60,6 +60,7 @@ type Engine struct {
 	tickInterval  time.Duration // limit checks while a turn runs
 	abortWait     time.Duration // how long to wait for "aborted" after chat.abort
 	finishGrace   time.Duration // how long a turn may continue after finish was accepted
+	modelStall    time.Duration // how long a turn may wait on the model with nothing arriving; 0 never
 	sendTimeout   time.Duration // one chat.send attempt
 	setupTimeout  time.Duration // one setup RPC (materialise, sessions.patch, subscribe)
 	convRetry     time.Duration // conversation mirror's retry tick (roster sync, catch-up)
@@ -88,6 +89,7 @@ func New(d Deps) *Engine {
 		tickInterval:  2 * time.Second,
 		abortWait:     10 * time.Second,
 		finishGrace:   20 * time.Second,
+		modelStall:    d.Cfg.ModelStallAfter,
 		sendTimeout:   15 * time.Second,
 		setupTimeout:  30 * time.Second,
 		convRetry:     convResyncEvery,

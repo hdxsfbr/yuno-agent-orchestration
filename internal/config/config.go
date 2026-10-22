@@ -70,7 +70,10 @@ type Config struct {
 	APIToken         string
 	EngineWorkers    int
 	EngineStaleAfter time.Duration
-	SchedulerTick    time.Duration
+	// ModelStallAfter is how long a turn may wait on the model's reply with nothing arriving
+	// before the engine restarts it (DESIGN 5.5 rule 6); 0 turns the check off.
+	ModelStallAfter time.Duration
+	SchedulerTick   time.Duration
 	// BudgetTick is how often project spend is checked for alerts (DESIGN 5.19 rule 5);
 	// MergeRequestSyncInterval how often open merge requests are refreshed from their
 	// provider (DESIGN 5.20 rule 3); IntakePollInterval how often the projects with
@@ -158,6 +161,7 @@ func FromEnv() Config {
 		APIToken:                 env("API_TOKEN", ""),
 		EngineWorkers:            envInt("ENGINE_WORKERS", 4),
 		EngineStaleAfter:         envDuration("ENGINE_STALE_AFTER", 300*time.Second),
+		ModelStallAfter:          envDuration("MODEL_STALL_AFTER", 10*time.Minute),
 		SchedulerTick:            envDuration("SCHEDULER_TICK", 10*time.Second),
 		BudgetTick:               envDuration("BUDGET_TICK", 60*time.Second),
 		MergeRequestSyncInterval: envDuration("MERGE_REQUEST_SYNC_INTERVAL", 120*time.Second),

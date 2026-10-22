@@ -6,6 +6,27 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-22
 
+**D-094 A turn whose model reply never comes is aborted after `MODEL_STALL_AFTER` (10
+minutes) without progress and no tool call open, and continued in a new turn from the
+model-error retry budget.** (Andre, 2026-10-22, after run 01a16451: its Builder's last tool
+result arrived at 15:57:48, the request for the next reply to `openai/gpt-6-astra` was never
+answered, and the step sat "running" with no events for 30 minutes until the operator's
+helper aborted the turn on the gateway and retried the run.) OpenClaw allows a turn 48 hours
+and has no idle limit on a model stream, and the engine had no check of its own: the step
+would have held its worker until the run's 3-hour limit. The check reuses what exists:
+progress is any chat or agent event of the turn or a new transcript entry; "waiting on a
+tool" is a call the transcript or the item events show started without its result, so a
+long test suite or a gated call is never taken for a stall; the recovery is the "model
+error; continuing in a new turn" path of DESIGN 5.5 rule 3 (`Continue.`, the same 3
+retries), after a `chat.abort` of the stalled turn. Before deciding, the engine re-reads
+`chat.history`, so a reply whose events were dropped is not taken for a stall. In the
+incident every tool call had its result and every item event its end, so the check would
+have fired at 16:07:48. Alternatives rejected: a gateway-side limit (OpenClaw has none for a
+model stream, and `agents.defaults.timeoutSeconds` bounds the whole turn, which a long
+Builder turn needs); failing the step at once (the operator would retry by hand what a new
+turn fixes); a fresh visit instead of a new turn (the visit's checkout and transcript are
+intact, and a new turn keeps them). Design: DESIGN 5.5 rule 6.
+
 **D-093 A Retry starts the failed step afresh: the answers and tool outcomes its failed
 attempt was given are not replayed, and the retried visit is told the operator retried the
 step.** (Andre, 2026-10-22, after run 01a160c8: its documentation audit found the checkout
