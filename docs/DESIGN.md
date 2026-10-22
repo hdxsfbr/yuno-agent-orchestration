@@ -5230,9 +5230,36 @@ Rules:
    - 502 `materialize_failed` leaves the agent restored.
    - A Telegram binding released by the delete is not restored.
    - `GET /api/agents?include_archived=true` adds archived agents with `archived_at`.
+5. `POST /api/audit/{id}/revert` (risk routine; the gate judges it as the PUT it writes
+   back, by 5.32 rule 5):
+   - It accepts only a PUT row with outcome `ok` on an agent, a schedule, a skill or a
+     project; anything else is 422 `not_revertible`, and a workflow is pointed at rule 3.
+   - A per-resource mapper turns the row's `before` into that PUT's input. Project tokens
+     are never written.
+   - 422 `nothing_to_revert` when `before` is missing, cut, or holds redacted values (the
+     placeholder must never overwrite a real value), or when the change touched nothing a
+     revert writes (a token alone).
+   - 412 `version_conflict` "changed again since; revert the later change first" when the
+     resource as it is now differs from the row's `after` through the same mapper. Read-only
+     fields such as `next_run_at` or a project's spend do not count. A resource deleted
+     since also answers 412.
+   - Otherwise the PUT runs through the resource's own handler with the current ETag.
+   - The revert's own audit row targets the reverted resource.
 6. Schedules pause and resume through `enabled`, and expose `tz` and `next_run_at`.
+7. **Chat acceptance.** The tests run `platform_call` through MCP into the real chain and
+   the real handlers:
+   - an agent, a workflow and a schedule are each created, read back, updated and deleted,
+     with every delete through the approval round trip;
+   - a privileged change is pending, then denied and audited after a rejection;
+   - an anonymous request is audited as a 401;
+   - a revert restores an agent's prompt.
+8. `docs/briefs/chief-platform-control/PARITY.md` names every operation, and
+   `TestParityMatrix` fails when an acceptance name has no `func Test<Name>`, when an
+   operation has no row, or when a name still marked as a later wave already exists.
 
-Tests: TestWorkflowVersionsBackfill, TestWorkflowVersionAuthor, TestWorkflowVersionsWritten,
+Tests: TestAuditRevert, TestAuditRevertByChief, TestRevertMappers, TestChiefAgentCRUD,
+TestChiefWorkflowCRUD, TestChiefScheduleCRUD, TestUnauthorizedAudited, TestParityMatrix,
+TestWorkflowVersionsBackfill, TestWorkflowVersionAuthor, TestWorkflowVersionsWritten,
 TestWorkflowRestore, TestAgentRestore, TestScheduleEnabledTimezoneNextRun,
 TestSeedWritesWorkflowVersions.
 

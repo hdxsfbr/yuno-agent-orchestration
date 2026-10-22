@@ -24,7 +24,8 @@ Behaviour changes operators notice, newest first. The design reasons are in
   to date with the default branch (`update-from-default`), and you can read its diff,
   checks and job logs.
 - Workflows keep every version; you can read and restore one. An archived agent can be
-  restored.
+  restored. A change to an agent, schedule, skill or project can be undone from its audit
+  row (`POST /api/audit/{id}/revert`), unless it changed again since.
 - `answer_question` passes an answer on only when your latest message says it or carries
   the question's code.
 
