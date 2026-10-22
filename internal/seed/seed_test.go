@@ -1220,3 +1220,53 @@ func TestUpgradeAgentsUnchangedNoUpdate(t *testing.T) {
 		t.Fatal("chief not in Agents")
 	}
 }
+
+// A scoped reset: only the named agents, each keeping its model, an OpenAI one included,
+// and no workflow; a name that is not shipped is an error.
+func TestResetShippedScoped(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	log := slog.New(slog.DiscardHandler)
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	sh := loadStubTemplates(t, pool)
+	_, _, err = Templates(ctx, pool, sh, log)
+	must(t, err)
+
+	chief, err := findAgent(ctx, pool, "Chief of Staff")
+	must(t, err)
+	chief.SystemPrompt, chief.ToolAllowlist, chief.Model = "old chief", []string{"list_agents"}, "openai/gpt-6-astra"
+	must(t, store.UpdateAgent(ctx, pool, chief))
+	builder, err := findAgent(ctx, pool, "Builder")
+	must(t, err)
+	builder.SystemPrompt = "my builder"
+	must(t, store.UpdateAgent(ctx, pool, builder))
+	planID := mustWorkflowNamed(t, pool, "Plan pipeline")
+	before, err := store.GetWorkflow(ctx, pool, planID)
+	must(t, err)
+
+	agents, workflows, err := ResetShippedScoped(ctx, pool, sh, ResetScope{Agents: []string{"chief of staff"}, KeepModels: true})
+	must(t, err)
+	if !slices.Equal(agents, []string{"Chief of Staff"}) || len(workflows) != 0 {
+		t.Fatalf("reset %v %v", agents, workflows)
+	}
+	chief, err = findAgent(ctx, pool, "Chief of Staff")
+	must(t, err)
+	if chief.SystemPrompt != shippedPrompt(t, "Chief of Staff") || !slices.Contains(chief.ToolAllowlist, "platform_call") ||
+		chief.Model != "openai/gpt-6-astra" {
+		t.Fatalf("chief after the scoped reset: model %s tools %v", chief.Model, chief.ToolAllowlist)
+	}
+	builder, err = findAgent(ctx, pool, "Builder")
+	must(t, err)
+	if builder.SystemPrompt != "my builder" {
+		t.Fatal("an agent outside the scope was reset")
+	}
+	after, err := store.GetWorkflow(ctx, pool, planID)
+	must(t, err)
+	if after.Version != before.Version {
+		t.Fatalf("a scoped reset touched a workflow: version %d -> %d", before.Version, after.Version)
+	}
+	if _, _, err := ResetShippedScoped(ctx, pool, sh, ResetScope{Agents: []string{"Chef of Staff"}}); err == nil {
+		t.Fatal("a name that is not shipped was accepted")
+	}
+}

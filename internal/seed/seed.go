@@ -345,6 +345,18 @@ type Options struct {
 	// instantiated templates' definitions to the current shipped versions (DESIGN 5.16
 	// rule 14), keeping ids, bindings, memory and every other setting.
 	ResetShipped bool
+	// Scope narrows the reset: the named agents only (no workflows), and every agent's
+	// current model kept. The zero value resets everything shipped, as before.
+	Scope ResetScope
+}
+
+// ResetScope narrows ResetShipped. Agents names the shipped agents to reset (none: all of
+// them); with any named, no workflow is reset. KeepModels keeps each agent's current
+// model, an OpenAI one included: while the operator runs the agents on OpenAI (D-091) a
+// reset brings back their shipped prompt and tools without moving them to Claude.
+type ResetScope struct {
+	Agents     []string
+	KeepModels bool
 }
 
 // Run creates every missing demo agent, instantiates the templates no workflow was made
@@ -405,7 +417,7 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger, opts Options)
 	}
 
 	if opts.ResetShipped {
-		agents, workflows, err := ResetShipped(ctx, pool, sh)
+		agents, workflows, err := ResetShippedScoped(ctx, pool, sh, opts.Scope)
 		if err != nil {
 			return err
 		}
@@ -500,7 +512,21 @@ type Resetter interface {
 // model, limits, guardrails, memory, skills, bindings) is kept, and agents or workflows
 // that are not shipped are untouched. It returns the names it reset.
 func ResetShipped(ctx context.Context, q store.Querier, r Resetter) (agents, workflows []string, err error) {
+	return ResetShippedScoped(ctx, q, r, ResetScope{})
+}
+
+// ResetShippedScoped is ResetShipped narrowed by scope. A named agent that is not shipped
+// is an error, so a typo does not pass for a reset.
+func ResetShippedScoped(ctx context.Context, q store.Querier, r Resetter, scope ResetScope) (agents, workflows []string, err error) {
+	for _, name := range scope.Agents {
+		if !slices.ContainsFunc(Agents, func(t store.Agent) bool { return strings.EqualFold(t.Name, strings.TrimSpace(name)) }) {
+			return nil, nil, fmt.Errorf("seed: %q is not a shipped agent", name)
+		}
+	}
 	for _, tpl := range Agents {
+		if len(scope.Agents) > 0 && !slices.ContainsFunc(scope.Agents, func(n string) bool { return strings.EqualFold(strings.TrimSpace(n), tpl.Name) }) {
+			continue
+		}
 		a, err := findAgent(ctx, q, tpl.Name)
 		if err != nil {
 			return agents, workflows, err
@@ -512,7 +538,7 @@ func ResetShipped(ctx context.Context, q store.Querier, r Resetter) (agents, wor
 		// The shipped agents are Claude agents: one the operator moved to OpenAI goes back
 		// to its shipped model, while a Claude model of the operator's choosing is kept (D-091).
 		model := a.Model
-		if openclaw.IsOpenAIModel(model) {
+		if openclaw.IsOpenAIModel(model) && !scope.KeepModels {
 			model = tpl.Model
 		}
 		if a.Role == tpl.Role && a.SystemPrompt == tpl.SystemPrompt && slices.Equal(a.ToolAllowlist, tpl.ToolAllowlist) && a.Model == model {
@@ -530,6 +556,9 @@ func ResetShipped(ctx context.Context, q store.Querier, r Resetter) (agents, wor
 			return agents, workflows, err
 		}
 		agents = append(agents, tpl.Name)
+	}
+	if len(scope.Agents) > 0 {
+		return agents, nil, nil
 	}
 	all, err := store.ListWorkflows(ctx, q)
 	if err != nil {

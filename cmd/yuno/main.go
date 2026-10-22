@@ -4,7 +4,8 @@
 //	yuno migrate        apply database migrations and exit
 //	yuno seed           create the demo agents and the Chief of Staff, instantiate the
 //	                    shipped templates once, bind the chief to Telegram when unbound (idempotent);
-//	                    --reset-shipped also restores the shipped agents' prompts and allowlists
+//	                    --reset-shipped also restores the shipped agents' prompts and allowlists;
+//	                    --keep-models keeps each agent's model, --agent <name> resets only that agent
 //	                    (and the Claude model of one moved to OpenAI) and the instantiated
 //	                    templates to the current shipped versions
 //	yuno openclaw-init  write the baseline openclaw.json into the state directory, create its
@@ -75,14 +76,28 @@ func main() {
 		err = deploytarget.Run(ctx, cfg, log)
 	case "seed":
 		var opts seed.Options
-		for _, arg := range os.Args[2:] {
-			switch arg {
+		args := os.Args[2:]
+		for i := 0; i < len(args); i++ {
+			switch args[i] {
 			case "--reset-shipped":
 				opts.ResetShipped = true
+			case "--keep-models":
+				opts.Scope.KeepModels = true
+			case "--agent":
+				if i+1 >= len(args) {
+					fmt.Fprintln(os.Stderr, "usage: --agent needs a shipped agent's name")
+					os.Exit(2)
+				}
+				i++
+				opts.Scope.Agents = append(opts.Scope.Agents, args[i])
 			default:
-				fmt.Fprintln(os.Stderr, "usage: yuno seed [--reset-shipped]")
+				fmt.Fprintln(os.Stderr, "usage: yuno seed [--reset-shipped [--keep-models] [--agent <name>]...]")
 				os.Exit(2)
 			}
+		}
+		if !opts.ResetShipped && (opts.Scope.KeepModels || len(opts.Scope.Agents) > 0) {
+			fmt.Fprintln(os.Stderr, "usage: --keep-models and --agent narrow --reset-shipped")
+			os.Exit(2)
 		}
 		err = seed.Run(ctx, cfg, log, opts)
 	case "eval":

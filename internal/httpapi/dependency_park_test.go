@@ -333,15 +333,27 @@ func TestDependencyAcceptanceResumesRun(t *testing.T) {
 		}
 		return mr
 	}
+	var mine []string
+	// tick runs one sync pass and checks this test's own requests synced: other packages'
+	// tests leave open requests in the shared database whose providers do not answer, so
+	// the pass's own failure count is not this test's.
 	tick := func() {
 		t.Helper()
-		if _, failed := f.srv.mergeSync().TickOnce(ctx); failed != 0 {
-			t.Fatal("a merge request sync failed")
+		f.srv.mergeSync().TickOnce(ctx)
+		for _, id := range mine {
+			rec, err := store.GetMergeRequest(ctx, pool, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rec.LastSyncError != nil && *rec.LastSyncError != "" {
+				t.Fatalf("syncing %s failed: %s", rec.SourceBranch, *rec.LastSyncError)
+			}
 		}
 	}
 
 	pre := open("yuno/pre", map[string]string{"pre.txt": "prerequisite\n"})
 	dep := open("yuno/dep", map[string]string{"dep.txt": "dependent\n"})
+	mine = []string{pre.ID, dep.ID}
 	if code, body := e.call(http.MethodPut, "/api/merge-requests/"+dep.ID+"/dependencies", `{"prerequisites":["`+pre.ID+`"]}`, true); code != http.StatusOK {
 		t.Fatalf("set the dependency = %d %s", code, body)
 	}
