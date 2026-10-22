@@ -25,7 +25,7 @@ const (
 )
 
 var runStatuses = []string{
-	store.RunQueued, store.RunRunning, store.RunWaitingApproval,
+	store.RunQueued, store.RunRunning, store.RunWaitingApproval, store.RunPaused,
 	store.RunSucceeded, store.RunFailed, store.RunCancelled, store.RunTimedOut,
 }
 
@@ -190,34 +190,20 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, &one[0])
 }
 
-// cancelRun flags the run for cancellation: 202 with the run, 409 when it has already
-// finished.
+// cancelRun cancels the run (DESIGN W2 rules 10 and 11): 202 with the run and its command
+// (applied at once for a run no worker holds, pending for a live run's worker), 409
+// run_finished when it has already finished, 503 when the command could not be recorded.
 func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	run, err := store.GetRun(r.Context(), s.pool, id)
-	if err != nil {
+	if _, err := store.GetRun(r.Context(), s.pool, id); err != nil {
 		s.storeError(w, r, "run", err)
 		return
 	}
-	if store.IsTerminal(run.Status) {
-		writeError(w, http.StatusConflict, "run_finished", "run is already "+run.Status, nil)
+	if !s.engineReady(w) {
 		return
 	}
-	if s.engine == nil {
-		writeError(w, http.StatusServiceUnavailable, "engine_unavailable", errEngineUnavailable.Error(), nil)
-		return
-	}
-	run, err = s.engine.Cancel(r.Context(), id, cancelledBy)
-	if err != nil {
-		// The run may have finished between the read and the cancel.
-		if cur, gerr := store.GetRun(r.Context(), s.pool, id); gerr == nil && store.IsTerminal(cur.Status) {
-			writeError(w, http.StatusConflict, "run_finished", "run is already "+cur.Status, nil)
-			return
-		}
-		s.engineError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, run)
+	run, err := s.engine.Cancel(r.Context(), id, cancelledBy)
+	s.commandAnswer(w, r, run, err)
 }
 
 func (s *Server) getTrace(w http.ResponseWriter, r *http.Request) {

@@ -300,7 +300,8 @@ export type Tool = {
   chat?: boolean;
 };
 
-export const RUN_STATUSES = ["queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "timed_out"] as const;
+/** `paused`: the operator paused the run; no worker holds it until it is resumed. */
+export const RUN_STATUSES = ["queued", "running", "waiting_approval", "paused", "succeeded", "failed", "cancelled", "timed_out"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 /** Where a run came from; "issue" is a run the issue intake created for a labelled issue (DESIGN 5.23), "plan" a wave's ship run (DESIGN 5.29 rule 9). */
 export const RUN_TRIGGERS = ["manual", "schedule", "channel", "eval", "issue", "plan"] as const;
@@ -383,10 +384,33 @@ export type Run = {
   merge_request_id?: string;
   /** The commit the run's checkout was cloned at, moved to each commit the run pushed; absent without a checkout (DESIGN 5.22). */
   checkout_sha?: string;
+  /** Whether the last turn of a stopped run is confirmed stopped; absent when nothing was stopped. */
+  cancel_state?: "confirmed" | "unconfirmed";
+  /** The command a cancel, pause, resume, retry or steer request recorded; only on the answer to that request. */
+  command?: RunCommand;
   created_at: string;
   started_at?: string;
   finished_at?: string;
   updated_at?: string;
+};
+
+export type RunCommandKind = "cancel" | "pause" | "resume" | "retry" | "steer";
+export type RunCommandOutcome = "pending" | "applied" | "rejected" | "failed" | "superseded";
+
+/** A request to stop, hold, restart or redirect a run, from receipt to its outcome. */
+export type RunCommand = {
+  id: string;
+  run_id: string;
+  kind: RunCommandKind;
+  node_id?: string;
+  payload: Record<string, unknown>;
+  actor: Record<string, unknown>;
+  request_id?: string;
+  received_at: string;
+  acked_at?: string;
+  applied_at?: string;
+  outcome: RunCommandOutcome;
+  detail?: string;
 };
 
 export type Toolchain = "go" | "node" | "python" | "default";
@@ -636,6 +660,8 @@ export type RunNode = {
   question_id?: string;
   /** Set on a visit made inside a branch of a fork: the `RunBranch` it belongs to (DESIGN 5.26 rule 4). */
   branch_id?: string;
+  /** "paused" on the visit the operator paused; the step continues in a new visit once the run is resumed. */
+  park_reason?: "paused";
   started_at?: string;
   finished_at?: string;
 };
@@ -942,6 +968,15 @@ export const cancelRun = (id: string) => api<Run>(`/api/runs/${seg(id)}/cancel`,
  * `retry_limit` or `limits_exhausted` (its details name each exhausted limit).
  */
 export const retryRun = (id: string, limits?: Limits) => api<Run>(`/api/runs/${seg(id)}/retry`, withBody("POST", limits ? { limits } : undefined));
+/** Pauses a run: a queued one at once, a live one once its worker stopped the turn and parked the step. */
+export const pauseRun = (id: string) => api<Run>(`/api/runs/${seg(id)}/pause`, withBody("POST"));
+/** Re-queues a paused run; the note goes into the task of the step's next visit. */
+export const resumeRun = (id: string, note?: string) => api<Run>(`/api/runs/${seg(id)}/resume`, withBody("POST", note?.trim() ? { note: note.trim() } : undefined));
+/** Sends the operator's message into the run's live step; `node_id` names the step when several are live. */
+export const steerRun = (id: string, message: string, nodeId?: string) =>
+  api<Run>(`/api/runs/${seg(id)}/steer`, withBody("POST", nodeId ? { node_id: nodeId, message } : { message }));
+/** The run's commands, newest first, at most 100. */
+export const listRunCommands = async (id: string) => (await api<RunCommand[] | null>(`/api/runs/${seg(id)}/commands`)) ?? [];
 export const getTrace = async (id: string) => normalizeTrace(await api<Trace>(`/api/runs/${seg(id)}/trace`));
 
 /** The files the run delivered, by path (DESIGN 5.25); empty for a run that delivered nothing. */

@@ -27,6 +27,7 @@ function PlatformCards() {
     ["Queued runs", s.runs.queued ?? 0],
     ["Running", s.runs.running ?? 0],
     ["Waiting approval", s.runs.waiting_approval ?? 0],
+    ["Paused", s.runs.paused ?? 0],
   ];
 
   return (

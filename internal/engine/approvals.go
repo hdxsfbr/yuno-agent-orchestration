@@ -710,7 +710,7 @@ func (e *Engine) failRunFrom(ctx context.Context, runID, reason string, from ...
 // whose worker is gone): its approvals expire with reason "run cancelled" (DESIGN 5.3
 // rule 8).
 func (e *Engine) cancelWaitingRun(ctx context.Context, runID, reason string) (*store.Run, bool) {
-	run, err := store.TransitionRun(ctx, e.deps.Pool, runID, []string{store.RunWaitingApproval}, store.RunCancelled, &reason, e.clock.Now())
+	run, err := store.TransitionRun(ctx, e.deps.Pool, runID, []string{store.RunWaitingApproval, store.RunPaused}, store.RunCancelled, &reason, e.clock.Now())
 	if err != nil {
 		return nil, false
 	}
@@ -721,6 +721,13 @@ func (e *Engine) cancelWaitingRun(ctx context.Context, runID, reason string) (*s
 // closeWaitingRun is the terminal housekeeping of a run that ended while paused.
 func (e *Engine) closeWaitingRun(ctx context.Context, run *store.Run, reason, approvalReason string) {
 	now := e.clock.Now()
+	// DESIGN W2 rules 11 and 12: the stop's state, and the commands the run leaves pending.
+	if state := e.stopState(ctx, e.deps.Pool, run); state != "" && state != run.CancelState {
+		if done, err := store.SetRunCancelState(ctx, e.deps.Pool, run.ID, state); err == nil {
+			run = done
+		}
+	}
+	e.settleAtEnd(ctx, run)
 	e.expireRunApprovals(ctx, run.ID, approvalReason)
 	for _, n := range unfinishedVisits(ctx, e, run.ID) {
 		r := reason

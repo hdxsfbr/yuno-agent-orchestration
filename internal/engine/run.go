@@ -28,6 +28,12 @@ type outcome struct {
 	// paused means the run waits at an approval node: the worker lets it go and a
 	// decision re-queues it (DESIGN 5.6 rule 8).
 	paused bool
+	// operatorPause is a visit stopped for the operator's pause (DESIGN W2 rule 14): its
+	// turn is confirmed stopped, and the walk saves its checkout and parks it.
+	operatorPause bool
+	// leaseLost means the worker found its lease gone (DESIGN W2 rule 9): it writes nothing
+	// more to the run, which is another worker's now.
+	leaseLost bool
 }
 
 func succeeded(output json.RawMessage) outcome {
@@ -50,6 +56,10 @@ func violated(v *violation) outcome {
 // runRun executes one claimed run until it is terminal or waits at an approval node
 // (DESIGN 5.1, 5.6).
 func (e *Engine) runRun(ctx context.Context, run *store.Run) {
+	// The worker keeps the lease epoch it claimed the run with; every fenced write of the
+	// run carries it (DESIGN W2 rules 7 and 8).
+	lease := store.NewLease(run)
+	ctx = store.WithLease(ctx, lease)
 	wctx := context.WithoutCancel(ctx)
 	now := e.clock.Now()
 	resumed := run.CurrentNode != nil && *run.CurrentNode != ""
@@ -124,7 +134,14 @@ func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 		}
 		res = w.execute(ctx)
 	}
+	if lease.Lost() {
+		res = outcome{leaseLost: true}
+	}
 	switch {
+	case res.leaseLost:
+		// DESIGN W2 rule 9: the run is another worker's; this one stops and writes nothing.
+		e.leaseLost(wctx, run.ID)
+		return
 	case res.interrupted:
 		e.endSpan(ctx, rootSpan, e.clock.Now(), map[string]any{"interrupted": true})
 		return
@@ -135,6 +152,11 @@ func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 	}
 	for _, key := range w.sessions {
 		e.deleteSession(wctx, key)
+	}
+	if res.paused {
+		// The worker let the run go: the commands still pending for it are decided as the api
+		// decides those of a run no worker holds (DESIGN W2 rule 5).
+		e.settleUnheld(wctx, run.ID)
 	}
 }
 
@@ -179,12 +201,27 @@ func (e *Engine) finishRun(ctx context.Context, runID string, res outcome, rootS
 		reason = &r
 	}
 	run, err := e.transition(ctx, runID, res.runStatus, reason, now)
+	if errors.Is(err, store.ErrLeaseLost) {
+		e.leaseLost(ctx, runID) // DESIGN W2 rule 9
+		return
+	}
 	if err != nil {
 		e.log.Error("terminal transition failed", "run_id", runID, "to", res.runStatus, "error", err)
 		if run, err = store.GetRun(ctx, e.deps.Pool, runID); err != nil {
 			return
 		}
 	}
+	// DESIGN W2 rules 11 and 12: whether the run's last turn is confirmed stopped, then the
+	// commands it leaves pending (a cancel applied, or acknowledged until the reconcile pass
+	// confirms the stop; the rest rejected, the run having ended first).
+	if state := e.stopState(ctx, e.deps.Pool, run); state != "" && state != run.CancelState {
+		if done, err := store.SetRunCancelState(ctx, e.deps.Pool, runID, state); err == nil {
+			run = done
+		} else {
+			e.log.Warn("record the stop's state failed", "run_id", runID, "error", err)
+		}
+	}
+	e.settleAtEnd(ctx, run)
 	if run.Status != store.RunSucceeded {
 		why := "run ended"
 		if run.Status == store.RunCancelled {

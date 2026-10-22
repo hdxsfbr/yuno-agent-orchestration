@@ -39,7 +39,7 @@ func (e *Engine) EscalateRun(ctx context.Context, runID, kind, reason string) er
 	}
 	e.logEvent(ctx, runID, "warn", "escalated ("+kind+")")
 	if !e.failRunFrom(context.WithoutCancel(ctx), runID, EscalateReason(kind, reason),
-		store.RunWaitingApproval, store.RunQueued, store.RunRunning) {
+		store.RunWaitingApproval, store.RunQueued, store.RunRunning, store.RunPaused) {
 		return ErrRunEnded
 	}
 	return nil

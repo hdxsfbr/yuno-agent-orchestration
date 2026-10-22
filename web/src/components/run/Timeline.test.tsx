@@ -430,3 +430,12 @@ describe("a fork visit", () => {
     expect(screen.getAllByRole("region", { name: /^Node / })).toHaveLength(1);
   });
 });
+
+describe("a paused step", () => {
+  it("says the operator paused it, not that it waits for an approval", () => {
+    renderTimeline([], [node({ status: "waiting_approval", park_reason: "paused", finished_at: undefined })]);
+    const step = within(screen.getByRole("region", { name: "Node coder" }));
+    expect(step.getByText("Paused by the operator.")).not.toBeNull();
+    expect(step.queryByText("Waiting for an approval.")).toBeNull();
+  });
+});

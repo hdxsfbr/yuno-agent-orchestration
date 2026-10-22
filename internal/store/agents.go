@@ -216,9 +216,9 @@ func ListAgentActivity(ctx context.Context, q Querier) (map[string]AgentActivity
 	rows, err := q.Query(ctx, `SELECT rn.agent_id,
 		count(*) FILTER (WHERE rn.status = $1), count(*) FILTER (WHERE rn.status = $2)
 		FROM run_nodes rn JOIN runs r ON r.id = rn.run_id
-		WHERE rn.agent_id IS NOT NULL AND rn.status IN ($1, $2) AND r.status IN ($3, $4, $5)
+		WHERE rn.agent_id IS NOT NULL AND rn.status IN ($1, $2) AND r.status IN ($3, $4, $5, $6)
 		GROUP BY rn.agent_id`,
-		NodeRunning, NodeWaitingApproval, RunQueued, RunRunning, RunWaitingApproval)
+		NodeRunning, NodeWaitingApproval, RunQueued, RunRunning, RunWaitingApproval, RunPaused)
 	if err != nil {
 		return nil, err
 	}

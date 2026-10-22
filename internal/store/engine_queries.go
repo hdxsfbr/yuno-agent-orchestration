@@ -21,21 +21,24 @@ func SetRunStartedAt(ctx context.Context, q Querier, id string, at time.Time) er
 // TransitionRun moves a run to status `to` only if its current status is one of
 // `from`, and returns the updated row. It returns ErrNotFound when the run does not
 // exist or is in none of the expected statuses. finished_at is set for terminal
-// statuses; reason, when non-nil, replaces failure_reason.
+// statuses; reason, when non-nil, replaces failure_reason. A worker's transition is
+// fenced by its lease (DESIGN W2 rule 8): ErrLeaseLost when the epoch moved on.
 func TransitionRun(ctx context.Context, q Querier, id string, from []string, to string, reason *string, at time.Time) (*Run, error) {
 	var finished any
 	if IsTerminal(to) {
 		finished = at.UTC()
 	}
+	l := fence(ctx, id)
+	_, epoch := fenceArgs(l)
 	rows, err := q.Query(ctx, `UPDATE runs SET status=$3, failure_reason=COALESCE($4, failure_reason),
 		finished_at=COALESCE($5, finished_at), updated_at=now()
-		WHERE id=$1 AND status = ANY($2) RETURNING `+runColumns, id, from, to, reason, finished)
+		WHERE id=$1 AND status = ANY($2) AND `+runFence("$6")+` RETURNING `+runColumns, id, from, to, reason, finished, epoch)
 	if err != nil {
 		return nil, err
 	}
 	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, lostOr(ctx, q, l, ErrNotFound)
 	}
 	return r, err
 }
@@ -43,55 +46,69 @@ func TransitionRun(ctx context.Context, q Querier, id string, from []string, to 
 // AddRunUsageReturning is AddRunUsage that returns the updated row, so the engine can
 // check limits and the cancel flag on the same read (DESIGN 5.2).
 func AddRunUsageReturning(ctx context.Context, q Querier, id string, steps, toolCalls int, in, out, cacheRead, cacheWrite, costMicros int64) (*Run, error) {
+	l := fence(ctx, id)
+	_, epoch := fenceArgs(l)
 	rows, err := q.Query(ctx, `UPDATE runs SET step_count=step_count+$2, tool_call_count=tool_call_count+$3,
 		input_tokens=input_tokens+$4, output_tokens=output_tokens+$5, cache_read_tokens=cache_read_tokens+$6,
 		cache_write_tokens=cache_write_tokens+$7, cost_usd_micros=cost_usd_micros+$8, updated_at=now()
-		WHERE id=$1 RETURNING `+runColumns,
-		id, steps, toolCalls, in, out, cacheRead, cacheWrite, costMicros)
+		WHERE id=$1 AND `+runFence("$9")+` RETURNING `+runColumns,
+		id, steps, toolCalls, in, out, cacheRead, cacheWrite, costMicros, epoch)
 	if err != nil {
 		return nil, err
 	}
 	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, lostOr(ctx, q, l, ErrNotFound)
 	}
 	return r, err
 }
 
 // TouchRun refreshes updated_at so the stale-run sweeper (DESIGN 5.1 rule 8) leaves a
-// long, quiet turn alone.
+// long, quiet turn alone. The heartbeat renews the worker's lease (DESIGN W2 rule 8): it is
+// fenced, and ErrLeaseLost says the run is another worker's now.
 func TouchRun(ctx context.Context, q Querier, id string) error {
-	_, err := q.Exec(ctx, `UPDATE runs SET updated_at=now() WHERE id=$1`, id)
+	l := fence(ctx, id)
+	_, epoch := fenceArgs(l)
+	tag, err := q.Exec(ctx, `UPDATE runs SET updated_at=now() WHERE id=$1 AND `+runFence("$2"), id, epoch)
+	if err == nil && tag.RowsAffected() == 0 {
+		return lostOr(ctx, q, l, nil)
+	}
 	return err
 }
 
-// PauseRunAt moves a running run to waiting_approval at the given time.
+// PauseRunAt moves a running run to waiting_approval at the given time; fenced by the
+// worker's lease (DESIGN W2 rule 8).
 func PauseRunAt(ctx context.Context, q Querier, id, resumeNodeVisitID string, at time.Time) (*Run, error) {
+	l := fence(ctx, id)
+	_, epoch := fenceArgs(l)
 	rows, err := q.Query(ctx, `UPDATE runs SET status=$2, paused_at=$3, resume_node_visit_id=$4, updated_at=now()
-		WHERE id=$1 AND status=$5 RETURNING `+runColumns, id, RunWaitingApproval, at.UTC(), resumeNodeVisitID, RunRunning)
+		WHERE id=$1 AND status=$5 AND `+runFence("$6")+` RETURNING `+runColumns, id, RunWaitingApproval, at.UTC(), resumeNodeVisitID, RunRunning, epoch)
 	if err != nil {
 		return nil, err
 	}
 	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, lostOr(ctx, q, l, ErrNotFound)
 	}
 	return r, err
 }
 
 // ResumeRunAt moves a waiting_approval run back to running in place (the OpenClaw turn
-// never stopped) and adds the paused interval to paused_total_ms.
+// never stopped) and adds the paused interval to paused_total_ms; fenced by the worker's
+// lease (DESIGN W2 rule 8).
 func ResumeRunAt(ctx context.Context, q Querier, id string, at time.Time) (*Run, error) {
+	l := fence(ctx, id)
+	_, epoch := fenceArgs(l)
 	rows, err := q.Query(ctx, `UPDATE runs SET status=$2,
 		paused_total_ms = paused_total_ms + GREATEST(0, COALESCE(EXTRACT(EPOCH FROM ($3::timestamptz - paused_at)) * 1000, 0))::bigint,
-		paused_at=NULL, updated_at=now() WHERE id=$1 AND status=$4 RETURNING `+runColumns,
-		id, RunRunning, at.UTC(), RunWaitingApproval)
+		paused_at=NULL, updated_at=now() WHERE id=$1 AND status=$4 AND `+runFence("$5")+` RETURNING `+runColumns,
+		id, RunRunning, at.UTC(), RunWaitingApproval, epoch)
 	if err != nil {
 		return nil, err
 	}
 	r, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Run])
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, lostOr(ctx, q, l, ErrNotFound)
 	}
 	return r, err
 }
@@ -102,14 +119,22 @@ func ResumeRunAt(ctx context.Context, q Querier, id string, at time.Time) (*Run,
 // A parked visit (DESIGN 5.24 rule 5) that its decision already closed keeps its closed
 // state: the visit goroutine that parked it may still save what it holds (a late
 // transcript entry) after the decision re-queued the run, and must not reopen the row.
+//
+// The write is the visit's progress and finish, fenced by the worker's lease (DESIGN W2
+// rule 8).
 func UpdateRunNodeProgress(ctx context.Context, q Querier, n *RunNode) error {
-	_, err := q.Exec(ctx, `UPDATE run_nodes SET iteration=$2, messages=$4, failure_reason=$5, session_key=$6,
+	l := fence(ctx, n.RunID)
+	r, e := fenceArgs(l)
+	tag, err := q.Exec(ctx, `UPDATE run_nodes SET iteration=$2, messages=$4, failure_reason=$5, session_key=$6,
 		openclaw_run_id=$7, started_at=$8,
 		status = CASE WHEN parked_at IS NOT NULL AND status = $10 THEN status ELSE $3 END,
 		finished_at = CASE WHEN parked_at IS NOT NULL AND status = $10 THEN finished_at ELSE $9 END
-		WHERE id=$1`,
+		WHERE id=$1 AND `+childFence("run_id", "$11", "$12"),
 		n.ID, n.Iteration, n.Status, n.Messages, n.FailureReason, n.SessionKey, n.OpenClawRunID, n.StartedAt, n.FinishedAt,
-		NodeSucceeded)
+		NodeSucceeded, r, e)
+	if err == nil && tag.RowsAffected() == 0 {
+		return lostOr(ctx, q, l, nil)
+	}
 	return err
 }
 
@@ -125,8 +150,11 @@ func SetRunNodeOutput(ctx context.Context, q Querier, id string, output json.Raw
 // FailRunningNodes marks a run's unfinished node visits failed (a re-queued run after
 // a lost worker, DESIGN 5.1 rule 8).
 func FailRunningNodes(ctx context.Context, q Querier, runID, reason string, at time.Time) (int64, error) {
+	// A worker's write is fenced by its lease (DESIGN W2 rule 8).
+	r, e := fenceArgs(fence(ctx, runID))
 	tag, err := q.Exec(ctx, `UPDATE run_nodes SET status=$2, failure_reason=$3, finished_at=$4
-		WHERE run_id=$1 AND status IN ($5, $6, $7)`, runID, NodeFailed, reason, at.UTC(), NodePending, NodeRunning, NodeWaitingApproval)
+		WHERE run_id=$1 AND status IN ($5, $6, $7) AND `+childFence("run_id", "$8", "$9"),
+		runID, NodeFailed, reason, at.UTC(), NodePending, NodeRunning, NodeWaitingApproval, r, e)
 	if err != nil {
 		return 0, err
 	}
@@ -228,8 +256,16 @@ func collectRun(rows pgx.Rows, err error) (*Run, error) {
 // drops resume_node_visit_id: the walk moves off a decided approval node only through
 // here, so once it has, that visit's decision is spent and the node, reached again, is
 // a new entry.
+//
+// A worker's write is fenced by its lease (DESIGN W2 rule 8).
 func SetRunCurrentNode(ctx context.Context, q Querier, id, node string) error {
-	_, err := q.Exec(ctx, `UPDATE runs SET current_node=$2, resume_node_visit_id=NULL, updated_at=now() WHERE id=$1`, id, node)
+	l := fence(ctx, id)
+	_, epoch := fenceArgs(l)
+	tag, err := q.Exec(ctx, `UPDATE runs SET current_node=$2, resume_node_visit_id=NULL, updated_at=now() WHERE id=$1 AND `+runFence("$3"),
+		id, node, epoch)
+	if err == nil && tag.RowsAffected() == 0 {
+		return lostOr(ctx, q, l, nil)
+	}
 	return err
 }
 
@@ -240,9 +276,16 @@ func SetRunStateNode(ctx context.Context, q Querier, id, nodeID string, output j
 	if len(output) == 0 {
 		output = json.RawMessage(`null`)
 	}
-	return collectRun(q.Query(ctx, `UPDATE runs SET state = jsonb_set(CASE WHEN jsonb_typeof(state) = 'object' THEN state ELSE '{}'::jsonb END,
-		ARRAY[$2::text], $3::jsonb, true), current_node=$4, updated_at=now() WHERE id=$1 RETURNING `+runColumns,
-		id, nodeID, output, currentNode))
+	// A worker's write is fenced by its lease (DESIGN W2 rule 8).
+	l := fence(ctx, id)
+	_, epoch := fenceArgs(l)
+	run, err := collectRun(q.Query(ctx, `UPDATE runs SET state = jsonb_set(CASE WHEN jsonb_typeof(state) = 'object' THEN state ELSE '{}'::jsonb END,
+		ARRAY[$2::text], $3::jsonb, true), current_node=$4, updated_at=now() WHERE id=$1 AND `+runFence("$5")+` RETURNING `+runColumns,
+		id, nodeID, output, currentNode, epoch))
+	if errors.Is(err, ErrNotFound) {
+		return nil, lostOr(ctx, q, l, err)
+	}
+	return run, err
 }
 
 // InsertApprovalAndPause stores a pending approval and moves its running run to
@@ -277,8 +320,10 @@ func AppendPendingEffect(ctx context.Context, q Querier, id string, entry json.R
 
 // RequeuePausedRunAt moves a waiting_approval run back to queued (an approval node was
 // decided) and adds the paused interval to paused_total_ms.
+//
+// The move to queued increments the lease epoch (DESIGN W2 rule 7).
 func RequeuePausedRunAt(ctx context.Context, q Querier, id string, at time.Time) (*Run, error) {
-	return collectRun(q.Query(ctx, `UPDATE runs SET status=$2,
+	return collectRun(q.Query(ctx, `UPDATE runs SET status=$2, lease_epoch=lease_epoch+1,
 		paused_total_ms = paused_total_ms + GREATEST(0, COALESCE(EXTRACT(EPOCH FROM ($3::timestamptz - paused_at)) * 1000, 0))::bigint,
 		paused_at=NULL, updated_at=now() WHERE id=$1 AND status=$4 RETURNING `+runColumns,
 		id, RunQueued, at.UTC(), RunWaitingApproval))
@@ -306,9 +351,48 @@ func ParkVisit(ctx context.Context, db interface {
 	if tag.RowsAffected() == 0 {
 		return nil, ErrNotFound
 	}
+	// The park is the worker's write, fenced by its lease (DESIGN W2 rule 8).
+	l := fence(ctx, runID)
+	_, epoch := fenceArgs(l)
 	run, err := collectRun(tx.Query(ctx, `UPDATE runs SET status=$2, paused_at=COALESCE(paused_at, $3), resume_node_visit_id=$4,
-		updated_at=now() WHERE id=$1 AND status IN ($5, $2) RETURNING `+runColumns,
-		runID, RunWaitingApproval, at.UTC(), runNodeID, RunRunning))
+		updated_at=now() WHERE id=$1 AND status IN ($5, $2) AND `+runFence("$6")+` RETURNING `+runColumns,
+		runID, RunWaitingApproval, at.UTC(), runNodeID, RunRunning, epoch))
+	if errors.Is(err, ErrNotFound) {
+		return nil, lostOr(ctx, tx, l, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return run, tx.Commit(ctx)
+}
+
+// PauseVisit parks a visit the operator paused (DESIGN W2 rule 14) in one transaction, as
+// ParkVisit parks one on its question: the visit's row becomes waiting_approval with
+// parked_at and park_reason paused, and the run moves to paused with resume_node_visit_id
+// the visit and paused_at the park time. Fenced by the worker's lease (rule 8). ErrNotFound
+// means the visit or the run was not in a state that can pause; nothing is stored.
+func PauseVisit(ctx context.Context, db beginner, runID, runNodeID string, at time.Time) (*Run, error) {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // no-op after commit
+	l := fence(ctx, runID)
+	_, epoch := fenceArgs(l)
+	tag, err := tx.Exec(ctx, `UPDATE run_nodes SET parked_at=$3, status=$4, park_reason=$6 WHERE id=$1 AND run_id=$2 AND status IN ($5, $4)`,
+		runNodeID, runID, at.UTC(), NodeWaitingApproval, NodeRunning, ParkPaused)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrNotFound
+	}
+	run, err := collectRun(tx.Query(ctx, `UPDATE runs SET status=$2, paused_at=$3, resume_node_visit_id=$4, updated_at=now()
+		WHERE id=$1 AND status IN ($5, $6) AND `+runFence("$7")+` RETURNING `+runColumns,
+		runID, RunPaused, at.UTC(), runNodeID, RunRunning, RunWaitingApproval, epoch))
+	if errors.Is(err, ErrNotFound) {
+		return nil, lostOr(ctx, tx, l, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -351,7 +435,7 @@ func RequeueParkedRun(ctx context.Context, q Querier, runID, runNodeID string, a
 		branch AS (
 			UPDATE run_branches SET status=$7 WHERE id IN (SELECT branch_id FROM parked WHERE branch_id IS NOT NULL) AND status=$8
 			RETURNING id)
-		UPDATE runs SET status=$9,
+		UPDATE runs SET status=$9, lease_epoch=lease_epoch+1,
 			paused_total_ms = paused_total_ms + GREATEST(0, COALESCE(EXTRACT(EPOCH FROM ($3::timestamptz - paused_at)) * 1000, 0))::bigint,
 			paused_at=NULL, updated_at=now()
 		WHERE runs.id=$1 AND runs.status=$4 AND `+parkedResumeSQL+`
@@ -363,10 +447,12 @@ func RequeueParkedRun(ctx context.Context, q Querier, runID, runNodeID string, a
 
 // CountNodeLoopVisits returns the visits of a node in a run that count toward
 // max_loop_visits (DESIGN 5.24 rule 5): those that continue no question. CountNodeVisits
-// stays the visit number.
+// stays the visit number. A visit the operator paused (DESIGN W2 rule 14) is not counted
+// either: the visit that continues it after the resume is the step's same pass.
 func CountNodeLoopVisits(ctx context.Context, q Querier, runID, nodeID string) (int, error) {
 	var n int
-	err := q.QueryRow(ctx, `SELECT count(*) FROM run_nodes WHERE run_id=$1 AND node_id=$2 AND question_id IS NULL`, runID, nodeID).Scan(&n)
+	err := q.QueryRow(ctx, `SELECT count(*) FROM run_nodes WHERE run_id=$1 AND node_id=$2 AND question_id IS NULL
+		AND park_reason <> $3`, runID, nodeID, ParkPaused).Scan(&n)
 	return n, err
 }
 
@@ -438,15 +524,18 @@ func LatestNodeVisit(ctx context.Context, q Querier, runID, nodeID string) (*Run
 // FinishRunNode sets a node visit's terminal status (approval node visits, which no
 // visit goroutine owns) unless it is already terminal, and returns the row.
 func FinishRunNode(ctx context.Context, q Querier, id, status string, reason *string, at time.Time) (*RunNode, error) {
+	// A worker's write is fenced by its lease (DESIGN W2 rule 8).
+	l := LeaseOf(ctx)
+	r, e := fenceArgs(l)
 	rows, err := q.Query(ctx, `UPDATE run_nodes SET status=$2, failure_reason=COALESCE($3, failure_reason), finished_at=$4
-		WHERE id=$1 AND status IN ($5, $6, $7) RETURNING `+runNodeColumns,
-		id, status, reason, at.UTC(), NodePending, NodeRunning, NodeWaitingApproval)
+		WHERE id=$1 AND status IN ($5, $6, $7) AND `+childFence("run_id", "$8", "$9")+` RETURNING `+runNodeColumns,
+		id, status, reason, at.UTC(), NodePending, NodeRunning, NodeWaitingApproval, r, e)
 	if err != nil {
 		return nil, err
 	}
 	n, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[RunNode])
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, lostOr(ctx, q, l, ErrNotFound)
 	}
 	return n, err
 }

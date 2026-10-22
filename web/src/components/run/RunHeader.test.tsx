@@ -534,3 +534,67 @@ describe("the step line inside a fork", () => {
     expect(screen.getByRole("link", { name: "Asks: Which branch should I review?" })).not.toBeNull();
   });
 });
+
+describe("pause, resume and steer (DESIGN W2)", () => {
+  const live = () => run({ status: "running", finished_at: undefined });
+
+  it("pauses a live run and says the pause waits for the step to stop", async () => {
+    api.on("POST", "/api/runs/r1/pause", () => live());
+    renderHeader(live());
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(api.made("POST", "/api/runs/r1/pause")).toHaveLength(1));
+    expect(await screen.findByText("Pause requested: the run pauses once its step stops.")).not.toBeNull();
+    expect(onRunChange).toHaveBeenCalled();
+  });
+
+  it("offers Resume with an optional note on a paused run, and sends the note", async () => {
+    const queued = run({ status: "queued", finished_at: undefined });
+    api.on("POST", "/api/runs/r1/resume", () => queued);
+    renderHeader(run({ status: "paused", finished_at: undefined }));
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "Note for the step" }), { target: { value: "  use the staging branch  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(onRunChange).toHaveBeenCalledWith(queued));
+    expect(api.made("POST", "/api/runs/r1/resume")[0].body).toEqual({ note: "use the staging branch" });
+  });
+
+  it("resumes without a body when there is no note", async () => {
+    api.on("POST", "/api/runs/r1/resume", () => run({ status: "queued", finished_at: undefined }));
+    renderHeader(run({ status: "paused", finished_at: undefined }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(api.made("POST", "/api/runs/r1/resume")).toHaveLength(1));
+    expect(api.made("POST", "/api/runs/r1/resume")[0].body).toBeUndefined();
+  });
+
+  it("steers a live run with the message typed", async () => {
+    api.on("POST", "/api/runs/r1/steer", () => live());
+    renderHeader(live());
+    fireEvent.click(screen.getByRole("button", { name: "Steer" }));
+    const send = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    fireEvent.change(screen.getByRole("textbox", { name: "Message to the running step" }), { target: { value: "Skip the docs." } });
+    fireEvent.click(send);
+    await waitFor(() => expect(api.made("POST", "/api/runs/r1/steer")).toHaveLength(1));
+    expect(api.made("POST", "/api/runs/r1/steer")[0].body).toEqual({ message: "Skip the docs." });
+    expect(await screen.findByText("Sent to the running step.")).not.toBeNull();
+  });
+
+  it("says why a refused command was refused", async () => {
+    api.on("POST", "/api/runs/r1/steer", () => apiError(409, "command_rejected", "nothing is running; retry or resume with a note"));
+    renderHeader(live());
+    fireEvent.click(screen.getByRole("button", { name: "Steer" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Message to the running step" }), { target: { value: "Hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText(/Could not send the message: nothing is running; retry or resume with a note/)).not.toBeNull();
+  });
+
+  it("offers neither Pause nor Steer on a finished run, nor once a cancel was asked for", () => {
+    renderHeader(run({ status: "failed" }));
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Steer" })).toBeNull();
+    cleanup();
+    renderHeader(run({ status: "running", cancel_requested: true, finished_at: undefined }));
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Steer" })).toBeNull();
+  });
+});

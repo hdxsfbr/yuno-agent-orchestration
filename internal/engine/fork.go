@@ -150,7 +150,13 @@ func (w *walk) runBranches(ctx context.Context, fork, join *workflow.Node, regio
 			w.sessions = append(w.sessions, r.w.sessions...)
 		}
 	}
+	leaseLost := false
 	for {
+		if leaseLost && len(running) == 0 {
+			// Every branch stopped itself on the lost lease (DESIGN W2 rule 9): the run is
+			// another worker's, and the fork writes nothing more either.
+			return "", &outcome{leaseLost: true}
+		}
 		if len(running) == 0 && failure == nil {
 			runnable, done, parked, err := w.runnableBranches(ctx, fv.ID)
 			if err != nil {
@@ -187,6 +193,11 @@ func (w *walk) runBranches(ctx context.Context, fork, join *workflow.Node, regio
 				drain()
 				e.endSpan(ctx, span, e.clock.Now(), map[string]any{"interrupted": true})
 				return "", &outcome{interrupted: true}
+			case r.res.leaseLost || store.LeaseOf(ctx).Lost():
+				// An ErrLeaseLost in a branch stops that branch's visit only (DESIGN W2 Failure
+				// handling): it is no failure, nothing stops its siblings, and nothing is written;
+				// each sibling stops itself at its next fenced write.
+				leaseLost = true
 			case r.done:
 				w.finishBranch(ctx, b, store.BranchSucceeded, nil)
 				e.logEvent(ctx, w.run.ID, "info", "branch "+b.Head+" done", "node_id", fork.ID)
@@ -245,6 +256,9 @@ func (bw *walk) runBranch(ctx context.Context) branchEnd {
 	for {
 		if ctx.Err() != nil {
 			return branchEnd{w: bw, res: outcome{interrupted: true}}
+		}
+		if store.LeaseOf(ctx).Lost() {
+			return branchEnd{w: bw, res: outcome{leaseLost: true}}
 		}
 		if cur == bw.region.Join {
 			return branchEnd{w: bw, done: true}

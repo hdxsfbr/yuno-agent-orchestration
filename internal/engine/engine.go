@@ -247,6 +247,9 @@ func (e *Engine) sweeper(ctx context.Context) {
 		case <-t.C:
 		}
 		e.sweepStale(ctx)
+		// DESIGN W2 rule 11: the turns not confirmed stopped are checked again, after the
+		// sweep marked those of the runs it took from a lost worker (rule 12).
+		e.reconcileStops(ctx)
 		// After the stale-run sweep, so a run it failed is reported in the same tick.
 		e.sweepReports(ctx)
 	}
@@ -664,52 +667,6 @@ func (e *Engine) quickRunWorkflow(ctx context.Context, a *store.Agent, def *work
 		return nil, fmt.Errorf("quick-run workflow: %w", err)
 	}
 	return wf, nil
-}
-
-// Cancel flags a run for cancellation (DESIGN 5.2). A queued run is cancelled at once;
-// a running one is aborted by its worker on the next check, which this call triggers.
-// Finished runs are returned unchanged.
-func (e *Engine) Cancel(ctx context.Context, runID, by string) (*store.Run, error) {
-	if by == "" {
-		by = "user"
-	}
-	run, err := store.GetRun(ctx, e.deps.Pool, runID)
-	if err != nil {
-		return nil, fmt.Errorf("run %s: %w", runID, err)
-	}
-	if store.IsTerminal(run.Status) {
-		return run, nil
-	}
-	if err := store.RequestCancel(ctx, e.deps.Pool, runID, by); err != nil {
-		return nil, fmt.Errorf("run %s: %w", runID, err)
-	}
-	if run.Status == store.RunQueued {
-		reason := "cancelled by " + by
-		if done, err := store.TransitionRun(ctx, e.deps.Pool, runID, []string{store.RunQueued}, store.RunCancelled, &reason, e.clock.Now()); err == nil {
-			e.log.Info("run cancelled before start", "run_id", runID, "by", by)
-			// A run re-queued after a release (DESIGN 5.26 rule 8) still has its fork row,
-			// its parked visits and their questions open: closed as a waiting run's are.
-			e.closeWaitingRun(context.WithoutCancel(ctx), done, reason, "run cancelled")
-			return done, nil
-		}
-	}
-	live := e.activeVisits(runID)
-	for _, v := range live {
-		v.requestCancel()
-	}
-	if len(live) == 0 && run.Status == store.RunWaitingApproval {
-		// Paused with no worker (an approval node): nothing else would see the flag.
-		if done, ok := e.cancelWaitingRun(context.WithoutCancel(ctx), runID, "cancelled by "+by); ok {
-			e.log.Info("run cancelled while waiting for approval", "run_id", runID, "by", by)
-			return done, nil
-		}
-	}
-	run, err = store.GetRun(ctx, e.deps.Pool, runID)
-	if err != nil {
-		return nil, fmt.Errorf("run %s: %w", runID, err)
-	}
-	e.emit(ctx, runID, "run.status", map[string]any{"run": run})
-	return run, nil
 }
 
 // ResolveRunToken maps a token to its run context; ok=false when unknown or revoked.

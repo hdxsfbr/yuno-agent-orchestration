@@ -12,16 +12,19 @@ import (
 
 // transitions is the run state machine (DESIGN 5.1): every pair not listed is refused.
 // running → queued is the stale-run re-queue; waiting_approval → running resumes a turn
-// whose exec approval was decided while OpenClaw kept the turn open.
+// whose exec approval was decided while OpenClaw kept the turn open. paused (DESIGN W2
+// rules 14 and 15) is entered from a queued run or a live one, and left by a resume
+// (queued), a cancel, or an escalation that fails the run.
 var transitions = map[string][]string{
-	store.RunQueued:          {store.RunRunning, store.RunCancelled},
-	store.RunRunning:         {store.RunQueued, store.RunWaitingApproval, store.RunSucceeded, store.RunFailed, store.RunCancelled, store.RunTimedOut},
+	store.RunQueued:          {store.RunRunning, store.RunCancelled, store.RunPaused},
+	store.RunRunning:         {store.RunQueued, store.RunWaitingApproval, store.RunPaused, store.RunSucceeded, store.RunFailed, store.RunCancelled, store.RunTimedOut},
 	store.RunWaitingApproval: {store.RunQueued, store.RunRunning, store.RunFailed, store.RunCancelled, store.RunTimedOut},
+	store.RunPaused:          {store.RunQueued, store.RunFailed, store.RunCancelled},
 }
 
-// RunStatuses lists the seven run statuses in state-machine order.
+// RunStatuses lists the eight run statuses in state-machine order.
 var RunStatuses = []string{
-	store.RunQueued, store.RunRunning, store.RunWaitingApproval,
+	store.RunQueued, store.RunRunning, store.RunWaitingApproval, store.RunPaused,
 	store.RunSucceeded, store.RunFailed, store.RunCancelled, store.RunTimedOut,
 }
 

@@ -278,10 +278,89 @@ func (f *fakeEngine) Cancel(ctx context.Context, runID, by string) (*store.Run, 
 	if err != nil {
 		return nil, err
 	}
+	// A finished run is refused as the engine refuses it (DESIGN W2 rule 4).
+	if run, err := store.GetRun(ctx, f.pool, runID); err == nil && store.IsTerminal(run.Status) {
+		return nil, &engine.CommandError{Code: engine.CodeRunFinished, Message: "the run already ended (" + run.Status + ")"}
+	}
 	if err := store.RequestCancel(ctx, f.pool, runID, by); err != nil {
 		return nil, err
 	}
 	return store.GetRun(ctx, f.pool, runID)
+}
+
+// RetryFrom is Retry from a step; the fake stands in for the engine as Retry does.
+func (f *fakeEngine) RetryFrom(ctx context.Context, runID, by, fromNode string, limits *store.Limits) (*store.Run, error) {
+	return f.Retry(ctx, runID, by, limits)
+}
+
+// Pause, Resume and Steer are the recovery commands of DESIGN W2; the fake records each as
+// the engine's receipt does and decides the plain cases: a queued run pauses, a paused one
+// resumes, anything else is refused as the engine refuses it.
+func (f *fakeEngine) Pause(ctx context.Context, runID, by string) (*store.Run, error) {
+	return f.command(ctx, runID, store.CommandPause, "", nil, func(run *store.Run) (string, error) {
+		if run.Status != store.RunQueued {
+			return "", nil
+		}
+		_, err := store.PauseQueuedRun(ctx, f.pool, runID, time.Now())
+		return store.CommandApplied, err
+	})
+}
+
+func (f *fakeEngine) Resume(ctx context.Context, runID, by, note string) (*store.Run, error) {
+	return f.command(ctx, runID, store.CommandResume, "", map[string]any{"note": note}, func(run *store.Run) (string, error) {
+		if run.Status != store.RunPaused {
+			return "", nil
+		}
+		_, err := store.ResumePausedRun(ctx, f.pool, runID, note, time.Now())
+		return store.CommandApplied, err
+	})
+}
+
+func (f *fakeEngine) Steer(ctx context.Context, runID, by, nodeID, message string) (*store.Run, error) {
+	return f.command(ctx, runID, store.CommandSteer, nodeID, map[string]any{"message": message}, func(run *store.Run) (string, error) {
+		if run.Status != store.RunRunning {
+			return "", nil
+		}
+		return store.CommandPending, nil
+	})
+}
+
+// command records a command and settles it with decide's outcome; "" refuses it.
+func (f *fakeEngine) command(ctx context.Context, runID, kind, nodeID string, payload map[string]any,
+	decide func(run *store.Run) (string, error)) (*store.Run, error) {
+	run, err := store.GetRun(ctx, f.pool, runID)
+	if err != nil {
+		return nil, err
+	}
+	raw, _ := json.Marshal(payload)
+	c := &store.RunCommand{RunID: runID, Kind: kind, Payload: raw}
+	if nodeID != "" {
+		c.NodeID = &nodeID
+	}
+	if err := store.InsertRunCommand(ctx, f.pool, c); err != nil {
+		return nil, err
+	}
+	outcome, err := decide(run)
+	if err != nil {
+		return nil, err
+	}
+	if outcome == "" {
+		rejected, err := store.SettleRunCommand(ctx, f.pool, c.ID, store.CommandRejected, "the run is "+run.Status)
+		if err != nil {
+			return nil, err
+		}
+		return nil, &engine.CommandError{Code: engine.CodeCommandRejected, Message: rejected.Detail, Command: rejected}
+	}
+	if outcome != store.CommandPending {
+		if c, err = store.SettleRunCommand(ctx, f.pool, c.ID, outcome, ""); err != nil {
+			return nil, err
+		}
+	}
+	if run, err = store.GetRun(ctx, f.pool, runID); err != nil {
+		return nil, err
+	}
+	run.Command = c
+	return run, nil
 }
 
 func (f *fakeEngine) ResolveRunToken(token string) (engine.RunContext, bool) {

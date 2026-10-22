@@ -32,23 +32,36 @@ type NodeEvidence struct {
 }
 
 // StartRunNodeEvidence records a visit's start: its first heartbeat and progress at `at`,
-// waiting on setup, no open call.
+// waiting on setup, no open call. Fenced by the worker's lease (DESIGN W2 rule 8).
 func StartRunNodeEvidence(ctx context.Context, q Querier, id string, at time.Time) error {
-	_, err := q.Exec(ctx, `UPDATE run_nodes SET heartbeat_at=$2, progress_at=$2, waiting_on=$3, model_wait_since=NULL,
-		open_calls='[]' WHERE id=$1`, id, at.UTC(), WaitingOnSetup)
+	l := LeaseOf(ctx)
+	r, e := fenceArgs(l)
+	tag, err := q.Exec(ctx, `UPDATE run_nodes SET heartbeat_at=$2, progress_at=$2, waiting_on=$3, model_wait_since=NULL,
+		open_calls='[]' WHERE id=$1 AND `+childFence("run_id", "$4", "$5"), id, at.UTC(), WaitingOnSetup, r, e)
+	if err == nil && tag.RowsAffected() == 0 {
+		return lostOr(ctx, q, l, nil)
+	}
 	return err
 }
 
 // TouchRunNode is TouchRun with the visit's heartbeat in the same statement: the run's
 // updated_at (the stale-run sweeper's evidence, DESIGN 5.1 rule 8) and the visit's
-// heartbeat_at move together.
+// heartbeat_at move together. The heartbeat renews the worker's lease (DESIGN W2 rule 8):
+// both writes carry the epoch, and ErrLeaseLost says the run is another worker's now.
 func TouchRunNode(ctx context.Context, q Querier, runID, runNodeID string, at time.Time) error {
-	_, err := q.Exec(ctx, `WITH node AS (UPDATE run_nodes SET heartbeat_at=$3 WHERE id=$2 AND run_id=$1 RETURNING id)
-		UPDATE runs SET updated_at=now() WHERE id=$1`, runID, runNodeID, at.UTC())
+	l := fence(ctx, runID)
+	_, epoch := fenceArgs(l)
+	tag, err := q.Exec(ctx, `WITH node AS (UPDATE run_nodes SET heartbeat_at=$3 WHERE id=$2 AND run_id=$1
+			AND EXISTS (SELECT 1 FROM runs lr WHERE lr.id=$1 AND `+runFence("$4")+`) RETURNING id)
+		UPDATE runs SET updated_at=now() WHERE id=$1 AND `+runFence("$4"), runID, runNodeID, at.UTC(), epoch)
+	if err == nil && tag.RowsAffected() == 0 {
+		return lostOr(ctx, q, l, nil)
+	}
 	return err
 }
 
-// SetRunNodeEvidence writes a visit's evidence after a change.
+// SetRunNodeEvidence writes a visit's evidence after a change, fenced by the worker's lease
+// (DESIGN W2 rule 8).
 func SetRunNodeEvidence(ctx context.Context, q Querier, id string, ev NodeEvidence) error {
 	calls := ev.OpenCalls
 	if len(calls) == 0 {
@@ -62,8 +75,14 @@ func SetRunNodeEvidence(ctx context.Context, q Querier, id string, ev NodeEviden
 	if ev.ModelWaitSince != nil {
 		since = ev.ModelWaitSince.UTC()
 	}
-	_, err := q.Exec(ctx, `UPDATE run_nodes SET waiting_on=$2, model_wait_since=$3, open_calls=$4,
-		progress_at=COALESCE($5::timestamptz, progress_at) WHERE id=$1`, id, ev.WaitingOn, since, calls, progress)
+	l := LeaseOf(ctx)
+	r, e := fenceArgs(l)
+	tag, err := q.Exec(ctx, `UPDATE run_nodes SET waiting_on=$2, model_wait_since=$3, open_calls=$4,
+		progress_at=COALESCE($5::timestamptz, progress_at) WHERE id=$1 AND `+childFence("run_id", "$6", "$7"),
+		id, ev.WaitingOn, since, calls, progress, r, e)
+	if err == nil && tag.RowsAffected() == 0 {
+		return lostOr(ctx, q, l, nil)
+	}
 	return err
 }
 
@@ -81,6 +100,7 @@ type LiveNode struct {
 	Agent          string
 	Status         string
 	Parked         bool
+	ParkReason     string // "paused" for a visit the operator paused (DESIGN W2 rule 14)
 	HeartbeatAt    *time.Time
 	ProgressAt     *time.Time
 	WaitingOn      string
@@ -99,7 +119,7 @@ func ListLiveNodes(ctx context.Context, q Querier, runIDs []string) ([]LiveNode,
 		return []LiveNode{}, nil
 	}
 	rows, err := q.Query(ctx, `SELECT n.id, n.run_id, n.node_id, n.visit, n.branch_id, n.agent_id, COALESCE(a.name, n.agent_id),
-			n.status, n.parked_at IS NOT NULL, n.heartbeat_at, n.progress_at, n.waiting_on, n.model_wait_since, n.open_calls,
+			n.status, n.parked_at IS NOT NULL, n.park_reason, n.heartbeat_at, n.progress_at, n.waiting_on, n.model_wait_since, n.open_calls,
 			le.seq, le.event, le.created_at
 		FROM run_nodes n
 		LEFT JOIN agents a ON a.id = n.agent_id
@@ -114,7 +134,7 @@ func ListLiveNodes(ctx context.Context, q Querier, runIDs []string) ([]LiveNode,
 	}
 	out, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (LiveNode, error) {
 		var n LiveNode
-		err := r.Scan(&n.ID, &n.RunID, &n.NodeID, &n.Visit, &n.BranchID, &n.AgentID, &n.Agent, &n.Status, &n.Parked,
+		err := r.Scan(&n.ID, &n.RunID, &n.NodeID, &n.Visit, &n.BranchID, &n.AgentID, &n.Agent, &n.Status, &n.Parked, &n.ParkReason,
 			&n.HeartbeatAt, &n.ProgressAt, &n.WaitingOn, &n.ModelWaitSince, &n.OpenCalls, &n.LastEventSeq, &n.LastEvent, &n.LastEventAt)
 		return n, err
 	})
@@ -142,14 +162,14 @@ func ListPendingApprovalsOfRuns(ctx context.Context, q Querier, runIDs []string)
 	return out, err
 }
 
-// ListLiveRuns returns the runs that have not ended (queued, running, waiting_approval),
-// newest first, optionally only those of a project; limit outside 1..500 is 100.
+// ListLiveRuns returns the runs that have not ended (queued, running, waiting_approval,
+// paused), newest first, optionally only those of a project; limit outside 1..500 is 100.
 func ListLiveRuns(ctx context.Context, q Querier, projectID string, limit int) ([]Run, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE status IN ($1, $2, $3) AND ($4 = '' OR project_id = $4)
-		ORDER BY created_at DESC LIMIT $5`, RunQueued, RunRunning, RunWaitingApproval, projectID, limit)
+	rows, err := q.Query(ctx, `SELECT `+runColumns+` FROM runs WHERE status IN ($1, $2, $3, $6) AND ($4 = '' OR project_id = $4)
+		ORDER BY created_at DESC LIMIT $5`, RunQueued, RunRunning, RunWaitingApproval, projectID, limit, RunPaused)
 	if err != nil {
 		return nil, err
 	}

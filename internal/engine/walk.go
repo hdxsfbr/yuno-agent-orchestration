@@ -58,6 +58,9 @@ func (w *walk) execute(ctx context.Context) outcome {
 		if ctx.Err() != nil {
 			return outcome{interrupted: true}
 		}
+		if store.LeaseOf(ctx).Lost() {
+			return outcome{leaseLost: true}
+		}
 		node, ok := w.def.Node(cur)
 		if !ok {
 			return failed(store.RunFailed, fmt.Sprintf("unknown node '%s'", cur))
@@ -271,6 +274,16 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 		} else if retried {
 			task += "\n\n" + retriedNotice
 		}
+		// A step the operator paused and resumed is told so, with the resume's note (DESIGN
+		// W2 rule 15).
+		if notes, nerr := store.StepResumeNotes(ctx, e.deps.Pool, w.run.ID, node.ID); nerr != nil {
+			if v.early == nil {
+				o := failed(store.RunFailed, "read the step's resume: "+nerr.Error())
+				v.early = &o
+			}
+		} else if len(notes) > 0 {
+			task += "\n\n" + resumeParagraph(notes)
+		}
 		// The step's decided questions go after the rendered task, before the protocol
 		// block taskMessageWith adds, so a continuation, a loop revisit and the visit that
 		// replaces one a restart interrupted all carry them (DESIGN 5.24 rule 7); a retry
@@ -326,6 +339,20 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 	res := v.execute(ctx)
 	e.removeActive(v)
 	wctx := context.WithoutCancel(ctx)
+	if res.leaseLost || v.lease.Lost() {
+		// The worker lost its lease (DESIGN W2 rule 9): the turn is aborted, the visit lets go
+		// of what it holds in this process, and nothing more is written to the run.
+		v.abortLiveTurn(wctx)
+		v.release()
+		if v.sandboxHeld {
+			v.sandboxHeld = false
+			e.releaseSandbox(wctx, v.ocID)
+		}
+		return "", &outcome{leaseLost: true}
+	}
+	if res.operatorPause {
+		return w.pauseVisit(ctx, v, res)
+	}
 	if res.interrupted {
 		if reason := w.stopping(); reason != "" {
 			// A sibling branch failed and the fork stopped this one (DESIGN 5.26 rule 6):
@@ -387,6 +414,71 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 		return w.nodeFailed(ctx, node, res)
 	}
 	return w.advance(ctx, node, res.output)
+}
+
+// pauseVisit parks a visit whose turn stopped for the operator's pause (DESIGN W2 rule 14):
+// the checkout is saved, the visit parked with reason paused and the run paused in one step
+// (store.PauseVisit), and the worker lets the run go. A cancel received while the turn
+// stopped wins (rule 6): the visit ends cancelled. A checkout that cannot be saved fails the
+// visit as it fails a park, and the pause with it.
+func (w *walk) pauseVisit(ctx context.Context, v *visit, res outcome) (string, *outcome) {
+	e := w.e
+	wctx := context.WithoutCancel(ctx)
+	cmd := v.pausing
+	end := func(o outcome) {
+		v.finish(wctx, o)
+		e.collectArtifacts(wctx, v)
+		if v.sessionCreated {
+			w.sessions = append(w.sessions, v.key)
+		}
+	}
+	w.refresh(wctx)
+	if w.run.CancelRequested {
+		by := "user"
+		if w.run.CancelBy != nil && *w.run.CancelBy != "" {
+			by = *w.run.CancelBy
+		}
+		o := failed(store.RunCancelled, "cancelled by "+by)
+		w.saveCheckoutOrLog(wctx, v)
+		end(o)
+		e.settleCommand(wctx, cmd, store.CommandRejected, "the run is being cancelled")
+		return "", &o
+	}
+	if err := v.saveCheckout(wctx); err != nil {
+		o := failed(store.RunFailed, "run repository: "+err.Error())
+		end(o)
+		e.settleCommand(wctx, cmd, store.CommandFailed, "the step's checkout could not be saved")
+		return w.nodeFailed(ctx, v.node, o)
+	}
+	// The visit's pending question closes as a visit's end closes it (DESIGN 5.24 rule 5): the
+	// visit that continues the step after the resume asks again if it needs to.
+	if id := v.pendingQuestion; id != "" {
+		v.pendingQuestion, v.parkedOn = "", ""
+		if q, err := store.GetApproval(wctx, e.deps.Pool, id); err == nil && q.Status == store.ApprovalPending {
+			e.expireApproval(wctx, q, "step paused")
+		}
+	}
+	now := e.clock.Now()
+	run, err := store.PauseVisit(wctx, e.deps.Pool, w.run.ID, v.rn.ID, now)
+	if err != nil {
+		if errors.Is(err, store.ErrLeaseLost) {
+			v.release()
+			return "", &outcome{leaseLost: true}
+		}
+		o := failed(store.RunFailed, "pause: "+err.Error())
+		end(o)
+		e.settleCommand(wctx, cmd, store.CommandFailed, "the step could not be parked")
+		return w.nodeFailed(ctx, v.node, o)
+	}
+	w.run = run
+	v.run = run
+	v.rn.Status, v.rn.ParkedAt, v.rn.ParkReason = store.NodeWaitingApproval, &now, store.ParkPaused
+	end(res)
+	e.settleCommand(wctx, cmd, store.CommandApplied, "")
+	e.emit(wctx, run.ID, "node.status", map[string]any{"node": v.rn})
+	e.emit(wctx, run.ID, "run.status", map[string]any{"run": run})
+	e.logEvent(wctx, run.ID, "info", fmt.Sprintf("paused at %s; a resume continues the step", v.node.ID), "node_id", v.node.ID)
+	return "", &outcome{paused: true}
 }
 
 // saveCheckoutOrLog is saveCheckout for a visit whose outcome stands whatever the commit
@@ -475,6 +567,13 @@ func (w *walk) carrySources(ctx context.Context, v *visit) ([]carrySource, strin
 	for _, src := range sources(func(n store.RunNode) string { return strValue(n.RepoSHA) }) {
 		if !src.skipRepo {
 			start = src.repoSHA
+		}
+	}
+	// A retry from this step (DESIGN W2 rule 17) rewinds the step's next visit to the commit
+	// its latest visit started from: a fresh attempt, whatever the later steps committed.
+	for _, n := range visits {
+		if n.NodeID == v.node.ID && n.Visit == v.rn.Visit-1 && n.RetryFromAt != nil && strValue(n.StartSHA) != "" {
+			start = *n.StartSHA
 		}
 	}
 	return sources(func(n store.RunNode) string { return strValue(n.WorkspaceDir) }), start, nil

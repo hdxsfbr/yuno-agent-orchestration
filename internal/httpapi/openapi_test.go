@@ -137,6 +137,7 @@ func TestOpenAPIConformance(t *testing.T) {
 	steps = append(steps, artifactConformanceSteps(t)...)
 	steps = append(steps, questionConformanceSteps(t)...)
 	steps = append(steps, branchConformanceSteps(t)...)
+	steps = append(steps, recoveryConformanceSteps(t)...)
 	var agentID string
 	for _, st := range steps {
 		code, body := checkConformance(t, router, ts.URL, st.method, st.path, st.body, st.want < 300)

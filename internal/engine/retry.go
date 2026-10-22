@@ -65,9 +65,50 @@ func (e *RetryError) Error() string { return e.Message }
 // A refusal is a *RetryError, a bad limit a *ValidationError, an unknown run wraps
 // store.ErrNotFound; nothing changes in any of them.
 func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limits) (*store.Run, error) {
+	return e.RetryFrom(ctx, runID, by, "", limits)
+}
+
+// RetryFrom is Retry from a step the run reached (DESIGN W2 rules 16 and 17): fromNode
+// becomes the run's current node, the latest visit of it and of every node visited after
+// it are marked retried (D-093), and the step's next visit starts from the commit that
+// latest visit started from; the later nodes run again as the graph reaches them. An empty
+// fromNode is Retry. The request is a command (rule 2): its receipt first, applied in the
+// retry's transaction or settled rejected with the refusal. A run whose last turn is not
+// confirmed stopped is refused with cancel_unconfirmed (rule 13).
+func (e *Engine) RetryFrom(ctx context.Context, runID, by, fromNode string, limits *store.Limits) (*store.Run, error) {
 	if by == "" {
 		by = "operator"
 	}
+	fromNode = strings.TrimSpace(fromNode)
+	payload := map[string]any{}
+	if fromNode != "" {
+		payload["from_node"] = fromNode
+	}
+	if limits != nil {
+		payload["limits"] = limits
+	}
+	cmd, err := e.record(ctx, runID, store.CommandRetry, by, fromNode, payload)
+	if err != nil {
+		return nil, err
+	}
+	retried, err := e.retry(ctx, runID, by, fromNode, limits, cmd)
+	if err != nil {
+		var re *RetryError
+		var ve *ValidationError
+		var be *project.BudgetError
+		outcome := store.CommandFailed
+		if errors.As(err, &re) || errors.As(err, &ve) || errors.As(err, &be) {
+			outcome = store.CommandRejected
+		}
+		e.settleCommand(ctx, cmd, outcome, obs.Redact(err.Error()))
+		return nil, err
+	}
+	e.emitCommand(ctx, cmd)
+	retried.Command = cmd
+	return retried, nil
+}
+
+func (e *Engine) retry(ctx context.Context, runID, by, fromNode string, limits *store.Limits, cmd *store.RunCommand) (*store.Run, error) {
 	now := e.clock.Now()
 	var retried *store.Run
 	var from string
@@ -88,6 +129,32 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 		if run.Retries >= maxRetries {
 			return &RetryError{Code: RetryLimitReached, Message: fmt.Sprintf("run was retried %d times", maxRetries)}
 		}
+		// DESIGN W2 rule 13: while the last turn may still run, a retry would start a second
+		// writer next to it. The reconcile pass is the only way out.
+		if run.CancelState == store.CancelUnconfirmed {
+			return &RetryError{Code: CodeCancelUnconfirmed, Message: unconfirmedDetail(ctx, tx, run.ID)}
+		}
+		// DESIGN W2 rules 16 and 17: a retry from a step the run reached, outside a fork
+		// branch, moves the run there; the step's latest visit is the one its next visit
+		// rewinds to.
+		var rewind *store.RunNode
+		if fromNode != "" {
+			visits, err := store.StepVisits(ctx, tx, runID, fromNode)
+			if err != nil {
+				return fmt.Errorf("run %s: visits of %s: %w", runID, fromNode, err)
+			}
+			if len(visits) == 0 {
+				return &RetryError{Code: RetryNotRetryable, Message: "from_node must be a step this run reached"}
+			}
+			rewind = &visits[len(visits)-1]
+			if rewind.BranchID != nil {
+				return &RetryError{Code: RetryNotRetryable, Message: "retry the fork step instead"}
+			}
+			if err := store.SetRunCurrentNode(ctx, tx, runID, fromNode); err != nil {
+				return fmt.Errorf("run %s: %w", runID, err)
+			}
+			run.CurrentNode = &fromNode
+		}
 		// Rule 2: the limits that will apply, and the counters against them.
 		under := run.Limits
 		if limits != nil {
@@ -105,6 +172,21 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 		steps, err := retriedSteps(ctx, tx, run)
 		if err != nil {
 			return fmt.Errorf("run %s: the steps to retry: %w", runID, err)
+		}
+		if rewind != nil {
+			// Rule 17: the step and every node visited after its latest visit.
+			after, err := store.NodesVisitedAfter(ctx, tx, runID, rewind.ID)
+			if err != nil {
+				return fmt.Errorf("run %s: the steps after %s: %w", runID, fromNode, err)
+			}
+			for _, n := range after {
+				if !slices.Contains(steps, n) {
+					steps = append(steps, n)
+				}
+			}
+			if err := store.MarkRetryFrom(ctx, tx, rewind.ID, now); err != nil {
+				return fmt.Errorf("run %s: mark %s: %w", runID, fromNode, err)
+			}
 		}
 		for _, step := range steps {
 			if err := store.MarkStepRetried(ctx, tx, runID, step, now); err != nil {
@@ -174,6 +256,14 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 			if ticketPlan, ticketProject, err = store.RetryTicketOfRun(ctx, tx, runID); err != nil {
 				return fmt.Errorf("run %s: move its plan ticket: %w", runID, err)
 			}
+		}
+		// The command is applied with the retry (DESIGN W2 rule 5: no worker holds the run).
+		if cmd != nil {
+			settled, err := store.SettleRunCommand(ctx, tx, cmd.ID, store.CommandApplied, "")
+			if err != nil {
+				return fmt.Errorf("run %s: settle the command: %w", runID, err)
+			}
+			*cmd = *settled
 		}
 		// Rule 4: the retried claim opens a root span of its own. A run the stale-run
 		// sweeper failed ("worker lost") never ended its root span, and the resumed path

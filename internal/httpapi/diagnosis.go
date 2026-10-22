@@ -43,6 +43,20 @@ type runDiagnosis struct {
 	Thresholds diagnosisThresholds `json:"thresholds"`
 	Nodes      []nodeDiagnosis     `json:"nodes"`
 	Pending    []pendingDiagnosis  `json:"pending"`
+	// DESIGN W2 Outputs: the run's commands still pending, oldest first, and whether its
+	// last stopped turn is confirmed stopped ("", confirmed or unconfirmed).
+	CommandsPending []commandDiagnosis `json:"commands_pending"`
+	CancelState     string             `json:"cancel_state"`
+}
+
+// commandDiagnosis is a pending command: received, and acknowledged by the worker when
+// acked_at is set (DESIGN W2 rule 4).
+type commandDiagnosis struct {
+	CommandID  string     `json:"command_id"`
+	Kind       string     `json:"kind"`
+	ReceivedAt time.Time  `json:"received_at"`
+	AckedAt    *time.Time `json:"acked_at"`
+	AgeS       int64      `json:"age_s"`
 }
 
 type nodeDiagnosis struct {
@@ -141,6 +155,10 @@ func (s *Server) diagnose(ctx context.Context, runs []store.Run) ([]runDiagnosis
 	if err != nil {
 		return nil, err
 	}
+	commands, err := store.PendingCommandsOfRuns(ctx, s.pool, live)
+	if err != nil {
+		return nil, err
+	}
 	nodesOf := map[string][]store.LiveNode{}
 	for _, n := range nodes {
 		nodesOf[n.RunID] = append(nodesOf[n.RunID], n)
@@ -158,7 +176,11 @@ func (s *Server) diagnose(ctx context.Context, runs []store.Run) ([]runDiagnosis
 	out := make([]runDiagnosis, 0, len(runs))
 	for _, r := range runs {
 		d := runDiagnosis{RunID: r.ID, Status: r.Status, CheckedAt: now, Thresholds: thresholds,
-			Nodes: []nodeDiagnosis{}, Pending: []pendingDiagnosis{}}
+			Nodes: []nodeDiagnosis{}, Pending: []pendingDiagnosis{}, CommandsPending: []commandDiagnosis{}, CancelState: r.CancelState}
+		for _, c := range commands[r.ID] {
+			d.CommandsPending = append(d.CommandsPending, commandDiagnosis{CommandID: c.ID, Kind: c.Kind, ReceivedAt: c.ReceivedAt.UTC(),
+				AckedAt: utc(c.AckedAt), AgeS: max(0, int64(now.Sub(c.ReceivedAt)/time.Second))})
+		}
 		in := liveness.Run{Status: r.Status, UpdatedAt: r.UpdatedAt, PausedAt: r.PausedAt, Blocked: blocked[r.ID],
 			Pending: pendingOfRun[r.ID]}
 		if r.FailureReason != nil {
@@ -169,7 +191,7 @@ func (s *Server) diagnose(ctx context.Context, runs []store.Run) ([]runDiagnosis
 			if err := json.Unmarshal(n.OpenCalls, &calls); err != nil {
 				calls = nil // unreadable evidence is missing evidence
 			}
-			v := liveness.ClassifyNode(liveness.Node{NodeID: n.NodeID, Parked: n.Parked, HeartbeatAt: n.HeartbeatAt,
+			v := liveness.ClassifyNode(liveness.Node{NodeID: n.NodeID, Parked: n.Parked, Paused: n.ParkReason == store.ParkPaused, HeartbeatAt: n.HeartbeatAt,
 				ProgressAt: n.ProgressAt, WaitingOn: n.WaitingOn, ModelWaitSince: n.ModelWaitSince, OpenCalls: calls,
 				Pending: pendingOfNode[n.ID]}, th, now)
 			in.Nodes = append(in.Nodes, v)
