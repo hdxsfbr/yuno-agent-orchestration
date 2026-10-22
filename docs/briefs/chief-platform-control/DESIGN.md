@@ -14,6 +14,16 @@ Ground truth this design rests on, from the inventory at aeec968:
   `external_chat_id` is the Telegram peer.
 - Approvals require a run (`approvals.run_id`, `run_node_id` NOT NULL, `0001_init.sql:136-150`).
 
+## Decisions (Andre, 2026-10-22)
+
+- **What needs Andre's approval code:** deleting anything; granting an agent tools or
+  loosening its rules; changing a project's repo or token, or raising a budget; Telegram
+  binding; merging a merge request; cancelling a plan. Everything else runs directly
+  (start, cancel, retry, pause and resume runs; edit prompts, models, workflows and
+  schedules). This is the `x-yuno-risk` table in `PARITY.md` and rule A5.
+- **Where dependencies come from:** both. The Planner declares `depends_on` per ticket, and
+  Andre or the Chief can add a dependency between any two merge requests (wave 3).
+
 ## Wave 1: the Chief sees everything and acts safely
 
 ### A. Platform access for the Chief
@@ -324,33 +334,172 @@ Out of scope for W1: worker leases (W2) and dependency blocking (W3).
 - `make ci-test` and `ci-lint` once locally. Run `make eval` once, because the Chief's
   prompt changes.
 
-## Wave 2: recovery (outline; full rules before it starts)
+## Wave 2: recovery
 
-- **Commands.** `run_commands(id, run_id, kind cancel|pause|resume|retry|steer, node_id,
-  payload, actor, received_at, acked_at, applied_at, outcome, detail)`. Every recovery
-  route answers 202 `{command}`, and `GET /api/runs/{id}/commands/{cid}` tracks it.
-  - Received: the row exists.
-  - Acknowledged: the owning worker took it, under its lease.
-  - Applied: the effect is confirmed (cancel: the gateway answered "aborted" or reported
-    no active turn, and the checkout was committed after).
-- **Leases.** `runs.lease_epoch` is incremented at every claim and every re-queue. The
-  worker holds it, and every engine write to the run, its nodes, branches, usage and tool
-  calls carries `AND lease_epoch = $mine`. Zero rows means the lease is lost, so the worker
-  aborts its turn and stops (self-fence). Branches are owned through their run's lease, and
-  their rows carry the epoch they were started under.
-- **Cancel, then retry.** A cancel that was never confirmed leaves `cancel_state =
-  unconfirmed`. Retry answers 409 `cancel_unconfirmed` until a reconcile pass confirms it
-  (an abort again, then a session check). There is no force option.
-- **Pause and resume.** Pause aborts the turn (confirmed) and parks the visit, reusing
-  ParkVisit and RequeueParkedRun. Resume re-queues, and the turn gets "The operator paused
-  this step; continue." plus the operator's note.
-- **Retry from a step.** `{from_node}` is any node the run visited. Its latest visit's start
-  commit is the checkout (D-092), state is kept, and later nodes run again.
-- **Steering.** Operator text goes into the live step's session as the next message. It is
-  acknowledged when queued and applied when its transcript entry is seen. If the turn ends
-  first, it opens the next turn.
-- Acceptance: diagnose a stalled step from evidence (the !17 case), then cancel,
-  acknowledged, then retry, with no second writer (a stale worker's write is refused).
+Purpose: let the operator or the Chief stop, hold, restart and redirect a run. Each request
+is tracked from receipt to applied outcome, and two workers never write one run.
+
+Inputs:
+- The recovery routes.
+- The run row, with a new `lease_epoch`.
+- The visit's live turn (`openclaw_run_id`, session key).
+- The gateway's answers: `chat.abort` `{aborted}`; `sessions.list` / `chat.history`
+  `sessionInfo.hasActiveRun` and `activeRunIds` (authoritative, [docs]
+  gateway/protocol/rpc-session-control.md); and `chat.send` with
+  `queueMode: "steer"`, which injects into an active run at the next tool boundary
+  ([docs] concepts/messages.md, tools/steer.md).
+
+Units: times are server-clock UTC; message lengths are characters.
+
+Rules:
+
+Commands
+1. Table `run_commands(id uuidv7, run_id, kind, node_id, payload jsonb, actor jsonb,
+   request_id, received_at, acked_at, applied_at, outcome, detail)`.
+   - `kind` is one of cancel, pause, resume, retry or steer.
+   - `outcome` is one of pending, applied, rejected, failed or superseded.
+2. The routes are `POST /api/runs/{id}/cancel`, `/pause`, `/resume`, `/retry` (body
+   `{from_node?, limits?}`) and `/steer` (body `{node_id?, message}`, 1 to 4000
+   characters). Each inserts a command (receipt) and answers 202 with the run and
+   `command`. The existing cancel and retry keep their paths and run body, and gain the
+   `command` field.
+3. `GET /api/runs/{id}/commands` (newest first, at most 100) and
+   `GET /api/runs/{id}/commands/{cid}`.
+4. **Acknowledged** means the worker holding the run's lease took the command (`acked_at`).
+   **Applied** means the effect is confirmed (`applied_at`, outcome `applied`).
+   **Rejected** means the command is not valid in the run's state when it is processed;
+   `detail` says why.
+5. Delivery:
+   - A run with a live worker: the API inserts the row and wakes the worker in-process; the
+     worker also reads its pending commands on every 2 s tick.
+   - A queued, parked or paused run: no worker holds it, so the API applies the command
+     itself in the same transaction (`acked_at = applied_at = now()`) wherever the rule
+     below allows it.
+6. Commands for one run are processed in `received_at` order. A cancel supersedes every
+   still-pending pause, resume or steer received before it.
+
+Leases
+7. `runs.lease_epoch` (bigint, default 0) is incremented by every claim and by every move to
+   queued: claim, stale re-queue, retry, resume, and re-queue of a parked run. The worker
+   keeps the epoch it claimed with.
+8. These writes carry `AND lease_epoch = $epoch` (for node and branch rows, through their
+   run):
+   - TransitionRun, TouchRun (the heartbeat renews the lease), SetRunCurrentNode,
+     SetRunStateNode and AddRunUsage;
+   - run_nodes progress, finish, park and evidence writes;
+   - SetBranchStatus and SetBranchCurrent;
+   - the checkout commit's `repo_sha` write.
+
+   Tool-call and model-call rows are records of what happened and are not fenced.
+9. A fenced write that touches 0 rows returns `ErrLeaseLost`. The visit then self-fences:
+   - it aborts its turn (`chat.abort`), writes nothing more to the run, and ends;
+   - it logs and emits `log` "worker lost its lease; stopped" through the event recorder,
+     which is not fenced.
+
+Cancel
+10. On a queued run, cancel is applied at once (`cancelled`).
+11. On a live run, the worker acknowledges and aborts the turn.
+    - Applied when the gateway's "aborted" chat event arrives, or when `sessions.list`
+      shows no active run for the session (`hasActiveRun = false`, or the turn's id not
+      in `activeRunIds`). The checkout commit is saved after that, then the run goes
+      `cancelled` with `runs.cancel_state = confirmed`.
+    - If neither happens within `abortWait` (10 s): the run goes `cancelled` with
+      `cancel_state = unconfirmed`, and the command stays acknowledged but not applied.
+    - A reconcile pass on the 60 s sweeper tick repeats `chat.abort` and the session check
+      for every `unconfirmed` run until the gateway shows no active run. It then sets
+      `confirmed` and the command `applied`.
+12. A run the sweeper fails as "worker lost", or re-queues, gets `cancel_state =
+    unconfirmed` for its last turn. That turn may still run, so the same reconcile pass
+    applies.
+13. Retry (and resume) answer 409 `cancel_unconfirmed` while `cancel_state = unconfirmed`,
+    with `detail` naming the session and the turn. There is no force option. The reconcile
+    pass is the only way out, so two writers never overlap.
+
+Pause and resume
+14. Pause on a live run: the worker acknowledges, aborts the turn (confirmed as in rule 11;
+    unconfirmed leaves the command `failed`, "could not confirm the turn stopped", and the
+    run keeps going), saves the checkout, parks the visit with reason `paused`, and sets
+    the run status `paused` (a new non-terminal status; the worker is released).
+    - Pause on a queued run: `paused` at once.
+    - Pause on `waiting_approval`: rejected, "the run is waiting on <approval>".
+15. Resume on a paused run: re-queued (lease epoch + 1). The step starts a continuation
+    visit from the parked visit's checkout, as a parked question does. Its task gains
+    "The operator paused this step and resumed it." plus the note from the resume body
+    (`{note?}`, at most 2000 characters).
+    - Resume on any other status: rejected "the run is not paused".
+
+Retry from a step
+16. Retry `{from_node}`:
+    - It must be a node with at least one visit in this run, outside a fork branch.
+      Otherwise it is rejected: "from_node must be a step this run reached" or "retry the
+      fork step instead".
+    - With no `from_node`: today's behaviour (the current node).
+17. The retry sets `current_node = from_node`, keeps the run state, and marks
+    `retried_at` (D-093) on the latest visit of `from_node` and of every node visited
+    after it.
+    - The retried step starts from the start commit of `from_node`'s latest visit (a fresh
+      attempt).
+    - Later nodes run again as the graph reaches them.
+    - Every other retry precondition stands (terminal status, at most 5 retries, limits,
+      budget, the live-run conflict checks, rule 13).
+
+Steering
+18. Steer on a run with exactly one live visit (or `node_id` naming one):
+    - The worker acknowledges and sends `chat.send` with `queueMode: "steer"`, message
+      "Operator: <message>", and idempotency key `<visit id>:steer:<command id>`. The
+      visit's turn id is not changed.
+    - Applied when a transcript user entry containing the message appears. If the turn
+      ends first, the message opens the next turn as its message, and that is applied when
+      the turn starts.
+    - No live visit: rejected "nothing is running; retry or resume with a note". Several
+      live visits and no `node_id`: rejected "name the step: <ids>".
+
+Edge cases:
+- A cancel that races a finishing turn: the run may end succeeded first. The command is
+  then rejected "the run already ended (succeeded)".
+- A resume while a cancel is pending: the cancel wins (rule 6).
+- A steer during a gated tool's approval wait is injected at the next boundary, after the
+  tool returns.
+
+Time: abortWait is 10 s; the reconcile pass runs on the 60 s sweeper tick; leases have no
+time-to-live of their own (the stale sweeper, `ENGINE_STALE_AFTER`, is the expiry, and it
+increments the epoch).
+
+Failure handling:
+- A gateway that is down during cancel leaves `unconfirmed` (rule 11), never `confirmed`.
+- A failed command write returns 503 and the request is not taken.
+- An `ErrLeaseLost` in a fork branch stops that branch's visit only; the run-level writer
+  is the new lease holder.
+
+Consistency: the lease check and the write are one statement. The API's inline application
+(rule 5) and the claim are serialised by the run row lock (`FOR UPDATE`).
+
+Outputs:
+- Command rows.
+- Events `run.command` `{command}` on every state change.
+- Diagnosis (C) gains `commands_pending` and `cancel_state`.
+- The Chief reaches it all through `platform_call` (risk `routine`).
+
+Tests:
+- TestCommandLifecycle (received, acknowledged, applied).
+- TestCancelQueued, TestCancelLiveConfirmedByEvent, TestCancelLiveConfirmedBySession,
+  TestCancelUnconfirmedThenReconciled.
+- TestRetryRefusedUnconfirmedCancel.
+- TestSweeperLeavesUnconfirmed.
+- TestLeaseFencing (a write after a re-queue is refused; the old visit self-fences and
+  does not end the run).
+- TestBranchFencing.
+- TestPauseResume, TestPauseOnWaitingRejected, TestPauseUnconfirmedFails.
+- TestRetryFromStep (checkout from that visit's start commit; later nodes re-run),
+  TestRetryFromStepRejected.
+- TestSteerLive, TestSteerBetweenTurns, TestSteerRejected.
+- TestCancelSupersedes.
+- **Acceptance, TestStalledStepRecovery:** the fake gateway hangs a turn; the diagnosis
+  says stalled with evidence; cancel is acknowledged, aborted and applied; retry starts a
+  new lease; the hung visit's late write is refused.
+
+Out of scope: checkpoints inside a visit (one commit per visit end stays); multi-process
+workers (one api process; the lease makes a second one safe but it is not deployed).
 
 ## Wave 3: dependencies and merge requests (outline)
 
