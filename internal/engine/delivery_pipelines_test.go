@@ -131,8 +131,19 @@ func TestWavePipelineManualTest(t *testing.T) {
 	if r.Status != store.RunWaitingApproval || deref(r.CurrentNode) != "manual_test" {
 		t.Fatalf("after the rejection: %s at %s %q", r.Status, deref(r.CurrentNode), deref(r.FailureReason))
 	}
-	if m := sc.message("builder", 2); !strings.Contains(m, "Bugs found in the manual test:") || !strings.Contains(m, "the export button does nothing on Safari") {
+	if m := sc.message("builder", 2); !strings.Contains(m, "Bugs found in the manual test:") || !strings.Contains(m, "the export button does nothing on Safari") ||
+		!strings.Contains(m, "answer them in responses with the id manual_test") {
 		t.Fatalf("builder visit 2 lacks the bugs:\n%s", m)
+	}
+	// D-090: the review after the rejection is a later round that checks the operator's bugs,
+	// not a new review.
+	if m := sc.message("code_review", 1); !strings.Contains(m, "This is your first review") {
+		t.Fatalf("code_review visit 1 is not a first review:\n%s", m)
+	}
+	if m := sc.message("code_review", 2); !strings.Contains(m, "This is a later round: verify, do not review again.") ||
+		!strings.Contains(m, "The operator's manual test sent bugs back (item manual_test): the export button does nothing on Safari\n") ||
+		!strings.Contains(m, "Raise nothing new") || strings.Contains(m, "This is your first review") {
+		t.Fatalf("code_review visit 2 does not check the operator's bugs:\n%s", m)
 	}
 	if d := gateEntry(t, r, "manual_test"); d["decision"] != "rejected" {
 		t.Fatalf("state.manual_test = %v", d)

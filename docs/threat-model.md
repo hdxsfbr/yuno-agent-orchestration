@@ -265,6 +265,15 @@ design or the plan, and two tickets cannot fight over them. The notes a ticket l
 its file reach the shared documents only through the ship run's documents request, which
 the operator approves and merges.
 
+**The code review reads, and trusts the Builder's test report (D-090).** The Code Reviewer
+has no `exec`, so nothing in the change it reviews (a test, a build script, a hook) runs in
+its sandbox, and it reads the change from `changes.diff`, which the platform makes from the
+run repository and which no agent's file of that name replaces. Residual risk: the reviewer
+no longer runs the suite itself, so `tests_passed` and the reported result are the
+Builder's own word, model-written; a Builder that reports a failing suite as passing gets
+past the review. The operator's manual test (pull the branch and run the CI tasks) and the
+project's CI on the merge request are the checks that run the code.
+
 **Escalation.** `escalate` can only end the run its token belongs to; it pauses the
 project's waves, which only an operator resumes.
 

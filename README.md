@@ -139,8 +139,10 @@ typed in chat).
   the project page's Plans section with its tickets, their issues, runs and merge
   requests, and every transition.
 - **Build** (`Wave pipeline`, one run per ticket; intake starts it from the ticket's issue):
-  the Builder writes the failing test first, then the code; the Code Reviewer (a
-  different model) sends it back with comments up to three times; the Integrator opens a
+  the Builder writes the failing test first, then the code, and runs the whole suite; the
+  Code Reviewer (a different model, which only reads) lists all its findings in its first
+  review, numbered, and later rounds only check that each was fixed or declined for a
+  good reason (at most three builds); the Integrator opens a
   draft merge request so the branch exists, and you pull it and test it (the manual-test
   approval; rejecting it sends your notes back to the Builder); the Doc Auditor writes
   the ticket's requirement trace, and notes on what the plan documents should say now, in

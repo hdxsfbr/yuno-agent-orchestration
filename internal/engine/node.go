@@ -438,7 +438,8 @@ func (v *visit) prepareRunDir(ctx context.Context) error {
 		if src.workspace == "" {
 			continue // a visit that ended before it had a workspace left no files
 		}
-		n, err := openclaw.CopyRunDirAt(src.workspace, ws, v.run.ID, []string{project.RepoDir})
+		// The checkout moves through the run repository; the changes file is each step's own.
+		n, err := openclaw.CopyRunDirAt(src.workspace, ws, v.run.ID, []string{project.RepoDir, project.ChangesFile})
 		if err != nil {
 			return fmt.Errorf("copy from %s: %w", src.ocID, err)
 		}
@@ -628,6 +629,7 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 			return &o
 		}
 		v.checkout = true
+		v.writeChanges(ctx, runRepo, branch)
 		if v.run.MergedSHA != nil {
 			// The merge of 5.22 rule 13 is not pushed yet: say which files still need resolving.
 			cctx, done = v.boundedContext(ctx, project.GitTimeout)
@@ -655,6 +657,23 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 	}
 	v.sandboxHeld = true
 	return nil
+}
+
+// writeChanges writes the run's changes so far, from the run repository, to
+// runs/<run id>/changes.diff of a later step's workspace (DESIGN 5.30 rule 11), so an agent
+// that runs no commands, as the Code Reviewer, reads what git diff would show. A failure is
+// a log line of the run and leaves no file: the step still has the checkout.
+func (v *visit) writeChanges(ctx context.Context, runRepo, branch string) {
+	cctx, done := v.boundedContext(ctx, project.GitTimeout)
+	patch, err := v.project.RunChanges(cctx, runRepo, v.startSHA, branch)
+	done()
+	if err == nil {
+		err = project.WriteChanges(v.workspace, v.run.ID, patch)
+	}
+	if err != nil && ctx.Err() == nil {
+		v.e.logEvent(ctx, v.run.ID, "warn", fmt.Sprintf("the run's changes were not written to %s for %s visit %d: %v",
+			project.ChangesFile, v.node.ID, v.rn.Visit, obs.Redact(err.Error())))
+	}
 }
 
 // boundedContext bounds a setup step by d and the run's remaining time, ending it when

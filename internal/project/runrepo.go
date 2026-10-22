@@ -307,25 +307,9 @@ func isAncestor(ctx context.Context, runRepo, ancestor, commit string) bool {
 // The history the run repository holds comes with them. Only those commits are fetched,
 // never another visit's. dest must not exist; its parent must.
 func (c Config) CheckoutRun(ctx context.Context, runRepo, commit, dest, branch string) error {
-	if !commitIDPattern.MatchString(commit) {
-		return fmt.Errorf("the commit %q is not a full commit id", tail(commit, 80))
-	}
-	base, visit, err := runBase(ctx, runRepo, commit)
+	base, head, def, err := c.checkoutRefs(ctx, runRepo, commit, branch)
 	if err != nil {
 		return err
-	}
-	head, def := base, ""
-	if c.DefaultBranch != "" && c.DefaultBranch != branch {
-		if def, err = refCommit(ctx, runRepo, DefaultRef(visit)); err != nil {
-			return err
-		}
-		merge, err := refCommit(ctx, runRepo, MergeRef(visit))
-		if err != nil {
-			return err
-		}
-		if merge != "" && isAncestor(ctx, runRepo, merge, commit) {
-			head = merge
-		}
 	}
 	if _, err := (Config{}).git(ctx, filepath.Dir(dest), "init", "--quiet", dest); err != nil {
 		return err
@@ -360,6 +344,104 @@ func (c Config) CheckoutRun(ctx context.Context, runRepo, commit, dest, branch s
 		}
 	}
 	return WriteExclude(dest)
+}
+
+// checkoutRefs are the commits a checkout of commit is built around: base, the commit the
+// run cloned; head, where its branch is (base, or the merge commit of MergeDefault when
+// commit descends from it); and def, the default branch's commit when the run's branch is
+// another one ("" otherwise).
+func (c Config) checkoutRefs(ctx context.Context, runRepo, commit, branch string) (base, head, def string, err error) {
+	if !commitIDPattern.MatchString(commit) {
+		return "", "", "", fmt.Errorf("the commit %q is not a full commit id", tail(commit, 80))
+	}
+	base, visit, err := runBase(ctx, runRepo, commit)
+	if err != nil {
+		return "", "", "", err
+	}
+	head = base
+	if c.DefaultBranch != "" && c.DefaultBranch != branch {
+		if def, err = refCommit(ctx, runRepo, DefaultRef(visit)); err != nil {
+			return "", "", "", err
+		}
+		merge, err := refCommit(ctx, runRepo, MergeRef(visit))
+		if err != nil {
+			return "", "", "", err
+		}
+		if merge != "" && isAncestor(ctx, runRepo, merge, commit) {
+			head = merge
+		}
+	}
+	return base, head, def, nil
+}
+
+// ChangesFile is the file under runs/<run id>/ of a later step's workspace that holds the
+// run's changes so far (DESIGN 5.30 rule 11): what RunChanges returns, written by the
+// platform before the step's first turn, outside the checkout.
+const ChangesFile = "changes.diff"
+
+// changesCutMarker ends a RunChanges patch cut at MaxDiffBytes.
+const changesCutMarker = "\n# cut at 10 MiB: read the changed files in the checkout for the rest\n"
+
+// RunChanges is the patch from where the checkout of commit has its branch (CheckoutRun's
+// head: the commit the run cloned, or the platform's merge of the default branch) to
+// commit, in the run repository: the changes the run's steps made so far, new and deleted
+// files included, as `git diff --no-color --no-ext-diff --no-textconv` prints them; empty
+// when nothing changed. It is what git status and git diff show in that checkout, for an
+// agent that runs no commands. Nothing runs in a checkout an agent has had. A patch longer
+// than MaxDiffBytes is cut there and ends with a marker line.
+func (c Config) RunChanges(ctx context.Context, runRepo, commit, branch string) ([]byte, error) {
+	_, head, _, err := c.checkoutRefs(ctx, runRepo, commit, branch)
+	if err != nil {
+		return nil, err
+	}
+	patch, err := (Config{}).gitCapped(ctx, runRepo, diffOutputLimit, "--git-dir="+runRepo,
+		"diff", "--no-color", "--no-ext-diff", "--no-textconv", head, commit, "--")
+	if err != nil {
+		return nil, err
+	}
+	if limit := diffOutputLimit - 1; int64(len(patch)) > limit {
+		keep := max(limit-int64(len(changesCutMarker)), 0)
+		patch = append(patch[:keep:keep], changesCutMarker...)
+	}
+	return patch, nil
+}
+
+// WriteChanges writes patch as runs/<run id>/ChangesFile of the workspace ws, read-only,
+// replacing whatever entry is there without following it; runs/<run id> must be a plain
+// directory.
+func WriteChanges(ws, runID string, patch []byte) error {
+	root, err := os.OpenRoot(ws)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	runRel := filepath.Join("runs", runID)
+	for _, rel := range []string{"runs", runRel} {
+		info, err := root.Lstat(rel)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s: run directory is not a plain directory", filepath.ToSlash(rel))
+		}
+	}
+	rel := filepath.Join(runRel, ChangesFile)
+	if err := root.RemoveAll(rel); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	// O_EXCL: the entry was just removed, so a link raced into its place is refused.
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o444)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(patch)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = root.Remove(rel) // no partial patch is left to read
+	}
+	return err
 }
 
 // PreMerge is what MergeDefault did to a checkout (DESIGN 5.22 rule 13, D-088).

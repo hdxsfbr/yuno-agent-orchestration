@@ -5,6 +5,12 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- The Code Reviewer now gives all its feedback in its first review, as numbered findings
+  (R1, R2 ...). The Builder fixes each one or says why not, and later rounds only check
+  those answers and the bugs you sent back from the manual test, with nothing new added, so
+  a ticket no longer runs out of review rounds on fresh requests. The Code Reviewer only
+  reads the code now and runs nothing: the Builder runs the whole test suite before every
+  hand-over and reports the command and the result.
 - Ticket merge requests no longer change the plan's shared documents. A ticket's request
   carries only its own `docs/plans/<feature>/tickets/<id>.md` among them; an edit to
   `PRD.md`, `ARCHITECTURE.md`, `TASKS.md` or `WAVES.md` is left out, and the run is told

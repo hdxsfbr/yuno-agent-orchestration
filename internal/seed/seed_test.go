@@ -186,7 +186,7 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 		"Architect":     {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "ask_operator", "escalate", "finish"}, false},
 		"Planner":       {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "ask_operator", "escalate", "finish"}, false},
 		"Builder":       {"claude-sonnet-5-5", []string{"read", "ls", "write", "edit", "exec", "ask_operator", "memory_save", "memory_recall", "escalate", "finish"}, true},
-		"Code Reviewer": {"claude-opus-5-5", []string{"read", "ls", "exec", "read_merge_request", "ask_operator", "escalate", "finish"}, false},
+		"Code Reviewer": {"claude-opus-5-5", []string{"read", "ls", "read_merge_request", "ask_operator", "escalate", "finish"}, false},
 		"Doc Auditor":   {"claude-opus-5-5", []string{"read", "ls", "write", "edit", "exec", "ask_operator", "escalate", "finish"}, false},
 		"Integrator":    {"claude-sonnet-5-5", []string{"open_merge_request", "publish_tickets", "advance_wave", "read", "ls", "write", "edit", "ask_operator", "memory_save", "escalate", "finish"}, true},
 	}
@@ -211,7 +211,7 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 		if a.Role == "" || len(a.SystemPrompt) < 400 || !strings.Contains(a.SystemPrompt, "output schema") {
 			t.Errorf("%s: role %q, prompt of %d bytes without the output schema sentence", name, a.Role, len(a.SystemPrompt))
 		}
-		if slices.Contains(a.ToolAllowlist, "exec") != slices.Contains([]string{"Scout", "Builder", "Code Reviewer", "Doc Auditor"}, name) {
+		if slices.Contains(a.ToolAllowlist, "exec") != slices.Contains([]string{"Scout", "Builder", "Doc Auditor"}, name) {
 			t.Errorf("%s: exec = %v", name, slices.Contains(a.ToolAllowlist, "exec"))
 		}
 	}
