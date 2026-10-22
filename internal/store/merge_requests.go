@@ -22,9 +22,17 @@ const (
 	MaxMergeRequestsLimit     = 200
 )
 
+// mergeRequestInsertColumns are the columns a new record is written with (ci_sha goes
+// with head_sha when the caller knows both); the rest start null and are the sync's and
+// the update's to fill.
+const mergeRequestInsertColumns = `id, project_id, run_id, provider, number, url, source_branch, target_branch, title,
+	state, ci_status, head_sha, unresolved_threads, last_sync_error, synced_at, reported_state, merged_by,
+	created_at, updated_at, closed_at, draft, follow_up_of, ci_sha`
+
 const mergeRequestColumnList = `id, project_id, run_id, provider, number, url, source_branch, target_branch, title,
 	state, ci_status, head_sha, unresolved_threads, last_sync_error, synced_at, reported_state, merged_by,
-	created_at, updated_at, closed_at, draft`
+	created_at, updated_at, closed_at, draft, merge_sha, follow_up_of, ci_sha, ci_pipeline_id, ci_url, mergeable,
+	merge_status, conflicts, updated_from_default_at`
 
 // mergeRequestColumns is the column list qualified with a table alias, for queries that
 // join the runs table.
@@ -92,12 +100,13 @@ func insertMergeRequest(ctx context.Context, q Querier, mr *MergeRequest, follow
 	if mr.UpdatedAt.IsZero() {
 		mr.UpdatedAt = mr.CreatedAt
 	}
-	tag, err := q.Exec(ctx, `INSERT INTO merge_requests (`+mergeRequestColumnList+`, follow_up_of)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+	mr.FollowUpOf = followUpOf
+	tag, err := q.Exec(ctx, `INSERT INTO merge_requests (`+mergeRequestInsertColumns+`)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 		ON CONFLICT DO NOTHING`,
 		mr.ID, mr.ProjectID, mr.RunID, mr.Provider, mr.Number, mr.URL, mr.SourceBranch, mr.TargetBranch, mr.Title,
 		mr.State, mr.CIStatus, mr.HeadSHA, mr.UnresolvedThreads, mr.LastSyncError, mr.SyncedAt, mr.ReportedState, mr.MergedBy,
-		mr.CreatedAt, mr.UpdatedAt, mr.ClosedAt, mr.Draft, followUpOf)
+		mr.CreatedAt, mr.UpdatedAt, mr.ClosedAt, mr.Draft, followUpOf, mr.CISHA)
 	if err != nil {
 		return false, err
 	}
@@ -267,8 +276,17 @@ type MergeRequestSync struct {
 	LastSyncError     *string
 	SyncedAt          time.Time
 	ClosedAt          *time.Time
-	// MergeSHA is the commit the provider says the merge made, when it merged and says.
+	// MergeSHA is the commit the provider says the merge made, when it merged and says; nil
+	// keeps the one recorded (DESIGN wave 3 rule 4: this wave writes it).
 	MergeSHA *string
+	// CISHA is the commit CIStatus was read for (DESIGN wave 3 rule 13): the head, exactly.
+	// CIPipelineID and CIURL name the pipeline or check behind it.
+	CISHA        *string
+	CIPipelineID *int64
+	CIURL        *string
+	// Mergeable and MergeStatus are the provider's account of the merge (rule 13).
+	Mergeable   *bool
+	MergeStatus *string
 }
 
 // UpdateMergeRequestSync writes a refresh in one statement conditional on state = 'open':
@@ -286,12 +304,57 @@ func UpdateMergeRequestSync(ctx context.Context, q Querier, id string, u MergeRe
 		closedAt = &c
 	}
 	tag, err := q.Exec(ctx, `UPDATE merge_requests SET
-			updated_at = CASE WHEN (state, ci_status, head_sha, unresolved_threads)
-				IS DISTINCT FROM ($2::text, $3::text, $4::text, $5::int) THEN $7::timestamptz ELSE updated_at END,
+			updated_at = CASE WHEN (state, ci_status, head_sha, unresolved_threads, ci_sha, merge_status)
+				IS DISTINCT FROM ($2::text, $3::text, $4::text, $5::int, $11::text, $15::text) THEN $7::timestamptz ELSE updated_at END,
 			state = $2, ci_status = $3, head_sha = $4, unresolved_threads = $5, last_sync_error = $6,
-			synced_at = $7, closed_at = $8
+			synced_at = $7, closed_at = $8, merge_sha = COALESCE($10, merge_sha),
+			ci_sha = $11, ci_pipeline_id = $12, ci_url = $13, mergeable = $14, merge_status = $15
 		WHERE id = $1 AND state = $9`,
-		id, u.State, u.CIStatus, u.HeadSHA, u.UnresolvedThreads, u.LastSyncError, at, closedAt, MergeRequestOpen)
+		id, u.State, u.CIStatus, u.HeadSHA, u.UnresolvedThreads, u.LastSyncError, at, closedAt, MergeRequestOpen,
+		u.MergeSHA, u.CISHA, u.CIPipelineID, u.CIURL, u.Mergeable, u.MergeStatus)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// MergeRequestPushed records a push the platform made to an open record's branch in one
+// write, which invalidates the stale check (DESIGN wave 3 rule 11): head_sha is the new
+// head, ci_status pending for exactly that commit (ci_sha), the old pipeline forgotten, and
+// recorded conflicts cleared. fromDefault marks the push as an update from the default
+// branch (updated_from_default_at). Conditional on state = 'open': false when the record
+// left open meanwhile.
+func MergeRequestPushed(ctx context.Context, q Querier, id, head string, at time.Time, fromDefault bool) (bool, error) {
+	tag, err := q.Exec(ctx, `UPDATE merge_requests SET head_sha = $2, ci_status = $3, ci_sha = $2, ci_pipeline_id = NULL,
+			ci_url = NULL, conflicts = NULL, updated_at = $4,
+			updated_from_default_at = CASE WHEN $5 THEN $4 ELSE updated_from_default_at END
+		WHERE id = $1 AND state = $6`, id, head, CIStatusPending, at.UTC(), fromDefault, MergeRequestOpen)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// SetMergeRequestConflicts records what an update from the default branch met (DESIGN
+// wave 3 rule 9); nil clears it, as an update that found none does. Conditional on state =
+// 'open'.
+func SetMergeRequestConflicts(ctx context.Context, q Querier, id string, c *MergeConflicts) (bool, error) {
+	var raw []byte
+	if c != nil {
+		cc := *c
+		cc.At = cc.At.UTC()
+		if cc.Files == nil {
+			cc.Files = []string{}
+		}
+		b, err := json.Marshal(cc)
+		if err != nil {
+			return false, err
+		}
+		raw = b
+	}
+	tag, err := q.Exec(ctx, `UPDATE merge_requests SET conflicts = $2::jsonb,
+			updated_at = CASE WHEN conflicts IS DISTINCT FROM $2::jsonb THEN now() ELSE updated_at END
+		WHERE id = $1 AND state = $3`, id, raw, MergeRequestOpen)
 	if err != nil {
 		return false, err
 	}

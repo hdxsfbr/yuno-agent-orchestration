@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -35,7 +36,7 @@ var mergeRequestStates = []string{store.MergeRequestOpen, store.MergeRequestMerg
 // messages (the engine does; a server without one reports nothing).
 func (s *Server) mergeSync() *mergereq.Sync {
 	rep, _ := s.engine.(mergereq.Reporter)
-	return &mergereq.Sync{Pool: s.pool, Projects: s.projects, Client: s.checkClient, Reporter: rep, Log: s.log}
+	return &mergereq.Sync{Pool: s.pool, Projects: s.projects, Client: s.checkClient, Reporter: rep, Events: s.rec, Log: s.log}
 }
 
 func (s *Server) listMergeRequests(w http.ResponseWriter, r *http.Request) {
@@ -91,6 +92,13 @@ func (s *Server) syncMergeRequest(w http.ResponseWriter, r *http.Request) {
 // the idempotency: there is no tool call and no side effect row, and a second POST finds
 // the record merged. The merge is recorded once the provider reports the request merged
 // (sync.ConfirmMerged), not on its 2xx alone.
+//
+// The merge guard (Chief platform control, DESIGN wave 3 rule 15): the record's check must
+// have passed on exactly its head (ci_status passed with ci_sha = head_sha), or found no
+// pipeline on that head in a project with no CI configured (rule 4's test: no pipeline or
+// check on the default branch's last 20 commits). The provider is sent the head as the
+// sha the merge must find, so a head that moved since the check is refused there: 409
+// merge_request_head_moved, after which the record is synced so it shows the new head.
 func (s *Server) mergeMergeRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	mr, err := store.GetMergeRequest(ctx, s.pool, r.PathValue("id"))
@@ -108,28 +116,61 @@ func (s *Server) mergeMergeRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pc, err := s.projects.ForRunID(ctx, mr.RunID)
+	if s.projectRefused(w, r, err, "merge_request_not_mergeable") {
+		return
+	}
+	head := ""
+	if mr.HeadSHA != nil {
+		head = *mr.HeadSHA
+	}
 	switch {
-	case errors.Is(err, project.ErrCannotRead):
-		// The operator fixes these on the Projects page; the text carries no secret.
-		writeError(w, http.StatusConflict, "merge_request_not_mergeable", sentence(project.ErrCannotRead.Error()), nil)
+	case head == "":
+		writeError(w, http.StatusConflict, "merge_request_ci_not_passed",
+			"the head commit of the request is not known yet; sync the request, then merge", nil)
 		return
-	case errors.Is(err, project.ErrNoKey):
-		writeError(w, http.StatusConflict, "merge_request_not_mergeable", "PROJECT_TOKEN_KEY is not set; the stored token cannot be read.", nil)
+	case mr.CISHA == nil || *mr.CISHA != head:
+		writeError(w, http.StatusConflict, "merge_request_ci_not_passed",
+			"the pipeline result is not for the head commit "+short(head)+"; sync the request, then merge", nil)
 		return
-	case errors.Is(err, project.ErrNoProject):
-		writeError(w, http.StatusConflict, "merge_request_not_mergeable", sentence(project.ErrNoProject.Error()), nil)
-		return
-	case err != nil:
-		s.internalError(w, r, "read the merge request's project", err)
-		return
+	}
+	provider := tools.ProviderFor(pc, s.checkClient)
+	if mr.CIStatus == store.CIStatusNone {
+		// None is accepted only for a project with no CI configured (rule 4's test).
+		cctx, cancel := context.WithTimeout(ctx, mergeTimeout)
+		configured, err := provider.CIConfigured(cctx, pc.DefaultBranch)
+		cancel()
+		switch {
+		case err != nil:
+			s.log.Warn("merge request CI check failed", "merge_request_id", mr.ID, "run_id", mr.RunID, "error", redactToken(err.Error(), pc.Token))
+			code := "provider_error"
+			if tools.TransientError(err) {
+				code = "provider_unavailable"
+			}
+			writeError(w, http.StatusBadGateway, code, "whether the project has CI could not be read: "+redactToken(err.Error(), pc.Token), nil)
+			return
+		case configured:
+			writeError(w, http.StatusConflict, "merge_request_ci_not_passed",
+				"no pipeline has run on "+short(head)+" yet; merge on the provider to override", nil)
+			return
+		}
 	}
 
 	mctx, cancel := context.WithTimeout(ctx, mergeTimeout)
-	err = tools.ProviderFor(pc, s.checkClient).Merge(mctx, mr.Number)
+	err = provider.Merge(mctx, mr.Number, head)
 	cancel()
 	sync := s.mergeSync()
 	var notMergeable *tools.ErrNotMergeable
+	var moved *tools.ErrHeadMoved
 	switch {
+	case errors.As(err, &moved):
+		// The branch moved since its check: the record is synced, so it shows the new head
+		// and that head's own check.
+		var details any
+		if cur, serr := sync.SyncOne(ctx, mr.ID); serr == nil && cur.HeadSHA != nil && *cur.HeadSHA != head {
+			details = map[string]string{"current": *cur.HeadSHA}
+		}
+		writeError(w, http.StatusConflict, "merge_request_head_moved",
+			"the request's head is no longer "+short(head)+", the commit that was checked; nothing was merged", details)
 	case err == nil:
 		// A 2xx is not the merge itself: the provider is asked once more, and the record is
 		// marked merged only when it says so. Otherwise the record stays open with the
@@ -179,4 +220,157 @@ func redactToken(text, token string) string {
 
 func writeNotOpen(w http.ResponseWriter, state string) {
 	writeError(w, http.StatusConflict, "merge_request_not_open", "the request is "+state, nil)
+}
+
+// projectRefused answers the project resolver's refusals, the ones the operator fixes on
+// the Projects page, as 409 code with a text that carries no secret, and any other error
+// as a 500. It reports whether it answered; a nil err is not answered.
+func (s *Server) projectRefused(w http.ResponseWriter, r *http.Request, err error, code string) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, project.ErrCannotRead):
+		writeError(w, http.StatusConflict, code, sentence(project.ErrCannotRead.Error()), nil)
+	case errors.Is(err, project.ErrNoKey):
+		writeError(w, http.StatusConflict, code, "PROJECT_TOKEN_KEY is not set; the stored token cannot be read.", nil)
+	case errors.Is(err, project.ErrNoProject):
+		writeError(w, http.StatusConflict, code, sentence(project.ErrNoProject.Error()), nil)
+	default:
+		s.internalError(w, r, "read the merge request's project", err)
+	}
+	return true
+}
+
+// short is a commit id as a message names it: its first seven characters.
+func short(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
+// readFailed answers the errors the merge request reads and the update share (Chief
+// platform control, DESIGN wave 3 rules 9 and 14): the project's refusals as 409 code, a
+// request or job the provider does not have as 404, a provider failure as 502 with its
+// cleaned text, anything else as a 500.
+func (s *Server) readFailed(w http.ResponseWriter, r *http.Request, err error, code string) {
+	var pe *mergereq.ProviderError
+	switch {
+	case errors.Is(err, project.ErrCannotRead), errors.Is(err, project.ErrNoKey), errors.Is(err, project.ErrNoProject):
+		s.projectRefused(w, r, err, code)
+	case errors.Is(err, tools.ErrRequestNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "the request is not on the provider", nil)
+	case errors.Is(err, tools.ErrJobNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "the provider has no log for this job", nil)
+	case errors.As(err, &pe):
+		status, c := http.StatusBadGateway, "provider_error"
+		if pe.Transient {
+			c = "provider_unavailable"
+		}
+		writeError(w, status, c, pe.Message, nil)
+	default:
+		s.internalError(w, r, "read the merge request from its provider", err)
+	}
+}
+
+// updateMergeRequestFromDefault merges the project's default branch into the request's
+// branch and pushes it (Chief platform control, DESIGN wave 3 rules 9 to 11). The body
+// names the head the caller saw; a branch that is elsewhere is 409 merge_request_head_moved
+// with {current}. Conflicts are an outcome, recorded on the record, not an error.
+func (s *Server) updateMergeRequestFromDefault(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		ExpectedHeadSHA string `json:"expected_head_sha"`
+	}
+	if !decodeBody(w, r, &in, 4<<10) {
+		return
+	}
+	if !project.IsCommitID(in.ExpectedHeadSHA) {
+		writeValidation(w, "invalid request body", fieldErrors{{Path: "expected_head_sha", Message: "must be a full 40-character commit id"}})
+		return
+	}
+	rec, res, err := s.mergeSync().UpdateFromDefault(r.Context(), r.PathValue("id"), in.ExpectedHeadSHA)
+	var notOpen *mergereq.ErrNotOpen
+	var moved *project.ErrHeadMoved
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, struct {
+			mergereq.UpdateResult
+			MergeRequest *store.MergeRequest `json:"merge_request"`
+		}{res, rec})
+	case errors.Is(err, store.ErrNotFound):
+		s.storeError(w, r, "merge request", err)
+	case errors.As(err, &notOpen):
+		writeNotOpen(w, notOpen.State)
+	case errors.As(err, &moved):
+		var details any
+		if moved.Current != "" {
+			details = map[string]string{"current": moved.Current}
+		}
+		writeError(w, http.StatusConflict, "merge_request_head_moved", "the branch is not at "+short(in.ExpectedHeadSHA)+" any more; nothing was pushed", details)
+	case errors.Is(err, project.ErrNoMergeBase):
+		writeError(w, http.StatusConflict, "merge_request_not_updatable", sentence(project.ErrNoMergeBase.Error())+" Nothing was pushed.", nil)
+	default:
+		s.readFailed(w, r, err, "merge_request_not_updatable")
+	}
+}
+
+// getMergeRequestDiff answers the request's files and patches from the provider (DESIGN
+// wave 3 rule 14), redacted and capped at 256 KiB.
+func (s *Server) getMergeRequestDiff(w http.ResponseWriter, r *http.Request) {
+	rec, err := store.GetMergeRequest(r.Context(), s.pool, r.PathValue("id"))
+	if err != nil {
+		s.storeError(w, r, "merge request", err)
+		return
+	}
+	d, err := s.mergeSync().Diff(r.Context(), rec)
+	if err != nil {
+		s.readFailed(w, r, err, "merge_request_unreadable")
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
+// getMergeRequestChecks answers the pipeline or check runs of exactly the record's head
+// with their jobs (rule 14).
+func (s *Server) getMergeRequestChecks(w http.ResponseWriter, r *http.Request) {
+	rec, err := store.GetMergeRequest(r.Context(), s.pool, r.PathValue("id"))
+	if err != nil {
+		s.storeError(w, r, "merge request", err)
+		return
+	}
+	c, err := s.mergeSync().Checks(r.Context(), rec)
+	if errors.Is(err, mergereq.ErrHeadUnknown) {
+		writeError(w, http.StatusConflict, "merge_request_head_unknown", mergereq.ErrHeadUnknown.Error(), nil)
+		return
+	}
+	if err != nil {
+		s.readFailed(w, r, err, "merge_request_unreadable")
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+// getMergeRequestJobLog answers the tail of a job's log (rule 14): tail_bytes, default
+// 64 KiB, at most 1 MiB, redacted.
+func (s *Server) getMergeRequestJobLog(w http.ResponseWriter, r *http.Request) {
+	tail := mergereq.DefaultLogTail
+	if v := r.URL.Query().Get("tail_bytes"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > mergereq.MaxLogTail {
+			writeValidation(w, "invalid query", fieldErrors{{Path: "tail_bytes", Message: fmt.Sprintf("must be an integer from 1 to %d", mergereq.MaxLogTail)}})
+			return
+		}
+		tail = n
+	}
+	rec, err := store.GetMergeRequest(r.Context(), s.pool, r.PathValue("id"))
+	if err != nil {
+		s.storeError(w, r, "merge request", err)
+		return
+	}
+	lg, err := s.mergeSync().JobLog(r.Context(), rec, r.PathValue("job"), tail)
+	if err != nil {
+		s.readFailed(w, r, err, "merge_request_unreadable")
+		return
+	}
+	writeJSON(w, http.StatusOK, lg)
 }

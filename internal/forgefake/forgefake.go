@@ -1,9 +1,10 @@
 // Package forgefake is the fake forge of the evals (DESIGN 5.29 rule 17): an in-memory
-// subset of GitLab's REST v4 (projects, issues, labels, merge requests, pipelines,
-// branches) plus Git smart HTTP over bare repositories in a temporary directory, so the
-// pushes of open_merge_request are real. It accepts one fixed token and has control
-// endpoints under /_forge/ that only the eval runner calls. It is started only under the
-// compose profile eval and is never part of make run or the public deployment.
+// subset of GitLab's REST v4 (projects, issues, labels, merge requests with their diffs,
+// pipelines with their jobs and traces, branches, commits) plus Git smart HTTP over bare
+// repositories in a temporary directory, so the pushes of open_merge_request are real. It
+// accepts one fixed token and has control endpoints under /_forge/ that only the eval
+// runner calls. It is started only under the compose profile eval and is never part of
+// make run or the public deployment.
 package forgefake
 
 import (
@@ -42,6 +43,7 @@ type Server struct {
 	nextIssue  int
 	nextMR     int
 	nextPipe   int
+	nextJob    int
 	nextNote   int
 	nextLabel  int
 	gitTimeout time.Duration

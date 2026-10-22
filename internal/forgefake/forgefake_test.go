@@ -270,7 +270,7 @@ func TestMergeRequestsThroughTheProviders(t *testing.T) {
 
 	// A draft does not merge.
 	var nm *tools.ErrNotMergeable
-	if err := rp.Merge(ctx, 1); !errors.As(err, &nm) {
+	if err := rp.Merge(ctx, 1, ""); !errors.As(err, &nm) {
 		t.Fatalf("merging a draft: %v", err)
 	}
 
@@ -291,11 +291,11 @@ func TestMergeRequestsThroughTheProviders(t *testing.T) {
 
 	// The request's pipelines are those of its source branch.
 	call(t, ts, http.MethodPost, "/_forge/repos/acme/app/pipeline", map[string]any{"state": "passed", "ref": "feature/one"}, nil, http.StatusCreated)
-	if ci, err := rp.CIStatus(ctx, 1, ""); err != nil || ci != "passed" {
+	if ci, err := rp.CIStatus(ctx, 1, d.HeadSHA); err != nil || ci != "passed" {
 		t.Fatalf("ci %q %v", ci, err)
 	}
 
-	if err := rp.Merge(ctx, 1); err != nil {
+	if err := rp.Merge(ctx, 1, ""); err != nil {
 		t.Fatal(err)
 	}
 	st, err = rp.Status(ctx, 1)
@@ -305,10 +305,10 @@ func TestMergeRequestsThroughTheProviders(t *testing.T) {
 	if ok, _ := rp.BranchExists(ctx, "feature/one"); ok {
 		t.Error("the source branch survived a merge that removes it")
 	}
-	if err := rp.Merge(ctx, 1); !errors.As(err, &nm) {
+	if err := rp.Merge(ctx, 1, ""); !errors.As(err, &nm) {
 		t.Fatalf("merging a merged request: %v", err)
 	}
-	if err := rp.Merge(ctx, 9); !errors.Is(err, tools.ErrRequestNotFound) {
+	if err := rp.Merge(ctx, 9, ""); !errors.Is(err, tools.ErrRequestNotFound) {
 		t.Fatalf("merging a missing request: %v", err)
 	}
 
@@ -418,10 +418,10 @@ func TestMergeConflict(t *testing.T) {
 		}
 	}
 	var nm *tools.ErrNotMergeable
-	if err := rp.Merge(ctx, 1); err != nil {
+	if err := rp.Merge(ctx, 1, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := rp.Merge(ctx, 2); !errors.As(err, &nm) {
+	if err := rp.Merge(ctx, 2, ""); !errors.As(err, &nm) {
 		t.Fatalf("a conflicting merge: %v", err)
 	}
 	if st, _ := rp.Status(ctx, 2); st.State != "open" {

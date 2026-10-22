@@ -17,7 +17,9 @@ import (
 //
 //	POST /_forge/repos                          {path, default_branch}  a project with a README commit
 //	POST /_forge/repos/<path>/merge-open        {iid?}                  merge the open, non-draft requests
-//	POST /_forge/repos/<path>/pipeline          {state, ref?}           record a pipeline now
+//	POST /_forge/repos/<path>/pipeline          {state, ref?, sha?, jobs?} record a pipeline now
+//	                                            (jobs: [{name, stage, state, log}]; one
+//	                                            "test" job when none is given)
 //	GET  /_forge/repos/<path>/issues                                    every issue with labels and state
 func (s *Server) control(w http.ResponseWriter, r *http.Request, segs []string) {
 	if len(segs) == 0 || segs[0] != "repos" {
@@ -143,10 +145,42 @@ func (s *Server) controlPipeline(w http.ResponseWriter, r *http.Request, rp *rep
 		fail(w, http.StatusNotFound, "no branch "+ref)
 		return
 	}
+	if v, _ := a.str("sha"); v != "" {
+		sha = v // a pipeline of an earlier commit of the ref
+	}
 	s.nextPipe++
 	p := &pipeline{id: s.nextPipe, ref: ref, sha: sha, status: status, createdAt: s.now()}
+	jobs, _ := a["jobs"].([]any)
+	for _, raw := range jobs {
+		spec, _ := raw.(map[string]any)
+		ja := args(spec)
+		name, _ := ja.str("name")
+		stage, _ := ja.str("stage")
+		log, _ := ja.str("log")
+		jstate, _ := ja.str("state")
+		jstatus, ok := gitlabStatus[jstate]
+		if !ok {
+			jstatus = status
+		}
+		p.jobs = append(p.jobs, s.newJob(name, stage, jstatus, log))
+	}
+	if len(p.jobs) == 0 {
+		p.jobs = append(p.jobs, s.newJob("test", "test", status, "Running the tests\nJob "+status+"\n"))
+	}
 	rp.pipelines = append(rp.pipelines, p)
 	writeJSON(w, http.StatusCreated, s.pipelineJSON(r, rp, p))
+}
+
+// newJob makes a job of a pipeline; a name or stage left out is "test".
+func (s *Server) newJob(name, stage, status, log string) *job {
+	if name == "" {
+		name = "test"
+	}
+	if stage == "" {
+		stage = "test"
+	}
+	s.nextJob++
+	return &job{id: s.nextJob, name: name, stage: stage, status: status, log: log}
 }
 
 // ---- Git smart HTTP -----------------------------------------------------------------

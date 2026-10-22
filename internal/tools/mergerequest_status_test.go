@@ -58,19 +58,19 @@ func TestGitLabRequestStatus(t *testing.T) {
 		{name: "closed, closed_at", mr: jm{"state": "closed", "sha": "def", "closed_at": closed.Format("2006-01-02T15:04:05.000Z")},
 			discussions: []jm{}, pipelines: []jm{}, state: "closed", ci: "none", closedAt: &closed},
 		{name: "locked is closed", mr: jm{"state": "locked", "sha": "def"}, discussions: []jm{}, pipelines: []jm{}, state: "closed", ci: "none"},
-		{name: "pipeline failed", mr: jm{"state": "opened"}, discussions: []jm{}, pipelines: []jm{{"status": "failed"}}, state: "open", ci: "failed"},
-		{name: "pipeline canceled", mr: jm{"state": "opened"}, discussions: []jm{}, pipelines: []jm{{"status": "canceled"}}, state: "open", ci: "failed"},
-		{name: "pipeline created", mr: jm{"state": "opened"}, discussions: []jm{}, pipelines: []jm{{"status": "created"}}, state: "open", ci: "pending"},
-		{name: "pipeline waiting_for_resource", mr: jm{"state": "opened"}, discussions: []jm{}, pipelines: []jm{{"status": "waiting_for_resource"}}, state: "open", ci: "pending"},
-		{name: "pipeline preparing", mr: jm{"state": "opened"}, discussions: []jm{}, pipelines: []jm{{"status": "preparing"}}, state: "open", ci: "pending"},
-		{name: "pipeline pending", mr: jm{"state": "opened"}, discussions: []jm{}, pipelines: []jm{{"status": "pending"}}, state: "open", ci: "pending"},
-		{name: "pipeline running", mr: jm{"state": "opened"}, discussions: []jm{}, pipelines: []jm{{"status": "running"}}, state: "open", ci: "pending"},
-		{name: "pipeline manual", mr: jm{"state": "opened"}, discussions: []jm{}, pipelines: []jm{{"status": "manual"}}, state: "open", ci: "pending"},
-		{name: "pipeline scheduled", mr: jm{"state": "opened"}, discussions: []jm{}, pipelines: []jm{{"status": "scheduled"}}, state: "open", ci: "pending"},
-		{name: "pipeline skipped is none", mr: jm{"state": "opened"}, discussions: []jm{}, pipelines: []jm{{"status": "skipped"}}, state: "open", ci: "none"},
-		{name: "only the first entry counts", mr: jm{"state": "opened"}, discussions: []jm{},
+		{name: "pipeline failed", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{}, pipelines: []jm{{"status": "failed"}}, state: "open", ci: "failed"},
+		{name: "pipeline canceled", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{}, pipelines: []jm{{"status": "canceled"}}, state: "open", ci: "failed"},
+		{name: "pipeline created", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{}, pipelines: []jm{{"status": "created"}}, state: "open", ci: "pending"},
+		{name: "pipeline waiting_for_resource", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{}, pipelines: []jm{{"status": "waiting_for_resource"}}, state: "open", ci: "pending"},
+		{name: "pipeline preparing", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{}, pipelines: []jm{{"status": "preparing"}}, state: "open", ci: "pending"},
+		{name: "pipeline pending", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{}, pipelines: []jm{{"status": "pending"}}, state: "open", ci: "pending"},
+		{name: "pipeline running", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{}, pipelines: []jm{{"status": "running"}}, state: "open", ci: "pending"},
+		{name: "pipeline manual", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{}, pipelines: []jm{{"status": "manual"}}, state: "open", ci: "pending"},
+		{name: "pipeline scheduled", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{}, pipelines: []jm{{"status": "scheduled"}}, state: "open", ci: "pending"},
+		{name: "pipeline skipped is none", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{}, pipelines: []jm{{"status": "skipped"}}, state: "open", ci: "none"},
+		{name: "only the first entry counts", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{},
 			pipelines: []jm{{"status": "running"}, {"status": "failed"}}, state: "open", ci: "pending"},
-		{name: "a status this table does not know is never passed", mr: jm{"state": "opened"}, discussions: []jm{},
+		{name: "a status this table does not know is never passed", mr: jm{"state": "opened", "sha": "abc"}, discussions: []jm{},
 			pipelines: []jm{{"status": "something_new"}}, state: "open", ci: "pending"},
 	}
 	for _, tc := range cases {
@@ -78,7 +78,7 @@ func TestGitLabRequestStatus(t *testing.T) {
 			g, srv := newFakeGitLab(t)
 			script(&g.scripted, "GET /merge_requests/7", 200, tc.mr)
 			script(&g.scripted, "GET /merge_requests/7/discussions", 200, tc.discussions)
-			script(&g.scripted, "GET /merge_requests/7/pipelines", 200, tc.pipelines)
+			script(&g.scripted, "GET /pipelines", 200, tc.pipelines)
 			st, err := gitlabStatusProvider(srv).Status(context.Background(), 7)
 			if err != nil {
 				t.Fatal(err)
@@ -322,7 +322,7 @@ func (rt rewriteTo) RoundTrip(r *http.Request) (*http.Response, error) {
 func TestMergeRequestMerge(t *testing.T) {
 	g, gsrv := newFakeGitLab(t)
 	script(&g.scripted, "PUT /merge_requests/7/merge", 200, jm{"state": "merged"})
-	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7); err != nil {
+	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7, ""); err != nil {
 		t.Fatal(err)
 	}
 	if g.bodies["PUT /merge_requests/7/merge"]["should_remove_source_branch"] != true {
@@ -330,7 +330,7 @@ func TestMergeRequestMerge(t *testing.T) {
 	}
 	h, hsrv := newFakeGitHub(t, "")
 	script(&h.scripted, "PUT /pulls/5/merge", 200, jm{"merged": true, "sha": "abc"})
-	if err := githubStatusProvider(hsrv).Merge(context.Background(), 5); err != nil {
+	if err := githubStatusProvider(hsrv).Merge(context.Background(), 5, ""); err != nil {
 		t.Fatal(err)
 	}
 	if h.bodies["PUT /pulls/5/merge"]["merge_method"] != "merge" {
@@ -347,7 +347,7 @@ func TestMergeRequestMerge(t *testing.T) {
 			{"github", func() RequestProvider { return githubStatusProvider(hsrv) }, func(s int, b any) { script(&h.scripted, "PUT /pulls/7/merge", s, b) }},
 		} {
 			side.set(status, jm{"message": "Branch cannot be merged\nconflicts in README.md", "documentation_url": "https://docs"})
-			err := side.p().Merge(context.Background(), 7)
+			err := side.p().Merge(context.Background(), 7, "")
 			var nm *ErrNotMergeable
 			if !errors.As(err, &nm) || nm.Message != "Branch cannot be merged" {
 				t.Fatalf("%s %d: err = %v", side.name, status, err)
@@ -357,23 +357,23 @@ func TestMergeRequestMerge(t *testing.T) {
 	// A refusal whose body is not JSON: its first line.
 	script(&g.scripted, "PUT /merge_requests/7/merge", 405, "405 Method Not Allowed")
 	var nm *ErrNotMergeable
-	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7); !errors.As(err, &nm) || !strings.Contains(nm.Message, "405 Method Not Allowed") {
+	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7, ""); !errors.As(err, &nm) || !strings.Contains(nm.Message, "405 Method Not Allowed") {
 		t.Fatalf("plain refusal = %v", err)
 	}
 	script(&g.scripted, "PUT /merge_requests/7/merge", 404, jm{"message": "404 Not found"})
-	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7); !errors.Is(err, ErrRequestNotFound) {
+	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7, ""); !errors.Is(err, ErrRequestNotFound) {
 		t.Fatalf("404 = %v", err)
 	}
 	script(&g.scripted, "PUT /merge_requests/7/merge", 503, jm{"message": "down"})
-	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7); err == nil || !TransientError(err) || errors.As(err, &nm) {
+	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7, ""); err == nil || !TransientError(err) || errors.As(err, &nm) {
 		t.Fatalf("503 = %v", err)
 	}
 	script(&g.scripted, "PUT /merge_requests/7/merge", 400, jm{"message": "400 Bad Request"})
-	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7); err == nil || TransientError(err) || errors.As(err, &nm) || errors.Is(err, ErrRequestNotFound) {
+	if err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7, ""); err == nil || TransientError(err) || errors.As(err, &nm) || errors.Is(err, ErrRequestNotFound) {
 		t.Fatalf("400 = %v", err)
 	}
 	// The token never travels into an error text.
-	if strings.Contains(statusErr(gitlabStatusProvider(gsrv).Merge(context.Background(), 7)), statusTestToken) {
+	if strings.Contains(statusErr(gitlabStatusProvider(gsrv).Merge(context.Background(), 7, "")), statusTestToken) {
 		t.Fatal("the token is in the error")
 	}
 }
@@ -392,13 +392,13 @@ func TestMergeRefusedForLackOfPermission(t *testing.T) {
 	g, gsrv := newFakeGitLab(t)
 	script(&g.scripted, "PUT /merge_requests/7/merge", 401, jm{"message": "401 Unauthorized"})
 	var nm *ErrNotMergeable
-	err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7)
+	err := gitlabStatusProvider(gsrv).Merge(context.Background(), 7, "")
 	if !errors.As(err, &nm) || !strings.Contains(nm.Message, "not allowed to merge this request (HTTP 401)") {
 		t.Fatalf("gitlab 401 = %v", err)
 	}
 	h, hsrv := newFakeGitHub(t, "")
 	script(&h.scripted, "PUT /pulls/5/merge", 403, jm{"message": "Resource not accessible by personal access token"})
-	if err := githubStatusProvider(hsrv).Merge(context.Background(), 5); !errors.As(err, &nm) || !strings.Contains(nm.Message, "(HTTP 403)") {
+	if err := githubStatusProvider(hsrv).Merge(context.Background(), 5, ""); !errors.As(err, &nm) || !strings.Contains(nm.Message, "(HTTP 403)") {
 		t.Fatalf("github 403 = %v", err)
 	}
 }

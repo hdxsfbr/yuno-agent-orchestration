@@ -40,8 +40,12 @@ func (s *Server) rest(w http.ResponseWriter, r *http.Request, segs []string) {
 		s.mergeRequests(w, r, rp, rest[1:])
 	case rest[0] == "pipelines":
 		s.pipelinesAPI(w, r, rp, rest[1:])
+	case rest[0] == "jobs" && len(rest) == 3 && rest[2] == "trace" && r.Method == http.MethodGet:
+		s.jobTrace(w, rp, rest[1])
 	case rest[0] == "repository" && len(rest) >= 2 && rest[1] == "branches":
 		s.branches(w, r, rp, rest[2:])
+	case rest[0] == "repository" && len(rest) == 2 && rest[1] == "commits" && r.Method == http.MethodGet:
+		s.commits(w, r, rp)
 	default:
 		fail(w, http.StatusNotFound, "404 Not Found")
 	}
@@ -298,9 +302,14 @@ func (s *Server) mrJSON(r *http.Request, rp *repo, mr *mergeRequest) map[string]
 		labels = []string{}
 	}
 	draft := isDraft(mr.title)
-	detailed := "mergeable"
-	if draft {
+	detailed, conflicts := "mergeable", false
+	switch {
+	case mr.state != "opened":
+		detailed = "not_open"
+	case draft:
 		detailed = "draft_status"
+	case s.conflicts(rp, mr):
+		detailed, conflicts = "conflict", true
 	}
 	var mergeSHA any
 	if mr.mergeSHA != "" {
@@ -310,7 +319,7 @@ func (s *Server) mrJSON(r *http.Request, rp *repo, mr *mergeRequest) map[string]
 		"id": mr.id, "iid": mr.iid, "project_id": rp.id, "title": mr.title, "description": mr.body,
 		"state": mr.state, "draft": draft, "work_in_progress": draft,
 		"source_branch": mr.source, "target_branch": mr.target, "sha": s.mrSHA(rp, mr), "merge_commit_sha": mergeSHA,
-		"labels": labels, "has_conflicts": false, "merge_status": "can_be_merged", "detailed_merge_status": detailed,
+		"labels": labels, "has_conflicts": conflicts, "merge_status": "can_be_merged", "detailed_merge_status": detailed,
 		"created_at": stamp(mr.createdAt), "updated_at": stamp(mr.updatedAt),
 		"merged_at": stampPtr(mr.mergedAt), "closed_at": stampPtr(mr.closedAt),
 		"web_url": fmt.Sprintf("%s/%s/-/merge_requests/%d", base(r), rp.path, mr.iid),
@@ -453,6 +462,11 @@ func (s *Server) mergeRequest(w http.ResponseWriter, r *http.Request, rp *repo, 
 			fail(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if sha, _ := a.str("sha"); sha != "" && mr.state == "opened" && sha != s.rev(rp, mr.source) {
+			// GitLab refuses a merge whose sha is not the source branch's head.
+			fail(w, http.StatusConflict, "SHA does not match HEAD of source branch: "+s.rev(rp, mr.source))
+			return
+		}
 		switch err := s.mergeMR(rp, mr, a.boolean("should_remove_source_branch")); {
 		case err == nil:
 			writeJSON(w, http.StatusOK, s.mrJSON(r, rp, mr))
@@ -477,6 +491,8 @@ func (s *Server) mergeRequest(w http.ResponseWriter, r *http.Request, rp *repo, 
 		writeJSON(w, http.StatusOK, out[lo:hi])
 	case len(rest) == 1 && rest[0] == "pipelines" && r.Method == http.MethodGet:
 		s.listPipelines(w, r, rp, func(p *pipeline) bool { return p.ref == mr.source })
+	case len(rest) == 1 && rest[0] == "diffs" && r.Method == http.MethodGet:
+		s.mrDiffs(w, r, rp, mr)
 	default:
 		fail(w, http.StatusNotFound, "404 Not Found")
 	}
@@ -501,16 +517,27 @@ func (s *Server) pipelineJSON(r *http.Request, rp *repo, p *pipeline) map[string
 func (s *Server) pipelinesAPI(w http.ResponseWriter, r *http.Request, rp *repo, rest []string) {
 	switch {
 	case len(rest) == 0 && r.Method == http.MethodGet:
-		ref := r.URL.Query().Get("ref")
-		s.listPipelines(w, r, rp, func(p *pipeline) bool { return ref == "" || p.ref == ref })
+		ref, sha := r.URL.Query().Get("ref"), r.URL.Query().Get("sha")
+		s.listPipelines(w, r, rp, func(p *pipeline) bool { return (ref == "" || p.ref == ref) && (sha == "" || p.sha == sha) })
 	case len(rest) == 1 && r.Method == http.MethodGet:
-		for _, p := range rp.pipelines {
-			if strconv.Itoa(p.id) == rest[0] {
-				writeJSON(w, http.StatusOK, s.pipelineJSON(r, rp, p))
-				return
-			}
+		if p := findPipeline(rp, rest[0]); p != nil {
+			writeJSON(w, http.StatusOK, s.pipelineJSON(r, rp, p))
+			return
 		}
 		fail(w, http.StatusNotFound, "404 Not found")
+	case len(rest) == 2 && rest[1] == "jobs" && r.Method == http.MethodGet:
+		p := findPipeline(rp, rest[0])
+		if p == nil {
+			fail(w, http.StatusNotFound, "404 Not found")
+			return
+		}
+		lo, hi := page(w, r, len(p.jobs))
+		out := make([]map[string]any, 0, hi-lo)
+		for _, j := range p.jobs[lo:hi] {
+			out = append(out, map[string]any{"id": j.id, "name": j.name, "stage": j.stage, "status": j.status,
+				"web_url": fmt.Sprintf("%s/%s/-/jobs/%d", base(r), rp.path, j.id), "pipeline": map[string]any{"id": p.id, "sha": p.sha, "ref": p.ref}})
+		}
+		writeJSON(w, http.StatusOK, out)
 	default:
 		fail(w, http.StatusNotFound, "404 Not Found")
 	}
