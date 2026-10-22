@@ -192,6 +192,68 @@ func Stored(ctx context.Context, q store.Querier, edges []store.Dependency) (Sta
 	return st, nil
 }
 
+// BlockedBy is what holds an open merge request (rule 5), as last recorded: each
+// prerequisite not satisfied with its reason; once all are satisfied and the request is not
+// let go yet, each with the watcher's reason (an update from the default branch to come,
+// conflicts, CI on the new head). A request that is not open is held by nothing. edges are
+// the request's, as store.MergeRequestDependencies returns them.
+func BlockedBy(ctx context.Context, q store.Querier, mr *store.MergeRequest, edges []store.Dependency) ([]Blocker, error) {
+	if mr.State != store.MergeRequestOpen {
+		return []Blocker{}, nil
+	}
+	st, err := Stored(ctx, q, edges)
+	if err != nil {
+		return nil, err
+	}
+	if len(st.Blocked) > 0 || len(st.Open) == 0 {
+		if st.Blocked == nil {
+			st.Blocked = []Blocker{}
+		}
+		return st.Blocked, nil
+	}
+	g, err := store.GetDependencyGate(ctx, q, mr.ID)
+	if err != nil {
+		return nil, err
+	}
+	reason := "the platform has not updated the branch from the default branch yet"
+	if g != nil && g.Reason != nil && *g.Reason != "" {
+		reason = *g.Reason
+	}
+	out := make([]Blocker, len(st.Open))
+	for i, e := range st.Open {
+		out[i] = Blocker{Prerequisite: e.PrerequisiteID, Kind: e.PrerequisiteKind, Label: st.Labels[i], Reason: reason}
+	}
+	return out, nil
+}
+
+// Held says why a run must not work on the merge request mrID yet (rule 7): the reason of
+// the first thing that holds it, as BlockedBy reads it, or "" when nothing does (no edge left
+// uncleared, the request is not open, or there is no such record). It asks no provider.
+func Held(ctx context.Context, q store.Querier, mrID string) (string, error) {
+	mr, err := store.GetMergeRequest(ctx, q, mrID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	edges, err := store.MergeRequestDependencies(ctx, q, mrID)
+	if err != nil {
+		return "", err
+	}
+	blocked, err := BlockedBy(ctx, q, mr, edges)
+	if err != nil || len(blocked) == 0 {
+		return "", err
+	}
+	return blocked[0].Reason, nil
+}
+
+// HeldDetail is the refusal of work on a held merge request (rule 7): "blocked by <reason>;
+// remove the dependency to override".
+func HeldDetail(reason string) string {
+	return "blocked by " + reason + "; remove the dependency to override"
+}
+
 // verdict is one prerequisite judged: satisfied, or the reason it is not; closed when it can
 // never be (closed without merging). A satisfied one may carry a note as its reason.
 type verdict struct {

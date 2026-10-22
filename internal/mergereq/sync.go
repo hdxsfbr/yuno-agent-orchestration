@@ -72,9 +72,8 @@ type Sync struct {
 	// after each dependency pass (Chief platform control, DESIGN wave 3 rule 8b).
 	Tickets TicketReleaser
 	// RequeueDependencyRuns, when set, is called once for a dependent merge request the
-	// dependency watcher lets go, with the task note of rule 8a. Rule 7 (runs parked on a
-	// dependent request) re-queues the request's paused dependency runs through it; until
-	// then nothing sets it.
+	// dependency watcher lets go, with the task note of rule 8a: the server re-queues the
+	// runs parked on the request for its dependencies (rule 7).
 	RequeueDependencyRuns func(ctx context.Context, rec *store.MergeRequest, note string) error
 	Interval              time.Duration
 	// Timeout bounds the refresh of one record; SyncTimeout (10 s) when zero.

@@ -245,8 +245,8 @@ func (s *Sync) letGo(ctx context.Context, rec *store.MergeRequest, st deps.State
 }
 
 // requeueDependencyRuns is the hook of rule 7: the runs parked on the request because of a
-// dependency are re-queued with the note. Rule 7 is not built yet, so nothing is parked and
-// nothing is re-queued unless RequeueDependencyRuns is set.
+// dependency are re-queued with the note. Nothing is re-queued unless RequeueDependencyRuns
+// is set.
 func (s *Sync) requeueDependencyRuns(ctx context.Context, rec *store.MergeRequest, note string) {
 	if s.RequeueDependencyRuns == nil {
 		return

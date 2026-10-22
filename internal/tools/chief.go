@@ -390,8 +390,19 @@ func NewDelegateTask(d ChiefDeps) *Tool {
 				release()
 				return Result{}, err
 			}
-			return JSONResult(map[string]any{"run_id": run.ID, "status": run.Status, "url": RunURL(d.PublicBaseURL, run.ID)}), nil
+			out := map[string]any{"run_id": run.ID, "status": run.Status, "url": RunURL(d.PublicBaseURL, run.ID)}
+			parkedFor(out, run)
+			return JSONResult(out), nil
 		},
+	}
+}
+
+// parkedFor adds why a run waits paused for its merge request's prerequisites (Chief
+// platform control, DESIGN wave 3 rule 7) to a tool's answer about it: "blocked_by", the
+// reason as it read when the run was parked. Such a run is queued by itself once they are in.
+func parkedFor(out map[string]any, run *store.Run) {
+	if run.Status == store.RunPaused && run.ParkReason == store.RunParkDependency && run.ParkDetail != nil {
+		out["blocked_by"] = *run.ParkDetail
 	}
 }
 
@@ -710,6 +721,7 @@ func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string, codeKey []byte) *Too
 				"steps": run.StepCount, "tool_calls": run.ToolCallCount,
 				"cost_usd": float64(run.CostUSDMicros) / 1e6, "url": RunURL(publicBaseURL, run.ID),
 			}
+			parkedFor(out, run)
 			if run.StartedAt != nil {
 				out["started_at"] = run.StartedAt.UTC().Format(time.RFC3339)
 				end := time.Now()

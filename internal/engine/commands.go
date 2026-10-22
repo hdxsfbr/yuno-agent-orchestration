@@ -31,6 +31,9 @@ const (
 	CodeRunFinished       = "run_finished"
 	CodeCommandRejected   = "command_rejected"
 	CodeCancelUnconfirmed = "cancel_unconfirmed"
+	// CodeDependencyBlocked refuses a resume or a retry of a run on a merge request its
+	// dependencies hold (Chief platform control, DESIGN wave 3 rule 7).
+	CodeDependencyBlocked = "dependency_blocked"
 )
 
 const (
@@ -438,7 +441,8 @@ func (e *Engine) decidePause(ctx context.Context, tx pgx.Tx, run *store.Run, by 
 // Resume re-queues a paused run (rule 15): the step it was paused in starts a continuation
 // visit from the paused visit's checkout, whose task carries the notice and the note (at most
 // 2000 characters, redacted). Any other status is rejected, and so is a run whose last turn
-// is not confirmed stopped (rule 13).
+// is not confirmed stopped (rule 13), or one on a merge request its dependencies hold
+// (Chief platform control, DESIGN wave 3 rule 7).
 func (e *Engine) Resume(ctx context.Context, runID, by, note string) (*store.Run, error) {
 	if by == "" {
 		by = "user"
@@ -465,6 +469,11 @@ func (e *Engine) decideResume(ctx context.Context, tx pgx.Tx, run *store.Run, by
 		return reject(CodeCommandRejected, "the run is being cancelled"), nil
 	case run.CancelState == store.CancelUnconfirmed:
 		return reject(CodeCancelUnconfirmed, unconfirmedDetail(ctx, tx, run.ID)), nil
+	}
+	// Chief platform control, DESIGN wave 3 rule 7: no run goes on with a merge request its
+	// dependencies hold; the dependency watcher re-queues a run parked for them.
+	if held, err := dependencyHold(ctx, tx, run); err != nil || held != "" {
+		return reject(CodeDependencyBlocked, held), err
 	}
 	parked := strValue(run.ResumeNodeVisitID)
 	done, err := store.ResumePausedRun(ctx, tx, run.ID, note, e.clock.Now())

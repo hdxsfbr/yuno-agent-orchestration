@@ -352,7 +352,10 @@ paths:
         it is refused with a 422 detail on `merge_request_id` when the workflow uses no
         project, the id is unknown, the record belongs to another project, the request
         is merged or closed, or a live run (the one that opened it included) is updating
-        it (`... is being updated by run <id>`).
+        it (`... is being updated by run <id>`). Chief platform control, DESIGN wave 3
+        rule 7: a run on a merge request its dependencies hold is created `paused` with
+        `park_reason` dependency and `park_detail` the reason, and is queued by itself once
+        the dependency watcher lets the request go.
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/RunCreate" } } }
@@ -404,6 +407,9 @@ paths:
         retries from an earlier step the run reached (rules 16 and 17); the request is recorded
         as a command, returned as the run's `command`; a run whose last turn is not confirmed
         stopped is refused with cancel_unconfirmed, naming the session and the turn (rule 13).
+        Chief platform control, DESIGN wave 3 rule 7: a run on a merge request its dependencies
+        hold is refused with dependency_blocked, "blocked by <reason>; remove the dependency to
+        override".
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       requestBody:
         required: false
@@ -411,7 +417,7 @@ paths:
       responses:
         "202": { description: re-queued, content: { application/json: { schema: { $ref: "#/components/schemas/Run" } } } }
         "404": { $ref: "#/components/responses/Error" }
-        "409": { description: "run_not_retryable (also for a from_node the run did not reach, or one inside a fork branch), retry_limit, limits_exhausted (details name each exhausted limit: max_steps, max_tool_calls, max_cost_usd, and max_loop_visits for the node the run resumes at) or cancel_unconfirmed", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: "run_not_retryable (also for a from_node the run did not reach, or one inside a fork branch), retry_limit, limits_exhausted (details name each exhausted limit: max_steps, max_tool_calls, max_cost_usd, and max_loop_visits for the node the run resumes at), cancel_unconfirmed or dependency_blocked", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "422": { $ref: "#/components/responses/Error" }
         "429": { description: "project_budget_reached (DESIGN 5.19)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "503": { description: "command_not_taken: the command could not be recorded; nothing was done", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
@@ -443,8 +449,10 @@ paths:
       description: |
         DESIGN W2 rule 15. Re-queues a paused run; the step it was paused in continues in a new
         visit from the paused visit's checkout, told that the operator paused and resumed it,
-        with the note. Refused for a run that is not paused, and with cancel_unconfirmed while
-        its last turn is not confirmed stopped.
+        with the note. Refused for a run that is not paused, with cancel_unconfirmed while
+        its last turn is not confirmed stopped, and with dependency_blocked ("blocked by
+        <reason>; remove the dependency to override") while the merge request it works on is
+        held by its dependencies (Chief platform control, DESIGN wave 3 rule 7).
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       requestBody:
         required: false
@@ -452,7 +460,7 @@ paths:
       responses:
         "202": { description: re-queued, content: { application/json: { schema: { $ref: "#/components/schemas/Run" } } } }
         "404": { $ref: "#/components/responses/Error" }
-        "409": { description: "command_rejected or cancel_unconfirmed, with the reason", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: "command_rejected, cancel_unconfirmed or dependency_blocked, with the reason (details.command is the rejected command)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "422": { $ref: "#/components/responses/Error" }
         "503": { description: "command_not_taken", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /api/runs/{id}/steer:
@@ -2386,6 +2394,8 @@ components:
         merge_request_id: { type: string, description: "DESIGN 5.22 rule 1: the merge request record the run updates (its branch was cloned); absent for a run that opens its own or none" }
         checkout_sha: { type: string, description: "DESIGN 5.22 rule 2: the commit the run's checkout was cloned at, moved to each commit the run pushed; absent for a run without a checkout" }
         cancel_state: { type: string, enum: [confirmed, unconfirmed], description: "DESIGN W2 rules 11 to 13: whether the last turn of a stopped run is confirmed stopped; unconfirmed until the gateway shows no active run for it, and a retry or resume is refused meanwhile; absent when nothing was stopped" }
+        park_reason: { type: string, enum: [dependency], description: "Chief platform control, DESIGN wave 3 rule 7: the run was created paused because the merge request it works on is held by its dependencies; it is queued by itself once the dependency watcher lets the request go. Absent otherwise" }
+        park_detail: { type: string, description: "with park_reason: why the run waits, as it read when it was parked (\"!17 is not merged\"); the diagnosis says what holds the request now" }
         command:
           allOf: [ { $ref: "#/components/schemas/RunCommand" } ]
           description: "DESIGN W2 rule 2: the command a cancel, pause, resume, retry or steer request recorded; present only on the answer to that request"
@@ -2447,7 +2457,9 @@ components:
         waiting; waiting_approval is waiting; running is the worst of its live steps (stalled,
         unknown, blocked, waiting, executing), or, between steps, executing while the run was
         updated within heartbeat_fresh_s, unknown within worker_stale_s, stalled after. A
-        paused run (DESIGN W2 rule 14) is waiting for a resume.
+        paused run (DESIGN W2 rule 14) is waiting for a resume; one parked for its merge
+        request's dependencies (Chief platform control, DESIGN wave 3 rule 7) is blocked, with
+        what holds the request as the reason.
       required: [run_id, status, liveness, reason, checked_at, thresholds, nodes, pending, commands_pending, cancel_state]
       properties:
         run_id: { type: string }

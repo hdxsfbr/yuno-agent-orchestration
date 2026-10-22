@@ -97,9 +97,9 @@ such a test exists, so the mark is dropped when its wave lands. Every operation 
 | 32 | POST /api/runs | createRun | delegate_task (no limits/model, no key) | limits, model, idempotency | routine; privileged with limits above the defaults (A5). `trigger=eval` and `script_id` are refused for the Chief (machine fields) | TestPlatformCallRefusesMachine, TestPrivilegedNeedsApproval |
 | 33 | GET /api/runs/{id} | getRun | run_status | — | read | TestPlatformParity |
 | 34 | POST /api/runs/{id}/cancel | cancelRun (a command: received, acknowledged, applied when the gateway confirms the stop) | — | — | routine, W2 | TestRunEndpoints, TestCommandLifecycle, TestCancelLiveConfirmedByEvent, TestCancelUnconfirmedThenReconciled |
-| 35 | POST /api/runs/{id}/retry | retryRun (a command; `from_node` picks the step; refused while a stop is unconfirmed) | — | — | routine, W2 | TestRetryRunAccepts, TestRetryFromStep, TestRetryRefusedUnconfirmedCancel |
+| 35 | POST /api/runs/{id}/retry | retryRun (a command; `from_node` picks the step; refused while a stop is unconfirmed) | — | — | routine, W2 | TestRetryRunAccepts, TestRetryFromStep, TestRetryRefusedUnconfirmedCancel, TestResumeRefusedWhileBlocked |
 | 35a | **new** POST /api/runs/{id}/pause | pauseRun | — | run pause (PRD 3) | routine, W2 | TestPauseResume, TestPauseOnWaitingRejected |
-| 35b | **new** POST /api/runs/{id}/resume | resumeRun | — | run resume with a note (PRD 3) | routine, W2 | TestPauseResume, TestResumeRefusedUnconfirmedStop |
+| 35b | **new** POST /api/runs/{id}/resume | resumeRun | — | run resume with a note (PRD 3) | routine, W2 | TestPauseResume, TestResumeRefusedUnconfirmedStop, TestResumeRefusedWhileBlocked |
 | 35c | **new** POST /api/runs/{id}/steer | steerRun | — | operator text into a live step (PRD 3) | routine, W2 | TestSteerLive, TestSteerBetweenTurns |
 | 35d | **new** GET /api/runs/{id}/commands | listRunCommands | — | command status (PRD 3) | read, W2 | TestRunCommandReads |
 | 35e | **new** GET /api/runs/{id}/commands/{cid} | getRunCommand | — | one command's status (PRD 3) | read, W2 | TestRunCommandReads, TestCommandLifecycle |
@@ -157,7 +157,7 @@ such a test exists, so the mark is dropped when its wave lands. Every operation 
 | 75 | POST /api/merge-requests/{id}/merge | mergeMergeRequest (CI passed on the head SHA; the provider gets the expected SHA) | — | exact-SHA guard (W3) | destructive (merging to the default branch) | TestMergeNeedsExactSHA, TestDestructiveNeedsApproval |
 | 86 | **new** GET …/diff, …/checks, …/jobs/{job}/log | getMergeRequestDiff, getMergeRequestChecks, getMergeRequestJobLog | — | PRD 4 | read, W3 | TestMergeRequestDiffChecksLog |
 | 87 | **new** POST …/update-from-default | updateMergeRequestFromDefault | — | safe branch update with expected head (PRD 4) | routine, W3 | TestUpdateFromDefault, TestUpdateFromDefaultEndpoint |
-| — | **new** dependencies (GET, PUT …/dependencies) | — | — | dependency gating (PRD 4) | routine, W3 | TestDependencyEdges (wave 3 gate), TestRunOnDependentParks (wave 3 gate), TestDependencyAcceptance (wave 3 gate) |
+| — | **new** dependencies (GET, PUT /api/merge-requests/{id}/dependencies) | getMergeRequestDependencies, putMergeRequestDependencies | — | dependency gating (PRD 4) | read (GET), routine (PUT), W3 | TestDependencyEdges, TestRunOnDependentParks, TestDependencyAcceptance, TestDependencyAcceptanceResumesRun |
 
 ## Channels and conversations
 

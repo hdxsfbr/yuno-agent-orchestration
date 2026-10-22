@@ -25,7 +25,7 @@ import (
 // pushes, pipelines of exact commits, the sync tick as the only trigger.
 
 // forgeEnv is a project on the fake forge (acme/app, default branch main) with a sync whose
-// re-queue hook (rule 7's, a no-op in production for now) counts its calls.
+// re-queue hook (rule 7's; the server re-queues the parked runs through it) counts its calls.
 type forgeEnv struct {
 	*env
 	srv  *httptest.Server

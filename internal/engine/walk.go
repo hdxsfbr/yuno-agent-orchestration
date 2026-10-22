@@ -264,6 +264,18 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 			o := failed(store.RunFailed, "task template: "+err.Error())
 			v.early = &o
 		}
+		// A run the dependency watcher re-queued tells its steps why it waited and what changed
+		// until one of them succeeded (Chief platform control, DESIGN wave 3 rules 7 and 8a).
+		if note := strValue(w.run.ResumeNote); note != "" {
+			if done, derr := store.RunStepSucceeded(ctx, e.deps.Pool, w.run.ID); derr != nil {
+				if v.early == nil {
+					o := failed(store.RunFailed, "read the run's steps: "+derr.Error())
+					v.early = &o
+				}
+			} else if !done {
+				task += "\n\n" + note
+			}
+		}
 		// A step the operator retried after it failed is told so (DESIGN 5.21 rule 4, D-093);
 		// it starts afresh, so the answers below are only those given since the retry.
 		if retried, rerr := store.StepRetried(ctx, e.deps.Pool, w.run.ID, node.ID); rerr != nil {

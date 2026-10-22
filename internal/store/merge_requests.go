@@ -126,6 +126,15 @@ func GetMergeRequest(ctx context.Context, q Querier, id string) (*MergeRequest, 
 	return mr, err
 }
 
+// LockMergeRequestShared locks a record's row until the transaction ends (FOR KEY SHARE):
+// a run inserted on the record and the dependency watcher letting it go, which holds the row
+// FOR UPDATE, are one after the other (Chief platform control, DESIGN wave 3 rule 7). A
+// record that does not exist locks nothing. q must be a transaction.
+func LockMergeRequestShared(ctx context.Context, q Querier, id string) error {
+	_, err := q.Exec(ctx, `SELECT 1 FROM merge_requests WHERE id=$1 FOR KEY SHARE`, id)
+	return err
+}
+
 // MergeRequestByRun returns the run's record, or nil when it has none (the answer
 // MergeRequestOfRun gave, which this replaces). It is the request the run opened, never a
 // follow-up of it (FollowUpMergeRequest).
