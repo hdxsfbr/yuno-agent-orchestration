@@ -105,7 +105,7 @@ ones that matter:
 | `make probe-approval` | Verifies the gateway's plugin approval calls the side-effect gate relies on |
 | `make probe-sandbox` | Verifies a per-agent sandbox image and network override on the running gateway, the mechanism project runs use |
 | `make seed` | Creates the eight factory agents the shipped templates name (Analyst, Scout, Architect, Planner, Builder, Code Reviewer, Doc Auditor, Integrator) and the Chief of Staff, and deletes the nine retired demo agents (Coder, Reviewer, Deployer, Researcher, Critic, Writer and the three panel reviewers) unless a workflow of yours still uses one; idempotent |
-| `make seed-reset` | `make seed`, then restores the shipped agents' prompts and allowlists (and the Claude model of any you moved to OpenAI) and the template workflows to the shipped versions, keeping everything else |
+| `make seed-reset` | `make seed`, then restores the shipped agents' prompts and allowlists (and the Claude model of any you moved to OpenAI) and the template workflows to the shipped versions, keeping everything else. `yuno seed --reset-shipped --keep-models --agent "Chief of Staff"` resets only the named agents and keeps their models, OpenAI included |
 | `make eval` | Run the evaluation suite offline with the scripted provider against the running stack; `make eval-baseline` / `make eval-final` store the report |
 | `make lint` | `go vet`, `staticcheck`, `eslint`, `tsc` |
 | `scripts/mutation-check.sh` | Breaks a line of code, runs a test command, restores the file, and says whether the test caught it |
