@@ -218,7 +218,9 @@ Rules:
    decided in time.`; the live turn's message ends with 5.24 rule 7's continue sentence, and a
    continuation visit (its `question_id` names the parked visit's question or, without one,
    its newest decided tool approval; free of `max_loop_visits` as 5.24's) carries the blocks
-   of every decided tool approval of the visits it continues after the task. An expiry while
+   of every decided tool approval of the visits it continues after the task. A retry
+   continues none of them: the retried step starts afresh, without the outcomes its failed
+   attempt was told (5.21 rule 4, D-093). An expiry while
    a visit waits this way does not fail the run: the agent decides (an empty URL, a
    question). The approval sweep repeats a re-queue that did not happen and settles again a
    grant whose effect a lost process left unrecorded (the key replays a finished effect).
@@ -2205,7 +2207,8 @@ Rules:
    the check, so raising a cap is how a run that died on it is retried; the visits of
    `current_node` are compared with `max_loop_visits` the same way (`max_loop_visits:
    3 of 3 used`), since the resumed visit would be refused at the node's entry
-   otherwise (since 5.24 the count leaves out continuation visits, 5.24 rule 5). The time limit
+   otherwise (since 5.24 the count leaves out continuation visits, 5.24 rule 5; the
+   retried visit is never one, D-093, so it counts). The time limit
    restarts: `started_at` is set to now and `paused_total_ms` to 0 when the run is next
    claimed; the trace keeps every attempt's root span with its own start. The project
    budget (5.19 rule 3) is checked as for a trigger.
@@ -2228,16 +2231,41 @@ Rules:
    the walk continues at `current_node` with a new visit of that node (visit n+1; the
    failed visit stays in the trace); the copy-forward of 5.6 rule 13 brings the run
    directory of every earlier visit, so the failed visit's partial edits of the
-   checkout are what the new visit starts from (the point of retrying from the step;
-   the task text is the same). A run that failed before its clone completed
-   (`toolchain` unset) clones again (5.16 rule 3). An approval node reached again asks
-   again (5.6 rule 8). A node that failed and followed its `on_failure` edge moved
+   checkout are what the new visit starts from (the point of retrying from the step).
+   A run that failed before its clone completed (`toolchain` unset) clones again (5.16
+   rule 3). An approval node reached again asks again (5.6 rule 8). A node that failed and followed its `on_failure` edge moved
    `current_node` to that target, so the retry resumes there, not at the node. Since
-   5.24 a run failed by `question unanswered` retries at the step that asked, and the
-   new visit's task lists the unanswered question (5.24 rules 7 and 8). Since 5.26 a run
-   that failed inside a fork's region has the fork as `current_node`: the retry re-enters
-   the fork and runs the failed or cancelled branches from where they stopped, the
-   succeeded ones not again (5.26 rule 9).
+   5.26 a run that failed inside a fork's region has the fork as `current_node`: the
+   retry re-enters the fork and runs the failed or cancelled branches from where they
+   stopped, the succeeded ones not again (5.26 rule 9).
+
+   **The retried step starts afresh (D-093).** The retry marks the latest visit of each
+   step it runs again (`run_nodes.retried_at`: the node it resumes at, or the positions
+   of the fork's unfinished branches), in its transaction, before the loop count of rule
+   2. The questions (5.24) and the tool approvals (5.3 rule 5) raised by that visit and
+   by the step's earlier visits belong to attempts the retry replaced: they are not in
+   the answer paragraph of 5.24 rule 7, no visit continues them (`ContinuationQuestion`
+   leaves them out, so the retried visit has no `question_id` and carries no tool
+   outcomes), and they do not count toward the step's 3 questions (5.24 rule 2), so the
+   retried step may ask again. Their rows stay as they were decided, on the run page and
+   in the inbox. The task text is the same, with one sentence after the rendered task and
+   before any answer paragraph:
+
+   ```
+   The operator retried this step after it failed; work on the step again.
+   ```
+
+   The sentence stays in the visits of the retried attempt (the first visit after the
+   retry, a continuation after a question it asks, a visit that replaces one a restart
+   interrupted) until a visit of the step succeeds; a later loop revisit does not get it.
+   Those visits carry the answers given since the retry, as any continuation or
+   replacement does. A step with no earlier visit (the run failed before entering it) has
+   nothing to mark and gets no sentence. Found live on run 01a160c8: the documentation
+   audit asked the operator, who answered `Stop this ticket`; the agent escalated and the
+   run failed; the operator fixed the cause and retried, and the retried visit's task
+   still listed that answer, so the agent escalated again at once. Since 5.24 a run
+   failed by `question unanswered` retries at the step that asked in the same way: the
+   expired question is not listed and the step may ask again (5.24 rule 8).
 5. Side effects. A retried visit is a new visit, so an identical call gets a new
    idempotency key (5.4's edge case); `open_merge_request` is covered by 5.20 rule 2
    (the run's record is updated, never a second request); `deploy_release` and
@@ -2296,7 +2324,16 @@ restarts. T5.21.6 cancelled while waiting at an approval node asks again. T5.21.
 concurrent retries: one 202, one 409. T5.21.8 the report-back is sent once more under
 the retry key. T5.21.9 a project at its budget refuses the retry. T5.21.10 UI: the
 button per status; the exhausted-limits dialog; the Timeline mark. T5.21.11
-`open_merge_request` after a retry updates the run's record (with T5.20.2).
+`open_merge_request` after a retry updates the run's record (with T5.20.2). T5.21.12
+(D-093) a question answered `Stop this ticket` within the wait, the agent escalates, the
+run fails, Retry: the retried visit's task has no trace of the answer and carries the
+retry sentence, the step's question count is 0, and a question it then asks and parks on
+is continued with that answer only, still with the sentence; the same for a parked tool
+approval rejected before the failure, continued then failed, and decided as the run ended
+(the retried visit names nothing and carries no outcome); a visit that replaces one an api
+restart interrupted keeps the answer given before the restart, and after a retry only the
+answers given since; a fork retry marks only the failed branch's step; a refused retry
+marks nothing.
 
 Out of scope: retrying from an earlier node than the one the run stopped at, editing
 state before the retry, a fresh checkout on retry, automatic retries of failed runs.
@@ -3060,9 +3097,10 @@ Rules:
    cases): an unknown or finished token is `invalid run token`; a second question while
    one of this visit is pending is the model-facing error `one question at a time:
    question <id> is still pending`; a fourth question of the step (rows of kind
-   `question` with this run and node id, any status) is `ask fewer questions: this step
-   already asked 3`. Otherwise the row is inserted (kind `question`, `message` the
-   question, redacted; `options` in `approvals.options JSONB`, null when none;
+   `question` with this run and node id, any status, asked since the operator last
+   retried the step: a retry starts the count afresh, 5.21 rule 4, D-093) is `ask fewer
+   questions: this step already asked 3`. Otherwise the row is inserted (kind
+   `question`, `message` the question, redacted; `options` in `approvals.options JSONB`, null when none;
    `run_node_id`, `node_id`; `expires_at = now + approval_timeout_seconds`), the waiter
    is registered, the run and the node pause (`waiting_approval`, the path of 5.3 rule
    5; the paused time does not count toward the time limit, 5.2 rule 4), the span
@@ -3111,7 +3149,11 @@ Rules:
    and expires its pending question with the reason `step finished`. The continuation
    visit's `question_id` is the newest decided question of the step whose visit parked
    and that no later visit names (`store.ContinuationQuestion`); nil for a loop revisit
-   or a retry. A continuation visit does not count toward `max_loop_visits`
+   or a retry. A retry starts the step afresh (5.21 rule 4, D-093): nothing raised
+   before the operator retried the step is continued, also a decision that landed as the
+   run ended, before its continuation visit started. A visit that replaces one a restart
+   interrupted is not a retry: it carries the answers given before the restart (rule 7).
+   A continuation visit does not count toward `max_loop_visits`
    (`CountNodeLoopVisits` counts the step's visits with `question_id IS NULL`; 5.6's
    entry check and 5.21 rule 2 use it) and is not refused by that limit at its own
    entry either (the parked visit may have been the last the limit allowed; the answer
@@ -3135,9 +3177,10 @@ Rules:
    answer of the first open line below; until it is answered the rule stands as
    written.
 7. **The answer paragraph.** Appended to the task text (before the protocol block) of a
-   continuation visit, of a retried visit and of a loop revisit of a step that asked,
-   and sent as the next turn's message to a live visit (rule 5 (b)); one block per
-   decided question of the step in this run, oldest first:
+   continuation visit, of a loop revisit of a step that asked and of a visit that
+   replaces one a restart interrupted (rule 5 (d), 5.1's re-queue), and sent as the next
+   turn's message to a live visit (rule 5 (b)); one block per decided question of the
+   step in this run since the operator last retried the step, oldest first:
 
    ```
    Earlier in this step you asked the operator: "<question>"
@@ -3147,16 +3190,20 @@ Rules:
    The second line is `The operator declined to answer<: <reason>>. Proceed without the
    answer and state what you assumed.` for a decline and `The operator did not answer
    in time. Proceed without the answer and state what you assumed.` for an expired
-   question (a retry after rule 8). The answer is the operator's own text (the holder of
+   question (one that expired within the wait, or a lost visit's question that the
+   replacement visit closed). The answer is the operator's own text (the holder of
    the API token, or the allowed Telegram user relayed by the Chief): redacted, not
    wrapped as untrusted content. The next-turn message ends with `Continue your task
-   and call yuno__finish when done.`
+   and call yuno__finish when done.` A retried visit does not carry the questions of the
+   attempt that failed (5.21 rule 4, D-093): an answer such as `Stop this ticket` was
+   given to that attempt and is not replayed into the next one.
 8. **Expiry and cancellation.** The sweeper of 5.2 rule 10 expires a pending question
    at `expires_at`: within the wait the call gets `unanswered` (rule 4) and the agent
    goes on; a parked question's expiry fails the run with `question unanswered`
    (`failRun`; the parked visit's row `failed` with the same reason), and the run is
-   retryable (5.21): the retried visit carries the paragraph of rule 7 with the
-   unanswered line and may ask again. A run cancelled while parked expires the question
+   retryable (5.21): the retried visit starts the step afresh (5.21 rule 4, D-093), so
+   the expired question is not in its task, and it may ask again. A run cancelled while
+   parked expires the question
    with `run cancelled` (5.3 rule 8). A run that ends while its visit's question is
    pending expires it with `step finished` (the inbox card closes; a late answer is
    409).
@@ -3173,7 +3220,8 @@ Rules:
    applies it.
 10. **Limits and counting.** Each `ask_operator` call is a tool call (`max_tool_calls`);
     the paused time is excluded from the duration (5.2 rule 4); 3 questions per step
-    per run and one pending per visit (rule 2); continuation visits are free of
+    per run, counted afresh after a retry, and one pending per visit (rule 2);
+    continuation visits are free of
     `max_loop_visits` (rule 5).
 11. **Representation and API.** `Approval.kind` gains `question`; `Approval` gains
     `options?: string[]` and `answer?: string`; `POST /api/approvals/{id}/answer`
@@ -3220,8 +3268,12 @@ statement, so a worker claiming the run never finds it open. `ContinuationQuesti
 only an answered or declined question, the last one of the visit that parked (an expired
 question is a retry, not a continuation, and a question answered within the wait never
 turns a loop revisit into a continuation); the paragraph of rule 7 is appended by the walk
-right after the task is rendered. `expireApproval` hands an expired question to its
-waiter; the parked case and `question unanswered` live in the question sweep, which also
+right after the task is rendered. Since D-093 the step's queries (the count of rule 2, the
+paragraph, `ContinuationQuestion` for questions and tool approvals) leave out every row
+raised by a visit at or before the step's latest visit marked `retried_at`; before that,
+the paragraph listed every decided question of the step in the run, so a retried visit
+replayed the answers its failed attempt was given. `expireApproval` hands an expired
+question to its waiter; the parked case and `question unanswered` live in the question sweep, which also
 re-queues a parked run whose question was decided while the re-queue failed; a cancel
 while the turn is live expires the question `step finished`, a cancel while parked `run
 cancelled`. `approve` on a question is 422 before the pending check (as `always` on a
@@ -3267,7 +3319,14 @@ operator answers through the UI and the Chief relays a second answer: 409 and th
 Chief's tool error. An option list with a duplicate or an empty entry: refused with
 the options text. A question whose run was retried (5.21) while parked: the retry is
 refused, the run is `waiting_approval`, not retryable. The operator declines without a
-reason: the model reads `the operator declined to answer`.
+reason: the model reads `the operator declined to answer`. The operator answers `Stop
+this ticket`, the agent escalates and the run fails; after fixing the cause the operator
+retries: the retried visit's task does not list the answer, says the step was retried,
+and the step may ask again (D-093). A parked question is answered and the run is
+cancelled before its continuation starts; a retry then starts the step afresh rather than
+continuing the question, so the retried visit counts toward `max_loop_visits`. The api
+restarts after a question was answered within the wait: the visit that replaces the
+interrupted one carries the answer (it is the same attempt, not a retry).
 
 Time: `expires_at` from `approval_timeout_seconds` as every approval; the wait from
 `MCP_TOOL_WAIT`; the paused time (in-wait and parked) excluded from the time limit
@@ -3311,7 +3370,8 @@ while `CountNodeVisits` counts it. T5.24.5 the decision arrives after the wait a
 before the turn ends: the next turn's message is the paragraph; no park. T5.24.6 the
 agent finishes after `pending`: the question expires `step finished`; a later answer
 is 409. T5.24.7 a parked question expires: the run fails `question unanswered`; the
-retry's visit carries the unanswered line. T5.24.8 cancel while parked: the question
+retry's visit carries the retry sentence and not the question, and the step's count is 0
+(D-093). T5.24.8 cancel while parked: the question
 expires `run cancelled`, the visit fails. T5.24.9 the fourth question of the step and
 a second pending question are refused with their texts. T5.24.10 the notices: a
 channel run gets the question notice once (claimed), not the waiting line; a manual
@@ -3324,7 +3384,10 @@ API: `answer` on a question and on a tool approval; `approve` on a question;
 `run_status.question`. T5.24.14 the materialiser writes the `## Questions` section
 only for agents holding the tool, and the amended sentence for all. T5.24.15 UI: the
 question card (options, text box, decline), the inbox count, the header line, the
-Timeline row, the answered card.
+Timeline row, the answered card. T5.24.16 (D-093, with T5.21.12) a parked question
+answered and continued with no retry carries the answer and no retry sentence; a visit
+that replaces one a restart interrupted carries the answer given before the restart; a
+retry carries none of the failed attempt's answers or tool outcomes.
 
 Out of scope: questions from the Chief itself (it is in a conversation and asks the
 person), questions addressed to someone other than the operator, attachments in
@@ -3722,7 +3785,8 @@ Rules:
    continuation visit; one whose question is still pending stays parked; a `running`,
    `failed` or `cancelled` branch runs from its `current_node` with a new visit (counted
    toward `max_loop_visits` as a recovery visit is today; a `failed` or `cancelled`
-   branch row goes back to `running`). The loop count of F is not applied on a
+   branch row goes back to `running`; after an operator retry each such branch's step
+   starts afresh, 5.21 rule 4, D-093). The loop count of F is not applied on a
    re-entry (the entry was counted). When nothing runs and at least one branch is
    parked, the fork releases the worker as rule 8 says; when every branch is
    `succeeded` (a crash between the last branch's end and the join) the fork joins at

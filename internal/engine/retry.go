@@ -21,10 +21,16 @@ import (
 // Retry from the failed step (DESIGN 5.21, decision D-043). An operator re-queues a run
 // that ended failed, timed_out or cancelled; it continues at the node it stopped at on
 // the engine's resumed path (run.go: current_node set, unfinished visits failed, a new
-// root span), keeping its state, its counters and the work its agents did.
+// root span), keeping its state, its counters and the work its agents did. The step itself
+// starts afresh (D-093): the answers and tool outcomes its failed attempt was given are not
+// replayed into the new visit, which is never a continuation of that attempt.
 
 // maxRetries is DESIGN 5.21 rule 1's cap: the sixth retry is refused.
 const maxRetries = 5
+
+// retriedNotice follows the task of a step the operator retried after it failed (DESIGN
+// 5.21 rule 4, D-093), in the visits of that attempt until one of them succeeds.
+const retriedNotice = "The operator retried this step after it failed; work on the step again."
 
 // Codes of a RetryError, the API's 409 error codes (DESIGN 5.21 rules 1 and 2).
 const (
@@ -91,29 +97,32 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 			}
 			applied, under = &resolved, resolved
 		}
-		// The visits of the node the walk resumes at count against max_loop_visits as its
-		// entry check counts them (walk.enter, >=), or the run would fail again at once; a
-		// continuation visit does not count (DESIGN 5.24 rule 5). The entry check lets a
-		// visit in that would continue an answered question whatever the count, so a
-		// retry of a run with such a question counts nothing either (review L13).
-		visits := 0
-		if under.MaxLoopVisits > 0 && resumesAtFork(run) {
-			// The fork is re-entered, not counted (DESIGN 5.26 rule 9); its unfinished
-			// branches run again from their positions, and those visits are counted at
-			// their nodes' entry, so the most visited of them is what the check compares.
-			if visits, err = forkRetryVisits(ctx, tx, run); err != nil {
-				return fmt.Errorf("run %s: count branch visits: %w", runID, err)
+		// The retry starts each step it runs again afresh (D-093): the step's latest visit is
+		// marked, so the answers and tool outcomes of the attempt that failed are neither
+		// carried into the step's next visits nor continued by them, and the next visit is a
+		// new one, never a continuation. Marked here, in the transaction, so a refusal below
+		// leaves nothing marked.
+		steps, err := retriedSteps(ctx, tx, run)
+		if err != nil {
+			return fmt.Errorf("run %s: the steps to retry: %w", runID, err)
+		}
+		for _, step := range steps {
+			if err := store.MarkStepRetried(ctx, tx, runID, step, now); err != nil {
+				return fmt.Errorf("run %s: mark %s retried: %w", runID, step, err)
 			}
-		} else if under.MaxLoopVisits > 0 {
-			switch _, cerr := store.ContinuationQuestion(ctx, tx, runID, *run.CurrentNode); {
-			case cerr == nil:
-				// The next visit is a continuation: free of the limit.
-			case errors.Is(cerr, store.ErrNotFound):
-				if visits, err = store.CountNodeLoopVisits(ctx, tx, runID, *run.CurrentNode); err != nil {
-					return fmt.Errorf("run %s: count visits of %s: %w", runID, *run.CurrentNode, err)
+		}
+		// Those visits count against max_loop_visits as the walk's entry check counts them
+		// (walk.enter, >=), or the run would fail again at once. A fork is re-entered, not
+		// counted (DESIGN 5.26 rule 9); its unfinished branches run again from their
+		// positions, so the most visited of those is what the check compares.
+		visits := 0
+		if under.MaxLoopVisits > 0 {
+			for _, step := range steps {
+				n, err := store.CountNodeLoopVisits(ctx, tx, runID, step)
+				if err != nil {
+					return fmt.Errorf("run %s: count visits of %s: %w", runID, step, err)
 				}
-			default:
-				return fmt.Errorf("run %s: continuation question of %s: %w", runID, *run.CurrentNode, cerr)
+				visits = max(visits, n)
 			}
 		}
 		if details := exhaustedLimits(run, under, visits); len(details) > 0 {
@@ -202,35 +211,31 @@ func resumesAtFork(run *store.Run) bool {
 	return ok && n.Kind == workflow.KindFork
 }
 
-// forkRetryVisits is the largest loop-visit count among the positions of the branches the
-// fork's latest visit will run again (every branch not succeeded).
-func forkRetryVisits(ctx context.Context, q store.Querier, run *store.Run) (int, error) {
+// retriedSteps are the steps a retry runs again: the node the run stopped at or, when that
+// is a fork (DESIGN 5.26 rule 9), the positions of the branches its latest visit will run
+// again (every branch not succeeded).
+func retriedSteps(ctx context.Context, q store.Querier, run *store.Run) ([]string, error) {
+	if !resumesAtFork(run) {
+		return []string{*run.CurrentNode}, nil
+	}
 	latest, err := store.LatestNodeVisit(ctx, q, run.ID, *run.CurrentNode)
 	if errors.Is(err, store.ErrNotFound) {
-		return 0, nil
+		return nil, nil
 	}
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	rows, err := store.ListForkBranches(ctx, q, latest.ID)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	most := 0
+	var steps []string
 	for _, b := range rows {
-		if b.Status == store.BranchSucceeded {
-			continue
+		if b.Status != store.BranchSucceeded && !slices.Contains(steps, b.CurrentNode) {
+			steps = append(steps, b.CurrentNode)
 		}
-		if _, cerr := store.ContinuationQuestion(ctx, q, run.ID, b.CurrentNode); cerr == nil {
-			continue // a continuation visit is free of the limit (5.24 rule 5)
-		}
-		n, err := store.CountNodeLoopVisits(ctx, q, run.ID, b.CurrentNode)
-		if err != nil {
-			return 0, err
-		}
-		most = max(most, n)
 	}
-	return most, nil
+	return steps, nil
 }
 
 // retryRow is store.RetryRun with the answers of the two live-run indexes turned into

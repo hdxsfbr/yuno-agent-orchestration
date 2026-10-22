@@ -586,8 +586,9 @@ func (v *visit) continueWithAnswer(ctx context.Context, asked bool, taken string
 // ---- the answer paragraph (rule 7) -----------------------------------------------------
 
 // stepAnswers is the paragraph of DESIGN 5.24 rule 7 for a step: one block per decided
-// question of the step in this run, oldest first, separated by blank lines; empty when
-// the step asked none. A failed read is the error: the callers fail the visit.
+// question of the step in this run since the operator last retried it (D-093), oldest
+// first, separated by blank lines; empty when the step asked none. A failed read is the
+// error: the callers fail the visit.
 func (e *Engine) stepAnswers(ctx context.Context, runID, nodeID string) (string, error) {
 	qs, err := listStepQuestions(ctx, e.deps.Pool, runID, nodeID)
 	if err != nil {

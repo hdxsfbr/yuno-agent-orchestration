@@ -1105,9 +1105,9 @@ func TestQuestionExpiresWhenTheVisitEndsAnyOtherWay(t *testing.T) {
 
 // T5.24.7: a parked question expires: the sweeper fails the run with "question unanswered"
 // and the parked visit's row fails with the same reason; the run is retryable, and the
-// retried visit (not a continuation) carries the paragraph with the unanswered line and may
-// ask again.
-func TestParkedQuestionExpiresAndTheRetryCarriesTheUnansweredLine(t *testing.T) {
+// retried visit (not a continuation) starts the step afresh (D-093): its task says the step
+// was retried, carries no paragraph, and the step may ask again.
+func TestParkedQuestionExpiresAndTheRetryStartsAfresh(t *testing.T) {
 	env := newEnv(t)
 	ctx := context.Background()
 	ag := env.questionAgent()
@@ -1148,6 +1148,9 @@ func TestParkedQuestionExpiresAndTheRetryCarriesTheUnansweredLine(t *testing.T) 
 	if err != nil || retried.Status != store.RunQueued {
 		t.Fatalf("retry: %+v %v", retried, err)
 	}
+	if n, _ := store.CountStepQuestions(ctx, env.pool, run.ID, "agent"); n != 0 {
+		t.Fatalf("the step's questions after the retry = %d; the retried step may ask afresh", n)
+	}
 	r = env.resume(env.e, run.ID)
 	if r.Status != store.RunSucceeded {
 		t.Fatalf("retried run = %s %q", r.Status, deref(r.FailureReason))
@@ -1159,8 +1162,7 @@ func TestParkedQuestionExpiresAndTheRetryCarriesTheUnansweredLine(t *testing.T) 
 	if nodes[1].QuestionID != nil {
 		t.Fatalf("the retried visit names question %s; a retry continues nothing", *nodes[1].QuestionID)
 	}
-	want := "Earlier in this step you asked the operator: \"Which greeting language?\"\nThe operator did not answer in time." + proceedText
-	if m := rig.snt.at(1).Message; !strings.HasPrefix(m, "greet\n\n"+want+"\n\n--- platform protocol ---\n") {
+	if m := rig.snt.at(1).Message; !strings.HasPrefix(m, "greet\n\n"+retriedNotice+"\n\n--- platform protocol ---\n") {
 		t.Fatalf("the retry's task:\n%s", m)
 	}
 }

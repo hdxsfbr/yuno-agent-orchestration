@@ -82,14 +82,15 @@ func runStatuses(ctx context.Context, q Querier, ids []string) (map[string]strin
 // ApprovalKindQuestion; a test keeps them in step): bound as a parameter it would keep the
 // planner from using the partial index approvals_question_step_idx once it settles on a
 // generic plan (review L6).
-const (
-	countStepQuestionsSQL = `SELECT count(*) FROM approvals WHERE kind='question' AND run_id=$1 AND node_id=$2`
+var (
+	countStepQuestionsSQL = `SELECT count(*) FROM approvals WHERE kind='question' AND run_id=$1 AND node_id=$2
+		AND ` + sinceRetry("approvals")
 
 	listStepQuestionsSQL = `SELECT ` + approvalSelect + ` FROM approvals
-		WHERE kind='question' AND run_id=$1 AND node_id=$2 AND status <> $3 ORDER BY requested_at, id`
-)
+		WHERE kind='question' AND run_id=$1 AND node_id=$2 AND status <> $3
+		  AND ` + sinceRetry("approvals") + `
+		ORDER BY requested_at, id`
 
-var (
 	continuationQuestionSQL = `SELECT ` + approvalSelect + ` FROM approvals
 		WHERE kind='question' AND run_id=$1 AND node_id=$2 AND status IN ($3, $4)
 		  AND EXISTS (SELECT 1 FROM run_nodes p WHERE p.id = approvals.run_node_id AND p.parked_at IS NOT NULL)
@@ -97,6 +98,7 @@ var (
 		  AND NOT EXISTS (SELECT 1 FROM approvals later WHERE later.kind = 'question' AND later.run_node_id = approvals.run_node_id
 		                  AND (later.requested_at, later.id) > (approvals.requested_at, approvals.id))
 		  AND ` + visitSettled("approvals.run_node_id") + `
+		  AND ` + sinceRetry("approvals") + `
 		ORDER BY requested_at DESC, id DESC LIMIT 1`
 
 	// continuationToolSQL is the continuation of a visit that parked on its tool calls'
@@ -112,8 +114,19 @@ var (
 		              AND p.status IN ('waiting_approval', 'succeeded'))
 		  AND NOT EXISTS (SELECT 1 FROM run_nodes n JOIN approvals x ON x.id = n.question_id WHERE x.run_node_id = approvals.run_node_id)
 		  AND ` + visitSettled("approvals.run_node_id") + `
+		  AND ` + sinceRetry("approvals") + `
 		ORDER BY requested_at DESC, id DESC LIMIT 1`
 )
+
+// sinceRetry is the predicate that the approval whose table alias is a was raised after the
+// operator last retried its step (DESIGN 5.21 rule 4, D-093): no visit of the step at or
+// after the one that raised it is marked retried_at. A retry starts the step afresh, so what
+// the attempt it replaced asked and was told is carried, continued and counted no more.
+func sinceRetry(a string) string {
+	return `NOT EXISTS (SELECT 1 FROM run_nodes asker JOIN run_nodes rv ON rv.run_id = asker.run_id AND rv.node_id = asker.node_id
+		              AND rv.retried_at IS NOT NULL AND rv.visit >= asker.visit
+		            WHERE asker.id = ` + a + `.run_node_id)`
+}
 
 // visitSettled is the predicate that the visit whose id the SQL expression visit gives
 // waits on nothing (DESIGN 5.3 rule 5, 5.24 rule 5): none of its questions or tool
@@ -125,9 +138,10 @@ func visitSettled(visit string) string {
 		  AND (u.status = 'pending' OR (u.kind = 'tool' AND u.status = 'approved' AND c.status = 'awaiting_approval')))`
 }
 
-// CountStepQuestions counts the questions a step has asked in a run: the rows of kind
-// question with the run and node id, whatever their status (rule 2: the fourth is
-// refused). The partial index approvals_question_step_idx serves it.
+// CountStepQuestions counts the questions a step has asked in a run since the operator last
+// retried it: the rows of kind question with the run and node id, whatever their status
+// (rule 2: the fourth is refused; a retry starts the count afresh, D-093). The partial index
+// approvals_question_step_idx serves it.
 func CountStepQuestions(ctx context.Context, q Querier, runID, nodeID string) (int, error) {
 	var n int
 	err := q.QueryRow(ctx, countStepQuestionsSQL, runID, nodeID).Scan(&n)
@@ -136,7 +150,8 @@ func CountStepQuestions(ctx context.Context, q Querier, runID, nodeID string) (i
 
 // ListStepQuestions lists the step's decided questions, oldest first: the rows of kind
 // question with the run and node id that are no longer pending, whichever visit asked
-// them (rule 7's answer paragraph has one block for each).
+// them since the operator last retried the step (rule 7's answer paragraph has one block
+// for each; D-093).
 func ListStepQuestions(ctx context.Context, q Querier, runID, nodeID string) ([]Approval, error) {
 	rows, err := q.Query(ctx, listStepQuestionsSQL, runID, nodeID, ApprovalPending)
 	if err != nil {
@@ -154,8 +169,10 @@ func ListStepQuestions(ctx context.Context, q Querier, runID, nodeID string) ([]
 // which asked it parked on (the last question of a visit whose parked_at is set), and
 // that no visit names yet. ErrNotFound for a loop revisit or a retry, which continue
 // nothing: an expired question is not one (a retry after rule 8 is not a continuation),
-// and a question the visit went on past (answered within the wait) is not the one it
-// parked on.
+// a question the visit went on past (answered within the wait) is not the one it parked
+// on, and nothing raised before the operator last retried the step is (D-093: a decision
+// that landed as the run ended, before its continuation started, does not make the retried
+// visit one).
 //
 // A visit also parks on the approvals of tool calls it was told are pending (DESIGN 5.3
 // rule 5): it is continued only once nothing of it waits any more, and when it has no

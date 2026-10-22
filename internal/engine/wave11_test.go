@@ -978,6 +978,8 @@ func TestForkReentryAfterCrashAndRetry(t *testing.T) {
 			t.Fatal(err)
 		}
 		bDone := make(chan struct{})
+		var mu sync.Mutex
+		var retriedTask string // a's task after the retry
 		env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
 			node, visit := visitOf(p.SessionKey)
 			switch {
@@ -994,6 +996,11 @@ func TestForkReentryAfterCrashAndRetry(t *testing.T) {
 						"errorKind": "invalid_request", "errorMessage": "bad request", "errorDetail": map[string]any{"httpStatus": 400}}))
 				}()
 			default:
+				if node == "a" {
+					mu.Lock()
+					retriedTask = p.Message
+					mu.Unlock()
+				}
 				go finishThenFinal(t, env, p, `{"ok":true}`)
 			}
 			return startedTurn(p)
@@ -1008,8 +1015,16 @@ func TestForkReentryAfterCrashAndRetry(t *testing.T) {
 		if _, err := env.e.Retry(ctx, run.ID, "tester", &store.Limits{MaxLoopVisits: 1}); !errors.As(err, &re) || re.Code != RetryLimitsExhausted || !slices.Contains(re.Details, "max_loop_visits: 1 of 1 used") {
 			t.Fatalf("retry at max_loop_visits 1 = %v, want limits_exhausted on a's visits", err)
 		}
+		marked := `SELECT count(*) FROM run_nodes WHERE run_id=$1 AND retried_at IS NOT NULL`
+		if n := env.count(marked, run.ID); n != 0 {
+			t.Fatalf("the refused retry marked %d visits", n)
+		}
 		if _, err := env.e.Retry(ctx, run.ID, "tester", &store.Limits{MaxLoopVisits: 3}); err != nil {
 			t.Fatal(err)
+		}
+		// Only the failed branch's step starts afresh (D-093): a's visit is marked, b's not.
+		if n, a := env.count(marked, run.ID), env.count(marked+` AND node_id='a' AND visit=1`, run.ID); n != 1 || a != 1 {
+			t.Fatalf("marked visits = %d (a#1: %d); want a's failed visit only", n, a)
 		}
 		r = env.resume(env.e, run.ID)
 		if r.Status != store.RunSucceeded {
@@ -1021,6 +1036,12 @@ func TestForkReentryAfterCrashAndRetry(t *testing.T) {
 		}
 		if b := branchRows(t, env, run.ID)["b"]; b.Status != store.BranchSucceeded {
 			t.Fatalf("branch b after the retry = %+v; it ran once", b)
+		}
+		mu.Lock()
+		task := retriedTask
+		mu.Unlock()
+		if !strings.Contains(task, "\n\n"+retriedNotice+"\n\n--- platform protocol ---\n") {
+			t.Fatalf("a's task after the retry does not say the step was retried:\n%s", task)
 		}
 	})
 }

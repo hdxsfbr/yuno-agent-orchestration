@@ -261,9 +261,21 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 			o := failed(store.RunFailed, "task template: "+err.Error())
 			v.early = &o
 		}
+		// A step the operator retried after it failed is told so (DESIGN 5.21 rule 4, D-093);
+		// it starts afresh, so the answers below are only those given since the retry.
+		if retried, rerr := store.StepRetried(ctx, e.deps.Pool, w.run.ID, node.ID); rerr != nil {
+			if v.early == nil {
+				o := failed(store.RunFailed, "read the step's retry: "+rerr.Error())
+				v.early = &o
+			}
+		} else if retried {
+			task += "\n\n" + retriedNotice
+		}
 		// The step's decided questions go after the rendered task, before the protocol
-		// block taskMessageWith adds, so a continuation, a retry and a loop revisit all
-		// carry them (DESIGN 5.24 rule 7). A visit never runs on a silently incomplete task.
+		// block taskMessageWith adds, so a continuation, a loop revisit and the visit that
+		// replaces one a restart interrupted all carry them (DESIGN 5.24 rule 7); a retry
+		// leaves out those of the attempt it replaced (D-093). A visit never runs on a
+		// silently incomplete task.
 		if answers, aerr := e.stepAnswers(ctx, w.run.ID, node.ID); aerr != nil {
 			if v.early == nil {
 				o := failed(store.RunFailed, "read the step's answers: "+aerr.Error())
