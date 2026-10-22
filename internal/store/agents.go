@@ -140,6 +140,51 @@ func DeleteAgent(ctx context.Context, q Querier, id string) error {
 	return nil
 }
 
+// Errors of RestoreAgent (DESIGN W4 rule 4).
+var (
+	ErrAgentNotArchived = errors.New("the agent is not archived")
+	ErrAgentNameTaken   = errors.New("a live agent has this name")
+)
+
+// RestoreAgent undoes DeleteAgent: it clears deleted_at, in one statement, unless a live
+// agent has the same name, compared trimmed and ignoring case as the seed and the
+// templates find agents by name (DESIGN W4 rule 4). It answers ErrNotFound for an unknown
+// id, ErrAgentNotArchived for a live agent and ErrAgentNameTaken for a taken name.
+func RestoreAgent(ctx context.Context, q Querier, id string) error {
+	tag, err := q.Exec(ctx, `UPDATE agents a SET deleted_at = NULL, updated_at = now()
+		WHERE a.id = $1 AND a.deleted_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM agents b
+			WHERE b.deleted_at IS NULL AND lower(btrim(b.name)) = lower(btrim(a.name)))`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	a, err := GetAgentForRun(ctx, q, id)
+	switch {
+	case err != nil:
+		return err
+	case a.DeletedAt == nil:
+		return ErrAgentNotArchived
+	}
+	return ErrAgentNameTaken
+}
+
+// LiveAgentNamed returns the oldest live agent whose name matches name trimmed and
+// ignoring case, ErrNotFound when there is none.
+func LiveAgentNamed(ctx context.Context, q Querier, name string) (*Agent, error) {
+	rows, err := q.Query(ctx, `SELECT `+agentSelect+` FROM agents WHERE deleted_at IS NULL
+		AND lower(btrim(name)) = lower(btrim($1)) ORDER BY created_at, id LIMIT 1`, name)
+	if err != nil {
+		return nil, err
+	}
+	a, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[Agent])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return a, err
+}
+
 // ListAgentsWithDeleted is ListAgents plus the soft-deleted rows, for reconciling the
 // runtime with the platform: a deleted agent still owns its OpenClaw id.
 func ListAgentsWithDeleted(ctx context.Context, q Querier) ([]Agent, error) {
