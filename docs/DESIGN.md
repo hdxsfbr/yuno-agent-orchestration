@@ -1283,6 +1283,20 @@ Rules:
    The image for a toolchain is derived from `OPENCLAW_SANDBOX_IMAGE`
    (`yuno-sandbox:latest` becomes `yuno-sandbox-<toolchain>:latest`); `default` keeps the
    default image.
+
+   **Tool versions.** A tool a sandbox image installs is pinned to an exact version
+   (`pytest==9.1.1`, `uv==0.13.1`, `pnpm@10.34.7`), and each base image names its release
+   line (`python:3.12-slim`, `node:24-slim`, `golang:1.26-bookworm`), so a new release of
+   a tool never reaches a run on its own; a test (`internal/config/images_test.go`) fails
+   when an install in `docker/sandbox*.Dockerfile` is unpinned or new. The images carry no
+   linter or formatter of the project's (ruff, eslint, golangci-lint and the like): those
+   come from the project's own lockfile, installed by the run (the task protocol block,
+   rule 9), so a project whose tools are unpinned (a range, no lockfile) takes a new
+   release of one the next time it installs, and the project's own checks can break
+   without any change of ours. The Scout and the Builder therefore install from the
+   lockfile, and when a new release of an unpinned lint or test tool breaks the project
+   they report it (the Scout as a constraint, the Builder in its summary) and propose
+   pinning it in the project; they do not change unrelated code to satisfy the release.
 7. **Sandbox selection through the materialiser, per visit.** Before the turn of every
    visit of a project run whose toolchain is known, the engine sets
    `agents.entries.<id>.sandbox` to `{scope: "session", docker: {image: <rule 6 image>,
@@ -1431,7 +1445,10 @@ GitHub token shapes and basic auth headers in logs, spans and tool rows; the too
 stored input and output carry no token. T5.16.7 UI: the run header shows the toolchain
 badge and the merge request link from the tool output; the list shows the badge; no link
 without an executed call. T5.16.8 `GET /api/tools` lists `open_merge_request` only when
-the project is configured; `RunCreate.project` reaches the snapshot.
+the project is configured; `RunCreate.project` reaches the snapshot. T5.16.9 every tool
+the sandbox images install is pinned to an exact version and every base image names a
+release line, and the Builder and Scout prompts tell them to install from the lockfile and
+to report an unpinned tool broken by a new release.
 
 Out of scope (more than one project per platform is 5.17): per-agent projects, branches other
 than the default as the base, rebases or conflict resolution, reviewing an existing
@@ -3904,7 +3921,8 @@ Rules:
    `slicer` in exactly one wave and waves numbered from 1 without gaps; a finish that
    breaks it is refused with the reason (5.6 output-schema repair). Two tickets of one
    wave that list a common file are refused the same way (the engine checks it for a node
-   whose output names `waves` and `tickets`, D-074 parallel safety).
+   whose output names `waves` and `tickets`, D-074 parallel safety). The same check
+   refuses a plan over the caps of 5.29 rule 2 (100 tickets, 30 waves).
 5. **`wave_pipeline`** (template, works on a project, one run per ticket): input `{task}`
    (the ticket, as intake gives it). Nodes: `builder` (tests first: writes the failing test,
    then the code, runs the suite; output `{summary, files, tests_passed}`) → `code_review`
@@ -3942,6 +3960,17 @@ Rules:
    enabled schedule points at it; an agent only if no live workflow other than such a
    copy uses it and it has no visit in flight. Everything kept is logged with its id;
    every deletion is a soft delete, logged with name, id and creation time.
+11. **The Integrator says how a merge request was checked.** The Integrator has no `exec`
+   and changes no code, so it checks nothing itself. The description of every merge
+   request it opens ends with a line `How it was checked:` that reports only what the
+   run's earlier steps verified and its task or context carries: in the wave pipeline the
+   builder's `tests_passed` and the Code Reviewer's verdict (both `integrator_draft` and
+   `integrator_ready` tasks name them, because marking the request ready replaces the
+   description), and the operator's manual test. When the task carries no result, as in a
+   quick run, whose task is the operator's text alone (`SingleAgent` has no earlier node
+   and so no context block), the line reads `How it was checked: Not run in this task;
+   the project's CI checks this merge request.` The Integrator never writes `NOT VERIFIED`
+   and never claims a check it was not told about.
 
 Edge cases: an operator who never answers the Analyst (the question parks and expires,
 5.24; the run fails "question unanswered"); a rejected design three times (the loop limit
@@ -3954,7 +3983,10 @@ the Chief bound; T5.28.2 the seed deletes the nine retired agents and keeps one 
 referenced by another workflow; T5.28.3 both templates load, validate and instantiate;
 T5.28.4 the waves node refuses a ticket in two waves and two tickets sharing a file;
 T5.28.5 eval 025 runs the plan pipeline with both approvals; T5.28.6 the wave pipeline's
-review loop is bounded and the gap path fails the run with the reason.
+review loop is bounded and the gap path fails the run with the reason; T5.28.7 the
+Integrator's prompt asks for the `How it was checked:` line with the plain CI sentence and
+never `NOT VERIFIED`, the wave pipeline's two Integrator tasks carry the builder's and the
+reviewer's results, and a quick run's task reaches the agent alone.
 
 Limitations: one feature at a time per project (5.29); the plan documents are only as
 good as the agents' prompts; nothing checks that `TASKS.md` slices are really end to end.
@@ -3998,7 +4030,16 @@ Rules:
    issues with label `feature:<feature>`); a found issue is reused, so a retried visit
    creates no duplicates. It records each issue on its plan ticket (status `pending`) and
    a plan event `published`. No issue carries the intake label yet (D-077). The
-   approval message lists the count per wave and the labels. Caps: 100 tickets, 30 waves, also applied by the waves check before the plan is approved.
+   approval message lists the count per wave and the labels. **Caps: at most 100 tickets
+   and 30 waves** (`workflow.MaxPlanTickets` and `MaxPlanWaves`, one constant each, shared
+   by the two places that apply them). The `waves_partition` check (5.28 rule 4) applies
+   them when the Planner finishes `waves`, before either approval, and sends an oversized
+   plan back with the reason (merge tickets into larger slices, or put more independent
+   tickets in one wave); `publish_tickets` applies the same caps again before it creates
+   anything, so a plan the operator approved always publishes and no plan is accepted by
+   one place and refused by the other. (Until 2026-10-19 the caps were 50 tickets and 10
+   waves, and only `publish_tickets` applied them: a plan of 15 waves passed both
+   approvals and was refused at publish.)
 3. **Issue creation on both providers.** `IssueProvider.Create(title, body, labels)` and
    `FindByMarker(label, marker)`: GitLab `POST /projects/:id/issues` and `GET
    /projects/:id/issues?labels=&search=` (body search, then exact marker match);

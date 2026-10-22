@@ -128,7 +128,9 @@ typed in chat).
   against the codebase and saves build and test facts as project notes; the Architect
   writes `ARCHITECTURE.md` and you approve it or send it back with a reason; the Planner
   writes `TASKS.md` (thin end-to-end slices) and `WAVES.md` (slices grouped so that no
-  two in a wave touch the same file, which the platform checks); you approve the plan;
+  two in a wave touch the same file, and which holds at most 100 tickets in at most 30
+  waves; the platform checks both when the Planner finishes and sends a plan that breaks
+  them back before you are asked); you approve the plan;
   the Integrator commits the four documents under `docs/plans/<feature>/` in one merge
   request.
 - **Publish**: after the plan's approval the Integrator opens the plan's merge request
@@ -385,6 +387,13 @@ engine sets the image on the agent for the visit's duration (a per-session sandb
 each visit starts a fresh container) and restores the defaults afterwards; `make
 probe-sandbox` verifies that mechanism on the running gateway.
 
+Every tool the sandbox images install (`pytest`, `uv`, `pnpm`) is pinned to an exact
+version, and each base image names its release line, so a new release of one never
+reaches a run on its own. The images carry none of a project's own linters or test
+runners: those come from the project's lockfile. When a project leaves them unpinned and
+a new release breaks its checks (a linter adding a rule, say), the Scout and the Builder
+report it and propose pinning the tool in the project instead of changing unrelated code.
+
 Sandbox network is off by default: the run still clones, and agents work with what the
 image provides. The project's network opt-in gives the sandboxes of its runs network
 access, and the task tells the Builder to install dependencies from the lockfile first
@@ -394,7 +403,11 @@ repository can reach the internet from the sandbox and side effects inside the s
 are not gated, so it is for trusted repositories only (`docs/threat-model.md`).
 
 At the end, the Integrator calls `open_merge_request` with a short title (a commit
-subject, at most 72 characters) and a description. The tool is approval-gated like every
+subject, at most 72 characters) and a description. The Integrator runs no commands, so
+the description ends with a "How it was checked" line that reports only what the run's
+earlier steps verified (the Builder's tests, the Code Reviewer's verdict, your manual
+test), or says "Not run in this task; the project's CI checks this merge request." when
+the run verified nothing, as in a quick run. The tool is approval-gated like every
 side effect and idempotent by the run's key: it clones the default branch again into a
 private directory of the api (never running git inside the agent-writable checkout,
 where a planted hook would run on the api side), copies the checkout's working tree over
