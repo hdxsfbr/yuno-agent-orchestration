@@ -639,6 +639,33 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
 
+  /api/audit:
+    get:
+      tags: [ops]
+      operationId: listAudit
+      x-yuno-risk: read
+      summary: The audit log, newest first
+      description: |
+        DESIGN 5.31. One row per /api request with method POST, PUT, PATCH or DELETE, and
+        per /api request refused for a missing or wrong bearer: who made it (the operator
+        through the UI or the API, an agent through the Chief's platform access, or
+        anonymous), what it asked, the target it changed before and after, and how it ended.
+        A row is written before the change runs; a row that stays `started` is a change
+        whose end was not recorded. `request`, `before` and `after` are redacted. Pages hold
+        at most `limit` rows; pass `next_cursor` as `cursor` for the next, older page.
+      parameters:
+        - { name: actor, in: query, description: "an actor kind (operator, agent, anonymous) or an agent id", schema: { type: string } }
+        - { name: target, in: query, description: "a target path, such as /api/agents/{id}", schema: { type: string } }
+        - { name: outcome, in: query, schema: { type: string, enum: [started, ok, denied, failed, pending_approval, replayed] } }
+        - { name: since, in: query, description: rows at or after this time, schema: { type: string, format: date-time } }
+        - { name: cursor, in: query, description: the next_cursor of the previous page, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, minimum: 1, maximum: 200 } }
+      responses:
+        "200":
+          description: a page of audit rows
+          content: { application/json: { schema: { $ref: "#/components/schemas/AuditPage" } } }
+        "422": { $ref: "#/components/responses/Error" }
+
   /api/skills:
     get:
       tags: [skills]
@@ -1047,6 +1074,46 @@ components:
             code: { type: string }
             message: { type: string }
             details: {}
+    AuditPage:
+      type: object
+      required: [events, next_cursor]
+      properties:
+        events: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } }
+        next_cursor: { type: string, description: "reads the next, older page; empty on the last page" }
+    AuditEvent:
+      type: object
+      required: [id, at, request_id, actor_kind, actor_id, actor_name, via, on_behalf_of, method, route, path, target,
+        idempotency_key, status, outcome, error_code, request, before, after, approval_id, evidence, duration_ms]
+      properties:
+        id: { type: string }
+        at: { type: string, format: date-time, description: when the request arrived }
+        request_id: { type: string }
+        actor_kind: { type: string, enum: [operator, agent, anonymous] }
+        actor_id: { type: string, description: "the agent's id; empty for the operator and anonymous" }
+        actor_name: { type: string, description: "the agent's name; empty for the operator and anonymous" }
+        via: { type: string, description: "ui (the web UI), api (another bearer client) or chief (an agent's platform access)" }
+        on_behalf_of: { type: string, description: "the person an agent acted for, telegram:<chat id>; empty when not known" }
+        method: { type: string }
+        route: { type: string, description: "the route the request matched, such as /api/agents/{id}; empty when none did" }
+        path: { type: string }
+        target: { type: string, description: "the resource read before and after the request; empty when it has none" }
+        idempotency_key: { type: string }
+        status: { type: [integer, "null"], description: "the response status; null while the row is started" }
+        outcome:
+          type: string
+          enum: [started, ok, denied, failed, pending_approval, replayed]
+          description: |
+            ok: 2xx. denied: 401, 403, 412, or refused by the platform gate. failed: any other
+            4xx or 5xx. pending_approval: waiting for the operator's approval. replayed: the
+            response of an earlier request with the same Idempotency-Key. started: the end
+            was not recorded.
+        error_code: { type: string, description: the code of an Error response }
+        request: { type: [object, array, string, number, boolean, "null"], description: "the redacted request body (at most 16 KiB; a longer one is cut into a string, a binary one is described by content_type, bytes and sha256); null without a body" }
+        before: { type: [object, array, string, number, boolean, "null"], description: "the redacted target before the request (at most 64 KiB); null when it did not exist or there is no target, {error} when it could not be read" }
+        after: { type: [object, array, string, number, boolean, "null"], description: "the redacted target after the request, or the response when there is no target or the request created something in a list (at most 64 KiB)" }
+        approval_id: { type: string, description: the approval the platform gate bound to the request }
+        evidence: { type: [object, "null"], description: what the platform gate recorded for its decision; null when none }
+        duration_ms: { type: [integer, "null"] }
     Status:
       type: object
       required: [version, uptime_s, db_ok, workers, runs, sse_clients, scheduler]

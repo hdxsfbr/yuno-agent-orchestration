@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiError, installFakeApi } from "@/test/fakeApi";
-import { api, subscribe } from "./api";
+import { api, newIdempotencyKey, subscribe } from "./api";
 import { clearToken, setToken, signInRequired } from "./auth";
 
 let fake: ReturnType<typeof installFakeApi>;
@@ -28,6 +28,27 @@ describe("api()", () => {
     for (const h of sent) expect(h.authorization).toBe("Bearer tok-1234");
     expect(sent[1]["x-trace"]).toBe("t1");
     expect(sent[1]["content-type"]).toBe("application/json");
+  });
+
+  it("says every call comes from the UI, and gives every change a fresh Idempotency-Key", async () => {
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) fake.on(method, "/api/things", () => ({}));
+    await api("/api/ping");
+    for (const method of ["POST", "PUT", "PATCH", "DELETE", "POST"]) await api("/api/things", { method, body: "{}" });
+    const sent = fake.calls.map((c) => c.headers);
+    for (const h of sent) expect(h["x-yuno-client"]).toBe("web");
+    expect(sent[0]["idempotency-key"]).toBeUndefined();
+    const keys = sent.slice(1).map((h) => h["idempotency-key"]);
+    for (const k of keys) expect(k).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("makes an Idempotency-Key without crypto.randomUUID, which plain HTTP lacks", () => {
+    const real = globalThis.crypto;
+    vi.stubGlobal("crypto", { getRandomValues: (b: Uint8Array) => real.getRandomValues(b) });
+    const a = newIdempotencyKey();
+    const b = newIdempotencyKey();
+    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(a).not.toBe(b);
   });
 
   it("sends no Authorization header when there is no token", async () => {
@@ -69,6 +90,7 @@ describe("subscribe()", () => {
     const stop = subscribe("/api/events", () => undefined);
     await vi.waitFor(() => expect(fake.streamCalls).toHaveLength(1));
     expect(fake.streamCalls[0].headers.authorization).toBe("Bearer tok-1234");
+    expect(fake.streamCalls[0].headers["x-yuno-client"]).toBe("web");
     expect(fake.streamCalls[0].url).toBe("/api/events");
     stop();
   });

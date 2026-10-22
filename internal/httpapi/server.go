@@ -88,6 +88,8 @@ type Server struct {
 	templatesDir string
 	startedAt    time.Time
 	mux          *http.ServeMux
+	// versionLocks are If-Match's per-target locks (DESIGN 5.31 rule 4).
+	versionLocks targetLocks
 
 	// botName is the Telegram bot username once known (channels.go).
 	botName atomic.Pointer[string]
@@ -202,6 +204,10 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	sweeps := []memory.SweepFunc{
 		func(ctx context.Context, now time.Time) (int64, error) {
 			return store.DeleteExpiredConversationMessages(ctx, pool, now)
+		},
+		// Idempotency keys expire after 24 hours (DESIGN 5.31 rule 3).
+		func(ctx context.Context, now time.Time) (int64, error) {
+			return store.SweepIdempotencyKeys(ctx, pool, now)
 		},
 	}
 	if collector != nil {
@@ -440,6 +446,9 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/conversations", s.listConversations)
 	mux.HandleFunc("GET /api/conversations/{id}/messages", s.listConversationMessages)
 	mux.HandleFunc("GET /api/conversations/{id}/tool-calls", s.listConversationToolCalls)
+
+	// The audit log (DESIGN 5.31 rule 5).
+	mux.HandleFunc("GET /api/audit", s.listAudit)
 
 	mux.Handle("/mcp", s.mcpHandler())
 
