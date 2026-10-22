@@ -60,6 +60,12 @@ func newFakeProvider(t *testing.T) (*fakeProvider, *http.Client) {
 		f.calls = append(f.calls, route)
 		f.tokens = append(f.tokens, r.Header.Get("PRIVATE-TOKEN"))
 		a, ok := f.routes[route]
+		if sha := r.URL.Query().Get("sha"); sha != "" {
+			// The pipelines of one commit (DESIGN wave 3 rule 13) are scripted per commit.
+			if bySHA, found := f.routes[route+"?sha="+sha]; found {
+				a, ok = bySHA, true
+			}
+		}
 		delay := f.delay
 		f.mu.Unlock()
 		if delay > 0 {
@@ -111,9 +117,10 @@ func (f *fakeProvider) request(n int, state, sha, pipeline string, unresolved in
 	f.set(fmt.Sprintf("GET /merge_requests/%d/discussions", n), 200, disc)
 	pipes := []map[string]any{}
 	if pipeline != "" {
-		pipes = append(pipes, map[string]any{"status": pipeline})
+		pipes = append(pipes, map[string]any{"id": 100 + n, "sha": sha, "status": pipeline,
+			"web_url": fmt.Sprintf("https://gitlab.test/group/demo/-/pipelines/%d", 100+n)})
 	}
-	f.set(fmt.Sprintf("GET /merge_requests/%d/pipelines", n), 200, pipes)
+	f.set("GET /pipelines?sha="+sha, 200, pipes)
 }
 
 func (f *fakeProvider) seen() []string {

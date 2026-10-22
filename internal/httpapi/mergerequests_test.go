@@ -53,6 +53,12 @@ func newMRProvider(t *testing.T) (*mrProvider, http.RoundTripper) {
 		f.bodies[route] = body
 		f.tokens = append(f.tokens, r.Header.Get("PRIVATE-TOKEN"))
 		a, ok := f.routes[route]
+		if sha := r.URL.Query().Get("sha"); sha != "" {
+			// The pipelines of one commit (DESIGN wave 3 rule 13) are scripted per commit.
+			if bySHA, found := f.routes[route+"?sha="+sha]; found {
+				a, ok = bySHA, true
+			}
+		}
 		f.mu.Unlock()
 		if !ok {
 			a = mrAnswer{404, map[string]string{"message": "404 Not Found"}}
@@ -78,9 +84,14 @@ func (f *mrProvider) set(route string, status int, body any) {
 	f.routes[route] = mrAnswer{status, body}
 }
 
-// request scripts the three reads of one merge request.
+// request scripts the three reads of one merge request, whose head is "sha-<state>".
 func (f *mrProvider) request(n int64, state, pipeline string, unresolved int) {
-	f.set(fmt.Sprintf("GET /merge_requests/%d", n), 200, map[string]any{"state": state, "sha": "sha-" + state})
+	f.requestAt(n, state, "sha-"+state, pipeline, unresolved)
+}
+
+// requestAt is request with the head commit given: the pipeline is that commit's.
+func (f *mrProvider) requestAt(n int64, state, sha, pipeline string, unresolved int) {
+	f.set(fmt.Sprintf("GET /merge_requests/%d", n), 200, map[string]any{"state": state, "sha": sha})
 	disc := []map[string]any{}
 	for range unresolved {
 		disc = append(disc, map[string]any{"notes": []map[string]any{{"resolvable": true, "resolved": false}}})
@@ -88,9 +99,9 @@ func (f *mrProvider) request(n int64, state, pipeline string, unresolved int) {
 	f.set(fmt.Sprintf("GET /merge_requests/%d/discussions", n), 200, disc)
 	pipes := []map[string]any{}
 	if pipeline != "" {
-		pipes = append(pipes, map[string]any{"status": pipeline})
+		pipes = append(pipes, map[string]any{"id": 100 + n, "sha": sha, "status": pipeline})
 	}
-	f.set(fmt.Sprintf("GET /merge_requests/%d/pipelines", n), 200, pipes)
+	f.set("GET /pipelines?sha="+sha, 200, pipes)
 }
 
 func (f *mrProvider) seen() []string {
@@ -207,6 +218,15 @@ func (e *mrEnv) get(id string) *store.MergeRequest {
 	mr, err := store.GetMergeRequest(context.Background(), e.pool, id)
 	mustDo(e.t, err)
 	return mr
+}
+
+// checked makes a record whose check is ci on exactly its head (ci_sha = head_sha), the
+// merge guard's precondition (DESIGN wave 3 rule 15).
+func checked(ci string) func(*store.MergeRequest) {
+	return func(mr *store.MergeRequest) {
+		head := "head-" + uniqueSuffix()
+		mr.CIStatus, mr.HeadSHA, mr.CISHA = ci, &head, &head
+	}
 }
 
 func decodeMR(t *testing.T, b []byte) store.MergeRequest {
@@ -411,9 +431,10 @@ func TestMergePreconditionsAndRefusals(t *testing.T) {
 		t.Fatalf("unknown: %d", code)
 	}
 
-	// The provider's own refusals: 405, 406, 409, 422 with its first line.
-	for _, status := range []int{405, 406, 409, 422} {
-		_, rec := e.record(e.project, true, func(mr *store.MergeRequest) { mr.CIStatus = store.CIStatusPassed })
+	// The provider's own refusals: 405, 406, 422 with its first line (409 is a head that
+	// moved, since the merge names the head: TestMergeNeedsExactSHA).
+	for _, status := range []int{405, 406, 422} {
+		_, rec := e.record(e.project, true, checked(store.CIStatusPassed))
 		e.prov.set(fmt.Sprintf("PUT /merge_requests/%d/merge", rec.Number), status,
 			map[string]string{"message": "Branch cannot be merged\nthe second line stays with the provider"})
 		expect(rec.ID, http.StatusConflict, "merge_request_not_mergeable", "Branch cannot be merged")
@@ -437,11 +458,15 @@ func TestMergePreconditionsAndRefusals(t *testing.T) {
 // on the provider, and reports the final state once; a second POST finds it merged.
 func TestMergeSucceeds(t *testing.T) {
 	e := newMREnv(t)
+	// The project has no CI (no commit of the default branch has a pipeline), so a check
+	// that found no pipeline on the head lets the merge through (DESIGN wave 3 rule 15).
+	e.prov.set("GET /repository/commits", 200, []map[string]any{{"id": "c1"}})
 	for _, ci := range []string{store.CIStatusPassed, store.CIStatusNone} {
-		run, rec := e.record(e.project, true, func(mr *store.MergeRequest) { mr.CIStatus = ci })
+		run, rec := e.record(e.project, true, checked(ci))
 		route := fmt.Sprintf("PUT /merge_requests/%d/merge", rec.Number)
 		e.prov.set(route, 200, map[string]any{"state": "merged"})
 		e.prov.request(rec.Number, "merged", "success", 0) // what the read after the 2xx finds
+		e.prov.set("GET /pipelines", 200, []map[string]any{})
 		before := time.Now().UTC().Add(-time.Second)
 
 		code, body := e.call(http.MethodPost, "/api/merge-requests/"+rec.ID+"/merge", "", true)
@@ -450,7 +475,7 @@ func TestMergeSucceeds(t *testing.T) {
 			got.ClosedAt == nil || got.ClosedAt.Before(before) || got.ReportedState == nil || *got.ReportedState != "merged" {
 			t.Fatalf("merge (%s) = %d %s", ci, code, body)
 		}
-		if e.prov.body(route)["should_remove_source_branch"] != true {
+		if e.prov.body(route)["should_remove_source_branch"] != true || e.prov.body(route)["sha"] != *rec.HeadSHA {
 			t.Fatalf("merge body = %v", e.prov.body(route))
 		}
 		noToken(t, "merge", body, e.token)
@@ -485,7 +510,7 @@ func TestMergeSucceeds(t *testing.T) {
 func TestMergeIsRecordedOnlyWhenTheProviderReportsItMerged(t *testing.T) {
 	e := newMREnv(t)
 	ready := func(chat bool) (*store.Run, *store.MergeRequest, string, string) {
-		run, rec := e.record(e.project, chat, func(mr *store.MergeRequest) { mr.CIStatus = store.CIStatusPassed })
+		run, rec := e.record(e.project, chat, checked(store.CIStatusPassed))
 		return run, rec, fmt.Sprintf("PUT /merge_requests/%d/merge", rec.Number), fmt.Sprintf("GET /merge_requests/%d", rec.Number)
 	}
 	merge := func(rec *store.MergeRequest) (int, store.MergeRequest, []byte) {
@@ -586,7 +611,7 @@ func TestMergeRefusalRedactsTheToken(t *testing.T) {
 		p     *store.Project
 		token string
 	}{"a token with a known shape": {e.project, e.token}, "an opaque token": {hidden, opaque}} {
-		_, rec := e.record(tc.p, false, func(mr *store.MergeRequest) { mr.CIStatus = store.CIStatusPassed })
+		_, rec := e.record(tc.p, false, checked(store.CIStatusPassed))
 		e.prov.set(fmt.Sprintf("PUT /merge_requests/%d/merge", rec.Number), 405,
 			map[string]string{"message": "Branch cannot be merged for " + tc.token + " (token " + tc.token + ")\nsecond line"})
 		code, body := e.call(http.MethodPost, "/api/merge-requests/"+rec.ID+"/merge", "", true)
@@ -619,7 +644,7 @@ func countCalls(calls []string, route string) int {
 func TestMergeProviderFailures(t *testing.T) {
 	e := newMREnv(t)
 	ready := func(chat bool) (*store.Run, *store.MergeRequest, string) {
-		run, rec := e.record(e.project, chat, func(mr *store.MergeRequest) { mr.CIStatus = store.CIStatusPassed })
+		run, rec := e.record(e.project, chat, checked(store.CIStatusPassed))
 		return run, rec, fmt.Sprintf("PUT /merge_requests/%d/merge", rec.Number)
 	}
 

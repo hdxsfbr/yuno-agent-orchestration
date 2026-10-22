@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"yuno/internal/events"
 	"yuno/internal/obs"
 	"yuno/internal/project"
 	"yuno/internal/store"
@@ -63,7 +64,10 @@ type Sync struct {
 	Client   *http.Client
 	Reporter Reporter
 	// Plans, when set, hears every record that turns merged (DESIGN 5.29 rule 10).
-	Plans    PlanHook
+	Plans PlanHook
+	// Events, when set, records merge_request.updated after a push the platform made
+	// (Chief platform control, DESIGN wave 3 rule 11).
+	Events   *events.Recorder
 	Interval time.Duration
 	// Timeout bounds the refresh of one record; SyncTimeout (10 s) when zero.
 	Timeout time.Duration
@@ -253,22 +257,35 @@ func (s *Sync) refresh(ctx context.Context, rec *store.MergeRequest) (cur *store
 	st, err := tools.ProviderFor(pc, s.Client).Status(pctx, rec.Number)
 	switch {
 	case errors.Is(err, tools.ErrRequestNotFound):
-		// The request is gone from the provider: closed, with the reason.
+		// The request is gone from the provider: closed, with the reason; what was known of
+		// its check stays.
 		msg := tools.ErrRequestNotFound.Error()
 		return s.settle(ctx, rec, store.MergeRequestSync{State: store.MergeRequestClosed, CIStatus: rec.CIStatus,
-			HeadSHA: rec.HeadSHA, UnresolvedThreads: rec.UnresolvedThreads, LastSyncError: &msg, SyncedAt: now, ClosedAt: &now})
+			HeadSHA: rec.HeadSHA, UnresolvedThreads: rec.UnresolvedThreads, LastSyncError: &msg, SyncedAt: now, ClosedAt: &now,
+			CISHA: rec.CISHA, CIPipelineID: rec.CIPipelineID, CIURL: rec.CIURL, Mergeable: rec.Mergeable, MergeStatus: rec.MergeStatus})
 	case ctx.Err() != nil:
 		return rec, false, ctx.Err()
 	case err != nil:
 		return s.recordFailure(ctx, rec, now, err.Error(), pc.Token)
 	}
 	u := store.MergeRequestSync{State: st.State, CIStatus: st.CIStatus, UnresolvedThreads: st.UnresolvedThreads,
-		SyncedAt: now, ClosedAt: st.ClosedAt}
+		SyncedAt: now, ClosedAt: st.ClosedAt, Mergeable: st.Mergeable}
 	if st.MergeSHA != "" && st.State == store.MergeRequestMerged {
+		// DESIGN wave 3 rule 4: the merge commit is persisted from the sync too.
 		u.MergeSHA = &st.MergeSHA
 	}
 	if st.HeadSHA != "" {
-		u.HeadSHA = &st.HeadSHA
+		// The provider read the CI of exactly this commit (rule 13).
+		u.HeadSHA, u.CISHA = &st.HeadSHA, &st.HeadSHA
+	}
+	if st.PipelineID != 0 {
+		u.CIPipelineID = &st.PipelineID
+	}
+	if st.CIURL != "" {
+		u.CIURL = &st.CIURL
+	}
+	if st.MergeStatus != "" {
+		u.MergeStatus = &st.MergeStatus
 	}
 	if st.Err != "" {
 		msg := cleanError(st.Err, pc.Token)

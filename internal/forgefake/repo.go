@@ -69,6 +69,16 @@ type pipeline struct {
 	sha       string
 	status    string
 	createdAt time.Time
+	jobs      []*job
+}
+
+// job is one job of a pipeline, with the log its trace answers.
+type job struct {
+	id     int
+	name   string
+	stage  string
+	status string
+	log    string
 }
 
 var (

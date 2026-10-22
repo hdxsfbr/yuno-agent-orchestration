@@ -88,6 +88,8 @@ paths:
         chat token; platform-wide, no run; `conversation_id` is null when the agent had no
         conversation). An approval raised in a conversation has no run; its
         approval.requested and approval.decided carry `conversation_id`.
+        merge_request.updated (`{merge_request}`: the platform pushed to the request's branch,
+        filed under the record's run; Chief platform control wave 3 rule 11).
       responses:
         "200": { description: event stream, content: { text/event-stream: { schema: { type: string } } } }
   /api/runs/{id}/events:
@@ -1005,15 +1007,83 @@ paths:
       tags: [merge-requests]
       summary: Merge the request on the provider
       description: |
-        DESIGN 5.20 rule 5. Needs state `open` and a pipeline that passed or
-        does not exist. A provider refusal (conflicts, a protected branch, a required approval)
-        answers 409 `merge_request_not_mergeable` with the provider's message.
+        DESIGN 5.20 rule 5. Needs state `open` and a pipeline that passed on
+        exactly the head (`ci_sha` = `head_sha`), or none on it in a project with no CI
+        configured; the provider is sent the head, so a head that moved is refused (Chief
+        platform control wave 3 rule 15). A provider refusal (conflicts, a protected branch, a
+        required approval) answers 409 `merge_request_not_mergeable` with the provider's message.
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       responses:
         "200": { description: merged record, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequest" } } } }
         "404": { $ref: "#/components/responses/Error" }
-        "409": { description: "merge_request_not_open, merge_request_ci_not_passed or merge_request_not_mergeable", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "409": { description: "merge_request_not_open, merge_request_ci_not_passed, merge_request_head_moved (details {current} when the re-sync read it) or merge_request_not_mergeable", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "502": { description: "provider_unavailable (the provider did not answer; the record was re-synced and is still open) or provider_error (the provider refused with another status)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/merge-requests/{id}/update-from-default:
+    post:
+      tags: [merge-requests]
+      operationId: updateMergeRequestFromDefault
+      x-yuno-risk: routine
+      summary: Merge the default branch into the request's branch and push it
+      description: |
+        Chief platform control wave 3 rules 9 to 11. The platform fetches the branch and the
+        default branch with the project's token, merges without a working tree and pushes a
+        two-parent merge commit, never forced. A push updates the record in one write: head_sha
+        and ci_sha the new commit, ci_status pending, updated_from_default_at now; event
+        merge_request.updated. Conflicts are an outcome, recorded on the record, with nothing
+        pushed.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequestUpdateInput" } } }
+      responses:
+        "200": { description: what the update did, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequestUpdateResult" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: "merge_request_not_open, merge_request_head_moved (details {current}: the branch is not at expected_head_sha, or moved before the push landed) or merge_request_not_updatable (the project's token cannot be read, or the branches share no history)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+        "502": { description: "provider_unavailable or provider_error (git or the provider failed)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/merge-requests/{id}/diff:
+    get:
+      tags: [merge-requests]
+      operationId: getMergeRequestDiff
+      x-yuno-risk: read
+      summary: The request's files and patches, from the provider
+      description: Chief platform control wave 3 rule 14. Redacted, at most 256 KiB of paths and patches, then `truncated`.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: diff, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequestDiff" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: "merge_request_unreadable (the project's token cannot be read)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "502": { description: "provider_unavailable or provider_error", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/merge-requests/{id}/checks:
+    get:
+      tags: [merge-requests]
+      operationId: getMergeRequestChecks
+      x-yuno-risk: read
+      summary: The pipeline or check runs of exactly the request's head, with their jobs
+      description: Chief platform control wave 3 rule 14. GitLab's newest pipeline for `head_sha`; GitHub's check runs and commit statuses for it.
+      parameters: [ { $ref: "#/components/parameters/Id" } ]
+      responses:
+        "200": { description: checks, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequestChecks" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: "merge_request_head_unknown (never synced) or merge_request_unreadable (the project's token cannot be read)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "502": { description: "provider_unavailable or provider_error", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+  /api/merge-requests/{id}/jobs/{job}/log:
+    get:
+      tags: [merge-requests]
+      operationId: getMergeRequestJobLog
+      x-yuno-risk: read
+      summary: The tail of a job's log
+      description: Chief platform control wave 3 rule 14. A tail that starts mid-log starts at a line; redacted.
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+        - { name: job, in: path, required: true, schema: { type: string }, description: "a job id from the checks" }
+        - { name: tail_bytes, in: query, schema: { type: integer, minimum: 1, maximum: 1048576, default: 65536 } }
+      responses:
+        "200": { description: log tail, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequestJobLog" } } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: "merge_request_unreadable (the project's token cannot be read)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "422": { $ref: "#/components/responses/Error" }
+        "502": { description: "provider_unavailable or provider_error", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
 components:
   securitySchemes:
@@ -1364,6 +1434,80 @@ components:
         updated_at: { type: string, format: date-time }
         closed_at: { type: string, format: date-time, description: "when it was merged or closed" }
         draft: { type: boolean, description: "The request is a draft (DESIGN 5.29 rule 4): opened with open_merge_request draft true, ready once a later call says draft false" }
+        merge_sha: { type: string, description: "the commit the merge made, as the provider reports it" }
+        follow_up_of: { type: string, description: "the record this one follows (DESIGN 5.29 rule 4)" }
+        ci_sha: { type: string, description: "the commit ci_status was read for; a merge needs it equal to head_sha" }
+        ci_pipeline_id: { type: integer, description: "the GitLab pipeline behind ci_status" }
+        ci_url: { type: string, description: "the pipeline or check behind ci_status" }
+        mergeable: { type: [boolean, "null"], description: "whether the branch merges into its target without conflicts; null while the provider does not know" }
+        merge_status: { type: string, description: "the provider's own word: GitLab's detailed_merge_status, GitHub's mergeable_state" }
+        conflicts: { $ref: "#/components/schemas/MergeConflicts" }
+        updated_from_default_at: { type: string, format: date-time, description: "when the platform last pushed an update from the default branch" }
+    MergeConflicts:
+      type: object
+      description: "What the last update from the default branch met: the files that conflict, when, and the default branch's commit it tried to merge."
+      required: [files, at, base_sha]
+      properties:
+        files: { type: array, items: { type: string } }
+        at: { type: string, format: date-time }
+        base_sha: { type: string }
+    MergeRequestUpdateInput:
+      type: object
+      required: [expected_head_sha]
+      additionalProperties: false
+      properties:
+        expected_head_sha: { type: string, pattern: "^[0-9a-f]{40}$", description: "the head the caller read; a branch elsewhere is 409 merge_request_head_moved" }
+    MergeRequestUpdateResult:
+      type: object
+      required: [outcome, merge_request]
+      properties:
+        outcome: { type: string, enum: [up_to_date, updated, conflicts] }
+        commit: { type: string, description: "the merge commit pushed (updated)" }
+        default_sha: { type: string, description: "the default branch's commit merged in, or found contained" }
+        conflicts: { type: array, items: { type: string }, description: "the files that conflict (conflicts); nothing was pushed" }
+        merge_request: { $ref: "#/components/schemas/MergeRequest" }
+    MergeRequestDiff:
+      type: object
+      required: [files, truncated]
+      properties:
+        files:
+          type: array
+          items:
+            type: object
+            required: [path, status, patch]
+            properties:
+              path: { type: string }
+              old_path: { type: string, description: "the path before a rename" }
+              status: { type: string, enum: [added, deleted, modified, renamed] }
+              patch: { type: string, description: "the provider's hunks, redacted; empty for a binary file or one too large for the provider" }
+        truncated: { type: boolean, description: "files or part of a patch were left out at the 256 KiB cap" }
+    MergeRequestChecks:
+      type: object
+      required: [sha, status, jobs]
+      properties:
+        sha: { type: string, description: "the head commit the checks are for" }
+        status: { type: string, enum: [none, pending, passed, failed] }
+        pipeline_id: { type: integer, description: "GitLab's pipeline" }
+        url: { type: string, description: "the pipeline (GitLab), or the check that decides status (GitHub)" }
+        jobs:
+          type: array
+          items:
+            type: object
+            required: [id, name, stage, status, url]
+            properties:
+              id: { type: string, description: "what GET …/jobs/{job}/log takes; a GitHub commit status (status-<id>) has no log" }
+              name: { type: string }
+              stage: { type: string, description: "GitLab's stage; empty on GitHub" }
+              status: { type: string, enum: [passed, failed, running, pending, canceled, skipped, manual] }
+              url: { type: string }
+    MergeRequestJobLog:
+      type: object
+      required: [job, size, truncated, log]
+      properties:
+        job: { type: string }
+        size: { type: integer, description: "the whole log, in bytes" }
+        truncated: { type: boolean, description: "log is the tail; it starts at a line" }
+        log: { type: string, description: "redacted" }
     Plan:
       type: object
       description: "DESIGN 5.29 rule 1: one feature's plan; a project has at most one whose status is not done or cancelled."

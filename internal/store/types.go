@@ -546,6 +546,34 @@ type MergeRequest struct {
 	ClosedAt          *time.Time `db:"closed_at" json:"closed_at,omitempty"`
 	// Draft is true while the request is a draft (DESIGN 5.29 rule 4).
 	Draft bool `db:"draft" json:"draft"`
+	// MergeSHA is the commit the merge made, as the provider reports it (DESIGN 5.29 rule
+	// 11); FollowUpOf the record this one follows (5.29 rule 4).
+	MergeSHA   *string `db:"merge_sha" json:"merge_sha,omitempty"`
+	FollowUpOf *string `db:"follow_up_of" json:"follow_up_of,omitempty"`
+	// The check of exactly one commit (Chief platform control, DESIGN wave 3 rule 13):
+	// CISHA is the commit CIStatus was read for, and the merge guard needs it equal to
+	// HeadSHA; CIPipelineID and CIURL name the pipeline or check behind it.
+	CISHA        *string `db:"ci_sha" json:"ci_sha,omitempty"`
+	CIPipelineID *int64  `db:"ci_pipeline_id" json:"ci_pipeline_id,omitempty"`
+	CIURL        *string `db:"ci_url" json:"ci_url,omitempty"`
+	// Mergeable is whether the branch merges into its target without conflicts, nil while
+	// the provider does not know; MergeStatus is the provider's own word (GitLab's
+	// detailed_merge_status, GitHub's mergeable_state).
+	Mergeable   *bool   `db:"mergeable" json:"mergeable"`
+	MergeStatus *string `db:"merge_status" json:"merge_status,omitempty"`
+	// Conflicts is what the last update from the default branch met (rule 9), nil once an
+	// update found none.
+	Conflicts            *MergeConflicts `db:"conflicts" json:"conflicts,omitempty"`
+	UpdatedFromDefaultAt *time.Time      `db:"updated_from_default_at" json:"updated_from_default_at,omitempty"`
+}
+
+// MergeConflicts is a merge of the default branch into a request's branch that conflicted
+// (DESIGN wave 3 rule 9): the files, sorted, when, and the default branch's commit that
+// was merged (base_sha).
+type MergeConflicts struct {
+	Files   []string  `json:"files"`
+	At      time.Time `json:"at"`
+	BaseSHA string    `json:"base_sha"`
 }
 
 // Label is how the provider names this request in the texts the platform writes (every

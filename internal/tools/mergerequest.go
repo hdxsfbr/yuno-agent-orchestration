@@ -654,6 +654,11 @@ func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *projec
 			return Result{IsError: true, Text: "record the new checkout commit after the push: " + obs.Redact(err.Error()) +
 				"; the commit was pushed to " + rec.SourceBranch}, nil
 		}
+		// The check of the old head no longer speaks for the branch (Chief platform control,
+		// DESIGN wave 3 rule 11): the record moves to the pushed commit with its CI pending.
+		if _, err := store.MergeRequestPushed(ctx, call.Tx, rec.ID, proposal.Commit, time.Now(), false); err != nil {
+			return Result{}, fmt.Errorf("record the push on the merge request: %w", err)
+		}
 	}
 	if updating != nil && call.Tx != nil {
 		// An iteration on a ticket's request: the request is linked already, so the ticket

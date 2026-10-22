@@ -191,12 +191,13 @@ func (fx *readFx) callChat(tool *Tool, input string) Result {
 	return invoke(fx.t, tool, Call{AgentID: "chief", Chat: true, Input: json.RawMessage(input)})
 }
 
-// scriptGitLab answers one request: the details, the discussions and the newest pipeline.
+// scriptGitLab answers one request: the details, the discussions and the newest pipeline of
+// its head (any head: the route is the project's pipelines).
 func (fx *readFx) scriptGitLab(number int, mr jm, discussions []jm, pipelines []jm) {
 	route := fmt.Sprintf("GET /merge_requests/%d", number)
 	script(&fx.gl.scripted, route, 200, mr)
 	script(&fx.gl.scripted, route+"/discussions", 200, discussions)
-	script(&fx.gl.scripted, route+"/pipelines", 200, pipelines)
+	script(&fx.gl.scripted, "GET /pipelines", 200, pipelines)
 }
 
 // scriptGitHub answers one pull request: the pull, the GraphQL threads and a passing check.
@@ -340,7 +341,7 @@ func TestReadMergeRequestGitLab(t *testing.T) {
 	if fx.gl.token != readGitLabToken {
 		t.Fatalf("the provider got token %q", fx.gl.token)
 	}
-	for _, line := range []string{"GET /merge_requests/5", "GET /merge_requests/5/discussions", "GET /merge_requests/5/pipelines"} {
+	for _, line := range []string{"GET /merge_requests/5", "GET /merge_requests/5/discussions", "GET /pipelines"} {
 		if !contains(fx.gl.calls, line) {
 			t.Errorf("provider calls %v lack %s", fx.gl.calls, line)
 		}

@@ -213,7 +213,7 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	// first pass settles the records of runs that predate the table.
 	go (&project.Watcher{Pool: pool, Tick: cfg.BudgetTick, Log: log, Reporter: eng}).Run(ctx)
 	mr := &mergereq.Sync{Pool: pool, Projects: s.projects, Client: s.checkClient, Reporter: eng,
-		Plans: s.plans, Interval: cfg.MergeRequestSyncInterval, Log: log}
+		Plans: s.plans, Events: rec, Interval: cfg.MergeRequestSyncInterval, Log: log}
 	if n, err := mr.Backfill(ctx); err == nil && n > 0 {
 		log.Info("merge requests backfilled from the trace", "count", n)
 	}
@@ -430,6 +430,12 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/merge-requests/{id}", s.getMergeRequest)
 	mux.HandleFunc("POST /api/merge-requests/{id}/sync", s.syncMergeRequest)
 	mux.HandleFunc("POST /api/merge-requests/{id}/merge", s.mergeMergeRequest)
+	// Chief platform control, DESIGN wave 3 rules 9 and 14: the update from the default
+	// branch and the provider reads.
+	mux.HandleFunc("POST /api/merge-requests/{id}/update-from-default", s.updateMergeRequestFromDefault)
+	mux.HandleFunc("GET /api/merge-requests/{id}/diff", s.getMergeRequestDiff)
+	mux.HandleFunc("GET /api/merge-requests/{id}/checks", s.getMergeRequestChecks)
+	mux.HandleFunc("GET /api/merge-requests/{id}/jobs/{job}/log", s.getMergeRequestJobLog)
 	mux.HandleFunc("GET /api/agents/{id}/memory", s.listAgentMemory)
 	mux.HandleFunc("DELETE /api/agents/{id}/memory/{factId}", s.deleteAgentMemory)
 
