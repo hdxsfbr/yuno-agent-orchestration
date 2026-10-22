@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link } from "react-router";
-import { MODELS, THINKING_LEVELS, type Agent, type AgentInput, type Skill, type Tool, type ThinkingLevel } from "@/lib/api";
+import { MODELS, OPENAI_MODELS, THINKING_LEVELS, isOpenAIModel, type Agent, type AgentInput, type Skill, type Tool, type ThinkingLevel } from "@/lib/api";
 import {
   LIMIT_FIELDS,
   agentToForm,
@@ -15,11 +15,13 @@ import {
 } from "@/lib/agentForm";
 import Button, { buttonClass } from "../Button";
 import { Card } from "../Card";
-import { CheckboxField, NumberField, SelectField, TextAreaField, TextField, toOptions } from "../fields";
+import { CheckboxField, NumberField, SelectField, TextAreaField, TextField, toOptions, type Option } from "../fields";
 import ExecPolicySection from "./ExecPolicySection";
 import GuardrailsSection from "./GuardrailsSection";
 import SkillPicker from "./SkillPicker";
 import ToolPicker from "./ToolPicker";
+
+const OPENAI_GROUP = "OpenAI (your ChatGPT subscription)";
 
 function Section({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
   return (
@@ -93,7 +95,13 @@ export default function AgentForm({ agent, tools, skills, saving, serverErrors, 
   };
 
   const toolNames = (tools.data ?? []).map((t) => t.name);
-  const modelOptions = toOptions(MODELS.includes(form.model as (typeof MODELS)[number]) ? MODELS : [form.model, ...MODELS]);
+  const known: readonly string[] = [...MODELS, ...OPENAI_MODELS];
+  const modelOptions: Option[] = [
+    // A model the agent holds that is no longer offered stays shown, so the choice shown is the choice held.
+    ...(known.includes(form.model) ? [] : toOptions([form.model])),
+    ...MODELS.map((m) => ({ value: m, label: m, group: "Anthropic" })),
+    ...OPENAI_MODELS.map((m) => ({ value: m, label: m, group: OPENAI_GROUP })),
+  ];
 
   return (
     <form onSubmit={submit} noValidate className="space-y-4">
@@ -120,7 +128,15 @@ export default function AgentForm({ agent, tools, skills, saving, serverErrors, 
 
       <Section title="Model">
         <div className="grid gap-4 sm:grid-cols-2">
-          <SelectField label="Model" required value={form.model} onChange={(v) => set({ model: v })} options={modelOptions} errors={errorsFor(errors, "model")} />
+          <SelectField
+            label="Model"
+            required
+            value={form.model}
+            onChange={(v) => set({ model: v })}
+            options={modelOptions}
+            hint={isOpenAIModel(form.model) ? "Uses the ChatGPT account signed in on the gateway. Costs are estimates at OpenAI's API prices." : undefined}
+            errors={errorsFor(errors, "model")}
+          />
           <NumberField label="Max tokens" hint="Largest reply the model may write." value={form.maxTokens} onChange={(v) => set({ maxTokens: v })} errors={errorsFor(errors, "max_tokens")} placeholder="8192" />
           <SelectField label="Thinking" value={form.thinking} onChange={(v) => set({ thinking: v as ThinkingLevel })} options={toOptions(THINKING_LEVELS)} errors={errorsFor(errors, "thinking")} />
         </div>

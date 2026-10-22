@@ -75,7 +75,7 @@ executors and MCP schemas), `model` (proxy, scripted provider, prices), `channel
 | Control plane | Go 1.26, stdlib `net/http`, `nhooyr.io/websocket` (or `gorilla/websocket`) for the gateway client | Suggested by the brief; one static binary; goroutines for the event pump |
 | MCP server | `github.com/modelcontextprotocol/go-sdk`, streamable HTTP | OpenClaw's native MCP client speaks it **[docs]** |
 | DB | Postgres 17, pgx v5, embedded SQL migrations | System of record for everything the UI and evals read |
-| Model | Anthropic API via the api proxy; `claude-opus-5-5` default per agent | Key never enters the gateway container |
+| Model | Anthropic API via the api proxy; `claude-opus-5-5` default per agent; or an OpenAI model through the operator's ChatGPT sign-in on the gateway (5.14 rule 14, D-091) | The Anthropic key never enters the gateway container |
 | Frontend | React 19, Vite, TypeScript, Tailwind, React Flow, TanStack Query | Visual builder is required |
 | Real-time | SSE from api | One direction suffices |
 | Contract | `api/openapi.yaml`, served and validated in tests | Required machine-readable contract |
@@ -131,7 +131,8 @@ Rules 1 to 10 stand with these definitions:
   with `role: assistant` and a `usage` block) **[probed]**; the engine increments
   `step_count` on each. `max_node_iterations` bounds steps within one visit.
 - Cost is `usage.cost.total` from the same entries, converted to micro-USD, cross-checked
-  against our own price table from the token counts; the larger is recorded.
+  against our own price table from the token counts; the larger is recorded. The table
+  has no OpenAI model, so for one the gateway's estimate is recorded (5.14 rule 14).
 - Enforcement is by `chat.abort { sessionKey, runId }` **[docs]**; after abort the engine
   waits up to 10 s for the `aborted` state, then marks the run regardless.
 - Checks run on every event that increments a counter and on a 2 s tick, not only
@@ -853,7 +854,8 @@ Rules:
    in micro-USD per token derived from the per-MTok table in `config/prices.yaml`
    (Opus 5.5: 4.00/20.00/0.20 cache read, Sonnet 5.5: 2.00/10.00/0.20, Haiku 5.5:
    0.10/0.50, cache write = 1.25 × input unless listed). Unknown model → cost 0 and a
-   `warn` log once per model.
+   `warn` log once per model. OpenAI models are not in the table: their cost is the
+   gateway's API-equivalent estimate (5.14 rule 14).
 3. SSE: `GET /api/events` (all runs) and `GET /api/runs/{id}/events`; each event has `id`
    (monotonic per process), `event` type, JSON `data`; the handler honours
    `Last-Event-ID` by replaying from the DB-backed event log for that run; heartbeat
@@ -1033,7 +1035,8 @@ Rules:
    the display name afterwards through the config entry;
    `config.patch` with `raw` JSON and `baseHash` from `config.get` **[probed]**, setting
    `agents.entries.<id>` (`model.primary`, `thinkingDefault`, `reasoningDefault: "off"`,
-   `tools.{profile,allow,deny}`, `skills`, `identity`); `exec.approvals.set` with the
+   `tools.{profile,allow,deny}`, `skills`, `identity`, and for an OpenAI model the
+   runtime pin of rule 14); `exec.approvals.set` with the
    agent's policy and `baseHash` **[probed]**; workspace files `SOUL.md` (role and system
    prompt), `AGENTS.md` (platform operating rules: finish protocol, untrusted content,
    run directory, files through the file tools rather than exec, dependent tool calls in
@@ -1092,7 +1095,8 @@ Rules:
     `chat.history` entries (`usage.input`, `usage.output`, `usage.cacheRead`,
     `usage.cacheWrite`, `usage.cost.total`) **[probed]**; OpenClaw computes cost from the
     provider's configured per-model `cost` (USD per million tokens) **[docs]**, which the
-    baseline config sets from our price table.
+    baseline config sets from our price table, and for an OpenAI model from OpenClaw's own
+    catalog (rule 14).
 11. **No chain of thought.** `reasoningDefault: off` on every managed agent, the proxy
     strips `thinking.display`, and the engine drops any `agent` event with
     `stream: reasoning` and any transcript part of type `thinking` before storage.
@@ -1124,6 +1128,46 @@ Rules:
     network and no socket.
 13. **Health.** `GET /healthz` on the gateway port **[probed]**; api `readyz` also checks
     the gateway connection is open and scoped.
+14. **OpenAI models through the operator's sign-in. [decision D-091]** An agent's `model`
+    is a Claude id, materialised as `yuno-anthropic/<id>` and served through the proxy
+    (rule 8), or one of `openai/gpt-6-astra`, `openai/gpt-5.6-terra` and
+    `openai/gpt-5.6-luna`, the refs OpenClaw 2026.10.3 lists for a ChatGPT/Codex
+    subscription **[docs]** (providers/openai/setup.md), written as given. Both are exact
+    lists, as the Claude ids were; the API answers 422 on `model` for another provider
+    prefix (`unknown model provider "<p>"`), an OpenAI id outside the list, or a bare id
+    outside the Claude list. OpenClaw's own `openai` provider makes those calls from the
+    gateway to OpenAI with the sign-in the operator made on the gateway (`openclaw models
+    auth login --provider openai --device-code --agent main`, stored as the default agent's
+    shared credential, which every agent inherits **[docs]** cli/agents.md); the api's
+    proxy, its key and `MODEL_PROXY_RATE_PER_MINUTE` are not on that path, and nothing in
+    the baseline changes. The agent's entry pins the embedded runtime for its ref,
+    `models["<ref>"].agentRuntime.id: "openclaw"`: unpinned, a subscription route may
+    select the Codex app-server runtime, which disables user MCP servers while an OpenClaw
+    sandbox is active **[docs]** (gateway/sandboxing/docker-backend.md), so `yuno__finish`
+    and every platform tool would be gone; pinned, a sandboxed quick run on
+    `openai/gpt-6-astra` called `exec`, `write` and `yuno__finish` and succeeded, and its
+    `model_calls` row has provider `openai`, model `gpt-6-astra`, tokens and cost
+    **[probed]** (public gateway). The pin is part of the entry and so of
+    `materialized_hash`: a model change re-materialises, the patch nulls the previous ref's
+    pin, and a switch back to Claude deletes the entry's `models`. `thinkingDefault`,
+    `reasoningDefault: off` and `params.maxTokens` are written as for a Claude agent: the
+    gateway's config schema accepts them for these refs (**[probed]** `openclaw config
+    validate` with the 2026.10.3 image, every thinking level); a level the model lacks is
+    mapped to its nearest one (`adaptive` to the provider default, `minimal` to `low`;
+    Astra and GPT-5.6 cannot turn reasoning off) **[docs]** tools/thinking.md; and the
+    ChatGPT subscription route drops `max_output_tokens` **[source]**
+    (`@openclaw/ai` openai-responses-params-internal.ts), so Max tokens has no effect there.
+    Cost: an OpenAI call records the gateway's `usage.cost.total` (rule 10), computed from
+    the per-model `cost` of OpenClaw's OpenAI catalog (input/output USD per MTok: Astra
+    10/50, Terra 2.50/15, Luna 1/6, with cache prices and Astra's long-context tier)
+    **[source]** (openai `openclaw.plugin.json`). A subscription is paid in quota, so the
+    figure is an API-equivalent estimate; the price table has no OpenAI entry (5.2 records
+    the larger of the two, which is then the gateway's), a call the gateway does not price
+    records 0, and run limits, `max_cost_usd` and project budgets count what is recorded.
+    Run lists and the trace name an OpenAI call `openai/<id>`, as the agent names its
+    model. The shipped agents stay on Claude; the seed keeps a model the operator chose
+    (D-080 tracks role, prompt and allowlist only), and `seed --reset-shipped` returns an
+    agent on an OpenAI model to its shipped Claude model (5.16 rule 14).
 
 Tests: T5.14.1 connect over loopback yields all four scopes (compose integration).
 T5.14.2 baseline config is idempotent (init twice → one write). T5.14.3 materialise an
@@ -1133,6 +1177,11 @@ T5.14.4 a scripted turn produces `model_calls`, `tool_calls` and spans with the 
 counts. T5.14.5 abort ends the turn within 10 s. T5.14.6 proxy injects the key, strips
 `display`, records the request id (httptest upstream). T5.14.7 scripted provider streams
 a tool call OpenClaw executes (compose integration). T5.14.8 reasoning events are dropped.
+T5.14.9 (rule 14) the API accepts the three OpenAI refs and refuses another provider or
+OpenAI id with a 422 on `model`; an OpenAI agent's entry has the ref as primary and the
+runtime pin, a Claude agent's is unchanged; each model change changes the hash, moves the
+pin, and a switch back to Claude removes it; an OpenAI call's cost is the gateway's; the
+seed keeps an agent moved to OpenAI and the reset returns it to Claude.
 
 ### 5.15 Chief of Staff: chat-time tools, delegation and report-back
 
@@ -1441,7 +1490,9 @@ Rules:
     workflow (5.15 rule 13); `yuno seed --reset-shipped` (`make seed-reset`) restores the
     shipped agents' role, prompt and allowlist and the instantiated templates'
     definitions to the current shipped versions, keeping ids, bindings, memory and every
-    other setting, for an install that predates this section.
+    other setting, for an install that predates this section. Since D-091 it also returns
+    an agent the operator moved to an OpenAI model to its shipped Claude model; a Claude
+    model of the operator's choosing is kept (5.14 rule 14).
 
 Edge cases: a quick run with `project: true` on an agent without `exec` still gets the
 checkout (file tools work in it). The clone's `runs/<run id>` is a link planted by the
@@ -4811,6 +4862,12 @@ Download through a blob, Preview for small text and images, the empty states).
 Wave 11 (5.26, planned): Fork and Join nodes in the builder with their panels and
 messages; on the run page the fork card with its branches side by side, the join card and
 the header's branch count; the Review panel template in the drawer.
+
+OpenAI models (5.14 rule 14): the agent form's Model select groups the Claude ids under
+"Anthropic" and the OpenAI refs under "OpenAI (your ChatGPT subscription)", with a hint
+under it while an OpenAI model is chosen; a model the agent holds that is no longer
+offered stays shown first. The agents list shows the model as configured, and the runs
+list and the trace name an OpenAI call `openai/<id>`.
 
 ## 8. Docker and Makefile
 

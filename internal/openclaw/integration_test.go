@@ -176,6 +176,25 @@ func TestIntegrationGateway(t *testing.T) {
 	}
 	t.Logf("exec policy: %s", v.ExecPolicy)
 
+	// D-091 against the real merge rules: an OpenAI model with its runtime pin, another one
+	// (the old ref's pin nulled), then back to Claude (the per-model settings deleted). No
+	// sign-in is needed: nothing here runs a turn.
+	for _, model := range []string{"openai/gpt-6-astra", "openai/gpt-5.6-luna", "claude-haiku-5-5"} {
+		a.Model = model
+		if a.MaterializedHash, err = Materialize(ctx, c, stateDir, a, nil); err != nil {
+			t.Fatalf("switch to %s: %v", model, err)
+		}
+		if v, err = Runtime(ctx, raw, stateDir, a); err != nil || !v.InSync {
+			t.Fatalf("runtime on %s: %+v %v", model, v, err)
+		}
+		var e map[string]any
+		_ = json.Unmarshal(v.ConfigEntry, &e)
+		models, _ := e["models"].(map[string]any)
+		if IsOpenAIModel(model) != (len(models) == 1 && models[model] != nil) {
+			t.Fatalf("models on %s: %v", model, e["models"])
+		}
+	}
+
 	// A session created by sessions.patch exposes the effective tool list; log it so the
 	// MCP tool name prefix can be read off once the api serves /mcp.
 	key := "agent:" + id + ":yuno-itest"

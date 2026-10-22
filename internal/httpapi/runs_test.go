@@ -320,6 +320,15 @@ func TestListRunsParticipants(t *testing.T) {
 	}
 	overridden := newRun(snapshot("scripted/scripted-1"))
 	plain := newRun(snapshot(""))
+	// An OpenAI call is listed as the agent names its model (D-091).
+	openai := newRun(snapshot(""))
+	n3 := &store.RunNode{RunID: openai.ID, NodeID: "code", AgentID: &coder.ID}
+	if err := store.CreateRunNode(ctx, pool, n3); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertModelCall(ctx, pool, &store.ModelCall{RunID: openai.ID, RunNodeID: n3.ID, Provider: "openai", Model: "gpt-6-astra", StartedAt: t0}); err != nil {
+		t.Fatal(err)
+	}
 
 	code, body := do(t, ts, http.MethodGet, "/api/runs?limit=500", "")
 	if code != http.StatusOK {
@@ -348,5 +357,8 @@ func TestListRunsParticipants(t *testing.T) {
 	}
 	if r := find(plain.ID); !slices.Equal(r.AgentNames, names) || !slices.Equal(r.Models, []string{"claude-sonnet-5-5", "claude-opus-5-5"}) {
 		t.Fatalf("plain: agents %v models %v", r.AgentNames, r.Models)
+	}
+	if r := find(openai.ID); !slices.Equal(r.Models, []string{"openai/gpt-6-astra"}) {
+		t.Fatalf("openai: models %v", r.Models)
 	}
 }

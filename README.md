@@ -105,7 +105,7 @@ ones that matter:
 | `make probe-approval` | Verifies the gateway's plugin approval calls the side-effect gate relies on |
 | `make probe-sandbox` | Verifies a per-agent sandbox image and network override on the running gateway, the mechanism project runs use |
 | `make seed` | Creates the eight factory agents the shipped templates name (Analyst, Scout, Architect, Planner, Builder, Code Reviewer, Doc Auditor, Integrator) and the Chief of Staff, and deletes the nine retired demo agents (Coder, Reviewer, Deployer, Researcher, Critic, Writer and the three panel reviewers) unless a workflow of yours still uses one; idempotent |
-| `make seed-reset` | `make seed`, then restores the shipped agents' prompts and allowlists and the template workflows to the shipped versions, keeping everything else |
+| `make seed-reset` | `make seed`, then restores the shipped agents' prompts and allowlists (and the Claude model of any you moved to OpenAI) and the template workflows to the shipped versions, keeping everything else |
 | `make eval` | Run the evaluation suite offline with the scripted provider against the running stack; `make eval-baseline` / `make eval-final` store the report |
 | `make lint` | `go vet`, `staticcheck`, `eslint`, `tsc` |
 | `scripts/mutation-check.sh` | Breaks a line of code, runs a test command, restores the file, and says whether the test caught it |
@@ -213,6 +213,25 @@ The model upstream is `MODEL_UPSTREAM=anthropic` with `ANTHROPIC_API_KEY`, or
 models through the Anthropic messages format, and the proxy rewrites model ids
 (`claude-opus-5-5` becomes `anthropic/claude-opus-5.5`) and the auth header, so agents
 are configured identically either way.
+
+OpenAI models (D-091): an agent can run on `openai/gpt-6-astra`, `openai/gpt-5.6-terra`
+or `openai/gpt-5.6-luna` with your own ChatGPT/Codex subscription instead of the
+Anthropic key. Sign the gateway in once, on the host (on the public host too):
+
+    docker exec -it yuno-openclaw openclaw models auth login --provider openai --device-code --agent main
+
+It prints a code to enter at the ChatGPT address it shows. The sign-in is kept in the
+gateway's state directory (`data/openclaw`) under the default agent, which every agent
+shares, so any agent set to an OpenAI model uses it; the api never sees it. Then choose the
+model in the agent's form, under "OpenAI (your ChatGPT subscription)". The shipped agents
+stay on Claude, a seed keeps the model you chose, and `make seed-reset` moves an agent you
+switched back to its shipped Claude model. A subscription is paid in quota, so the cost the
+run pages show for these calls is the gateway's estimate at OpenAI's API prices; budgets
+and cost limits count it. In the same container, `openclaw models auth list --provider
+openai --agent main` shows the sign-in and `openclaw models auth logout <profile id> --yes`
+removes it. Max tokens has no effect on the subscription route, and a thinking level the
+model lacks is mapped to the nearest one it has.
+
 Telegram: `TELEGRAM_BOT_TOKEN` from BotFather and `TELEGRAM_ALLOWED_USER_IDS` (numeric
 ids; only these users can talk to the bot or approve from chat). `TELEGRAM_MODE=webhook`
 is the verified-inbound mode: `make tunnel` starts a cloudflared quick tunnel to a
@@ -574,11 +593,13 @@ flowchart LR
   end
   TG["Telegram"]
   LLM["Model provider<br/>(Anthropic or OpenRouter)"]
+  OAI["OpenAI<br/>(your ChatGPT sign-in, held by the gateway)"]
   UI -- "HTTP + SSE" --> WEB --> API
   API <--> PG
   API -- "WebSocket RPC (loopback)" --> GW
   GW -- "MCP: yuno__* tools (bearer)" --> API
   GW -- "model proxy (loopback, key injected)" --> API --> LLM
+  GW -- "openai/* models" --> OAI
   GW --> SBX
   API -- "deploy_release" --> DT
   TG <--> GW

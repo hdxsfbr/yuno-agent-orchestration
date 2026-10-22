@@ -10,7 +10,8 @@ Rules referenced as 5.x are in `docs/DESIGN.md`; decisions as D-nnn in `DECISION
   platform tokens (`API_TOKEN`, `YUNO_MCP_TOKEN`, `OPENCLAW_GATEWAY_TOKEN`,
   `PROJECT_TOKEN_KEY`), the optional GitLab token, and the git token of every project
   (stored in the database AES-GCM encrypted under `PROJECT_TOKEN_KEY`; `PROJECT_GIT_TOKEN`
-  only bootstraps the first project).
+  only bootstraps the first project), and the operator's ChatGPT/Codex sign-in when one
+  is made, which the gateway holds (D-091).
 - The host: Docker socket, the state directory with every agent's workspace, the steps'
   private workspaces and the run repositories, Postgres.
 - The side effects: releases on the deploy target, merge requests on GitLab, branches
@@ -29,6 +30,7 @@ Rules referenced as 5.x are in `docs/DESIGN.md`; decisions as D-nnn in `DECISION
 | Browser | api | the operator's browser | optional `API_TOKEN` bearer; no accounts (single operator) |
 | MCP | api | the gateway's MCP client | `YUNO_MCP_TOKEN` bearer, loopback only |
 | Model proxy | api | the gateway | loopback only; the provider key never reaches the gateway (5.14 rule 8) |
+| OpenAI sign-in | gateway | agent code in the sandbox | the credential is in the gateway's state directory, which no sandbox mounts; any agent on an `openai/*` model uses it, and the api never holds it (5.14 rule 14) |
 
 ## Threats and mitigations
 
@@ -204,6 +206,25 @@ config endpoint redacts the bot token; `.env` is git-ignored and `.env.example` 
 names and defaults only; the coordinator's pre-commit scan catches token-shaped strings
 (it caught one test fixture in wave 3). Residual risk: a model may echo a secret it was
 given in a task; tasks should not contain secrets.
+
+**The ChatGPT sign-in on the gateway (D-091).** `openclaw models auth login --provider
+openai --agent main` stores an OAuth credential for the operator's subscription in the
+gateway's state directory (`data/openclaw` on the host), as the default agent's shared
+credential. Unlike the Anthropic key, which only the api holds, it lives in the gateway
+container and on the host's disk, and once it is made every agent on the gateway can use
+it: any agent set to an OpenAI model spends the subscription's quota, as can any other
+OpenClaw path with an OpenAI route. OpenAI calls do not pass the api's proxy, so its key
+handling, its request log line and `MODEL_PROXY_RATE_PER_MINUTE` do not apply to them.
+Mitigation: agent code runs in the sandbox with no network and only its session's
+private workspace mounted, never the state directory (5.14 rule 12, 5.30), so an agent
+cannot read the credential; only an operator can switch an agent to an OpenAI model
+(through the API); the run limits, the agents' cost caps and project budgets count the
+gateway's cost estimate for these calls (5.14 rule 14); `reasoningDefault: off` and the
+engine's drop of reasoning events still keep chain of thought out of storage; the operator
+removes the sign-in with `openclaw models auth logout`. Residual risk: whoever can read the
+host's `data/openclaw` or reach the gateway container (the Docker socket included) holds the
+subscription; the recorded cost is an estimate at API prices, not the quota the
+subscription actually uses, so a budget is an approximation of quota spent.
 
 **Chain-of-thought exposure.** Mitigation: reasoning streams from the gateway are never
 stored or shown; the proxy requests no reasoning display (5.14 rule 11); a trace test

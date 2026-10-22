@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -39,12 +40,33 @@ const ProviderID = "yuno-anthropic"
 // ScriptedProviderID is the deterministic offline provider (DESIGN 5.14 rule 9).
 const ScriptedProviderID = "scripted"
 
-// ModelRef returns the OpenClaw model reference for an Anthropic model id.
-func ModelRef(modelID string) string { return ProviderID + "/" + modelID }
+// OpenAIProviderID is OpenClaw's own OpenAI provider. Its calls go from the gateway to
+// OpenAI with the operator's ChatGPT sign-in, not through the api's proxy (D-091).
+const OpenAIProviderID = "openai"
+
+// ModelRef returns the OpenClaw model reference for an agent's model: an Anthropic id
+// goes through the api's proxy provider, an openai/<id> ref is used as given.
+func ModelRef(model string) string {
+	if IsOpenAIModel(model) {
+		return model
+	}
+	return ProviderID + "/" + model
+}
+
+// IsOpenAIModel reports whether an agent's model is an OpenAI ref ("openai/<id>").
+func IsOpenAIModel(model string) bool { return strings.HasPrefix(model, OpenAIProviderID+"/") }
 
 // ManagedModels are the Anthropic models exposed through the proxy, with the price
 // table OpenClaw uses for its own cost accounting (USD per million tokens).
 var ManagedModels = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"}
+
+// OpenAIModels are the OpenAI refs an agent may use: the ones OpenClaw 2026.10.3 lists
+// for a ChatGPT/Codex subscription (providers/openai/setup.md, route summary). OpenClaw's
+// own catalog prices them, so the gateway reports their cost (D-091).
+var OpenAIModels = []string{"openai/gpt-6-astra", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna"}
+
+// AgentModels are the models an agent may be configured with, Anthropic ones first.
+func AgentModels() []string { return append(slices.Clone(ManagedModels), OpenAIModels...) }
 
 // Baseline returns the managed keys as a nested map keyed by dotted path. Paths listed
 // here are owned by the platform and overwritten on every inputs change; everything

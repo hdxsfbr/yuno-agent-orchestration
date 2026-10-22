@@ -95,6 +95,38 @@ describe("AgentForm validation", () => {
   });
 });
 
+describe("AgentForm models", () => {
+  const model = () => screen.getByLabelText(/^Model/) as HTMLSelectElement;
+  const group = (label: string) => Array.from(model().querySelectorAll(`optgroup[label="${label}"] option`)).map((o) => o.textContent);
+
+  it("offers the Claude models and the OpenAI models of the ChatGPT subscription, each under its provider", () => {
+    setup();
+    expect(group("Anthropic")).toEqual(["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+    expect(group("OpenAI (your ChatGPT subscription)")).toEqual(["openai/gpt-6-astra", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna"]);
+    expect(model().value).toBe("claude-opus-5-5");
+    expect(screen.queryByText(/ChatGPT account signed in on the gateway/)).toBeNull();
+  });
+
+  it("submits an OpenAI model as chosen and says whose account it runs on", () => {
+    const { onSubmit } = setup();
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: "Builder" } });
+    fireEvent.change(model(), { target: { value: "openai/gpt-6-astra" } });
+    expect(screen.getByText("Uses the ChatGPT account signed in on the gateway. Costs are estimates at OpenAI's API prices.")).not.toBeNull();
+    submit();
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({ name: "Builder", model: "openai/gpt-6-astra" });
+  });
+
+  it("shows an agent's OpenAI model selected, and a model no longer offered as it is", () => {
+    setup({ agent: saved({ model: "openai/gpt-5.6-luna" }) });
+    expect(model().value).toBe("openai/gpt-5.6-luna");
+    cleanup();
+    setup({ agent: saved({ model: "claude-opus-5" }) });
+    expect(model().value).toBe("claude-opus-5");
+    expect(model().options[0].textContent).toBe("claude-opus-5");
+    expect(group("Anthropic")).not.toContain("claude-opus-5");
+  });
+});
+
 describe("AgentForm server errors", () => {
   it("renders 422 details next to the fields they name", () => {
     setup({ serverErrors: { name: ["name already taken"], "limits.max_steps": ["must be at least 1"] }, formError: "validation failed" });

@@ -52,6 +52,17 @@ const listCalls = () => api.made("GET", "/api/agents").length;
 const sleep = (ms: number) => act(async () => void (await new Promise((r) => setTimeout(r, ms))));
 const streamOpen = () => waitFor(() => expect(api.hasStream("/api/events")).toBe(true));
 
+describe("Model column", () => {
+  it("shows each agent's model as it is configured, an OpenAI one with its provider", async () => {
+    agents = [agent({}), agent({ id: "a2", name: "Builder", model: "openai/gpt-6-astra" })];
+    renderPage();
+    const coder = await cells("Coder");
+    const model = column("Model");
+    expect(coder[model].textContent).toBe("claude-opus-5-5");
+    expect((await cells("Builder"))[model].textContent).toBe("openai/gpt-6-astra");
+  });
+});
+
 describe("Channel column", () => {
   it("names the channel an agent is reached on, and shows a dash for one that has none", async () => {
     agents = [agent({ channels: ["telegram"] }), agent({ id: "a2", name: "Reviewer", channels: [] })];

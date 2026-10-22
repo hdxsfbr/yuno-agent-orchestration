@@ -5,7 +5,8 @@
 //	yuno seed           create the demo agents and the Chief of Staff, instantiate the
 //	                    shipped templates once, bind the chief to Telegram when unbound (idempotent);
 //	                    --reset-shipped also restores the shipped agents' prompts and allowlists
-//	                    and the instantiated templates to the current shipped versions
+//	                    (and the Claude model of one moved to OpenAI) and the instantiated
+//	                    templates to the current shipped versions
 //	yuno openclaw-init  write the baseline openclaw.json into the state directory, create its
 //	                    sandboxes/ folder, and exit
 //	yuno deploytarget   local release store the deploy tool publishes to

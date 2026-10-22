@@ -6,6 +6,33 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-21
 
+**D-091 Agents can run on OpenAI models through the operator's own ChatGPT sign-in on the
+gateway, with OpenClaw's embedded runtime pinned.** (Andre, 2026-10-21: "Let Yuno use OpenAI
+models: support openai/* model names per agent." His Anthropic API credits ran out; he has a
+ChatGPT/Codex subscription.) An agent's `model` is a Claude id, as before, or one of
+`openai/gpt-6-astra`, `openai/gpt-5.6-terra` and `openai/gpt-5.6-luna`, the refs OpenClaw
+2026.10.3 lists for a subscription; both are exact lists, and any other provider prefix or
+OpenAI id is a 422 on `model`. The ref is written to the agent's entry as given, and the
+entry pins `models["<ref>"].agentRuntime.id: "openclaw"`: left to choose, a subscription
+route may run on the Codex app-server runtime, which turns off user MCP servers while a
+sandbox is active, and every agent here is sandboxed and needs `yuno__finish`. A throwaway
+agent on the public gateway proved the pinned route: a sandboxed quick run called `exec`,
+`write` and `yuno__finish` and succeeded, with the call recorded under provider `openai`.
+The operator signs in once on the host (`openclaw models auth login --provider openai
+--device-code --agent main` in the gateway container); the credential is the default
+agent's, shared by every agent, and never reaches the api. Cost: the gateway prices OpenAI
+calls from its own catalog, at OpenAI's API prices, and the engine already records the larger
+of the gateway's figure and its own table's, which has no OpenAI entry; so the recorded cost
+is the gateway's API-equivalent estimate, budgets keep counting it, and no prices were added
+to `internal/model/prices.json`. The shipped agents stay on Claude; a seed keeps the model an
+operator chose, and `seed --reset-shipped` moves an agent on an OpenAI model back to its
+shipped Claude model while keeping a Claude model the operator chose. Alternatives rejected:
+an OpenAI API key through the api's proxy (Andre has a subscription, not API credits);
+leaving the runtime to OpenClaw (the platform tools would disappear on the Codex runtime);
+recording 0 for OpenAI calls (cost limits and budgets would stop guarding a runaway agent);
+a reset that restores every shipped model (it would undo an operator's Claude model choices,
+which the reset has always kept).
+
 **D-090 The Code Reviewer makes one review and then only checks it; it reads, it runs
 nothing.** (Andre, 2026-10-21: "The reviewer will make all of its observations on the first
 review it sends, and then additional follow-ups need to stick with those observations ... The

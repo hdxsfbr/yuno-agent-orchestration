@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { Approval, ModelCall, RunNode, ToolCall } from "@/lib/api";
+import { callModel, type Approval, type ModelCall, type RunNode, type ToolCall } from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros } from "@/lib/format";
 import { isQuestion, questionOutcome } from "@/lib/question";
 import { buildTimelineEntries, type RetryMark, type RunView, type TimelineBranch, type TimelineEntry, type TimelineItem, type TimelineNode } from "@/lib/trace";
@@ -299,7 +299,7 @@ function ModelCallRow({ call, compact }: { call: ModelCall; compact: boolean }) 
       title={
         <>
           <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">Model call</span>
-          <span className="font-mono font-medium">{call.model}</span>
+          <span className="font-mono font-medium">{callModel(call)}</span>
           {call.attempt > 1 ? <Badge tone="amber">attempt {call.attempt}</Badge> : null}
         </>
       }
