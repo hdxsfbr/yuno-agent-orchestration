@@ -5318,10 +5318,22 @@ Rules:
 6. **Holding tickets back.** A released wave's ticket with an unsatisfied prerequisite stays
    `pending` and unlabelled in every release path. It is labelled once satisfied, and its
    edges are then cleared.
-7. **Parking runs.** A run that would work on a held merge request is created `paused` with
-   park reason `dependency` and the reason; no worker is used. Its resume or retry is
-   refused, "blocked by <reason>; remove the dependency to override". The diagnosis reports
-   it as `blocked`.
+7. **Parking runs.** The check sits in one place, the engine's trigger, so it covers every
+   path that names a merge request: `POST /api/runs`, `delegate_task`, a ticket's change
+   request and schedules.
+   - A run that would work on a held merge request is created `paused` with
+     `runs.park_reason = dependency` and the reason (`park_detail`, migration 0034). No
+     worker is used.
+   - The trigger locks the request's row before it reads the edges, and the watcher's
+     release holds the same row, so the two cannot interleave.
+   - A resume or a retry of a run on a held request (including the run that opened it) is
+     refused 409 `dependency_blocked`, "blocked by <reason>; remove the dependency to
+     override", as a rejected command. An operator's own pause stays the operator's to
+     resume.
+   - The watcher's release re-queues the request's dependency-parked runs in one statement
+     (epoch + 1). Each step's task carries the note (`resume_note`) until one step
+     succeeds.
+   - The diagnosis reports a parked run as `blocked` with what holds the request now.
 8. **The watcher** runs at the end of every merge-request sync pass, and right after a manual
    sync that changed a prerequisite. For each held open request, once every prerequisite is
    satisfied:
@@ -5381,8 +5393,11 @@ for up to one sync interval after this release.
 
 Tests: TestDependencyEdges, TestPrerequisiteSatisfied, TestTicketNotReleasedUntilSatisfied,
 TestMergeRequestDependencyRoutes, TestResumeAfterCIOnNewSHA, TestCIFailedKeepsBlocked,
-TestDependentConflictsKeepBlocked, TestDependencyAcceptance (!24 waits for !17: !17 merges and
-passes on its merge commit, !24 is updated from main, passes on its new head, and is let go),
+TestDependentConflictsKeepBlocked, TestRunOnDependentParks, TestResumeRefusedWhileBlocked,
+TestRequeuedRunCarriesNote, TestDependencyAcceptance and the acceptance
+TestDependencyAcceptanceResumesRun (a run on !24 parks; !17 merges and passes on its merge
+commit; !24 is updated from main and passes on its new head; the run is queued once with the
+note),
 TestUpdateFromDefault, TestUpdateFromDefaultRecords, TestUpdateFromDefaultEndpoint,
 TestStaleCheckInvalidated, TestOpenMergeRequestPushInvalidatesTheCheck,
 TestMergeSHAPersistedOnSync, TestMergeNeedsExactSHA, TestMergeRequestDiffChecksLog,
