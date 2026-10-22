@@ -501,35 +501,170 @@ Tests:
 Out of scope: checkpoints inside a visit (one commit per visit end stays); multi-process
 workers (one api process; the lease makes a second one safe but it is not deployed).
 
-## Wave 3: dependencies and merge requests (outline)
+## Wave 3: dependencies and merge requests
 
-- **Edges.**
-  - `dependencies(dependent_type ticket|merge_request, dependent_id, prerequisite_mr_id,
-    created_by)`.
-  - Sources: the Planner's ticket `depends_on`, and an operator or Chief `PUT
-    /api/merge-requests/{id}/dependencies`.
-- **Satisfied** means the prerequisite is merged and the default branch's pipeline for its
-  exact `merge_sha` passed. This also fixes `merge_sha` not being stored on sync.
-- **Gate.**
-  - Intake does not release a dependent ticket.
-  - A run on a dependent merge request parks "waiting on !N", reusing the park and resume
-    machinery.
-  - A dependency watcher, on the MR sync tick, resumes eligible work. No agent polls.
-- **Update from default** (platform-only, no agent):
-  - Fetch, then merge the default branch into the MR branch in a platform workspace.
-  - A conflict is recorded on the MR record and the work stays blocked "conflicts in
-    <files>".
-  - Otherwise push with the expected head (`git push` refuses if the branch moved). Then
-    reset the MR's `ci_status` to pending with the new `head_sha`, which invalidates the
-    stale check, and wait for a pipeline on that exact SHA to pass before resuming.
-- **MR reads:**
-  - provider diff;
-  - mergeability (GitLab `detailed_merge_status` and `has_conflicts`, GitHub `mergeable`);
-  - exact-SHA pipeline and checks (GitLab `pipelines?sha=`);
-  - jobs and job logs (redacted and trimmed);
-  - merge with the expected `sha`.
-- Acceptance: !24 blocked until !17 is merged with green CI, then automatically updated
-  from main, then CI green on the new SHA, then resumed.
+Purpose: dependent work waits for its prerequisite to be merged and green on the exact
+commit, is brought up to date with the default branch by the platform, and resumes by
+itself. No agent spends turns polling.
+
+Inputs:
+- `merge_requests` rows and provider reads:
+  - GitLab: MR fields `detailed_merge_status`, `has_conflicts`, `sha`;
+    `pipelines?sha=<sha>&ref=<branch>`; pipeline jobs; job trace; MR diffs; merge with
+    `sha`.
+  - GitHub: PR `mergeable`, `mergeable_state`, `head.sha`; check-runs and the combined
+    status for a SHA; Actions job logs; PR files; merge with `sha`.
+- The Planner's ticket `depends_on`.
+- The dependency routes.
+- The project's token, used for the platform's own git push.
+
+Units: SHAs are full 40-character hex, compared exactly. Sizes are bytes. Times are UTC.
+
+Rules:
+
+Edges
+1. Table `dependencies(id, project_id, dependent_kind ticket|merge_request,
+   dependent_id, prerequisite_kind ticket|merge_request, prerequisite_id, source
+   planner|operator|chief, created_by jsonb, created_at)`.
+   - Unique on (dependent, prerequisite).
+   - A self-edge is refused, as is an edge that would close a cycle: "would make a cycle:
+     <path>".
+2. **Planner:** the `publish_tickets` ticket input gains `depends_on: [ticket id]`. Each id
+   must be a ticket of the same plan in the same or an earlier wave; otherwise it is
+   refused: "T9 depends on T12, which is in a later wave". Edges are stored ticket to
+   ticket.
+3. **Operator and Chief:** `GET` and `PUT /api/merge-requests/{id}/dependencies`
+   `{prerequisites: [merge request id]}` replace that MR's operator-set prerequisites
+   (risk routine). Planner edges are listed and are not editable there.
+
+Satisfied
+4. A merge-request prerequisite is satisfied when all of these hold:
+   - its state is `merged`;
+   - its `merge_sha` is known (this wave persists `merge_sha` from the sync, today's bug);
+   - the default branch's CI for exactly `merge_sha` has passed (GitLab: a pipeline with
+     that `sha` on the default ref has status `success`; GitHub: every check-run and the
+     combined status for that SHA are success, neutral or skipped).
+
+   If the project has no CI (no pipeline or check for the default branch in its last 20
+   commits) and none appears for `merge_sha` within 15 minutes of the merge, the
+   prerequisite is satisfied with the note "no CI configured".
+
+   A ticket prerequisite is satisfied when its merge request is. A ticket closed without a
+   merge never is: the dependent is blocked "prerequisite T9 was closed without merging",
+   and the operator is told.
+5. Unsatisfied reasons, in order: "!17 is not merged", "!17 merged; CI on <sha7> is
+   <pending|running|failed>", "!17 merged; the merge commit is not known yet".
+
+Gate
+6. **Tickets:** a released wave's ticket with an unsatisfied prerequisite is not labelled
+   for intake. The wave watcher labels it when it is satisfied. A new ticket run clones the
+   default branch, so it needs no update.
+7. **Runs on a merge request:** a run that would work on a dependent open merge request
+   (request changes, `delegate_task` with `merge_request`, a retry of such a run) is
+   created in status `paused` with park reason `dependency` and the reason text, and no
+   worker is used.
+   - Operator or Chief resume of such a run is refused, "blocked by <reason>; remove the
+     dependency to override".
+   - The dependency is removed through rule 3 (operator or Chief edges) or a plan revision
+     (Planner edges).
+8. **The dependency watcher** runs on the merge-request sync tick, and right after a sync
+   that changed a prerequisite's state or CI. For every blocked dependent whose
+   prerequisites are all satisfied:
+   - **(a) An open dependent merge request:** update from the default branch (rules
+     9-11), then wait for CI on the new head (rule 12), then re-queue its paused
+     dependency runs with the task note "Its prerequisite !17 is merged; the platform
+     merged <default> into this branch (<sha7>) and CI passed."
+   - **(b) An unreleased ticket:** label it (rule 6).
+
+Update from the default branch (the platform alone; no agent)
+9. `POST /api/merge-requests/{id}/update-from-default {expected_head_sha}` (routine) and
+   the watcher use one function:
+   - Fetch the branch and the default branch into a throwaway bare repository, with the
+     project's token.
+   - If the remote branch head differs from `expected_head_sha` (the watcher passes the
+     record's `head_sha`), answer 409 `head_moved` `{current}`.
+   - Merge the default branch into the branch:
+     - Already contained: outcome `up_to_date`.
+     - Conflicts: outcome `conflicts`, recorded on the merge request (`conflicts: {files,
+       at, base_sha}`). Nothing is pushed, and the dependent stays blocked "conflicts with
+       <default> in <files>".
+     - Otherwise: a two-parent merge commit, authored by the platform.
+10. The push is not forced: `<sha>:refs/heads/<branch>`, so a branch that moved since the
+    fetch is refused by the provider. That is reported as `head_moved`, and the next
+    watcher pass starts again from the new head.
+11. After a successful push the record is updated in one write, which invalidates the stale
+    check:
+    - `head_sha = <new sha>`;
+    - `ci_status = pending`, `ci_sha = <new sha>`, `ci_pipeline_id = null`;
+    - `updated_from_default_at = now()`.
+
+    An event `merge_request.updated` is emitted.
+12. Dependent work resumes only when CI for exactly `head_sha` has passed. A failure keeps
+    it blocked: "CI failed on <sha7>: <pipeline url>". The operator is told once per SHA
+    (a run-report style message to the Chief's conversation).
+
+Merge-request reads and the merge guard
+13. The merge-request record gains `ci_sha`, `ci_pipeline_id`, `ci_url`, `mergeable`
+    (bool, null when unknown), `merge_status` (the provider's word), `conflicts` (jsonb),
+    `updated_from_default_at` and `merge_sha` (now read and written).
+    - The sync reads GitLab CI for exactly the head SHA (`pipelines?sha=`), not "the newest
+      MR pipeline".
+14. New reads (risk read):
+    - `GET /api/merge-requests/{id}/diff`: provider files and patches, redacted with
+      `obs.Redact`, at most 256 KiB, then `truncated: true`.
+    - `GET /api/merge-requests/{id}/checks`: the pipeline or check-runs for `head_sha`, with
+      jobs `{id, name, stage, status, url}`.
+    - `GET /api/merge-requests/{id}/jobs/{job}/log?tail_bytes=` (default 64 KiB, at most
+      1 MiB): the job's log tail, redacted.
+15. Merge (the existing route, risk destructive):
+    - It requires `ci_status = passed` with `ci_sha = head_sha` (`none` is accepted only
+      under rule 4's "no CI configured").
+    - It sends the provider the expected `sha`, so the provider refuses a head that moved.
+    - It answers 409 `ci_not_passed` or `head_moved`.
+
+Edge cases:
+- A prerequisite merged before the dependency was declared is evaluated on the next
+  watcher pass and may be satisfied at once.
+- A dependent merge request whose branch already contains the prerequisite's merge commit
+  is `up_to_date`, and waits only for CI on its current head.
+- A dependent merge request that is closed or merged meanwhile: its edges stay for history
+  and nothing resumes.
+- Two dependents of one prerequisite are updated one after the other, each with its own
+  expected head.
+
+Time: the 15-minute "no CI configured" window counts from `merged_at`. The watcher runs at
+the sync interval (120 s); rules 8 and 12 are not faster than one sync.
+
+Failure handling: a provider error during a watcher pass is recorded in
+`last_sync_error`, the dependent stays blocked, and the next pass tries again. One
+dependent failing does not stop the others.
+
+Consistency: rule 11's single write keeps the head and the check together. The watcher
+reads the record fresh before each update.
+
+Outputs: the reason text on the paused run, the diagnosis (`blocked`) and the merge-request
+record; events; one operator message per failed SHA or per conflict.
+
+Tests:
+- TestDependencyEdges (unique, self-edge, cycle, Planner later-wave refused).
+- TestPrerequisiteSatisfied (each rule 4 clause on both sides; the no-CI window at 14 and
+  16 minutes).
+- TestTicketNotReleasedUntilSatisfied.
+- TestRunOnDependentParks, TestResumeRefusedWhileBlocked.
+- TestUpdateFromDefault (up to date, clean push, conflict recorded, head moved before the
+  fetch, push refused because the head moved).
+- TestStaleCheckInvalidated.
+- TestResumeAfterCIOnNewSHA, TestCIFailedKeepsBlocked.
+- TestMergeSHAPersistedOnSync.
+- TestMergeNeedsExactSHA.
+- TestMergeRequestDiffChecksLog (redaction, caps).
+- **Acceptance, TestDependencyAcceptance** (the fake forge): !24 depends on !17; a run on
+  !24 parks; !17 merges and the default pipeline passes on its `merge_sha`; the watcher
+  updates !24 from main (push), `ci_status` goes pending, then the fake pipeline passes on
+  the new SHA; the run resumes with the note.
+
+Out of scope: forge webhooks (the sync tick is the trigger); rebasing (merge only, as D-088);
+required-check policies beyond "all checks for the SHA".
 
 ## Wave 4: admin parity completion (outline)
 
