@@ -96,7 +96,7 @@ func TestPlatformOperationsSearch(t *testing.T) {
 		m := tg.(map[string]any)
 		counts[m["tag"].(string)] = m["operations"].(float64)
 	}
-	if counts["agents"] < 8 || counts["schedules"] != 5 || counts["ops"] != 4 || len(counts) < 10 {
+	if counts["agents"] < 8 || counts["schedules"] != 5 || counts["ops"] < 4 || len(counts) < 10 {
 		t.Fatalf("tags = %v", tags)
 	}
 

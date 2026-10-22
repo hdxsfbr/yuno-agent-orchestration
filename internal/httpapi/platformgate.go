@@ -342,9 +342,17 @@ func (s *Server) platformRisk(ctx context.Context, op *tools.PlatformOperation, 
 	var reasons []string
 	switch op.ID {
 	case "createAgent":
+		// Guardrails only restrict, so a new agent's guardrails need no approval; its tools,
+		// and interaction rules looser than the default policy, do.
 		var in agentInput
-		if json.Unmarshal(body, &in) == nil && (len(in.ToolAllowlist) > 0 || len(in.InteractionRules) > 0 || !emptyGuardrails(in.Guardrails)) {
-			reasons = append(reasons, "it gives a new agent tools, interaction rules or guardrails")
+		if json.Unmarshal(body, &in) != nil {
+			break
+		}
+		if len(in.ToolAllowlist) > 0 {
+			reasons = append(reasons, "it gives a new agent tools")
+		}
+		if s.loosensRules(nil, in.InteractionRules) {
+			reasons = append(reasons, "it gives a new agent interaction rules looser than the default")
 		}
 	case "updateAgent":
 		if params["id"] == who.ID {
@@ -430,10 +438,6 @@ func contractPathValues(contractPath, escapedPath string) map[string]string {
 		}
 	}
 	return out
-}
-
-func emptyGuardrails(g store.Guardrails) bool {
-	return g.MaxCostUSDPerRun == 0 && g.MaxRunsPerHour == 0 && len(g.BlockedTools) == 0 && len(g.BlockedInputPatterns) == 0
 }
 
 // addsTools reports a tool in next that cur does not allow, prefix or not.

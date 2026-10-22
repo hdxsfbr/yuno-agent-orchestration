@@ -49,8 +49,10 @@ func TestIdempotencyReplay(t *testing.T) {
 		*replayed[1].Status != http.StatusCreated {
 		t.Fatalf("audit rows = %+v", replayed)
 	}
-	// Keys are per actor: the Chief's use of the same key is its own first use.
-	code, hdr, _ = send(t, h, actor.With(ctx, chiefActor("chief-"+uniqueSuffix())), http.MethodPost, "/api/runs", testRunBody, key)
+	// Keys are per actor: the Chief's use of the same key is its own first use. Its body
+	// leaves out script_id, which the platform gate refuses to agents (PARITY row 32).
+	code, hdr, _ = send(t, h, actor.With(ctx, chiefActor("chief-"+uniqueSuffix())), http.MethodPost, "/api/runs",
+		`{"agent_id":"ag","task":"t","model":"scripted/scripted-1"}`, key)
 	if code != http.StatusCreated || hdr.Get("Idempotency-Replayed") != "" || len(fe.triggers) != 2 {
 		t.Fatalf("another actor: %d %v, triggers %d", code, hdr, len(fe.triggers))
 	}

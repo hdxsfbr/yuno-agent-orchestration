@@ -91,8 +91,11 @@ func TestAuditRowPerMutation(t *testing.T) {
 	}
 	put(ctx, "audit-ui-"+sfx, map[string]string{"X-Yuno-Client": "web"})
 	put(ctx, "audit-api-"+sfx, nil)
-	// The Chief's dispatch carries its actor; a header cannot change it.
-	put(actor.With(ctx, chiefActor("chief-"+sfx)), "audit-chief-"+sfx, map[string]string{"X-Yuno-Client": "web"})
+	// The Chief's dispatch carries its actor; a header cannot change it. The platform gate
+	// wants its key and the version it read (platform control A3).
+	_, got, _ := send(t, h, ctx, http.MethodGet, path, "", nil)
+	put(actor.With(ctx, chiefActor("chief-"+sfx)), "audit-chief-"+sfx, map[string]string{"X-Yuno-Client": "web",
+		"Idempotency-Key": "audit-chief-" + sfx, "If-Match": got.Get("ETag")})
 	if code, _, _ := send(t, h, ctx, http.MethodGet, path, "", nil); code != http.StatusOK {
 		t.Fatalf("GET %d", code)
 	}

@@ -581,7 +581,7 @@ func TestPrivilegedNeedsApproval(t *testing.T) {
 		privileged bool
 	}{
 		{"a new agent with tools", "createAgent", "/api/agents", map[string]any{"name": "n", "model": "m", "tool_allowlist": []string{"finish"}}, true},
-		{"a new agent with guardrails", "createAgent", "/api/agents", map[string]any{"name": "n", "model": "m", "guardrails": map[string]any{"max_runs_per_hour": 3}}, true},
+		{"a new agent with only guardrails", "createAgent", "/api/agents", map[string]any{"name": "n", "model": "m", "guardrails": map[string]any{"max_runs_per_hour": 3}}, false},
 		{"a new agent with nothing", "createAgent", "/api/agents", map[string]any{"name": "n", "model": "m"}, false},
 		{"adding a tool", "updateAgent", "/api/agents/" + other.ID, agent(func(m map[string]any) { m["tool_allowlist"] = []string{"read", "finish", "exec"} }), true},
 		{"removing a tool", "updateAgent", "/api/agents/" + other.ID, agent(func(m map[string]any) { m["tool_allowlist"] = []string{"read"} }), false},
