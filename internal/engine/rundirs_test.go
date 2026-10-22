@@ -2,12 +2,16 @@ package engine
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"yuno/internal/openclaw"
+	"yuno/internal/project"
 	"yuno/internal/store"
 	"yuno/internal/workflow"
 )
@@ -184,5 +188,143 @@ func TestSweepRunDirsDoesNotFollowLinks(t *testing.T) {
 	}
 	if present(link) {
 		t.Error("the planted link was left in place")
+	}
+}
+
+// keptStore stands in for the artifact collector, which lives in internal/artifacts and
+// imports this package. Like the real one (DESIGN 5.25) it reads a finished visit's
+// private workspace and keeps, in a store outside the state directory, the files under
+// runs/<run id>/out/ and, for a project run, the checkout's diff as diff.patch.
+type keptStore struct {
+	t   *testing.T
+	dir string
+}
+
+func (k *keptStore) Collect(ctx context.Context, in ArtifactInput) {
+	k.t.Helper()
+	runDir := filepath.Join(in.Workspace, "runs", in.Run.ID)
+	if !present(runDir) {
+		k.t.Errorf("visit %s#%d: no run folder to collect from in %s", in.Node.NodeID, in.Node.Visit, in.Workspace)
+		return
+	}
+	out := filepath.Join(runDir, "out")
+	_ = filepath.WalkDir(out, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			k.t.Error(err)
+			return nil
+		}
+		rel, _ := filepath.Rel(out, path)
+		writeFile(k.t, filepath.Join(k.dir, in.Run.ID, rel), string(b))
+		return nil
+	})
+	if in.Project == nil {
+		return
+	}
+	patch, err := in.Project.Diff(ctx, filepath.Join(runDir, project.RepoDir), in.Branch, deref(in.Run.CheckoutSHA))
+	if err != nil {
+		k.t.Errorf("visit %s#%d: diff: %v", in.Node.NodeID, in.Node.Visit, err)
+		return
+	}
+	if len(patch) > 0 {
+		writeFile(k.t, filepath.Join(k.dir, in.Run.ID, "diff.patch"), string(patch))
+	}
+}
+
+// filesUnder lists the regular files under dir as sorted paths relative to it.
+func filesUnder(t *testing.T, dir string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type().IsRegular() {
+			rel, _ := filepath.Rel(dir, path)
+			out = append(out, rel)
+		}
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// The P3 acceptance for cleanup (DESIGN 5.30 rule 8): a project run that succeeds leaves
+// only its artifacts, the files its steps put under out/ and the diff, which the
+// collector copied out of the steps' workspaces while they still existed. Its steps'
+// private workspaces and its run repository are gone, and nothing under the state
+// directory names the run any more.
+func TestSucceededRunLeavesOnlyItsArtifacts(t *testing.T) {
+	env, _, p := projectEnv(t, map[string]string{"README.md": "# demo\n", "go.mod": "module demo\n"}, false)
+	ctx := context.Background()
+	kept := &keptStore{t: t, dir: t.TempDir()}
+	env.e.deps.Artifacts = kept
+	coder, reviewer := env.agent(nil), env.agent(func(a *store.Agent) { a.Name = "Reviewer" })
+	def := line(workflow.Node{ID: "one", AgentID: coder.ID, Task: "write"},
+		workflow.Node{ID: "two", AgentID: reviewer.ID, Task: "review"})
+	def.Project = true
+	wf := env.createWorkflow(def)
+	run, err := env.e.Trigger(ctx, TriggerRequest{WorkflowID: wf.ID, ProjectID: p.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.fc.onSend = func(p openclaw.ChatSendParams, n int) (any, error) {
+		node, _ := visitOf(p.SessionKey)
+		runDir := filepath.Join(turnWS(env, p), "runs", run.ID)
+		switch node {
+		case "one":
+			writeFile(t, filepath.Join(runDir, "repo", "README.md"), "edited by one\n")
+			writeFile(t, filepath.Join(runDir, "out", "report.md"), "the report")
+			writeFile(t, filepath.Join(runDir, "scratch", "notes.txt"), "working notes")
+		case "two":
+			writeFile(t, filepath.Join(runDir, "out", "review", "summary.md"), "the review")
+		}
+		go finishThenFinal(t, env, p, `{"ok":true}`)
+		return startedTurn(p)
+	}
+	r := env.resume(env.e, run.ID)
+	if r.Status != store.RunSucceeded {
+		t.Fatalf("run = %s %q", r.Status, deref(r.FailureReason))
+	}
+
+	// The artifacts are in the store: out/ as the steps left it, and the diff.
+	stored := filepath.Join(kept.dir, run.ID)
+	if got, want := filesUnder(t, stored), []string{"diff.patch", "report.md", "review/summary.md"}; !slices.Equal(got, want) {
+		t.Fatalf("the store holds %v, want %v", got, want)
+	}
+	for rel, want := range map[string]string{"report.md": "the report", "review/summary.md": "the review"} {
+		if b, err := os.ReadFile(filepath.Join(stored, rel)); err != nil || string(b) != want {
+			t.Errorf("%s = %q, %v; want %q", rel, b, err, want)
+		}
+	}
+	if b, _ := os.ReadFile(filepath.Join(stored, "diff.patch")); !strings.Contains(string(b), "+edited by one") {
+		t.Errorf("diff.patch = %q, want the change of step one", b)
+	}
+
+	// Everything else of the run is gone: the steps' workspaces (the scratch notes with
+	// them), the run repository, and any trace under the state directory.
+	nodes := runNodes(t, env, run.ID)
+	if len(nodes) != 2 {
+		t.Fatalf("visits = %v", visitsOf(nodes))
+	}
+	for _, n := range nodes {
+		if n.WorkspaceDir == nil || present(*n.WorkspaceDir) {
+			t.Errorf("visit %s: workspace %q still there, or never recorded", n.NodeID, deref(n.WorkspaceDir))
+		}
+	}
+	if left, _ := openclaw.ListSandboxWorkspaces(env.dir); len(left) > 0 {
+		t.Errorf("private workspaces left: %v", left)
+	}
+	if repo := project.RunRepoPath(env.dir, run.ID); present(repo) {
+		t.Errorf("the run repository %s is still there", repo)
+	}
+	if found := tracesIn(t, env.dir, run.ID); len(found) > 0 {
+		t.Errorf("the state directory still names the run: %v", found)
 	}
 }

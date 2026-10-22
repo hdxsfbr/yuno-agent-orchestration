@@ -859,6 +859,42 @@ func TestCollectProjectDiff(t *testing.T) {
 	p.noLines()
 }
 
+// The P3 acceptance for cleanup (DESIGN 5.30 rule 8): what is collected is a copy in the
+// store, so deleting the step's whole workspace, as the engine does when the run
+// succeeds, leaves the out/ files and diff.patch listed and readable, as regular files and
+// not links back into the workspace.
+func TestStoredArtifactsOutliveTheWorkspace(t *testing.T) {
+	p := newProjectFixture(t)
+	p.edit("README.md", "# demo\nsecond line\n")
+	p.out("report.md", "the report")
+	p.out("data/results.csv", "a,b\n1,2\n")
+	p.collectProject("coder", 1)
+	before := p.rows()
+	if len(before) != 3 {
+		t.Fatalf("rows before = %+v, lines %+v", before, p.takeLines())
+	}
+
+	must(t, os.RemoveAll(p.ws))
+
+	after := p.rows()
+	if len(after) != len(before) {
+		t.Fatalf("rows after the workspace went = %+v", after)
+	}
+	for path, row := range before {
+		if after[path] != row {
+			t.Errorf("row %q changed: %+v -> %+v", path, row, after[path])
+		}
+		content, ok := p.stored(row)
+		if !ok || (path == "report.md" && content != "the report") || (path == "diff.patch" && !strings.Contains(content, "+second line")) {
+			t.Errorf("stored %q = %q (found %v) after the workspace went", path, content, ok)
+		}
+		info, err := os.Lstat(filepath.Join(p.c.Dir, p.run.ID, row.ID))
+		if err != nil || !info.Mode().IsRegular() {
+			t.Errorf("stored %q: %v, %v; want a regular file", path, info, err)
+		}
+	}
+}
+
 // DESIGN 5.25 rule 3: with only an excluded directory changed there is no diff and no
 // artifact; the diff counts toward the caps like any file and is cut at its cap with the
 // marker as its last line.

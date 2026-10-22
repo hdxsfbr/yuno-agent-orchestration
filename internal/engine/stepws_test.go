@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,8 +23,11 @@ import (
 // package (the path rule); T5.30.2 is TestProjectRunClonesCarriesAndProposes; T5.30.3 is
 // TestBranchFilesCheckoutAndDiff with TestForkCarriesOnlyTheNamedBranchsCommit.
 
-// Two runs of the same agent at once work in different private workspaces: what one
-// writes is not in the other's, and nothing is in the agent's workspace.
+// Two runs of the same agent at once each have a private workspace (DESIGN 5.30 rule 1;
+// the P3 acceptance: a run cannot list or open another run's folder). The workspace each
+// visit recorded (run_nodes.workspace_dir) is the one its turn works in, the two differ,
+// neither lies inside the other, neither holds a path or a file of the other run, and
+// nothing is in the agent's own workspace.
 func TestConcurrentRunsOfOneAgentDoNotShareAWorkspace(t *testing.T) {
 	env := newEnv(t)
 	a := env.agent(nil)
@@ -39,14 +44,46 @@ func TestConcurrentRunsOfOneAgentDoNotShareAWorkspace(t *testing.T) {
 	}
 	r1, d1 := env.start(TriggerRequest{AgentID: a.ID, Task: "one"})
 	r2, d2 := env.start(TriggerRequest{AgentID: a.ID, Task: "two"})
-	p1, p2 := recv(t, both, "the first turn"), recv(t, both, "the second turn")
-	ws1, ws2 := turnWS(env, p1), turnWS(env, p2)
+	turns := map[string]openclaw.ChatSendParams{} // run id → its turn
+	for range 2 {
+		p := recv(t, both, "a turn")
+		turns[tokenRunID(t, env, p)] = p
+	}
+	// Both turns are under way: the visit of each run has recorded where its turn works.
+	recorded := map[string]string{}
+	for _, r := range []*store.Run{r1, r2} {
+		p, ok := turns[r.ID]
+		if !ok {
+			t.Fatalf("run %s has no turn", r.ID)
+		}
+		nodes := runNodes(t, env, r.ID)
+		if len(nodes) != 1 || nodes[0].WorkspaceDir == nil {
+			t.Fatalf("run %s visits = %v", r.ID, visitsOf(nodes))
+		}
+		if *nodes[0].WorkspaceDir != turnWS(env, p) {
+			t.Fatalf("run %s recorded %s, its turn works in %s", r.ID, *nodes[0].WorkspaceDir, turnWS(env, p))
+		}
+		recorded[r.ID] = *nodes[0].WorkspaceDir
+	}
+	ws1, ws2 := recorded[r1.ID], recorded[r2.ID]
 	if ws1 == ws2 {
 		t.Fatalf("both runs work in %s", ws1)
 	}
-	for _, c := range []struct{ ws, other string }{{ws1, tokenRunID(t, env, p2)}, {ws2, tokenRunID(t, env, p1)}} {
-		if _, err := os.Lstat(filepath.Join(c.ws, "runs", c.other)); !os.IsNotExist(err) {
+	if isInside(ws1, ws2) || isInside(ws2, ws1) {
+		t.Fatalf("one workspace lies inside the other: %s, %s", ws1, ws2)
+	}
+	for _, c := range []struct {
+		ws          string
+		mine, other *store.Run
+	}{{ws1, r1, r2}, {ws2, r2, r1}} {
+		if b, err := os.ReadFile(filepath.Join(c.ws, "runs", c.mine.ID, "mine.txt")); err != nil || string(b) != turns[c.mine.ID].SessionKey {
+			t.Errorf("run %s lost its own file: %q, %v", c.mine.ID, b, err)
+		}
+		if _, err := os.Lstat(filepath.Join(c.ws, "runs", c.other.ID)); !os.IsNotExist(err) {
 			t.Errorf("%s holds the other run's folder: %v", c.ws, err)
+		}
+		if found := tracesIn(t, c.ws, c.other.ID, turns[c.other.ID].SessionKey); len(found) > 0 {
+			t.Errorf("%s holds traces of the other run: %v", c.ws, found)
 		}
 	}
 	close(release)
@@ -58,9 +95,52 @@ func TestConcurrentRunsOfOneAgentDoNotShareAWorkspace(t *testing.T) {
 			t.Fatalf("run %s = %s %q", w.run.ID, r.Status, deref(r.FailureReason))
 		}
 	}
-	if _, err := os.Lstat(filepath.Join(openclaw.WorkspaceDir(env.dir, sessionAgent(p1.SessionKey)), "runs")); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(openclaw.WorkspaceDir(env.dir, sessionAgent(turns[r1.ID].SessionKey)), "runs")); !os.IsNotExist(err) {
 		t.Fatalf("the agent's workspace has a runs folder: %v", err)
 	}
+}
+
+// isInside reports whether path is dir or lies below it.
+func isInside(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// tracesIn lists the paths under root that, by name or by content, mention any needle; a
+// folder that does is listed without what is in it.
+func tracesIn(t *testing.T, root string, needles ...string) []string {
+	t.Helper()
+	mentions := func(s string) bool {
+		for _, n := range needles {
+			if strings.Contains(s, n) {
+				return true
+			}
+		}
+		return false
+	}
+	var found []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if mentions(path) {
+			found = append(found, path)
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+		} else if d.Type().IsRegular() {
+			if b, err := os.ReadFile(path); err != nil {
+				return err
+			} else if mentions(string(b)) {
+				found = append(found, path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return found
 }
 
 // tokenRunID is the run a turn belongs to, from its run token.

@@ -1097,7 +1097,7 @@ Rules:
     strips `thinking.display`, and the engine drops any `agent` event with
     `stream: reasoning` and any transcript part of type `thinking` before storage.
 12. **Exec isolation: Docker sandbox, always on. [decision D-012]** Baseline config sets
-    `agents.defaults.sandbox: { mode: "all", scope: "session", workspaceAccess: "rw",
+    `agents.defaults.sandbox: { mode: "all", scope: "session", workspaceAccess: "none",
     prune: { idleHours: 1, maxAgeDays: 1 },
     docker: { image: "yuno-sandbox:latest", network: "none", readOnlyRoot: true,
     capDrop: ["ALL"], pidsLimit: 256, memory: "1g", cpus: 1, tmpfs: ["/tmp"] } }` and
@@ -1105,8 +1105,9 @@ Rules:
     in sandbox mode **[docs]**. The scope is `session`: every run visit has its own session
     key and so its own fresh container, nothing installed in a container reaches another
     run, and idle session containers are pruned after an hour and any after a day
-    (`sandbox.prune`, **[docs]** gateway/config-agents/sandbox.md); the workspace stays the
-    agent's, mounted read-write. The gateway container gets the host Docker socket
+    (`sandbox.prune`, **[docs]** gateway/config-agents/sandbox.md); the agent's own workspace
+    is never mounted: each session works in a private workspace of its own (5.30, D-083).
+    The gateway container gets the host Docker socket
     (`OPENCLAW_SANDBOX=1`, `OPENCLAW_DOCKER_SOCKET=/var/run/docker.sock`) and creates
     sibling containers named `openclaw-sbx-*`; the state directory and workspaces are
     **bind mounts from the host** (`./data/openclaw`), because named volumes cannot be
@@ -4247,7 +4248,17 @@ shared folder; T5.30.3 a fork whose join names one branch carries only that bran
 commit; T5.30.4 retry of a failed later step starts from the earlier step's commit after
 the shared run folders are gone; T5.30.5 cleanup removes the private workspaces and the
 run repository on success and keeps them on failure; T5.30.6 the sweep never touches a
-`sandboxes/` folder no visit records.
+`sandboxes/` folder no visit records. Acceptance tests (P3): T5.30.7 two concurrent runs of
+one agent have different recorded workspaces, neither inside the other, with no path or
+file of the other run, and nothing in the agent's workspace
+(`TestConcurrentRunsOfOneAgentDoNotShareAWorkspace`); T5.30.8 the defaults, every
+per-agent sandbox block the platform sets and a materialised agent's entry give
+`scope: session` and `workspaceAccess: none` (`TestNoSandboxBlockMountsTheAgentsWorkspace`);
+T5.30.9 a succeeded project run leaves only what the collector kept, its `out/` files and
+`diff.patch`, with no private workspace, run repository or other trace of the run under
+the state directory (`TestSucceededRunLeavesOnlyItsArtifacts`), and stored artifacts are
+copies that outlive the workspace (`TestStoredArtifactsOutliveTheWorkspace`); T5.30.10 the
+base and Python sandbox Dockerfiles install `libgomp1` (`TestSandboxImagesInstallLibgomp`).
 
 Limitations: the path rule is OpenClaw's internal behaviour, pinned by a test, not an API;
 on an OpenClaw upgrade the probe in `docs/test-results.md` is repeated.
