@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from "react";
+import { Fragment, useId, type ReactNode } from "react";
 
 export const controlClass =
   "w-full rounded-md border bg-white px-3 py-1.5 text-sm shadow-sm placeholder:text-zinc-400 focus:outline-none focus:ring-1 disabled:opacity-60 dark:bg-zinc-900 dark:placeholder:text-zinc-600";
@@ -129,7 +129,18 @@ export function TextAreaField({
   );
 }
 
-export type Option = { value: string; label: string };
+/** `group` puts the option under an optgroup of that label; consecutive options share one. */
+export type Option = { value: string; label: string; group?: string };
+
+function optionGroups(options: readonly Option[]): { group?: string; options: Option[] }[] {
+  const out: { group?: string; options: Option[] }[] = [];
+  for (const o of options) {
+    const last = out[out.length - 1];
+    if (last && last.group === o.group) last.options.push(o);
+    else out.push({ group: o.group, options: [o] });
+  }
+  return out;
+}
 
 export function SelectField({
   value,
@@ -137,15 +148,25 @@ export function SelectField({
   options,
   ...c
 }: Common & { value: string; onChange: (v: string) => void; options: readonly Option[] }) {
+  const renderOptions = (list: Option[]) =>
+    list.map((o) => (
+      <option key={o.value} value={o.value}>
+        {o.label}
+      </option>
+    ));
   return (
     <Field {...c}>
       {(p) => (
         <select {...p} value={value} onChange={(e) => onChange(e.target.value)} className={control(!!c.errors?.length)}>
-          {options.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
+          {optionGroups(options).map((g, i) =>
+            g.group ? (
+              <optgroup key={`${i}-${g.group}`} label={g.group}>
+                {renderOptions(g.options)}
+              </optgroup>
+            ) : (
+              <Fragment key={`${i}-`}>{renderOptions(g.options)}</Fragment>
+            ),
+          )}
         </select>
       )}
     </Field>

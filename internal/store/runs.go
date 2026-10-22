@@ -701,9 +701,12 @@ func FillRunParticipants(ctx context.Context, q Querier, runs []Run) error {
 	if err != nil {
 		return err
 	}
+	// An OpenAI call is named as the agent's model is, openai/<id> (D-091); the proxy's
+	// Anthropic calls keep the bare id the agents use.
 	models, err := collectAggregates(ctx, q, `SELECT x.run_id, array_agg(x.model ORDER BY x.first) FROM (
-		SELECT run_id, model, min(started_at) AS first FROM model_calls WHERE run_id = ANY($1)
-		GROUP BY run_id, model) x GROUP BY x.run_id`, ids)
+		SELECT run_id, CASE WHEN provider = 'openai' THEN 'openai/' || model ELSE model END AS model,
+		min(started_at) AS first FROM model_calls WHERE run_id = ANY($1)
+		GROUP BY 1, 2) x GROUP BY x.run_id`, ids)
 	if err != nil {
 		return err
 	}

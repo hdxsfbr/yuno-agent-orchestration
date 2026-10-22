@@ -303,8 +303,18 @@ func desiredEntry(a *store.Agent, skillNames []string) map[string]any {
 	}
 	// max_tokens is the agent-wide stream param OpenClaw merges over per-model params
 	// [docs]; effort has no OpenClaw counterpart, thinkingDefault is the reasoning control.
+	// Both stand for an OpenAI model too: the gateway maps a level the model lacks to its
+	// nearest one, and drops max_output_tokens on the ChatGPT subscription route
+	// [source: @openclaw/ai openai-responses-params-internal.ts] rather than refusing it.
 	if a.MaxTokens > 0 {
 		entry["params"] = map[string]any{"maxTokens": a.MaxTokens}
+	}
+	if IsOpenAIModel(a.Model) {
+		// Pin the embedded runtime for this model (D-091). Unpinned, a subscription route
+		// may select the Codex app-server runtime, which disables user MCP servers while a
+		// sandbox is active: yuno__finish and every platform tool would be gone [docs:
+		// gateway/sandboxing/docker-backend.md]. The embedded runtime keeps them [probed].
+		entry["models"] = map[string]any{ModelRef(a.Model): map[string]any{"agentRuntime": map[string]any{"id": "openclaw"}}}
 	}
 	if len(skillNames) > 0 {
 		s := make([]any, len(skillNames))
@@ -564,6 +574,11 @@ func patchEntry(ctx context.Context, c Client, d desired) error {
 		if _, want := entry["params"]; !want && hasPath(live, []string{"params"}) {
 			entry["params"] = nil
 		}
+		if models := modelsPatch(live, entry["models"]); models != nil {
+			entry["models"] = models
+		} else if hasPath(live, []string{"models"}) {
+			entry["models"] = nil
+		}
 		var replace []string
 		for _, p := range arrayPaths {
 			if hasPath(live, p) {
@@ -586,6 +601,28 @@ func patchEntry(ctx context.Context, c Client, d desired) error {
 		}
 	}
 	return fmt.Errorf("config.patch: %w", lastErr)
+}
+
+// modelsPatch is the entry's per-model settings as a merge patch over the live ones: the
+// wanted refs, plus null for each live ref the agent no longer uses, so a model change
+// does not leave the old ref's runtime pin behind. nil when nothing is wanted; the caller
+// then deletes the whole object, as after a switch back to Claude.
+func modelsPatch(live map[string]any, want any) map[string]any {
+	wanted, _ := want.(map[string]any)
+	if len(wanted) == 0 {
+		return nil
+	}
+	cur, _ := live["models"].(map[string]any)
+	out := make(map[string]any, len(wanted)+len(cur))
+	for ref, v := range wanted {
+		out[ref] = v
+	}
+	for ref := range cur {
+		if _, keep := wanted[ref]; !keep {
+			out[ref] = nil
+		}
+	}
+	return out
 }
 
 func isStaleHash(err error) bool {

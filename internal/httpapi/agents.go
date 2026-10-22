@@ -70,11 +70,7 @@ func (in *agentInput) validate(registry *tools.Registry) fieldErrors {
 	case n > 80:
 		fe.add("name", "must be at most 80 characters")
 	}
-	if in.Model == "" {
-		fe.add("model", "is required")
-	} else if models := openclaw.ManagedModels; !slices.Contains(models, in.Model) {
-		fe.add("model", "must be one of %s", strings.Join(models, ", "))
-	}
+	checkModel(&fe, in.Model)
 	checkEnum(&fe, "effort", in.Effort, effortLevels)
 	checkEnum(&fe, "thinking", in.Thinking, thinkingLevels)
 	if in.MaxTokens != nil && *in.MaxTokens < 1 {
@@ -173,6 +169,23 @@ func checkInteractionRule(fe *fieldErrors, registry *tools.Registry, key, value 
 		fe.add(path, "finish is how a node reports its result and is always auto")
 	case !platform && value == tools.PolicyRequireApproval:
 		fe.add(path, "require_approval applies to platform tools; built-in tools follow the exec policy")
+	}
+}
+
+// checkModel validates an agent's model (D-091): a Claude id served through the api's
+// proxy, or an openai/<id> ref the gateway serves with the operator's ChatGPT sign-in.
+// Both are exact lists, so a typo is refused here rather than by the gateway at the
+// first run; a ref with any other provider prefix is named as such.
+func checkModel(fe *fieldErrors, model string) {
+	switch provider, _, qualified := strings.Cut(model, "/"); {
+	case model == "":
+		fe.add("model", "is required")
+	case qualified && provider != openclaw.OpenAIProviderID:
+		fe.add("model", "unknown model provider %q: must be one of %s", provider, strings.Join(openclaw.AgentModels(), ", "))
+	case qualified && !slices.Contains(openclaw.OpenAIModels, model):
+		fe.add("model", "unknown OpenAI model: must be one of %s", strings.Join(openclaw.OpenAIModels, ", "))
+	case !qualified && !slices.Contains(openclaw.ManagedModels, model):
+		fe.add("model", "must be one of %s", strings.Join(openclaw.AgentModels(), ", "))
 	}
 }
 

@@ -488,9 +488,10 @@ type Resetter interface {
 
 // ResetShipped restores the shipped agents (by name) to their shipped role, prompt and
 // tool allowlist, and every workflow instantiated from a shipped template to the
-// template's current definition (DESIGN 5.16 rule 14). Everything else an operator set
-// on them (model, limits, guardrails, memory, skills, bindings) is kept, and agents or
-// workflows that are not shipped are untouched. It returns the names it reset.
+// template's current definition (DESIGN 5.16 rule 14). An agent on an OpenAI model goes
+// back to its shipped Claude model; everything else an operator set on them (a Claude
+// model, limits, guardrails, memory, skills, bindings) is kept, and agents or workflows
+// that are not shipped are untouched. It returns the names it reset.
 func ResetShipped(ctx context.Context, q store.Querier, r Resetter) (agents, workflows []string, err error) {
 	for _, tpl := range Agents {
 		a, err := findAgent(ctx, q, tpl.Name)
@@ -501,13 +502,19 @@ func ResetShipped(ctx context.Context, q store.Querier, r Resetter) (agents, wor
 			continue
 		}
 		shipped := store.AgentSeedHash(tpl.Role, tpl.SystemPrompt, tpl.ToolAllowlist)
-		if a.Role == tpl.Role && a.SystemPrompt == tpl.SystemPrompt && slices.Equal(a.ToolAllowlist, tpl.ToolAllowlist) {
+		// The shipped agents are Claude agents: one the operator moved to OpenAI goes back
+		// to its shipped model, while a Claude model of the operator's choosing is kept (D-091).
+		model := a.Model
+		if openclaw.IsOpenAIModel(model) {
+			model = tpl.Model
+		}
+		if a.Role == tpl.Role && a.SystemPrompt == tpl.SystemPrompt && slices.Equal(a.ToolAllowlist, tpl.ToolAllowlist) && a.Model == model {
 			if err := store.SetAgentSeededHash(ctx, q, a.ID, shipped); err != nil {
 				return agents, workflows, err
 			}
 			continue
 		}
-		a.Role, a.SystemPrompt, a.ToolAllowlist = tpl.Role, tpl.SystemPrompt, slices.Clone(tpl.ToolAllowlist)
+		a.Role, a.SystemPrompt, a.ToolAllowlist, a.Model = tpl.Role, tpl.SystemPrompt, slices.Clone(tpl.ToolAllowlist), model
 		a.MaterializedHash = "" // the runtime copy is out of date until the api pushes it
 		if err := store.UpdateAgent(ctx, q, a); err != nil {
 			return agents, workflows, fmt.Errorf("seed: reset agent %s: %w", tpl.Name, err)

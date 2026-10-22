@@ -5,6 +5,13 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- Agents can run on OpenAI models with your ChatGPT/Codex subscription: sign the gateway in
+  once with `docker exec -it yuno-openclaw openclaw models auth login --provider openai
+  --device-code --agent main`, then pick `openai/gpt-6-astra`, `openai/gpt-5.6-terra` or
+  `openai/gpt-5.6-luna` under "OpenAI (your ChatGPT subscription)" in the agent's form.
+  The costs shown for these calls are estimates at OpenAI's API prices, and budgets count
+  them. The shipped agents stay on Claude; `make seed-reset` moves one you switched back to
+  its Claude model.
 - The Code Reviewer now gives all its feedback in its first review, as numbered findings
   (R1, R2 ...). The Builder fixes each one or says why not, and later rounds only check
   those answers and the bugs you sent back from the manual test, with nothing new added, so

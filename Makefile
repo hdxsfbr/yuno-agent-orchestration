@@ -138,7 +138,7 @@ migrate: ## Apply database migrations
 seed: ## Create the demo agents, the Chief of Staff, both template workflows, and bind the Chief to Telegram when nothing is bound (idempotent)
 	$(COMPOSE) run --rm api seed
 
-seed-reset: ## seed, then restore the shipped agents' prompts and allowlists and the template workflows to the shipped versions (keeps everything else)
+seed-reset: ## seed, then restore the shipped agents' prompts and allowlists (and the Claude model of one moved to OpenAI) and the template workflows to the shipped versions (keeps everything else)
 	$(COMPOSE) run --rm api seed --reset-shipped
 
 # The fake forge (DESIGN 5.29 rule 17): started for the eval targets only. The api accepts its

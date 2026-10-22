@@ -1480,7 +1480,7 @@ components:
         name: { type: string, minLength: 1, maxLength: 80 }
         role: { type: string }
         system_prompt: { type: string }
-        model: { type: string, description: "Anthropic model id, e.g. claude-opus-5-5" }
+        model: { type: string, description: "A Claude model id (claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5) or an OpenAI ref run through the ChatGPT sign-in on the gateway (openai/gpt-6-astra, openai/gpt-5.6-terra, openai/gpt-5.6-luna); 422 on model for anything else" }
         effort: { type: string, enum: [low, medium, high, xhigh, max] }
         thinking: { type: string, enum: [off, minimal, low, medium, high, xhigh, adaptive, max] }
         max_tokens: { type: integer }

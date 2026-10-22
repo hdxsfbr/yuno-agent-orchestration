@@ -18,6 +18,7 @@ import (
 
 	"yuno/internal/config"
 	"yuno/internal/httpapi"
+	"yuno/internal/openclaw"
 	"yuno/internal/store"
 	"yuno/internal/tools"
 	"yuno/internal/workflow"
@@ -682,6 +683,65 @@ func TestResetShipped(t *testing.T) {
 	must(t, err)
 	if len(agents) != 0 || len(workflows) != 3 {
 		t.Fatalf("second reset %v %v", agents, workflows)
+	}
+}
+
+// D-091 with D-080: the shipped agents are on Claude; an operator who moves one to an
+// OpenAI model keeps it through every seed, an untouched prompt still upgrades around it,
+// and only the reset returns it to its shipped Claude model.
+func TestSeedKeepsOpenAIModel(t *testing.T) {
+	pool := needDB(t)
+	ctx := context.Background()
+	_, _, err := Seed(ctx, pool)
+	must(t, err)
+	for _, tpl := range Agents {
+		if openclaw.IsOpenAIModel(tpl.Model) || !slices.Contains(openclaw.ManagedModels, tpl.Model) {
+			t.Fatalf("shipped agent %s is on %s", tpl.Name, tpl.Model)
+		}
+	}
+	builder := shippedAgent(t, pool, "Builder")
+	builder.Model = "openai/gpt-6-astra"
+	must(t, store.UpdateAgent(ctx, pool, builder))
+	// The Integrator moves too, and its prompt is one an earlier release shipped, so the
+	// seed upgrades it.
+	integrator := shippedAgent(t, pool, "Integrator")
+	integrator.Model, integrator.SystemPrompt = "openai/gpt-5.6-luna", "release one prompt"
+	must(t, store.UpdateAgent(ctx, pool, integrator))
+	must(t, store.SetAgentSeededHash(ctx, pool, integrator.ID, store.AgentSeedHash(integrator.Role, integrator.SystemPrompt, integrator.ToolAllowlist)))
+
+	for range 2 {
+		created, _, err := Seed(ctx, pool)
+		must(t, err)
+		done, err := UpgradeAgents(ctx, pool, slog.New(slog.DiscardHandler))
+		must(t, err)
+		if len(created) != 0 || slices.Contains(done, "Builder") {
+			t.Fatalf("created %v upgraded %v", created, done)
+		}
+	}
+	if got := shippedAgent(t, pool, "Builder"); got.Model != "openai/gpt-6-astra" {
+		t.Fatalf("builder model after seeding: %s", got.Model)
+	}
+	got := shippedAgent(t, pool, "Integrator")
+	if got.Model != "openai/gpt-5.6-luna" || got.SystemPrompt != shippedPrompt(t, "Integrator") {
+		t.Fatalf("integrator after seeding: %s %q", got.Model, got.SystemPrompt)
+	}
+
+	// The Scout is on a Claude model of the operator's choosing; the reset keeps that.
+	scout := shippedAgent(t, pool, "Scout")
+	scout.Model = "claude-haiku-5-5"
+	must(t, store.UpdateAgent(ctx, pool, scout))
+	agents, _, err := ResetShipped(ctx, pool, loadStubTemplates(t, pool))
+	must(t, err)
+	if !slices.Equal(agents, []string{"Builder", "Integrator"}) {
+		t.Fatalf("reset %v", agents)
+	}
+	for name, want := range map[string]string{"Builder": modelSonnet, "Integrator": modelSonnet, "Scout": "claude-haiku-5-5"} {
+		if got := shippedAgent(t, pool, name); got.Model != want {
+			t.Fatalf("%s after the reset: %s, want %s", name, got.Model, want)
+		}
+	}
+	if got := shippedAgent(t, pool, "Builder"); got.MaterializedHash != "" {
+		t.Fatalf("builder's runtime copy not marked stale: %q", got.MaterializedHash)
 	}
 }
 

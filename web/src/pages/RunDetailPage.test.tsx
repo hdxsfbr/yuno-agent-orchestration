@@ -172,6 +172,13 @@ describe("RunDetailPage", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: /Cancel/ })).toBeNull());
   });
 
+  it("names an OpenAI model call as the agent names its model", async () => {
+    trace = { ...trace, model_calls: [{ ...modelCall, provider: "openai", model: "gpt-6-astra" }] };
+    renderPage();
+    const card = await screen.findByRole("region", { name: "Node agent" });
+    expect(within(card).getByText("openai/gpt-6-astra")).not.toBeNull();
+  });
+
   it("updates the run summary from the counters live call events carry", async () => {
     renderPage();
     const header = await screen.findByRole("region", { name: "Run summary" });

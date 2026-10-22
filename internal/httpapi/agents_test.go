@@ -52,6 +52,62 @@ func TestCreateAgentValidation(t *testing.T) {
 	}
 }
 
+// D-091: a model is a Claude id or one of the OpenAI refs; another provider prefix, an
+// OpenAI id outside the list and the proxy's own provider name are refused with a 422
+// that says which.
+func TestAgentModelValidation(t *testing.T) {
+	_, ts := newTestServer(t, nil, &fakeEngine{}, nil)
+	for model, want := range map[string]string{
+		"anthropic/claude-opus-5-5":      `unknown model provider "anthropic": must be one of claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, openai/gpt-6-astra, openai/gpt-5.6-terra, openai/gpt-5.6-luna`,
+		"yuno-anthropic/claude-opus-5-5": `unknown model provider "yuno-anthropic"`,
+		"google/gemini-3":                `unknown model provider "google"`,
+		"openai/gpt-5":                   "unknown OpenAI model: must be one of openai/gpt-6-astra, openai/gpt-5.6-terra, openai/gpt-5.6-luna",
+		"openai/":                        "unknown OpenAI model",
+		"gpt-6-astra":                    "must be one of claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, openai/gpt-6-astra",
+	} {
+		code, body := do(t, ts, http.MethodPost, "/api/agents", `{"name":"a","model":"`+model+`"}`)
+		if code != http.StatusUnprocessableEntity || !slices.Equal(detailPaths(t, body), []string{"model"}) {
+			t.Fatalf("%s: %d %s", model, code, body)
+		}
+		var fe []fieldError
+		_ = json.Unmarshal(decodeError(t, body).Error.Details, &fe)
+		if !strings.HasPrefix(fe[0].Message, want) {
+			t.Errorf("%s: message %q, want %q", model, fe[0].Message, want)
+		}
+	}
+}
+
+// An agent on an OpenAI model is created, listed and switched back to Claude; the model
+// is stored and answered as given.
+func TestAgentOpenAIModel(t *testing.T) {
+	pool := needDB(t)
+	fe := &fakeEngine{pool: pool}
+	_, ts := newTestServer(t, pool, fe, nil)
+	for _, model := range []string{"openai/gpt-6-astra", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna"} {
+		code, body := do(t, ts, http.MethodPost, "/api/agents", `{"name":"`+model+`","model":"`+model+`","thinking":"high"}`)
+		if code != http.StatusCreated {
+			t.Fatalf("%s: %d %s", model, code, body)
+		}
+		var a store.Agent
+		_ = json.Unmarshal(body, &a)
+		if a.Model != model {
+			t.Fatalf("stored model %q, want %q", a.Model, model)
+		}
+		code, body = do(t, ts, http.MethodPut, "/api/agents/"+a.ID, `{"name":"back","model":"claude-sonnet-5-5"}`)
+		if code != http.StatusOK || !strings.Contains(string(body), `"model":"claude-sonnet-5-5"`) {
+			t.Fatalf("switch back: %d %s", code, body)
+		}
+		code, body = do(t, ts, http.MethodPut, "/api/agents/"+a.ID, `{"name":"again","model":"`+model+`"}`)
+		if code != http.StatusOK || !strings.Contains(string(body), `"model":"`+model+`"`) {
+			t.Fatalf("switch again: %d %s", code, body)
+		}
+	}
+	_, body := do(t, ts, http.MethodGet, "/api/agents", "")
+	if !strings.Contains(string(body), `"model":"openai/gpt-6-astra"`) {
+		t.Fatalf("list: %s", body)
+	}
+}
+
 func TestAgentLifecycle(t *testing.T) {
 	pool := needDB(t)
 	fe := &fakeEngine{pool: pool}
