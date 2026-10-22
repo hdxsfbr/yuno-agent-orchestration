@@ -329,6 +329,9 @@ func TestAuditTargets(t *testing.T) {
 		{"POST", "/api/projects/p1/intake/poll", "/api/projects/{id}/intake/poll", "/api/projects/p1", false},
 		{"POST", "/api/workflows/w1/versions/3/restore", "/api/workflows/{id}/versions/{version}/restore", "/api/workflows/w1", false},
 		{"POST", "/api/plans/pl1/tickets/T9/changes", "/api/plans/{id}/tickets/{ticket}/changes", "/api/plans/pl1", false},
+		// A revert's target is the resource of the row it reverts, read from the database
+		// (TestAuditRevert); without one there is none.
+		{"POST", "/api/audit/e1/revert", "/api/audit/{id}/revert", "", false},
 		{"POST", "/api/nowhere", "", "", false},
 	} {
 		route, target, collection := s.routeTarget(httptest.NewRequest(tc.method, tc.path, nil))

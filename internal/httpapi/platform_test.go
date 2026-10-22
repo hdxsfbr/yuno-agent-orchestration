@@ -1,12 +1,10 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,9 +20,9 @@ import (
 // Chief platform control, wave 1 part A: platform_call through the api's own chain and the
 // platform gate.
 
-// platformFixture is the Chief's chat fixture with platform_call dispatched through DESIGN
-// B6's chain, in which part B's idempotency and If-Match layers are played by fakes that
-// keep to the headers of B3 and B4, and with a count of handler runs by route.
+// platformFixture is the Chief's chat fixture with platform_call dispatched through the
+// api's own chain (DESIGN B6: actor, audit, gate, idempotency, If-Match), and with a count of
+// handler runs by route, taken where the routes sit in that chain.
 type platformFixture struct {
 	*chatFixture
 	tool *tools.Tool
@@ -37,17 +35,21 @@ func newPlatformFixture(t *testing.T) *platformFixture {
 	f := newChatFixture(t, nil)
 	p := &platformFixture{chatFixture: f, runs: map[string]int{}}
 	s := f.s
-	counted := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	p.tool = tools.NewPlatformCall(tools.PlatformCallDeps{Pool: testPool, Dispatcher: platformDispatcher{s: s, handler: s.withMiddleware(p.counted(s))}})
+	tools.NewRegistry().Register(p.tool)
+	return p
+}
+
+// counted is the routes, counting each request that reaches a handler. The middleware's own
+// reads of a target (audit, If-Match) go to the routes directly and are not counted.
+func (p *platformFixture) counted(s *Server) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pattern := s.mux.Handler(r)
 		p.mu.Lock()
 		p.runs[pattern]++
 		p.mu.Unlock()
 		s.mux.ServeHTTP(w, r)
 	})
-	chain := s.recoverer(s.requestID(s.logging(s.auth(s.platformGate(fakeIdempotency(fakeVersions(s, counted)))))))
-	p.tool = tools.NewPlatformCall(tools.PlatformCallDeps{Pool: testPool, Dispatcher: platformDispatcher{s: s, handler: chain}})
-	tools.NewRegistry().Register(p.tool)
-	return p
 }
 
 // pc runs platform_call as the Chief in its conversation: the result's JSON, its text and
@@ -73,101 +75,6 @@ func (p *platformFixture) ran(pattern string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.runs[pattern]
-}
-
-// fakeIdempotency plays DESIGN B3 by its headers: a mutating request's Idempotency-Key, per
-// actor, method and path, replays the stored response with Idempotency-Replayed: true for
-// the same body, refuses another body, and stores nothing of a 5xx.
-func fakeIdempotency(next http.Handler) http.Handler {
-	type stored struct {
-		sha    string
-		status int
-		header http.Header
-		body   []byte
-	}
-	var mu sync.Mutex
-	keys := map[string]*stored{}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := r.Header.Get(tools.HeaderIdempotencyKey)
-		if key == "" || r.Method == http.MethodGet || r.Method == http.MethodHead {
-			next.ServeHTTP(w, r)
-			return
-		}
-		who, _ := actor.From(r.Context())
-		body, _ := io.ReadAll(r.Body)
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		k := who.ID + " " + r.Method + " " + r.URL.Path + " " + key
-		mu.Lock()
-		st := keys[k]
-		mu.Unlock()
-		if st != nil {
-			if st.sha != tools.BodySHA256(body) {
-				writeError(w, http.StatusUnprocessableEntity, "idempotency_key_reused", "the key was used with another body", nil)
-				return
-			}
-			for h, v := range st.header {
-				w.Header()[h] = v
-			}
-			w.Header().Set(tools.HeaderIdempotencyReplayed, "true")
-			w.WriteHeader(st.status)
-			_, _ = w.Write(st.body)
-			return
-		}
-		rec := newResponseBuffer(platformResponseMax)
-		next.ServeHTTP(rec, r)
-		res := rec.response()
-		if res.Status < 500 {
-			mu.Lock()
-			keys[k] = &stored{sha: tools.BodySHA256(body), status: res.Status, header: res.Header.Clone(), body: bytes.Clone(res.Body)}
-			mu.Unlock()
-		}
-		for h, v := range res.Header {
-			w.Header()[h] = v
-		}
-		w.WriteHeader(res.Status)
-		_, _ = w.Write(res.Body)
-	})
-}
-
-// fakeETag is DESIGN B4's version of a JSON body.
-func fakeETag(body []byte) string {
-	sum := sha256.Sum256(body)
-	return `"` + hex.EncodeToString(sum[:8]) + `"`
-}
-
-// fakeVersions plays DESIGN B4 by its headers: a GET 200 carries ETag, and an update or
-// delete with If-Match runs only when it is the target's current one, else 412
-// version_conflict.
-func fakeVersions(s *Server, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			rec := newResponseBuffer(platformResponseMax)
-			next.ServeHTTP(rec, r)
-			res := rec.response()
-			for h, v := range res.Header {
-				w.Header()[h] = v
-			}
-			if res.Status == http.StatusOK && strings.HasPrefix(res.Header.Get("Content-Type"), "application/json") {
-				w.Header().Set(tools.HeaderETag, fakeETag(res.Body))
-			}
-			w.WriteHeader(res.Status)
-			_, _ = w.Write(res.Body)
-		case http.MethodPut, http.MethodPatch, http.MethodDelete:
-			if want := r.Header.Get(tools.HeaderIfMatch); want != "" {
-				get := httptest.NewRequestWithContext(r.Context(), http.MethodGet, r.URL.EscapedPath(), nil)
-				rec := newResponseBuffer(platformResponseMax)
-				s.mux.ServeHTTP(rec, get)
-				if cur := fakeETag(rec.response().Body); cur != want {
-					writeError(w, http.StatusPreconditionFailed, "version_conflict", "the target changed since it was read", map[string]string{"current_etag": cur})
-					return
-				}
-			}
-			next.ServeHTTP(w, r)
-		default:
-			next.ServeHTTP(w, r)
-		}
-	})
 }
 
 // scheduleBody is a valid schedule of wf.
@@ -464,6 +371,17 @@ func TestDestructiveNeedsApproval(t *testing.T) {
 	if isErr || replay["status"] != float64(http.StatusNoContent) || replay["idempotent_replayed"] != true || p.ran("DELETE /api/schedules/{id}") != 1 {
 		t.Fatalf("second repeat = %s", text)
 	}
+	// The audit tells the same story: asked three times, run once, replayed once.
+	outcomes := map[string]int{}
+	for _, e := range auditRows(t, "/api/schedules/"+id) {
+		outcomes[e.Outcome]++
+		if e.Outcome == store.AuditOK && e.ApprovalID != apID {
+			t.Errorf("the run's row names approval %q, want %s", e.ApprovalID, apID)
+		}
+	}
+	if outcomes[store.AuditPendingApproval] != 3 || outcomes[store.AuditOK] != 1 || outcomes[store.AuditReplayed] != 1 || len(outcomes) != 3 {
+		t.Fatalf("audit outcomes = %v", outcomes)
+	}
 }
 
 // Platform control A6: a rejected approval refuses its call "rejected by <who>"; an
@@ -675,17 +593,15 @@ func TestPlatformCallArtifacts(t *testing.T) {
 	}
 }
 
-// Platform control A4: the request a platform_call makes carries the agent, via chief, on
-// behalf of the conversation's Telegram chat, with the server's own bearer; the gate tells
-// the request's note what it decided. (Part B's audit row is not on this branch: the
-// handler's view of the actor and the note stand in for it.)
+// Platform control A4 and DESIGN B1: the request a platform_call makes carries the agent,
+// via chief, on behalf of the conversation's Telegram chat, with the server's own bearer;
+// its audit row names them, with what the gate decided.
 func TestPlatformCallActor(t *testing.T) {
 	f := newChatFixture(t, nil)
 	s := f.s
 	s.cfg.APIToken = "platform-actor-test-api-token"
 	var mu sync.Mutex
 	var seen []actor.Actor
-	var notes []*actor.Note
 	capture := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a, _ := actor.From(r.Context())
 		mu.Lock()
@@ -693,18 +609,8 @@ func TestPlatformCallActor(t *testing.T) {
 		mu.Unlock()
 		s.mux.ServeHTTP(w, r)
 	})
-	// The audit's place in DESIGN B6: it puts a note in the context, before the gate.
-	noted := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx, n := actor.WithNote(r.Context())
-			mu.Lock()
-			notes = append(notes, n)
-			mu.Unlock()
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
-	chain := s.recoverer(s.requestID(s.logging(s.auth(noted(s.platformGate(fakeIdempotency(capture)))))))
-	tool := tools.NewPlatformCall(tools.PlatformCallDeps{Pool: testPool, Dispatcher: platformDispatcher{s: s, handler: chain}})
+	// The api's own chain (built after the bearer is set), with the handlers seen through capture.
+	tool := tools.NewPlatformCall(tools.PlatformCallDeps{Pool: testPool, Dispatcher: platformDispatcher{s: s, handler: s.withMiddleware(capture)}})
 	tools.NewRegistry().Register(tool)
 	run := func(conv string, args map[string]any) map[string]any {
 		t.Helper()
@@ -714,11 +620,6 @@ func TestPlatformCallActor(t *testing.T) {
 		var out map[string]any
 		_ = json.Unmarshal([]byte(res.Text), &out)
 		return out
-	}
-	lastNote := func() *actor.Note {
-		mu.Lock()
-		defer mu.Unlock()
-		return notes[len(notes)-1]
 	}
 
 	out := run(f.conv.ID, map[string]any{"operation_id": "listTools"})
@@ -737,20 +638,49 @@ func TestPlatformCallActor(t *testing.T) {
 	if seen[1].OnBehalfOf != "" || seen[1].ID != f.agent.ID {
 		t.Fatalf("no conversation = %+v", seen[1])
 	}
-	// The gate's decisions reach the note: a refusal, a pending approval.
-	run(f.conv.ID, map[string]any{"operation_id": "createSchedule", "body": scheduleBody(scheduleWorkflow(t))})
-	if n := lastNote(); n.Outcome != outcomeDenied || n.ErrorCode != "idempotency_key_required" {
-		t.Fatalf("denied note = %+v", n)
-	}
-	sched := &store.Schedule{WorkflowID: scheduleWorkflow(t).ID, Kind: store.ScheduleDelay, TZ: "UTC", Input: json.RawMessage(`{}`)}
+
+	// Each change gets its audit row (a read gets none), naming the agent and the person:
+	// a refusal of the gate, a pending approval, and a change that ran.
+	wf := scheduleWorkflow(t)
+	run(f.conv.ID, map[string]any{"operation_id": "createSchedule", "body": scheduleBody(wf)})
+	sched := &store.Schedule{WorkflowID: wf.ID, Kind: store.ScheduleDelay, TZ: "UTC", Input: json.RawMessage(`{}`)}
 	at := time.Now().Add(time.Hour).UTC()
 	sched.RunAt = &at
 	mustDo(t, store.CreateSchedule(context.Background(), testPool, sched))
-	out = run(f.conv.ID, map[string]any{"operation_id": "deleteSchedule", "path_params": map[string]any{"id": sched.ID}, "idempotency_key": "a-" + sched.ID,
-		"if_match": `"any"`})
-	if n := lastNote(); out["status"] != tools.GatePending || n.Outcome != outcomePendingApproval || n.ApprovalID != out["approval_id"] ||
-		n.Evidence["risk"] != "destructive" {
-		t.Fatalf("pending = %v, note %+v", out, n)
+	pending := run(f.conv.ID, map[string]any{"operation_id": "deleteSchedule", "path_params": map[string]any{"id": sched.ID},
+		"idempotency_key": "a-" + sched.ID, "if_match": `"any"`})
+	if pending["status"] != tools.GatePending {
+		t.Fatalf("pending = %v", pending)
+	}
+	created := run(f.conv.ID, map[string]any{"operation_id": "createSchedule", "body": scheduleBody(wf), "idempotency_key": "c-" + sched.ID})
+	if created["status"] != float64(http.StatusCreated) {
+		t.Fatalf("create = %v", created)
+	}
+	rows, err := store.ListAuditEvents(context.Background(), testPool, store.AuditFilter{Actor: f.agent.ID, Limit: 10})
+	mustDo(t, err)
+	if len(rows) != 3 {
+		t.Fatalf("audit rows = %+v", rows)
+	}
+	for i, w := range []struct {
+		method, path, outcome, code, approval, risk string
+		status                                      int
+	}{
+		{http.MethodPost, "/api/schedules", store.AuditOK, "", "", "routine", http.StatusCreated},
+		{http.MethodDelete, "/api/schedules/" + sched.ID, store.AuditPendingApproval, "", pending["approval_id"].(string), "destructive", http.StatusAccepted},
+		{http.MethodPost, "/api/schedules", store.AuditDenied, "idempotency_key_required", "", "routine", http.StatusPreconditionRequired},
+	} {
+		e := rows[i] // newest first
+		if e.ActorKind != string(actor.Agent) || e.ActorID != f.agent.ID || e.ActorName != f.agent.Name || e.Via != actor.ViaChief ||
+			e.OnBehalfOf != "telegram:"+f.conv.ExternalChatID {
+			t.Errorf("row %d actor = %s %q %q %s %q", i, e.ActorKind, e.ActorID, e.ActorName, e.Via, e.OnBehalfOf)
+		}
+		if e.Method != w.method || e.Path != w.path || e.Outcome != w.outcome || e.ErrorCode != w.code || e.ApprovalID != w.approval ||
+			e.Status == nil || *e.Status != w.status || jsonField(t, e.Evidence, "risk") != w.risk || jsonField(t, e.Evidence, "operation_id") == "" {
+			t.Errorf("row %d = %+v evidence %s", i, e, e.Evidence)
+		}
+	}
+	if rows[0].RequestID != created["request_id"] {
+		t.Errorf("request id %q, the call's %v", rows[0].RequestID, created["request_id"])
 	}
 	// A request from the network carries no agent: the gate leaves it to auth and the handler.
 	ts := httptest.NewServer(s.Handler())

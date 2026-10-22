@@ -301,6 +301,9 @@ func (g *gateRequest) newApproval(now time.Time, risk tools.PlatformRisk, reason
 	if len(bytes.TrimSpace(body)) > 0 {
 		m.WriteString("\nBody: " + obs.Truncate(string(obs.RedactJSON(body)), approvalShownMax))
 	}
+	if revert := g.s.revertApprovalText(g.r.Context(), g.op, g.r); revert != "" {
+		m.WriteString("\n" + obs.Truncate(revert, approvalShownMax))
+	}
 	if before := g.s.approvalBefore(g.r); before != "" {
 		m.WriteString("\nNow: " + obs.Truncate(before, approvalShownMax))
 	}
@@ -412,6 +415,9 @@ func (s *Server) platformRisk(ctx context.Context, op *tools.PlatformOperation, 
 		if json.Unmarshal(body, &in) == nil && limitsAbove(in.Limits, store.DefaultLimits) {
 			reasons = append(reasons, "it sets run limits above the platform defaults")
 		}
+	case "revertAudit":
+		// DESIGN W4 rule 5: a revert is the change it writes back.
+		return s.revertRisk(ctx, op, params["id"], who)
 	}
 	if len(reasons) > 0 && !op.Risk.Gated() {
 		return tools.PlatformPrivileged, reasons, nil

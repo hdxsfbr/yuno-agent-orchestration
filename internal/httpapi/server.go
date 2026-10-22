@@ -504,8 +504,10 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/conversations/{id}/messages", s.listConversationMessages)
 	mux.HandleFunc("GET /api/conversations/{id}/tool-calls", s.listConversationToolCalls)
 
-	// The audit log (DESIGN 5.31 rule 5).
+	// The audit log (DESIGN 5.31 rule 5) and the revert of a recorded change (DESIGN W4
+	// rule 5).
 	mux.HandleFunc("GET /api/audit", s.listAudit)
+	mux.HandleFunc("POST /api/audit/{id}/revert", s.revertAudit)
 
 	mux.Handle("/mcp", s.mcpHandler())
 
