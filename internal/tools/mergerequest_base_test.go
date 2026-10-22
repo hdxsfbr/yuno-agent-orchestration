@@ -66,3 +66,38 @@ func TestOpenMergeRequestKeepsWhatMainGained(t *testing.T) {
 		})
 	}
 }
+
+// T5.22.15 (the tool half of DESIGN 5.22 rule 13, D-087): a run on a request whose checkout
+// has main merged in (merged_sha) pushes a merge commit of the request's branch and that
+// commit of main, so the branch contains main; the push clears merged_sha and moves
+// checkout_sha to the pushed commit.
+func TestOpenMergeRequestPushesThePendingMerge(t *testing.T) {
+	e := newRecordEnv(t, project.ProviderGitLab)
+	ctx := context.Background()
+	rec := e.openFirst()
+	branch := rec.SourceBranch
+	mainHead := pushByHand(t, e.bare, "main", "later.txt", "later\n")
+	u := e.newUpdater(rec, nil)
+	// The engine merged main into the checkout before the run's first turn.
+	u.edit(t, "later.txt", "later\n")
+	must(t, store.SetRunMergedSHA(ctx, testPool, u.run.ID, mainHead))
+	u.edit(t, "README.md", "# demo\nv1\nfixed the review comment\n")
+
+	out, got, err := e.call(u, 'a', "Address the review")
+	if err != nil || out.Result.IsError || !got.Updated {
+		t.Fatalf("call: %+v %v", out, err)
+	}
+	tip := e.tip(branch)
+	if projecttest.Git(t, e.bare, "rev-parse", branch+"^1") != u.base || projecttest.Git(t, e.bare, "rev-parse", branch+"^2") != mainHead {
+		t.Fatalf("tip %s is not a merge of the branch %s and main %s", tip, u.base, mainHead)
+	}
+	projecttest.Git(t, e.bare, "merge-base", "--is-ancestor", "main", branch)
+	if projecttest.FileAt(t, e.bare, branch, "later.txt") != "later\n" || projecttest.FileAt(t, e.bare, branch, "README.md") != "# demo\nv1\nfixed the review comment\n" {
+		t.Fatal("the branch lacks main's file or the run's change")
+	}
+	r, err := store.GetRun(ctx, testPool, u.run.ID)
+	must(t, err)
+	if r.MergedSHA != nil || r.CheckoutSHA == nil || *r.CheckoutSHA != tip {
+		t.Fatalf("after the push: merged_sha %v, checkout_sha %v (tip %s)", r.MergedSHA, r.CheckoutSHA, tip)
+	}
+}
