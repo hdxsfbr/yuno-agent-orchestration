@@ -261,8 +261,18 @@ func TestSeedCreatesFactoryAgents(t *testing.T) {
 	if !strings.Contains(integrator.SystemPrompt, "advance_wave exactly once") || !strings.Contains(integrator.SystemPrompt, "after the smoke test passed") {
 		t.Error("the Integrator prompt does not say when to advance the wave")
 	}
-	if !strings.Contains(integrator.SystemPrompt, `paths ["CLAUDE.md"]`) || !strings.Contains(integrator.SystemPrompt, "best effort") {
-		t.Error("the Integrator prompt does not cover the lessons merge request")
+	if !strings.Contains(integrator.SystemPrompt, `["docs/plans/<feature>", "CLAUDE.md"]`) || !strings.Contains(integrator.SystemPrompt, "best effort") {
+		t.Error("the Integrator prompt does not cover the notes and lessons merge request")
+	}
+	// D-089: a ticket run's notes for the plan documents go into its ticket file, which is
+	// the only plan document it changes; the ship run applies them.
+	if !strings.Contains(auditor.SystemPrompt, `"## Notes for the plan documents"`) ||
+		!strings.Contains(auditor.SystemPrompt, "never edit PRD.md, ARCHITECTURE.md, TASKS.md or WAVES.md") ||
+		strings.Contains(auditor.SystemPrompt, "edit ARCHITECTURE.md only") {
+		t.Error("the Doc Auditor prompt does not keep a ticket run to its ticket file")
+	}
+	if !strings.Contains(integrator.SystemPrompt, `"## Notes for the plan documents"`) || !strings.Contains(integrator.SystemPrompt, "left_out") {
+		t.Error("the Integrator prompt does not say how the plan documents' notes are applied and reported")
 	}
 	if !strings.Contains(builder.SystemPrompt, "failing test") || !strings.Contains(reviewer.SystemPrompt, "never rewrite") ||
 		!strings.Contains(auditor.SystemPrompt, "never patch around it") {

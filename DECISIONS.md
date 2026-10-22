@@ -6,6 +6,40 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-21
 
+**D-089 A ticket run changes only its own ticket file among the plan documents; the wave's
+ship run applies the shared notes; a plan revision holds the waves.** (Andre, 2026-10-21:
+"Plan revisions and running waves edit the same documents.") Seen live: the plan revision
+merge request !21 conflicted with the `ARCHITECTURE.md` edits wave 5's ticket runs T8 and
+T14 made while the revision ran, because every ticket's Doc Auditor wrote "as built" notes
+into the shared `ARCHITECTURE.md`. Three changes. (1) The platform enforces what the Doc
+Auditor's prompt only asked: in the run of a plan ticket, `open_merge_request` leaves out of
+the push every change under `docs/plans/<feature>/` but `tickets/<ticket id>.md`, names the
+left-out paths in its answer and says to put such notes in the ticket file under `## Notes
+for the plan documents`. Left out rather than refused, so a stray edit of a shared document
+never blocks a ticket whose code and trace are fine; the answer says so plainly. On a
+checkout with the default branch merged in (D-088) a left-out document keeps the merged
+version, so the push never reverts the default branch's documents. (2) The Doc Auditor
+writes the design as built and any other change a plan document needs as notes in its
+ticket file, and the ship run's Integrator applies the wave's notes to `ARCHITECTURE.md`
+(and the other documents where a note asks) in one documents merge request with the lessons.
+That request is gated by its own approval: `auto_after: smoke_test` covers `advance_wave`,
+and the rule that lets a follow-up through (D-086) covers a `docs/` call of a run that has a
+request already, which this first request of the ship run is not; no approval has seen the
+text the Integrator wrote. (3) While a run whose input `revise_plan` names the plan is live,
+the wave watcher releases no wave and starts no ship run for it, and `advance_wave` closes
+its wave but holds the next one back (recorded as `held_wave`) for the watcher to release
+once the revision ended; ticket runs in flight go on. A derived check rather than a stored
+pause flag, so a revision that fails, times out or is cancelled leaves nothing paused. The
+revision's own documents still meet the default branch per path at push time (D-087): a
+document both changed is a conflict, never an overwrite. Alternatives rejected: refusing
+the ticket's call (blocks the ticket for a note); rebasing the revision's documents onto the
+default branch with a line merge (the per-path merge already applies them onto the branch
+as it is, and a line merge would mix two authors' text nobody reviewed); pausing the project
+with `waves_paused` (the operator's flag, and left set if the revision dies). Design:
+DESIGN 5.28 rule 9, 5.29 rules 12, 13, 14 and 16. Found on the way: a follow-up's push
+(D-086) did not record the run's own commit as its `checkout_sha`, so the run's next call
+conflicted with the follow-up's own files; it does now.
+
 **D-088 A run's checkout has the default branch's history, and a run on a merge request
 starts with the default branch merged in.** (Andre, 2026-10-21: "Runs updating an MR cannot
 see the target branch, so agents cannot resolve conflicts.") Seen live: a Builder asked to

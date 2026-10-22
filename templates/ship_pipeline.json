@@ -1,7 +1,7 @@
 {
   "key": "ship_pipeline",
   "name": "Ship pipeline",
-  "description": "Ships one wave of a feature after its tickets merged and the default branch passed: the operator smoke tests the deployed app, the Integrator saves the lessons of the wave as project notes and advances the plan to the next wave, and after the last wave the operator checks the live app against the feature's PRD. Started by the wave watcher, never by hand.",
+  "description": "Ships one wave of a feature after its tickets merged and the default branch passed: the operator smoke tests the deployed app, the Integrator saves the lessons of the wave as project notes, advances the plan to the next wave and proposes the notes the wave's tickets left for the plan documents in one merge request, and after the last wave the operator checks the live app against the feature's PRD. Started by the wave watcher, never by hand.",
   "definition": {
     "input_schema": {
       "type": "object",
@@ -42,6 +42,13 @@
         },
         "main_url": {
           "type": "string"
+        },
+        "tickets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^T[0-9]+$"
+          }
         }
       },
       "required": [
@@ -78,6 +85,12 @@
               "type": "boolean"
             },
             "lessons": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "notes": {
               "type": "array",
               "items": {
                 "type": "string"
@@ -125,6 +138,13 @@
               "items": {
                 "type": "string"
               }
+            },
+            "notes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The notes of the wave's tickets you applied to the plan documents, one line each: the ticket, the document and what changed"
             }
           },
           "required": [
@@ -134,7 +154,7 @@
           ],
           "additionalProperties": true
         },
-        "task": "Wave {{.input.wave}} of the feature {{.input.feature}} is shipped: its tickets are merged, the default branch passed and the operator smoke tested the deployed app. Close it out in this order:\n\n1. Save one to three lessons from this wave as project notes, one memory_save call each with scope \"project\", a short key (start it with \"{{.input.feature}} wave {{.input.wave}}\") and the lesson as the value: what to do again, avoid or check next time, specific to this project. Base them on what you can see in the checkout (git log, the plan documents in docs/plans/{{.input.feature}}/) and on the project notes you already have.\n2. Call advance_wave exactly once, with only your run_token. It closes the wave's issues and tickets and releases the next wave.\n3. Then, if you saved at least one lesson, add them to the repository's CLAUDE.md: create the file if it is missing, otherwise keep everything in it; find or add the heading \"## Lessons\" and append under it a sub-heading \"### {{.input.feature}}, wave {{.input.wave}} (YYYY-MM-DD)\" (today's date, UTC) followed by one bullet per lesson. Then call open_merge_request with the title \"Lessons from {{.input.feature}}, wave {{.input.wave}}\", a one-line description and paths [\"CLAUDE.md\"]. The operator approves this request. If the call is rejected, expires or fails, carry on: the lessons are best effort and the run still finishes. With no lessons, skip this step.\n4. Finish with wave (the wave you shipped), last (taken from the advance_wave result: true when this was the last wave) and lessons (the lessons you saved, as plain strings).\n\nIf advance_wave refuses, call the escalate tool with kind other and the refusal as the reason. After escalate the run ends: do not finish."
+        "task": "Wave {{.input.wave}} of the feature {{.input.feature}} is shipped: its tickets are merged, the default branch passed and the operator smoke tested the deployed app. Close it out in this order:\n\n1. Save one to three lessons from this wave as project notes, one memory_save call each with scope \"project\", a short key (start it with \"{{.input.feature}} wave {{.input.wave}}\") and the lesson as the value: what to do again, avoid or check next time, specific to this project. Base them on what you can see in the checkout (git log, the plan documents in docs/plans/{{.input.feature}}/) and on the project notes you already have.\n2. Call advance_wave exactly once, with only your run_token. It closes the wave's issues and tickets and releases the next wave.\n3. Apply the notes this wave's tickets left for the plan documents. Each ticket has a file in the checkout, docs/plans/{{.input.feature}}/tickets/<ticket id>.md ({{with .input.tickets}}this wave's tickets: {{range $i, $t := .}}{{if $i}}, {{end}}{{$t}}{{end}}{{else}}the tickets docs/plans/{{.input.feature}}/WAVES.md lists for wave {{.input.wave}}{{end}}); read its section \"## Notes for the plan documents\" where it has one. Make each note's change in the document it names: ARCHITECTURE.md for the design as built, and PRD.md, TASKS.md or WAVES.md only where a note asks for it. Edit the documents in place and keep everything else; skip a note the document already says, and leave the ticket files as they are. With no notes, skip this step.\n4. If you saved at least one lesson, add them to the repository's CLAUDE.md: create the file if it is missing, otherwise keep everything in it; find or add the heading \"## Lessons\" and append under it a sub-heading \"### {{.input.feature}}, wave {{.input.wave}} (YYYY-MM-DD)\" (today's date, UTC) followed by one bullet per lesson. With no lessons, skip this step.\n5. If step 3 or 4 changed a file, call open_merge_request once, with the title \"Notes and lessons from {{.input.feature}}, wave {{.input.wave}}\", a short description that lists the notes applied (by ticket) and the lessons, and paths naming what changed: \"docs/plans/{{.input.feature}}\" when step 3 changed a plan document and \"CLAUDE.md\" when step 4 changed it, so paths [\"docs/plans/{{.input.feature}}\", \"CLAUDE.md\"] when both did. The operator approves this request. If the call is rejected, expires or fails, carry on: these documents are best effort and the run still finishes. When neither step changed a file, skip this step.\n6. Finish with wave (the wave you shipped), last (taken from the advance_wave result: true when this was the last wave), lessons (the lessons you saved, as plain strings) and notes (the notes you applied, one line each: the ticket, the document and what changed; empty when none).\n\nIf advance_wave refuses, call the escalate tool with kind other and the refusal as the reason. After escalate the run ends: do not finish."
       },
       {
         "id": "accept_feature",

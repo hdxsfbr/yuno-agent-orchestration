@@ -256,20 +256,32 @@ call, the call opens a follow-up request with what was left (D-086); it passes u
 same approval only on the same terms, every path under `docs/`, so no code reaches a new
 request without an approval of its own.
 
+**The plan's shared documents.** A ticket run's agents read issue text that anyone with
+tracker rights can edit, and the tickets of a wave run in parallel. Mitigation: in the run
+of a plan ticket `open_merge_request` leaves every change to the feature's plan documents
+but the ticket's own file out of the push, on the platform side and whatever paths the call
+names (D-089), and says which; so a ticket's merge request cannot rewrite the PRD, the
+design or the plan, and two tickets cannot fight over them. The notes a ticket leaves in
+its file reach the shared documents only through the ship run's documents request, which
+the operator approves and merges.
+
 **Escalation.** `escalate` can only end the run its token belongs to; it pauses the
 project's waves, which only an operator resumes.
 
 **Waves that advance themselves.** The wave watcher starts ship runs and releases waves
 without an operator's click. Mitigation: a ship run starts only when every ticket of the
 wave is merged and the default branch's pipeline passed after the newest merge, at most
-once per plan and wave (a unique index), and never while the project is paused; the run
-itself stops at the smoke-test approval. `advance_wave` closes issues and labels the next
+once per plan and wave (a unique index), and never while the project is paused or a
+revision of the plan runs (nor is a wave released then, D-089); the run itself stops at the
+smoke-test approval. `advance_wave` closes issues and labels the next
 wave's issues for intake; it passes on `auto_after: smoke_test` only inside a ship run
 whose smoke test was approved, refuses while paused or for a wave that is not current,
 and a second call returns the first result. A person with label rights who labels a later
 wave's issues early still starts builds for them (bounded as above); the watcher still
-ships wave by wave. The merge request that appends a wave's lessons to `CLAUDE.md` is a new
-request, not under `auto_after`: the operator approves it, and a rejection does not fail the run.
+ships wave by wave. The merge request that appends a wave's lessons to `CLAUDE.md` and
+applies its tickets' notes to the plan documents is a new request, not under `auto_after`,
+even when it carries only `docs/` paths: the operator approves it, and a rejection does not
+fail the run.
 
 **The eval forge.** `forgefake` runs only under the compose profile `eval` and accepts one
 fixed, non-secret token. The api accepts an `http` repository URL only for the exact host

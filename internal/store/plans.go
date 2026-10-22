@@ -410,6 +410,41 @@ func TicketByRun(ctx context.Context, q Querier, runID string) (*PlanTicket, err
 	return t, err
 }
 
+// TicketDocsOfRun returns the feature and the ticket id of the plan ticket the run builds
+// (the one TicketByRun returns), "" and "" for a run that builds none: the plan-document
+// rule of open_merge_request (DESIGN 5.28 rule 9, D-089).
+func TicketDocsOfRun(ctx context.Context, q Querier, runID string) (feature, ticketID string, err error) {
+	err = q.QueryRow(ctx, `SELECT p.feature, t.ticket_id FROM plan_tickets t JOIN plans p ON p.id = t.plan_id
+		WHERE t.run_id=$1 ORDER BY t.updated_at DESC LIMIT 1`, runID).Scan(&feature, &ticketID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", nil
+	}
+	return feature, ticketID, err
+}
+
+// LiveRevisionRun returns the id of the oldest run of the project whose input revise_plan
+// names the plan and that has not ended, "" when there is none (DESIGN 5.29 rule 12, D-089):
+// while one runs, the plan's waves wait.
+func LiveRevisionRun(ctx context.Context, q Querier, projectID, planID string) (string, error) {
+	var id string
+	err := q.QueryRow(ctx, `SELECT id FROM runs WHERE project_id=$1 AND btrim(input->>'revise_plan')=$2
+		AND status NOT IN ('succeeded','failed','cancelled','timed_out') ORDER BY created_at, id LIMIT 1`, projectID, planID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}
+
+// HeldWave reports whether advance_wave closed the wave before wave while a revision of the
+// plan ran, and so left wave to be released when it ended (DESIGN 5.29 rule 14, D-089): the
+// plan's `wave_done` event whose detail names wave as held_wave.
+func HeldWave(ctx context.Context, q Querier, planID string, wave int) (bool, error) {
+	var held bool
+	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM plan_events WHERE plan_id=$1 AND kind=$2 AND detail->>'held_wave'=$3)`,
+		planID, PlanEventWaveDone, strconv.Itoa(wave)).Scan(&held)
+	return held, err
+}
+
 // TicketByMergeRequest returns the plan ticket whose merge request record is mergeRequestID,
 // ErrNotFound when none is.
 func TicketByMergeRequest(ctx context.Context, q Querier, mergeRequestID string) (*PlanTicket, error) {

@@ -5,10 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"yuno/internal/project"
 	"yuno/internal/project/projecttest"
@@ -336,6 +340,13 @@ func TestOpenMergeRequestOnAFinalNamedRequest(t *testing.T) {
 	}
 }
 
+// failingWrites is a transaction whose statements through Exec fail while its queries work.
+type failingWrites struct{ pgx.Tx }
+
+func (failingWrites) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, errors.New("tx is closed")
+}
+
 // The failure handling of 5.22: a checkout_sha write that fails after the push is a tool
 // error that names the step and says the push landed.
 func TestOpenMergeRequestCheckoutSHAWriteFailure(t *testing.T) {
@@ -343,9 +354,10 @@ func TestOpenMergeRequestCheckoutSHAWriteFailure(t *testing.T) {
 	rec := e.openFirst()
 	u := e.newUpdater(rec, nil)
 	u.edit(t, "README.md", "# demo\nfixed\n")
-	tx, err := testPool.Begin(context.Background())
+	open, err := testPool.Begin(context.Background())
 	must(t, err)
-	must(t, tx.Rollback(context.Background())) // every statement on it now fails
+	t.Cleanup(func() { _ = open.Rollback(context.Background()) })
+	tx := failingWrites{open} // reads work (the run's ticket), every write fails
 	m := &mergeRequest{}
 	run, err := store.GetRun(context.Background(), testPool, u.run.ID)
 	must(t, err)

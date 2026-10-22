@@ -623,9 +623,9 @@ type lessonsGate struct {
 }
 
 // shipRunLessons is shipRun whose integrator, when lessonsMR is set, also calls the
-// approval-gated open_merge_request with paths ["CLAUDE.md"] after advance_wave and waits
-// for the operator's decision before it finishes (DESIGN 5.29 rule 13). The finish
-// carries lessons.
+// approval-gated open_merge_request for the plan notes and the lessons, with paths
+// ["docs/plans/x", "CLAUDE.md"], after advance_wave and waits for the operator's decision
+// before it finishes (DESIGN 5.29 rule 13, D-089). The finish carries lessons.
 func shipRunLessons(t *testing.T, env *testEnv, last, lessonsMR bool, lessons []string) (*store.Run, *int32, *scripted, *lessonsGate) {
 	t.Helper()
 	if lessons == nil {
@@ -667,14 +667,14 @@ func shipRunLessons(t *testing.T, env *testEnv, last, lessonsMR bool, lessons []
 				}
 				key := "key-lessons"
 				call := &store.ToolCall{RunID: rc.RunID, RunNodeID: rc.RunNodeID, ToolUseID: "mcp-" + store.NewID(), ToolName: "open_merge_request",
-					Input:  json.RawMessage(`{"run_token":"` + tokenIn(p.Message) + `","title":"Lessons from x, wave 1","description":"Lessons of wave 1.","paths":["CLAUDE.md"]}`),
+					Input:  json.RawMessage(`{"run_token":"` + tokenIn(p.Message) + `","title":"Notes and lessons from x, wave 1","description":"Notes and lessons of wave 1.","paths":["docs/plans/x","CLAUDE.md"]}`),
 					Status: store.ToolAwaitingApproval, IdempotencyKey: &key}
 				if err := store.InsertToolCall(ctx, env.pool, call); err != nil {
 					t.Error(err)
 					return
 				}
 				a, err := env.e.RequestApproval(ctx, ApprovalRequest{Token: tokenIn(p.Message), ToolName: "open_merge_request", ToolCallID: call.ID,
-					Message: "Open a merge request: Lessons from x, wave 1 (1 file)", Input: call.Input})
+					Message: "Open a merge request: Notes and lessons from x, wave 1 (2 paths)", Input: call.Input})
 				if err != nil {
 					t.Errorf("RequestApproval: %v", err)
 					return
@@ -735,7 +735,7 @@ func shipWithLessonsMR(t *testing.T, decision string, lessons []string) (*testEn
 			err = json.Unmarshal(call.Input, &in)
 		}
 		if err != nil || ap.Kind != store.ApprovalKindTool || ap.NodeID != "integrator" || call.ToolName != "open_merge_request" ||
-			!slices.Equal(in.Paths, []string{"CLAUDE.md"}) {
+			!slices.Equal(in.Paths, []string{"docs/plans/x", "CLAUDE.md"}) {
 			t.Fatalf("approval = %+v call %+v %v", ap, call, err)
 		}
 		if _, err := env.e.DecideApproval(ctx, ap.ID, decision, "andre", "not now"); err != nil {
@@ -925,6 +925,71 @@ func TestShipPipelineSmokeTestMessage(t *testing.T) {
 	}
 }
 
+// DESIGN 5.29 rule 13 (D-089): the ship integrator gathers the notes the wave's tickets left
+// for the plan documents from their files, by the ticket ids of the input or, for a run
+// started without them, from WAVES.md, applies them and proposes them with the lessons in one
+// merge request; the wave pipeline's Doc Auditor writes such notes into its ticket file and
+// changes no other plan document.
+func TestShipPipelineAppliesTheTicketNotes(t *testing.T) {
+	load := func(name string) *workflow.Definition {
+		t.Helper()
+		raw, err := os.ReadFile("../../templates/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var tpl struct {
+			Definition workflow.Definition `json:"definition"`
+		}
+		if err := json.Unmarshal(raw, &tpl); err != nil {
+			t.Fatal(err)
+		}
+		return &tpl.Definition
+	}
+	ship := load("ship_pipeline.json")
+	node, _ := ship.Node("integrator")
+	render := func(input string) string {
+		t.Helper()
+		out, err := workflow.Render(node.Task, json.RawMessage(input), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	withTickets := render(`{"plan_id":"p1","feature":"x","wave":2,"last_wave":3,"tickets":["T4","T5"]}`)
+	for _, want := range []string{"docs/plans/x/tickets/<ticket id>.md (this wave's tickets: T4, T5)", `"## Notes for the plan documents"`,
+		"ARCHITECTURE.md for the design as built", "leave the ticket files as they are", `"Notes and lessons from x, wave 2"`,
+		`paths ["docs/plans/x", "CLAUDE.md"]`, "notes (the notes you applied"} {
+		if !strings.Contains(withTickets, want) {
+			t.Errorf("task lacks %q:\n%s", want, withTickets)
+		}
+	}
+	if strings.Index(withTickets, "advance_wave exactly once") > strings.Index(withTickets, "open_merge_request once") {
+		t.Error("the documents request comes before advance_wave")
+	}
+	bare := render(shipInput)
+	if !strings.Contains(bare, "the tickets docs/plans/x/WAVES.md lists for wave 1") || strings.Contains(bare, "<no value>") {
+		t.Errorf("task without the ticket ids:\n%s", bare)
+	}
+	if msgs := ship.ValidateTemplates(json.RawMessage(`{"plan_id":"p1","feature":"x","wave":1,"last_wave":1,"tickets":["T1"]}`)); len(msgs) > 0 {
+		t.Fatalf("templates: %v", msgs)
+	}
+	if !strings.Contains(string(node.OutputSchema), `"notes"`) {
+		t.Error("the integrator's output does not name the applied notes")
+	}
+
+	audit, _ := load("wave_pipeline.json").Node("doc_audit")
+	for _, want := range []string{"never edit PRD.md, ARCHITECTURE.md, TASKS.md or WAVES.md in a ticket run",
+		`under the heading "## Notes for the plan documents"`, "the wave's ship run applies them",
+		`write the change as a note under "## Notes for the plan documents" in your ticket file`} {
+		if !strings.Contains(audit.Task, want) {
+			t.Errorf("doc_audit task lacks %q", want)
+		}
+	}
+	if strings.Contains(audit.Task, "Edit ARCHITECTURE.md only if") {
+		t.Error("doc_audit still edits ARCHITECTURE.md")
+	}
+}
+
 // DESIGN 5.29 rules 13 and 14: auto_after sits on the integrator only and names the smoke
 // test; the edges route on state.integrator.last; the template validates and a misplaced
 // auto_after is refused.
@@ -968,7 +1033,7 @@ func TestShipPipelineStructure(t *testing.T) {
 	if err := json.Unmarshal(def.InputSchema, &schema); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"merge_requests", "main_url"} {
+	for _, k := range []string{"merge_requests", "main_url", "tickets"} {
 		if _, ok := schema.Properties[k]; !ok || slices.Contains(schema.Required, k) {
 			t.Errorf("input %s: declared %v, required %v", k, ok, slices.Contains(schema.Required, k))
 		}

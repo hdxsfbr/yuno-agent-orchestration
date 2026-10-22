@@ -223,6 +223,9 @@ type Proposal struct {
 	// else Commit's second parent (rule 10, D-087).
 	Base  string
 	Files int // files copied from the checkout
+	// LeftOut are the plan documents the run changed that the proposal does not carry, sorted
+	// (Base.Ticket, DESIGN 5.28 rule 9, D-089); also set with ErrNoChanges.
+	LeftOut []string
 }
 
 // Base is where a run's changes are counted from when they are proposed (rule 10, D-087).
@@ -239,6 +242,38 @@ type Base struct {
 	// the run's first turn (runs.merged_sha, DESIGN 5.22 rule 13): the run's own commit gets
 	// it as its second parent, so the push is a real merge. "" when there is none.
 	Merged string
+	// Ticket is the plan ticket the run builds, nil for any other run: of its feature's plan
+	// documents the proposal carries only the ticket's own file (DESIGN 5.28 rule 9, D-089).
+	Ticket *TicketDocs
+}
+
+// TicketDocs is the plan ticket a run builds, for the plan-document rule of DESIGN 5.28 rule
+// 9 (D-089): the tickets of a wave run in parallel, so a ticket run changes no plan document
+// of its feature but its own ticket file, and a change to any other is left out of its push.
+type TicketDocs struct {
+	Feature string // the plan's feature slug
+	Ticket  string // the ticket id, T<n>
+}
+
+// Dir is docs/plans/<feature>, where the plan documents live.
+func (t TicketDocs) Dir() string { return "docs/plans/" + t.Feature }
+
+// File is docs/plans/<feature>/tickets/<ticket id>.md, the one plan document a ticket run
+// writes.
+func (t TicketDocs) File() string { return t.Dir() + "/tickets/" + t.Ticket + ".md" }
+
+// withholds reports whether a change of p is not the ticket run's to make: p is in Dir, is
+// Dir itself, or is a directory above it (a file there would replace the documents), and is
+// not the ticket's own file, whose name is matched in any case.
+func (t TicketDocs) withholds(p string) bool {
+	dir := t.Dir()
+	switch {
+	case strings.EqualFold(p, t.File()):
+		return false
+	case p == dir || strings.HasPrefix(p, dir+"/"):
+		return true
+	}
+	return strings.HasPrefix(dir, p+"/")
 }
 
 // RunBase is the unguarded base of a run's next proposal: its checkout_sha and merged_sha.
@@ -284,7 +319,8 @@ func (c Config) Propose(ctx context.Context, checkout, branch, message string) (
 // caller) only those are the run's changes: each replaces its counterpart in the base (a
 // path the checkout no longer has but the base does is a deletion), and the rest of the
 // checkout stays out. A path in neither is *ErrPathMissing. ErrNoChanges when there is
-// nothing to push, *ErrConflict when the default branch changed the same files.
+// nothing to push, *ErrConflict when the default branch changed the same files. A base with
+// a Ticket leaves the other plan documents out (Proposal.LeftOut).
 func (c Config) ProposePaths(ctx context.Context, checkout, branch string, base Base, message string, paths []string) (Proposal, error) {
 	return c.propose(ctx, checkout, c.DefaultBranch, branch, base, message, paths)
 }
@@ -320,7 +356,8 @@ func (c Config) ProposeOntoPaths(ctx context.Context, checkout, branch string, b
 //     and checked out, so the clone holds the tree the run's checkout started from.
 //  2. The checkout is copied over it (the whole working tree, or the paths) and staged; the
 //     run's changes are the difference between the base and that index, path by path,
-//     less what the copy cannot speak for (keepRunChanges). None is ErrNoChanges.
+//     less what the copy cannot speak for (keepRunChanges) and, for a ticket run, less the
+//     plan documents that are not its own (leaveOut). None is ErrNoChanges.
 //  3. The run's own commit is the base with those changes. When the head is the base it is
 //     what is pushed, as before.
 //  4. Otherwise the branch moved since the base, and each changed path is weighed against
@@ -412,20 +449,31 @@ func (c Config) propose(ctx context.Context, checkout, from, branch string, base
 	if changes, err = keepRunChanges(checkout, changes); err != nil {
 		return Proposal{}, err
 	}
+	if base.Merged != "" {
+		if _, err := c.git(ctx, dest, "fetch", "--quiet", "--no-tags", "--depth", "1", "origin", base.Merged); err != nil {
+			return Proposal{}, err
+		}
+	}
+	var leftOut []string
+	if base.Ticket != nil {
+		if changes, leftOut, err = c.leaveOut(ctx, dest, basis, base, changes); err != nil {
+			return Proposal{}, err
+		}
+	}
 	if len(changes) == 0 {
-		return Proposal{Branch: branch, Files: n}, ErrNoChanges
+		return Proposal{Branch: branch, Files: n, LeftOut: leftOut}, ErrNoChanges
 	}
 	parents := []string{basis}
 	if base.Merged != "" {
-		marked, err := markerFiles(ctx, dest, nil, strings.TrimSpace(string(staged)), changes)
+		// A plan document left out takes another version than the checkout's, so its markers
+		// do not count.
+		own := slices.DeleteFunc(slices.Clone(changes), func(ch treeChange) bool { return slices.Contains(leftOut, ch.path) })
+		marked, err := markerFiles(ctx, dest, nil, strings.TrimSpace(string(staged)), own)
 		if err != nil {
 			return Proposal{}, err
 		}
 		if len(marked) > 0 {
 			return Proposal{}, &ErrMarkers{Paths: marked}
-		}
-		if _, err := c.git(ctx, dest, "fetch", "--quiet", "--no-tags", "--depth", "1", "origin", base.Merged); err != nil {
-			return Proposal{}, err
 		}
 		parents = append(parents, base.Merged)
 	}
@@ -441,7 +489,7 @@ func (c Config) propose(ctx context.Context, checkout, from, branch string, base
 		}
 		if len(onto) == 0 {
 			// The branch has every change of the run already.
-			return Proposal{Branch: branch, Files: n}, ErrNoChanges
+			return Proposal{Branch: branch, Files: n, LeftOut: leftOut}, ErrNoChanges
 		}
 	}
 	if strings.TrimSpace(message) == "" {
@@ -476,7 +524,50 @@ func (c Config) propose(ctx context.Context, checkout, from, branch string, base
 	if _, err := c.git(ctx, dest, "push", "--quiet", "--no-verify", "--", "origin", pushed+":refs/heads/"+branch); err != nil {
 		return Proposal{}, err
 	}
-	return Proposal{Branch: branch, Commit: pushed, Base: own, Files: n}, nil
+	return Proposal{Branch: branch, Commit: pushed, Base: own, Files: n, LeftOut: leftOut}, nil
+}
+
+// leaveOut applies the plan-document rule of a ticket run (DESIGN 5.28 rule 9, D-089) to the
+// run's changes: a change of a path base.Ticket withholds is not the run's to make. It is
+// dropped, so the path keeps the base's version. On a base with a merged commit (D-088) the
+// path keeps the version that merge brings instead, the merged commit's where it differs
+// from the base's, so the push never reverts what the default branch did to a plan document.
+// It returns the changes kept and the paths left out, sorted: those whose content in the
+// checkout the push does not carry.
+func (c Config) leaveOut(ctx context.Context, repo, basis string, base Base, changes []treeChange) ([]treeChange, []string, error) {
+	scope := *base.Ticket
+	theirs := map[string]treeChange{}
+	if base.Merged != "" {
+		list, err := c.treeChanges(ctx, repo, basis, base.Merged)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, t := range list {
+			if scope.withholds(t.path) {
+				theirs[t.path] = t
+			}
+		}
+	}
+	var kept []treeChange
+	var left []string
+	for _, ch := range changes {
+		if !scope.withholds(ch.path) {
+			kept = append(kept, ch)
+			continue
+		}
+		t, merged := theirs[ch.path]
+		switch {
+		case merged && ch.sameResult(t):
+			kept = append(kept, ch) // the default branch's version, as the merge brought it
+		case merged:
+			kept = append(kept, t)
+			left = append(left, ch.path)
+		default:
+			left = append(left, ch.path)
+		}
+	}
+	slices.Sort(left)
+	return kept, left, nil
 }
 
 // treeChange is one path of `git diff-tree -r -z`: its mode and object id before and after,

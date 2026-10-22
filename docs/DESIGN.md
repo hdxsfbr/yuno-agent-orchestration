@@ -1363,7 +1363,9 @@ Rules:
     paths that differ between the base and that index: added, modified and deleted,
     except a path inside an excluded directory, a submodule, and the deletion of a path
     the checkout still has as a link (or under one), which the copy cannot see and which
-    keep the base's version. None ends the call with the model-facing error `the
+    keep the base's version; in the run of a plan ticket, also every path of its feature's
+    plan documents but the ticket's own file, which is left out and named (5.28 rule 9,
+    D-089). None ends the call with the model-facing error `the
     checkout has no changes to propose`. The run's own commit is the base with those
     changes, as `Yuno <yuno@localhost>` with the title as message (no hooks, no
     signing). When the head is the base, that commit is what is pushed. Otherwise the
@@ -4056,8 +4058,9 @@ Rules:
    then the code, runs the suite; output `{summary, files, tests_passed}`) → `code_review`
    (Code Reviewer; output `{verdict: approved | changes_requested, comments}`;
    `changes_requested` → `builder`, bounded by `max_loop_visits` 3) → `doc_audit` (Doc
-   Auditor: updates the plan documents to match the code and traces each requirement the
-   ticket covers to code and tests; output `{verdict: ok | gap, reason, trace}`) →
+   Auditor: traces each requirement the ticket covers to code and tests in the ticket's
+   own file, with notes for the other plan documents, rule 9; output `{verdict: ok | gap,
+   reason, trace}`) →
    `integrator` (`open_merge_request` with code and documents) → end; `doc_audit` with
    `gap` goes to approval `gap_found` (message: the reason; approve = open the MR anyway,
    reject = stop the ticket: the run fails "rejected at gap_found" with the operator's
@@ -4079,10 +4082,46 @@ Rules:
    committed, so the plan MR carries `docs/plans/<feature>/` and nothing a build left in
    the checkout.
 9. **Ticket runs stay parallel-safe in the documents.** In a ticket run the Doc Auditor
-   writes its requirement trace to `docs/plans/<feature>/tickets/<ticket id>.md`, never
-   edits `TASKS.md` or `WAVES.md`, and edits `ARCHITECTURE.md` only when the design
-   changed, saying so in its output (a change against the approved design is a gap).
-   Ticket ids are `T<n>`; the wave comes from `WAVES.md`.
+   writes its requirement trace to `docs/plans/<feature>/tickets/<ticket id>.md` and
+   changes no other plan document: the design as built where it differs from
+   `ARCHITECTURE.md`, and anything else a plan document should say after the ticket (an
+   operator's decision that the documents change included), go into that file under the
+   heading `## Notes for the plan documents`, one note per change naming the document and
+   the section; the wave's ship run applies them (5.29 rule 13). A difference against the
+   approved design is not a note but the operator's decision (5.29 rule 6). Ticket ids are
+   `T<n>`; the wave comes from `WAVES.md`.
+   **The platform enforces it (D-089).** Seen live: plan revision !21 conflicted with the
+   `ARCHITECTURE.md` edits that wave 5's ticket runs T8 and T14 made while the revision ran,
+   because every ticket's audit wrote "as built" notes into the shared file. Now, in the
+   run of a plan ticket (`plan_tickets.run_id` is the run, whatever its workflow: intake's
+   wave pipeline run, or an iteration on the ticket's merge request), `open_merge_request`
+   leaves out of the push every change under `docs/plans/<feature>/` but the ticket's own
+   `tickets/<ticket id>.md` (its name matched in any case), whether the call proposes the
+   whole checkout or names paths: `PRD.md`, `ARCHITECTURE.md`, `TASKS.md`, `WAVES.md`, any
+   other file there and another ticket's file keep the base's version, and so never reach
+   the request or conflict with the default branch. (A file in place of the directory, or of
+   one above it, is left out too.) On a run whose checkout has the default branch merged in
+   (5.22 rule 13) a left-out document keeps the version the merge brings, the default
+   branch's where it differs from the branch's, so the push never reverts what the default
+   branch did to a plan document, and its conflict markers do not block the push. The
+   answer names the paths (`left_out`) with a `notice`: `Left out of the merge request:
+   <paths>. A ticket's merge request carries no plan document of the feature but the
+   ticket's own file, <file>, because the tickets of a wave run in parallel. Write what the
+   other documents need in that file under the heading "## Notes for the plan documents",
+   naming the document and section of each note; the wave's ship run applies them.` A call
+   whose only changes are left out pushes and opens nothing and is the model error `the
+   checkout has no changes to propose besides plan documents a ticket run does not change;
+   nothing was pushed.` followed by that notice; a later call of a run with a request
+   answers `replayed` without `updated`, with `left_out`. Runs that build no ticket (the plan
+   pipeline's, the ship pipeline's, a quick run) are not held: a plan revision writes all
+   four documents, and its push meets the default branch's newer edits per path (5.16 rule
+   10): a document only it changed goes on top, one both changed is a conflict that pushes
+   nothing, and nothing is overwritten. Choice: left out rather than refused, so a ticket is
+   never blocked by a stray edit of a shared document (its code and trace still reach the
+   request) and the agent is told plainly what was dropped and where the note goes; the
+   Integrator reports `left_out` in its finish. Choice: the rule follows the ticket link, not
+   the template, so a copied workflow or an iteration run is held the same way; a run of a
+   ticket of a finished plan is held too, the documents being shared all the same.
 10. **Retiring is conservative.** The seed deletes a copy of a retired template only if it
    still has the shipped name and version 1, no run in flight, and no project intake or
    enabled schedule points at it; an agent only if no live workflow other than such a
@@ -4114,7 +4153,14 @@ T5.28.5 eval 025 runs the plan pipeline with both approvals; T5.28.6 the wave pi
 review loop is bounded and the gap path fails the run with the reason; T5.28.7 the
 Integrator's prompt asks for the `How it was checked:` line with the plain CI sentence and
 never `NOT VERIFIED`, the wave pipeline's two Integrator tasks carry the builder's and the
-reviewer's results, and a quick run's task reaches the agent alone.
+reviewer's results, and a quick run's task reaches the agent alone; T5.28.8 (D-089) a ticket
+run that edited `ARCHITECTURE.md`, `TASKS.md`, another ticket's file and its own, besides
+code, pushes only the code and its own file and names the rest in `left_out` with the notice,
+for the whole checkout and for the feature's directory as paths, while the default branch's
+newer `ARCHITECTURE.md` stays; a call with only left-out changes opens nothing; with the
+default branch merged in, a left-out document takes the default branch's version and its
+markers do not block the push; a plan run writes all four documents; the Doc Auditor's
+prompt and task send notes to the ticket file and never edit the other documents.
 
 Limitations: one feature at a time per project (5.29); the plan documents are only as
 good as the agents' prompts; nothing checks that `TASKS.md` slices are really end to end.
@@ -4199,7 +4245,10 @@ Rules:
    request holds the rest.`, and recorded as a record of the run whose `follow_up_of` names the merged
    one (migration 0024). The answer is the follow-up's `{number, url, branch, provider}`
    with `follow_up: true` instead of an error. A later call pushes onto the run's newest
-   follow-up while it is open, and a follow-up merged in turn gets a follow-up of its own.
+   follow-up while it is open, counting from the run's own commit of the follow-up's push,
+   which that push records as the run's `checkout_sha` like any other (5.16 rule 10; until
+   2026-10-21 it did not, and the later call conflicted with the follow-up's own files), and
+   a follow-up merged in turn gets a follow-up of its own.
    When the default branch already holds everything the call proposes, nothing is pushed,
    opened or recorded, and the answer is the merged request with `merged: true`. The run's
    own record stays the one the run header, its plan ticket and `auto_after` read; the
@@ -4296,12 +4345,48 @@ Rules:
     `runs_plan_wave_idx`); a watcher that finds the run records it instead of starting
     another, and the plan's `main_state`, `main_sha`, `main_at`, `main_url` hold its last
     read of the default branch (plan detail `main`, `ship_runs`).
+    **A plan revision holds the waves (D-089).** While a revision of the plan runs (a run of
+    its project whose input `revise_plan` names the plan and whose status is not final), the
+    watcher releases no wave and starts no ship run for it: wave 1 after the plan merge
+    request waits, and so does the ship run of a wave that is merged and green. The check is
+    made when the pass looks at the plan and again inside the release's transaction. Ticket
+    runs in flight go on, as does a ship run already started (rule 14 holds its release of
+    the next wave), the default branch's status is still read and recorded, and tickets that
+    ended without a merge still escalate. When the revision ends, succeeded, failed or
+    cancelled, the next pass goes on where the plan is. Choice: the hold is derived from the
+    live run rather than stored as a pause, so a revision that fails, times out or is
+    cancelled leaves nothing paused and nobody has to resume anything; the project's pause
+    flag stays the operator's. The revision's documents are applied onto the default branch
+    as it is at push time (5.16 rule 10, per path), so the hold is not what keeps them
+    consistent: it keeps a new wave from building, and the ship run from applying its notes,
+    against documents about to change.
 13. **`ship_pipeline`** (template; trigger only by the watcher): approval `smoke_test`
     (message: the wave, its merged MRs, main's pipeline) → `integrator` (lessons: project
     notes, and a small MR appending them to the repository's `CLAUDE.md`, D-075; then
     `advance_wave`) → when the result says `last`, approval `accept_feature` (message:
     check the live app against `PRD.md`) → end. A rejected smoke test pauses the waves
     with the operator's reason.
+    **The wave's notes for the plan documents (D-089).** The ship run's input carries the
+    wave's ticket ids (`tickets`; a run started before it says to take them from
+    `WAVES.md`). After `advance_wave` the Integrator reads the section `## Notes for the plan
+    documents` of each ticket's `docs/plans/<feature>/tickets/<ticket id>.md` (rule 9 of
+    5.28) and makes each note's change in the document it names, `ARCHITECTURE.md` for the
+    design as built and `PRD.md`, `TASKS.md` or `WAVES.md` only where a note asks for it,
+    in place, skipping a note the document already says and leaving the ticket files as
+    they are. The documents and the lessons go into one merge request (a run has one,
+    5.20 rule 2): `open_merge_request` titled `Notes and lessons from <feature>, wave <n>`
+    with paths `docs/plans/<feature>` when a plan document changed and `CLAUDE.md` when the
+    lessons did; nothing changed, no call. It stays best effort, as the lessons were: a
+    rejection, an expiry or a failure does not fail the run, and the notes stay in the
+    ticket files on the default branch. The Integrator's finish lists the notes it applied
+    (`notes`). Choice: the call is gated by its own approval, not by `auto_after:
+    smoke_test`. The rule that lets a ready call's follow-up through (rule 5) covers a
+    `docs/` call of a run that has a request already, standing in for a push the manual
+    test covered; this is the ship run's first request, its text was written by the
+    Integrator after the smoke test, and the smoke test approved the running app, not
+    documents, so the operator approves it like any new request (`CLAUDE.md` is outside
+    `docs/` besides). Choice: only the wave's own tickets are read, not every ticket of the
+    feature, so a note a later revision overtook is never applied again.
 14. **`advance_wave`** (side-effecting, gated by the smoke-test approval through
     `auto_after: smoke_test`): closes the wave's issues still open, sets its tickets
     `closed`, records `wave_done`, then releases the next wave (rule 12) or returns
@@ -4310,7 +4395,17 @@ Rules:
     next wave, each safe to repeat) and the database last in one transaction, so a failed
     call is retried whole; the first result is the `wave_done` event's detail; a call is
     refused unless the plan is `shipping` that wave; after the last wave the plan is
-    `accepting` and `accept_waiting` is recorded in the same transaction.
+    `accepting` and `accept_waiting` is recorded in the same transaction. While a revision
+    of the plan runs (rule 12, D-089) the call still closes the wave, but holds the next
+    one back: its issues are not labelled and its tickets stay `pending`, the plan moves to
+    it as `building`, and `wave_done` names it in its detail (`held_wave`), as does the
+    result (`held_wave`, `released` 0). The watcher releases a held wave that has no
+    `wave_released` yet once no revision of the plan runs and the project is not paused,
+    the same way it releases wave 1 (the pause and the revision read again under the plan
+    lock, the tracker first): once, since `wave_released` is then recorded. A revision that
+    released the wave itself (its current wave moved, rule 16) leaves nothing for the
+    watcher to do. Choice: closing the wave is not held, since its tickets are merged and
+    the operator approved the smoke test; refusing would make the Integrator escalate.
 15. **Done.** Approving `accept_feature` sets the plan `done` and records `feature_done`;
     rejecting it pauses with the reason (the operator revises the plan, D-076). Choices: a ship run
     that ends other than succeeded pauses the waves and records `escalated` (no ticket, `detail`
@@ -4325,7 +4420,14 @@ Rules:
     retried run that ends badly again is told again.
 16. **Revising a plan** (wave 4): `plan_pipeline` with input `revise_plan` amends the
     documents and `publish_tickets` adds or updates issues by marker; the plan resumes at
-    its current wave. Choices: `revise_plan` names an open plan of the run's project whose
+    its current wave. While the revision runs the waves wait (rule 12, D-089): no wave is
+    released and no ship run started, a ship run in flight closes its wave without
+    releasing the next (rule 14), and ticket runs in flight go on, their merge requests
+    carrying no plan document but their ticket files (5.28 rule 9), so they do not touch
+    the documents the revision amends. Its own push puts the amended documents onto the
+    default branch as it is then, per path: a document the default branch changed since the
+    revision's checkout (a ship run's notes) and the revision changed too is a conflict
+    named to the Integrator, never overwritten. Choices: `revise_plan` names an open plan of the run's project whose
     feature is the run's; a plan that is done or cancelled, another project's, or one for another
     feature is refused before any effect. The current wave is the lowest wave with a ticket not
     `closed`; tickets that are merged or closed are left as they are (issue, title, wave), and a
@@ -4394,7 +4496,8 @@ closed without a merged MR is `failed` and escalates); a ticket MR closed unmerg
 itself is read, a confidential one being open, and only a released ticket without a merge
 request record is judged so, as the sync settles the others); main red after a wave's merges (the watcher waits; nothing
 escalates, the project page shows main's status); a pause during a running wave (runs in
-flight finish; only the next release and the ship run wait); two waves' worth of tickets
+flight finish; only the next release and the ship run wait); a plan revision during a
+running wave (the same, until the revision ends, rule 12); two waves' worth of tickets
 labelled early by a person with tracker rights (intake takes them, the watcher still
 ships wave by wave; the threat model names it); an operator who rejects the manual test
 three times (the loop limit fails the run, rule 7).
@@ -4428,7 +4531,18 @@ record; `auto_after` lets a `docs/` follow-up through and gates one with code; t
 names the newest follow-up; T5.29.14 a revision on both providers, its refusals, and its
 follow-ups (one ticket and issue for a changed merged ticket in the right wave, none again on
 a retried visit or after a rollback, none for an unchanged one, the Planner's own
-follow-up); evals 026 (loop limit
+follow-up); T5.29.15 (D-089) while a revision of the plan runs the watcher releases no
+wave after the plan merge request and starts no ship run for a merged, green wave, a
+revision of another plan or one that ended holds nothing, and a failed revision holds
+nothing once it ended; `advance_wave` during a revision closes the wave, labels nothing,
+records `held_wave` and answers it again on a second call, and the watcher releases the
+held wave once the revision ended and the project is not paused, once; the ship run's
+input names the wave's tickets; T5.29.16 a revision whose `PRD.md` and `ARCHITECTURE.md`
+changes meet the default branch's newer `ARCHITECTURE.md` is a conflict naming it with
+nothing pushed, and without its own `ARCHITECTURE.md` change merges on top keeping the
+default branch's; the ship integrator's task reads the wave's ticket files by id (or from
+`WAVES.md`), applies their notes and proposes them with the lessons in one request whose
+call `auto_after: smoke_test` does not cover; evals 026 (loop limit
 escalation), 027 (PRD gap escalation), 028 (two waves auto-advance with the pause flag).
 
 Limitations: one open plan per project; main's status is read, not run, so a project

@@ -64,7 +64,7 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 		}
 		sample := `{"task":"x","feature":"x"}`
 		if key == "ship_pipeline" {
-			sample = `{"plan_id":"p1","feature":"x","wave":1,"last_wave":2}`
+			sample = `{"plan_id":"p1","feature":"x","wave":1,"last_wave":2,"tickets":["T1","T2"]}`
 		}
 		if msgs := def.ValidateTemplates(json.RawMessage(sample)); len(msgs) > 0 {
 			t.Errorf("%s templates: %v", key, msgs)
@@ -96,6 +96,11 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 			if routes["ok"] != "integrator_ready" || routes["rework"] != "builder" {
 				t.Errorf("doc_audit routes = %v", routes)
 			}
+			// D-089: the audit's notes for the plan documents go into the ticket's own file.
+			if a, _ := def.Node("doc_audit"); a == nil || !strings.Contains(a.Task, `"## Notes for the plan documents"`) ||
+				!strings.Contains(a.Task, "never edit PRD.md, ARCHITECTURE.md, TASKS.md or WAVES.md") {
+				t.Errorf("doc_audit = %+v", a)
+			}
 		}
 		if key == "ship_pipeline" {
 			i, _ := def.Node("integrator")
@@ -106,8 +111,12 @@ func TestDeliveryTemplatesInstantiate(t *testing.T) {
 				t.Errorf("ship wiring: integrator %+v smoke_test %+v accept_feature %+v", i, s, a)
 			}
 			if !strings.Contains(string(i.OutputSchema), "lessons") || !strings.Contains(i.Task, "advance_wave") || !strings.Contains(i.Task, "memory_save") ||
-				!strings.Contains(i.Task, `paths ["CLAUDE.md"]`) || strings.Contains(i.Task, "with the branch") {
+				!strings.Contains(i.Task, `paths ["docs/plans/{{.input.feature}}", "CLAUDE.md"]`) || strings.Contains(i.Task, "with the branch") {
 				t.Errorf("ship integrator = %+v", i)
+			}
+			// D-089: the wave's tickets' notes for the plan documents are applied here.
+			if !strings.Contains(i.Task, `"## Notes for the plan documents"`) || !strings.Contains(i.Task, ".input.tickets") {
+				t.Errorf("ship integrator does not apply the tickets' notes: %s", i.Task)
 			}
 		}
 		if key == "plan_pipeline" {
