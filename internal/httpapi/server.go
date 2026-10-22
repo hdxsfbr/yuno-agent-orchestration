@@ -250,15 +250,17 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	// from their provider (DESIGN 5.20 rule 3), the backfill of rule 7 first so the
 	// first pass settles the records of runs that predate the table.
 	go (&project.Watcher{Pool: pool, Tick: cfg.BudgetTick, Log: log, Reporter: eng}).Run(ctx)
+	// The wave watcher (DESIGN 5.29 rule 12) releases and ships the waves of the open plans.
+	s.waves = &waves.Service{Pool: pool, Plans: s.plans, Projects: s.projects, Client: s.checkClient, Engine: eng,
+		Interval: cfg.WaveWatchInterval, Log: log}
+	// The sync's dependency watcher releases held tickets through the wave watcher (Chief
+	// platform control, DESIGN wave 3 rule 8b).
 	mr := &mergereq.Sync{Pool: pool, Projects: s.projects, Client: s.checkClient, Reporter: eng,
-		Plans: s.plans, Events: rec, Interval: cfg.MergeRequestSyncInterval, Log: log}
+		Plans: s.plans, Events: rec, Tickets: s.waves, Interval: cfg.MergeRequestSyncInterval, Log: log}
 	if n, err := mr.Backfill(ctx); err == nil && n > 0 {
 		log.Info("merge requests backfilled from the trace", "count", n)
 	}
 	go mr.Run(ctx)
-	// The wave watcher (DESIGN 5.29 rule 12) releases and ships the waves of the open plans.
-	s.waves = &waves.Service{Pool: pool, Plans: s.plans, Projects: s.projects, Client: s.checkClient, Engine: eng,
-		Interval: cfg.WaveWatchInterval, Log: log}
 	go s.waves.Run(ctx)
 	// Issue intake (DESIGN 5.23 rule 2): projects with intake enabled are polled for
 	// labelled issues and their finished issue runs are posted back on the issue.
@@ -499,6 +501,9 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/merge-requests/{id}/diff", s.getMergeRequestDiff)
 	mux.HandleFunc("GET /api/merge-requests/{id}/checks", s.getMergeRequestChecks)
 	mux.HandleFunc("GET /api/merge-requests/{id}/jobs/{job}/log", s.getMergeRequestJobLog)
+	// Chief platform control wave 3 rule 3: a merge request's prerequisites.
+	mux.HandleFunc("GET /api/merge-requests/{id}/dependencies", s.getMergeRequestDependencies)
+	mux.HandleFunc("PUT /api/merge-requests/{id}/dependencies", s.putMergeRequestDependencies)
 	mux.HandleFunc("GET /api/agents/{id}/memory", s.listAgentMemory)
 	mux.HandleFunc("DELETE /api/agents/{id}/memory/{factId}", s.deleteAgentMemory)
 

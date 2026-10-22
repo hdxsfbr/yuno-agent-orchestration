@@ -74,7 +74,19 @@ func (s *Server) getMergeRequest(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, r, "merge request", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, mr)
+	// What holds the request, when something does (Chief platform control, DESIGN wave 3
+	// rule 5), so the operator and the Chief see why it waits.
+	edges, err := store.MergeRequestDependencies(r.Context(), s.pool, mr.ID)
+	if err != nil {
+		s.internalError(w, r, "read the merge request's dependencies", err)
+		return
+	}
+	blocked, err := blockedBy(r.Context(), s.pool, mr, edges)
+	if err != nil {
+		s.internalError(w, r, "read the merge request's dependencies", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mergeRequestRead{MergeRequest: mr, BlockedBy: blocked})
 }
 
 // syncMergeRequest refreshes one record from its provider at once (rule 3). A provider

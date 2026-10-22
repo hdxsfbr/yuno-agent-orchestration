@@ -213,7 +213,64 @@ func (g *gitlabProvider) CIConfigured(ctx context.Context, branch string) (bool,
 	return false, nil
 }
 
+// CommitCI is rule 4's check of a merge commit for GitLab: GET pipelines?sha=<sha>&
+// ref=<ref>&order_by=id&sort=desc&per_page=1, the variant of headPipeline that counts only
+// the default branch's own pipeline. No pipeline (or a skipped one) is none.
+func (g *gitlabProvider) CommitCI(ctx context.Context, ref, sha string) (BranchStatus, error) {
+	if sha == "" {
+		return BranchStatus{State: BranchNone}, nil
+	}
+	var pipelines []struct {
+		Status    string  `json:"status"`
+		SHA       string  `json:"sha"`
+		WebURL    string  `json:"web_url"`
+		CreatedAt *string `json:"created_at"`
+	}
+	q := url.Values{"sha": {sha}, "ref": {ref}, "order_by": {"id"}, "sort": {"desc"}, "per_page": {"1"}}
+	if _, err := g.api.do(ctx, http.MethodGet, g.base+"/pipelines?"+q.Encode(), nil, &pipelines); err != nil {
+		return BranchStatus{}, err
+	}
+	if len(pipelines) == 0 {
+		return BranchStatus{State: BranchNone}, nil
+	}
+	pl := pipelines[0]
+	state, ok := gitlabBranchStates[pl.Status]
+	if !ok {
+		state = BranchPending
+	}
+	if state == BranchNone {
+		return BranchStatus{State: BranchNone}, nil
+	}
+	st := BranchStatus{State: state, SHA: sha, URL: pl.WebURL}
+	if t := parseProviderTime(pl.CreatedAt); t != nil {
+		st.At = *t
+	}
+	return st, nil
+}
+
 // ---- GitHub -------------------------------------------------------------------------
+
+// CommitCI is rule 4's check of a merge commit for GitHub: every check run and the combined
+// status of the commit (checks belong to a commit, not to a ref, so ref is not read).
+// Success, neutral and skipped pass; nothing at all is none.
+func (g *githubProvider) CommitCI(ctx context.Context, _ string, sha string) (BranchStatus, error) {
+	c, err := g.checks(ctx, sha)
+	if err != nil {
+		return BranchStatus{}, err
+	}
+	st := BranchStatus{SHA: sha, URL: c.URL}
+	switch c.Status {
+	case store.CIStatusPassed:
+		st.State = BranchPassed
+	case store.CIStatusFailed:
+		st.State = BranchFailed
+	case store.CIStatusPending:
+		st.State = BranchPending
+	default:
+		return BranchStatus{State: BranchNone}, nil
+	}
+	return st, nil
+}
 
 // githubCheckRun is a check run as GitHub lists it.
 type githubCheckRun struct {

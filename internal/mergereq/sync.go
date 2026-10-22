@@ -67,8 +67,16 @@ type Sync struct {
 	Plans PlanHook
 	// Events, when set, records merge_request.updated after a push the platform made
 	// (Chief platform control, DESIGN wave 3 rule 11).
-	Events   *events.Recorder
-	Interval time.Duration
+	Events *events.Recorder
+	// Tickets, when set, releases the held plan tickets whose prerequisites are satisfied
+	// after each dependency pass (Chief platform control, DESIGN wave 3 rule 8b).
+	Tickets TicketReleaser
+	// RequeueDependencyRuns, when set, is called once for a dependent merge request the
+	// dependency watcher lets go, with the task note of rule 8a. Rule 7 (runs parked on a
+	// dependent request) re-queues the request's paused dependency runs through it; until
+	// then nothing sets it.
+	RequeueDependencyRuns func(ctx context.Context, rec *store.MergeRequest, note string) error
+	Interval              time.Duration
 	// Timeout bounds the refresh of one record; SyncTimeout (10 s) when zero.
 	Timeout time.Duration
 	Log     *slog.Logger
@@ -125,6 +133,9 @@ func (s *Sync) TickOnce(ctx context.Context) (synced, failed int) {
 			synced++
 		}
 	}
+	// The dependency watcher runs on the sync tick, after the records it reads were
+	// refreshed (Chief platform control, DESIGN wave 3 rule 8).
+	s.WatchDependencies(ctx)
 	return synced, failed
 }
 
@@ -155,7 +166,30 @@ func (s *Sync) SyncOne(ctx context.Context, id string) (*store.MergeRequest, err
 		return rec, nil
 	}
 	cur, _, err := s.refresh(ctx, rec)
+	if err == nil && changedForDependents(rec, cur) {
+		// A prerequisite whose state or CI changed: its dependents are looked at now
+		// (DESIGN wave 3 rule 8), and cur is re-read in case one of them is itself.
+		s.watchDependentsOf(ctx, cur.ID)
+		if again, gerr := store.GetMergeRequest(ctx, s.Pool, cur.ID); gerr == nil {
+			cur = again
+		}
+	}
 	return cur, err
+}
+
+// changedForDependents reports whether a refresh changed what a dependent's watcher reads
+// of its prerequisite: the state, or the check of the head.
+func changedForDependents(before, after *store.MergeRequest) bool {
+	if after == nil {
+		return false
+	}
+	str := func(p *string) string {
+		if p == nil {
+			return ""
+		}
+		return *p
+	}
+	return before.State != after.State || before.CIStatus != after.CIStatus || str(before.CISHA) != str(after.CISHA)
 }
 
 // MarkMerged records a merge the platform made on the provider (rule 5): the record
