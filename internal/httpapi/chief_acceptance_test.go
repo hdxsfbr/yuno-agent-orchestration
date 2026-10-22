@@ -16,7 +16,7 @@ import (
 	"yuno/internal/tools"
 )
 
-// Chat acceptance (DESIGN W4 rule 7): the Chief's platform_call through the MCP server, the
+// Chat acceptance (DESIGN 5.35 rule 7): the Chief's platform_call through the MCP server, the
 // tools, the dispatcher, the api's whole chain (actor, audit, platform gate, idempotency,
 // If-Match) and the real handlers, against the database. Every change is read back.
 
@@ -248,7 +248,7 @@ func TestChiefWorkflowCRUD(t *testing.T) {
 	}
 }
 
-// A schedule created, read, moved to another zone, paused and resumed (DESIGN W4 rule 6:
+// A schedule created, read, moved to another zone, paused and resumed (DESIGN 5.35 rule 6:
 // enabled, the zone and next_run_at through platform_call) and deleted from chat.
 func TestChiefScheduleCRUD(t *testing.T) {
 	f := newChatFixture(t, nil)
@@ -291,7 +291,7 @@ func TestChiefScheduleCRUD(t *testing.T) {
 	f.readGone(t, "getSchedule", id)
 }
 
-// DESIGN W4 rule 7 and 5.31 rule 1: a request without the bearer is refused 401 and audited
+// DESIGN 5.35 rule 7 and 5.31 rule 1: a request without the bearer is refused 401 and audited
 // as anonymous and denied, its body unread and nothing read on its behalf, whatever it asks
 // for; the rows are in the audit read.
 func TestUnauthorizedAudited(t *testing.T) {

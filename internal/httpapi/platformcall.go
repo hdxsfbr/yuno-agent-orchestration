@@ -14,19 +14,19 @@ import (
 )
 
 // platformResponseMax is how much of a response body platform_call keeps; its size and
-// SHA-256 cover the whole body (platform control A8).
+// SHA-256 cover the whole body (DESIGN 5.32 rule 4).
 const platformResponseMax = 1 << 20
 
 // inProcessAddr is the remote address of a platform_call request: not a loopback one, so
 // the model proxy refuses it like any caller from outside.
 const inProcessAddr = "in-process:0"
 
-// platformDispatcher is platform_call's way into the api (platform control A3): the
+// platformDispatcher is platform_call's way into the api (DESIGN 5.32 rule 4): the
 // request goes through Handler(), every middleware included, with the server's own bearer
 // and the agent actor in its context, which no network request can set.
 type platformDispatcher struct {
 	s *Server
-	// handler replaces Handler() when set: a chain with other layers in the slots DESIGN B6
+	// handler replaces Handler() when set: a chain with other layers in the slots DESIGN 5.31 rule 6
 	// names.
 	handler http.Handler
 }

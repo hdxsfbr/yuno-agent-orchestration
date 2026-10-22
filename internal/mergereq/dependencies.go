@@ -15,7 +15,7 @@ import (
 	"yuno/internal/tools"
 )
 
-// The dependency watcher (Chief platform control, DESIGN wave 3 rules 8 and 12): an open
+// The dependency watcher (Chief platform control, DESIGN 5.34 rules 8 and 12): an open
 // merge request held by prerequisites waits until they are all satisfied, is then brought
 // up to date with the default branch by the platform, and is let go once CI passed on
 // exactly its new head. No agent polls.

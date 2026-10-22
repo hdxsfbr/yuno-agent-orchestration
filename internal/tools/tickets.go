@@ -74,7 +74,7 @@ type planTicketIn struct {
 	Tests      json.RawMessage `json:"tests"`
 	Acceptance json.RawMessage `json:"acceptance_tests"` // fallback for tests
 	// DependsOn names the tickets of the plan whose merged work this one needs (Chief
-	// platform control, DESIGN wave 3 rule 2): each in the same or an earlier wave.
+	// platform control, DESIGN 5.34 rule 2): each in the same or an earlier wave.
 	DependsOn []string `json:"depends_on,omitempty"`
 }
 
@@ -92,7 +92,7 @@ type publishPlan struct {
 	waves  [][]planTicketIn // index = wave - 1
 	count  int
 	// edges are the tickets' depends_on as [dependent, prerequisite] pairs, in plan order
-	// (DESIGN wave 3 rule 2).
+	// (DESIGN 5.34 rule 2).
 	edges [][2]string
 }
 
@@ -289,7 +289,7 @@ func readPublishPlan(run *store.Run) (*publishPlan, error) {
 }
 
 // ticketDependencies reads and checks the tickets' depends_on (Chief platform control, DESIGN
-// wave 3 rules 1 and 2): each id is another ticket of the plan in the same or an earlier
+// DESIGN 5.34 rules 1 and 2): each id is another ticket of the plan in the same or an earlier
 // wave, and the edges make no cycle. It returns them as [dependent, prerequisite] pairs.
 func ticketDependencies(waves [][]planTicketIn) ([][2]string, error) {
 	waveOf := map[string]int{}
@@ -495,7 +495,7 @@ func (p *publishTickets) exec(ctx context.Context, call Call) (Result, error) {
 		}
 	}
 
-	// The Planner's edges, ticket to ticket (DESIGN wave 3 rule 2).
+	// The Planner's edges, ticket to ticket (DESIGN 5.34 rule 2).
 	if err := store.ReplacePlannerDependencies(ctx, q, *run.ProjectID, planID, plan.edges); err != nil {
 		return Result{}, err
 	}

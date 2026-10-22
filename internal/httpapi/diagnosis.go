@@ -44,14 +44,14 @@ type runDiagnosis struct {
 	Thresholds diagnosisThresholds `json:"thresholds"`
 	Nodes      []nodeDiagnosis     `json:"nodes"`
 	Pending    []pendingDiagnosis  `json:"pending"`
-	// DESIGN W2 Outputs: the run's commands still pending, oldest first, and whether its
+	// DESIGN 5.33 Outputs: the run's commands still pending, oldest first, and whether its
 	// last stopped turn is confirmed stopped ("", confirmed or unconfirmed).
 	CommandsPending []commandDiagnosis `json:"commands_pending"`
 	CancelState     string             `json:"cancel_state"`
 }
 
 // commandDiagnosis is a pending command: received, and acknowledged by the worker when
-// acked_at is set (DESIGN W2 rule 4).
+// acked_at is set (DESIGN 5.33 rule 4).
 type commandDiagnosis struct {
 	CommandID  string     `json:"command_id"`
 	Kind       string     `json:"kind"`
@@ -226,7 +226,7 @@ func nodeView(n store.LiveNode, v liveness.Verdict) nodeDiagnosis {
 // budget cap (the budget check's own refusal, DESIGN 5.19 rule 3), or its waves are paused
 // (5.29 rule 9). A run of a deleted project, or of none, is not blocked. A run parked for its
 // merge request's dependencies is blocked by what holds the request now (Chief platform
-// control, DESIGN wave 3 rule 7).
+// control, DESIGN 5.34 rule 7).
 func (s *Server) blockedRuns(ctx context.Context, runs []store.Run, now time.Time) (map[string]string, error) {
 	out := map[string]string{}
 	why := map[string]string{} // project id → reason, read once per project

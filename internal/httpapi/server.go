@@ -91,10 +91,10 @@ type Server struct {
 	mux          *http.ServeMux
 	// versionLocks are If-Match's per-target locks (DESIGN 5.31 rule 4).
 	versionLocks targetLocks
-	// routeTable is every route as routes registered it (platform control A1).
+	// routeTable is every route as routes registered it (DESIGN 5.32 rule 1).
 	routeTable []registeredRoute
 	// contract is api/openapi.yaml indexed by operation; the platform gate finds a
-	// request's operation and risk in it (platform control A3, A5, A6).
+	// request's operation and risk in it (DESIGN 5.32 rules 4 to 6).
 	contract *tools.PlatformContract
 	// codeKey keys the approval codes (D-081): decide_approval's, answer_question's and the
 	// platform gate's are the same.
@@ -254,7 +254,7 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	s.waves = &waves.Service{Pool: pool, Plans: s.plans, Projects: s.projects, Client: s.checkClient, Engine: eng,
 		Interval: cfg.WaveWatchInterval, Log: log}
 	// The sync's dependency watcher releases held tickets through the wave watcher and
-	// re-queues the runs a dependent request held (Chief platform control, DESIGN wave 3
+	// re-queues the runs a dependent request held (Chief platform control, DESIGN 5.34
 	// rules 7 and 8).
 	mr := &mergereq.Sync{Pool: pool, Projects: s.projects, Client: s.checkClient, Reporter: eng,
 		Plans: s.plans, Events: rec, Tickets: s.waves, RequeueDependencyRuns: s.requeueDependencyRuns,
@@ -395,7 +395,7 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes(modelTransport http.RoundTripper) error {
 	// Every route is recorded as it is registered, so TestPlatformParity can hold the
-	// contract to them (platform control A1).
+	// contract to them (DESIGN 5.32 rule 1).
 	mux := routeRecorder{ServeMux: http.NewServeMux(), routes: &s.routeTable}
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
@@ -441,7 +441,7 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /api/runs/{id}/cancel", s.cancelRun)
 	mux.HandleFunc("POST /api/runs/{id}/retry", s.retryRun)
-	// DESIGN W2: recovery commands and their status.
+	// DESIGN 5.33: recovery commands and their status.
 	mux.HandleFunc("POST /api/runs/{id}/pause", s.pauseRun)
 	mux.HandleFunc("POST /api/runs/{id}/resume", s.resumeRun)
 	mux.HandleFunc("POST /api/runs/{id}/steer", s.steerRun)
@@ -497,13 +497,13 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/merge-requests/{id}", s.getMergeRequest)
 	mux.HandleFunc("POST /api/merge-requests/{id}/sync", s.syncMergeRequest)
 	mux.HandleFunc("POST /api/merge-requests/{id}/merge", s.mergeMergeRequest)
-	// Chief platform control, DESIGN wave 3 rules 9 and 14: the update from the default
+	// Chief platform control, DESIGN 5.34 rules 9 and 14: the update from the default
 	// branch and the provider reads.
 	mux.HandleFunc("POST /api/merge-requests/{id}/update-from-default", s.updateMergeRequestFromDefault)
 	mux.HandleFunc("GET /api/merge-requests/{id}/diff", s.getMergeRequestDiff)
 	mux.HandleFunc("GET /api/merge-requests/{id}/checks", s.getMergeRequestChecks)
 	mux.HandleFunc("GET /api/merge-requests/{id}/jobs/{job}/log", s.getMergeRequestJobLog)
-	// Chief platform control wave 3 rule 3: a merge request's prerequisites.
+	// DESIGN 5.34 rule 3: a merge request's prerequisites.
 	mux.HandleFunc("GET /api/merge-requests/{id}/dependencies", s.getMergeRequestDependencies)
 	mux.HandleFunc("PUT /api/merge-requests/{id}/dependencies", s.putMergeRequestDependencies)
 	mux.HandleFunc("GET /api/agents/{id}/memory", s.listAgentMemory)
@@ -517,7 +517,7 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/conversations/{id}/messages", s.listConversationMessages)
 	mux.HandleFunc("GET /api/conversations/{id}/tool-calls", s.listConversationToolCalls)
 
-	// The audit log (DESIGN 5.31 rule 5) and the revert of a recorded change (DESIGN W4
+	// The audit log (DESIGN 5.31 rule 5) and the revert of a recorded change (DESIGN 5.35
 	// rule 5).
 	mux.HandleFunc("GET /api/audit", s.listAudit)
 	mux.HandleFunc("POST /api/audit/{id}/revert", s.revertAudit)
@@ -579,7 +579,7 @@ func (s *Server) openapi(w http.ResponseWriter, _ *http.Request) {
 }
 
 // apiOpenAPI serves the same document under /api: its own handler, so each route has one
-// operationId equal to its handler's name (platform control A1).
+// operationId equal to its handler's name (DESIGN 5.32 rule 1).
 func (s *Server) apiOpenAPI(w http.ResponseWriter, r *http.Request) { s.openapi(w, r) }
 
 type statusResponse struct {
@@ -709,7 +709,7 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 		AddProject: s.chatAddProject,
 		// decide_approval's codes: keyed by the server's own secrets, random when none is set.
 		ApprovalCodeKey: s.codeKey,
-		// platform_call goes through this server's own handler (platform control A3).
+		// platform_call goes through this server's own handler (DESIGN 5.32 rule 4).
 		Platform: platformDispatcher{s: s},
 		// escalate and publish_tickets reach the engine at call time as ask_operator does.
 		Escalate: func(ctx context.Context, runID, kind, reason string) error {

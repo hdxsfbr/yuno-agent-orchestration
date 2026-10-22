@@ -47,7 +47,7 @@ func at(s string) *time.Time {
 	return &t
 }
 
-// DESIGN W4 rule 6: a schedule pauses and resumes through enabled, and exposes its time
+// DESIGN 5.35 rule 6: a schedule pauses and resumes through enabled, and exposes its time
 // zone (tz) and next_run_at. Each change is read back through GET: paused, it has no next
 // run; resumed, its next run is the next occurrence from now in its zone; a new zone moves
 // the next run; a zone the parser does not know is refused and changes nothing.

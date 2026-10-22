@@ -22,7 +22,7 @@ import (
 // ---- pure rules -----------------------------------------------------------------------
 
 func TestTransitionTable(t *testing.T) {
-	// DESIGN W2 rules 14 and 15 add paused: from queued and running, left by a resume
+	// DESIGN 5.33 rules 14 and 15 add paused: from queued and running, left by a resume
 	// (queued), a cancel or a failure.
 	allowed := map[string][]string{
 		store.RunQueued:          {store.RunRunning, store.RunCancelled, store.RunPaused},

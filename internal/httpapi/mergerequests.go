@@ -43,13 +43,13 @@ func (s *Server) mergeSync() *mergereq.Sync {
 }
 
 // dependencyRequeuer is the engine's re-queue of the runs parked on a merge request for its
-// dependencies (Chief platform control, DESIGN wave 3 rule 7).
+// dependencies (Chief platform control, DESIGN 5.34 rule 7).
 type dependencyRequeuer interface {
 	RequeueDependencyRuns(ctx context.Context, mrID, note string) ([]store.Run, error)
 }
 
 // requeueDependencyRuns is the dependency watcher's hook (mergereq.Sync.RequeueDependencyRuns,
-// DESIGN wave 3 rules 7 and 8a): once the watcher let a dependent request go, its parked runs
+// DESIGN 5.34 rules 7 and 8a): once the watcher let a dependent request go, its parked runs
 // are queued with the task note. An engine that cannot re-queue leaves them paused.
 func (s *Server) requeueDependencyRuns(ctx context.Context, rec *store.MergeRequest, note string) error {
 	rq, ok := s.engine.(dependencyRequeuer)
@@ -95,7 +95,7 @@ func (s *Server) getMergeRequest(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, r, "merge request", err)
 		return
 	}
-	// What holds the request, when something does (Chief platform control, DESIGN wave 3
+	// What holds the request, when something does (Chief platform control, DESIGN 5.34
 	// rule 5), so the operator and the Chief see why it waits.
 	edges, err := store.MergeRequestDependencies(r.Context(), s.pool, mr.ID)
 	if err != nil {
@@ -126,7 +126,7 @@ func (s *Server) syncMergeRequest(w http.ResponseWriter, r *http.Request) {
 // the record merged. The merge is recorded once the provider reports the request merged
 // (sync.ConfirmMerged), not on its 2xx alone.
 //
-// The merge guard (Chief platform control, DESIGN wave 3 rule 15): the record's check must
+// The merge guard (Chief platform control, DESIGN 5.34 rule 15): the record's check must
 // have passed on exactly its head (ci_status passed with ci_sha = head_sha), or found no
 // pipeline on that head in a project with no CI configured (rule 4's test: no pipeline or
 // check on the default branch's last 20 commits). The provider is sent the head as the
@@ -283,7 +283,7 @@ func short(sha string) string {
 }
 
 // readFailed answers the errors the merge request reads and the update share (Chief
-// platform control, DESIGN wave 3 rules 9 and 14): the project's refusals as 409 code, a
+// platform control, DESIGN 5.34 rules 9 and 14): the project's refusals as 409 code, a
 // request or job the provider does not have as 404, a provider failure as 502 with its
 // cleaned text, anything else as a 500.
 func (s *Server) readFailed(w http.ResponseWriter, r *http.Request, err error, code string) {
@@ -307,7 +307,7 @@ func (s *Server) readFailed(w http.ResponseWriter, r *http.Request, err error, c
 }
 
 // updateMergeRequestFromDefault merges the project's default branch into the request's
-// branch and pushes it (Chief platform control, DESIGN wave 3 rules 9 to 11). The body
+// branch and pushes it (Chief platform control, DESIGN 5.34 rules 9 to 11). The body
 // names the head the caller saw; a branch that is elsewhere is 409 merge_request_head_moved
 // with {current}. Conflicts are an outcome, recorded on the record, not an error.
 func (s *Server) updateMergeRequestFromDefault(w http.ResponseWriter, r *http.Request) {
@@ -348,7 +348,7 @@ func (s *Server) updateMergeRequestFromDefault(w http.ResponseWriter, r *http.Re
 }
 
 // getMergeRequestDiff answers the request's files and patches from the provider (DESIGN
-// wave 3 rule 14), redacted and capped at 256 KiB.
+// DESIGN 5.34 rule 14), redacted and capped at 256 KiB.
 func (s *Server) getMergeRequestDiff(w http.ResponseWriter, r *http.Request) {
 	rec, err := store.GetMergeRequest(r.Context(), s.pool, r.PathValue("id"))
 	if err != nil {

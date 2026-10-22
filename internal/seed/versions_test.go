@@ -11,7 +11,7 @@ import (
 	"yuno/internal/store"
 )
 
-// DESIGN W4 rule 1: every workflow the seed and the template loader write (the template
+// DESIGN 5.35 rule 1: every workflow the seed and the template loader write (the template
 // rows, the copies made from them, an upgrade of a copy and the reset) has a version for
 // each version it reached, the newest holding its definition, written by the platform.
 func TestSeedWritesWorkflowVersions(t *testing.T) {

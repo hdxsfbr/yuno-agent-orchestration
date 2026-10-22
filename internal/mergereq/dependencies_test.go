@@ -21,7 +21,7 @@ import (
 	"yuno/internal/tools"
 )
 
-// Chief platform control, DESIGN wave 3 rules 8 and 12 against the fake forge: real
+// Chief platform control, DESIGN 5.34 rules 8 and 12 against the fake forge: real
 // pushes, pipelines of exact commits, the sync tick as the only trigger.
 
 // forgeEnv is a project on the fake forge (acme/app, default branch main) with a sync whose
@@ -199,7 +199,7 @@ func (f *forgeEnv) prepared(chat bool) (pre, dep *store.MergeRequest, h1 string)
 	return pre, dep, h1
 }
 
-// DESIGN wave 3 rule 12 with rule 11: once the platform updated the dependent from main, it
+// DESIGN 5.34 rule 12 with rule 11: once the platform updated the dependent from main, it
 // is let go only when CI passed on exactly its new head; the pass recorded for the old head
 // does not count, even when a record claims it.
 func TestResumeAfterCIOnNewSHA(t *testing.T) {
@@ -246,7 +246,7 @@ func TestResumeAfterCIOnNewSHA(t *testing.T) {
 	}
 }
 
-// DESIGN wave 3 rule 12: a failed CI on the updated head keeps the dependent held with
+// DESIGN 5.34 rule 12: a failed CI on the updated head keeps the dependent held with
 // "CI failed on <sha7>: <url>", the operator told once per commit; a new head that already
 // contains main is up to date, waits for its own CI, and is let go when it passes.
 func TestCIFailedKeepsBlocked(t *testing.T) {
@@ -294,7 +294,7 @@ func TestCIFailedKeepsBlocked(t *testing.T) {
 	}
 }
 
-// DESIGN wave 3 rule 9 in the watcher: a dependent that conflicts with main once its
+// DESIGN 5.34 rule 9 in the watcher: a dependent that conflicts with main once its
 // prerequisite merged stays held, nothing pushed, the operator told once.
 func TestDependentConflictsKeepBlocked(t *testing.T) {
 	f := newForgeEnv(t)
@@ -323,7 +323,7 @@ func TestDependentConflictsKeepBlocked(t *testing.T) {
 	}
 }
 
-// Acceptance, DESIGN wave 3 (TestDependencyAcceptance): !2 (the dependent, "!24") depends on
+// Acceptance, DESIGN 5.34 (TestDependencyAcceptance): !2 (the dependent, "!24") depends on
 // !1 (the prerequisite, "!17"). While !1 is open nothing moves; !1 merges and main's
 // pipeline passes on its merge commit; the watcher updates !2 from main with a push, its
 // ci_status goes pending; the fake pipeline passes on the new commit; the re-queue hook is

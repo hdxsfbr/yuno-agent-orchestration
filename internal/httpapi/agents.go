@@ -208,7 +208,7 @@ func sortedKeys(m map[string]string) []string {
 // agentListItem is an agent in GET /api/agents (AgentListItem): channels are the ones it
 // answers, from the channel bindings rather than the form's setting, and activity counts
 // its node visits in flight (audit #17, #18). ArchivedAt is set on an archived agent,
-// listed with include_archived=true (DESIGN W4 rule 4).
+// listed with include_archived=true (DESIGN 5.35 rule 4).
 type agentListItem struct {
 	store.Agent
 	Activity   store.AgentActivity `json:"activity"`
@@ -391,7 +391,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// restoreAgent undoes deleteAgent (DESIGN W4 rule 4): the archived agent is live again with
+// restoreAgent undoes deleteAgent (DESIGN 5.35 rule 4): the archived agent is live again with
 // its id and configuration, and is materialised in OpenClaw (same 502 rule as create). A
 // Telegram binding it had stays released. 409 not_archived for a live agent; 409
 // name_taken when a live agent has its name.

@@ -10,7 +10,7 @@ import (
 	"yuno/internal/tools"
 )
 
-// Chief platform control, DESIGN wave 3: the fake answers the reads of rules 4, 13 and 14
+// Chief platform control, DESIGN 5.34: the fake answers the reads of rules 4, 13 and 14
 // and the merge with the head's sha of rule 15 as GitLab does.
 func TestChecksDiffsAndExactMerge(t *testing.T) {
 	ts, pc := forge(t)

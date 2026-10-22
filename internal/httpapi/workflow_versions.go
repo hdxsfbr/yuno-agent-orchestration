@@ -17,7 +17,7 @@ type restoreRequest struct {
 }
 
 // listWorkflowVersions returns the workflow's versions newest first, without their
-// definitions (DESIGN W4 rule 2).
+// definitions (DESIGN 5.35 rule 2).
 func (s *Server) listWorkflowVersions(w http.ResponseWriter, r *http.Request) {
 	wf, err := store.GetWorkflow(r.Context(), s.pool, r.PathValue("id"))
 	if err != nil {
@@ -32,7 +32,7 @@ func (s *Server) listWorkflowVersions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
-// getWorkflowVersion returns one version with its definition (DESIGN W4 rule 2).
+// getWorkflowVersion returns one version with its definition (DESIGN 5.35 rule 2).
 func (s *Server) getWorkflowVersion(w http.ResponseWriter, r *http.Request) {
 	wf, err := store.GetWorkflow(r.Context(), s.pool, r.PathValue("id"))
 	if err != nil {
@@ -63,7 +63,7 @@ func (s *Server) workflowVersion(w http.ResponseWriter, r *http.Request, workflo
 }
 
 // restoreWorkflowVersion writes an earlier version's name, description and definition as
-// a new version, current + 1 (DESIGN W4 rule 3). The caller names the version it read in
+// a new version, current + 1 (DESIGN 5.35 rule 3). The caller names the version it read in
 // expected_version: any other current version answers 412 version_conflict. The restored
 // definition is checked as a PUT checks one, against the agents and schemas of today: 422
 // with the problems when it would not be accepted now. Runs keep the snapshot they

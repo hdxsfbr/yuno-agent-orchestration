@@ -190,7 +190,7 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, &one[0])
 }
 
-// cancelRun cancels the run (DESIGN W2 rules 10 and 11): 202 with the run and its command
+// cancelRun cancels the run (DESIGN 5.33 rules 10 and 11): 202 with the run and its command
 // (applied at once for a run no worker holds, pending for a live run's worker), 409
 // run_finished when it has already finished, 503 when the command could not be recorded.
 func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {

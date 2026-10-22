@@ -140,7 +140,7 @@ func (e *env) judge(d store.Dependency) State {
 
 const mergeSHA = "1111111111111111111111111111111111111111"
 
-// DESIGN wave 3 rules 4 and 5: a merge request prerequisite is satisfied when merged, its
+// DESIGN 5.34 rules 4 and 5: a merge request prerequisite is satisfied when merged, its
 // merge commit known, and the default branch's CI of exactly that commit passed; each
 // clause on both sides, the reasons in rule 5's words, the 15-minute no-CI window at 14
 // and 16 minutes, a ticket prerequisite through its merge request, and a satisfied edge

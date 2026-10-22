@@ -1,4 +1,4 @@
--- Chief platform control, DESIGN wave 3 rule 7: a run that would work on a merge request
+-- Chief platform control, DESIGN 5.34 rule 7: a run that would work on a merge request
 -- its dependencies hold is created paused, and no worker takes it until the dependency
 -- watcher lets the request go and re-queues it (rule 8a). Such a run has no visit yet, so
 -- the run row carries why it waits:

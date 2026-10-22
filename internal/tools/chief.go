@@ -32,7 +32,7 @@ const (
 )
 
 // ChatToolNames are the tools callable with a chat token (DESIGN 5.15 rule 2, 5.17 rule
-// 8, 5.22 rule 6, 5.24 rule 9, D-081, platform control A2 and A3), sorted. The registry marks
+// 8, 5.22 rule 6, 5.24 rule 9, D-081, DESIGN 5.32 rule 2 and A3), sorted. The registry marks
 // the same tools Chat; a test keeps the two in step.
 var ChatToolNames = []string{AddProjectName, AnswerQuestionName, DecideApprovalName, DelegateTaskName, ListAgentsName, ListApprovalsName,
 	ListProjectsName, ListWorkflowsName, MemoryRecallName, MemorySaveName, PlatformCallName, PlatformOperationsName,
@@ -398,7 +398,7 @@ func NewDelegateTask(d ChiefDeps) *Tool {
 }
 
 // parkedFor adds why a run waits paused for its merge request's prerequisites (Chief
-// platform control, DESIGN wave 3 rule 7) to a tool's answer about it: "blocked_by", the
+// platform control, DESIGN 5.34 rule 7) to a tool's answer about it: "blocked_by", the
 // reason as it read when the run was parked. Such a run is queued by itself once they are in.
 func parkedFor(out map[string]any, run *store.Run) {
 	if run.Status == store.RunPaused && run.ParkReason == store.RunParkDependency && run.ParkDetail != nil {
@@ -685,7 +685,7 @@ func workflowByName(ctx context.Context, pool *pgxpool.Pool, name string) (*stor
 }
 
 // NewRunStatus builds run_status (DESIGN 5.15 rule 8). codeKey keys the code its question
-// shows, the one answer_question accepts as the person's evidence (platform control A7).
+// shows, the one answer_question accepts as the person's evidence (DESIGN 5.32 rule 7).
 func NewRunStatus(pool *pgxpool.Pool, publicBaseURL string, codeKey []byte) *Tool {
 	return &Tool{
 		Name: RunStatusName,

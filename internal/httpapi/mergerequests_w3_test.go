@@ -26,7 +26,7 @@ import (
 	"yuno/internal/tools"
 )
 
-// Chief platform control, DESIGN wave 3 rules 9 to 15, through the API against the fake
+// Chief platform control, DESIGN 5.34 rules 9 to 15, through the API against the fake
 // forge: real pushes, pipelines of exact commits, the merge guard.
 
 // forgeEnv is a server whose project lives on a fake forge (acme/app), with a run and the

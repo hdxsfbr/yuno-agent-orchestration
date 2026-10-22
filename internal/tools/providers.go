@@ -146,7 +146,7 @@ type RequestStatus struct {
 	// MergeSHA is the commit a merged request made, "" when the provider gave none.
 	MergeSHA string
 	Err      string
-	// CIStatus is the CI of exactly HeadSHA (Chief platform control, DESIGN wave 3 rule
+	// CIStatus is the CI of exactly HeadSHA (Chief platform control, DESIGN 5.34 rule
 	// 13); PipelineID and CIURL name the pipeline (GitLab) or check (GitHub) behind it, 0
 	// and "" when there is none.
 	PipelineID int64
@@ -168,7 +168,7 @@ type ErrNotMergeable struct{ Message string }
 func (e *ErrNotMergeable) Error() string { return e.Message }
 
 // ErrHeadMoved is a provider's refusal to merge a request whose head is no longer the
-// commit the merge named (Chief platform control, DESIGN wave 3 rule 15): both providers
+// commit the merge named (Chief platform control, DESIGN 5.34 rule 15): both providers
 // answer 409 to a merge whose sha does not match the head. Message is the provider's
 // first line.
 type ErrHeadMoved struct{ Message string }
@@ -200,7 +200,7 @@ type RequestProvider interface {
 	Status(ctx context.Context, number int64) (RequestStatus, error)
 	// Merge merges the request: *ErrNotMergeable when the provider refuses,
 	// ErrRequestNotFound on a 404. sha, when not empty, is the head the merge must find
-	// (DESIGN wave 3 rule 15): a head that moved is *ErrHeadMoved.
+	// (DESIGN 5.34 rule 15): a head that moved is *ErrHeadMoved.
 	Merge(ctx context.Context, number int64, sha string) error
 	// Details reads what the request says (DESIGN 5.22 rule 6): ErrRequestNotFound on
 	// a 404 for the request itself.
@@ -210,14 +210,14 @@ type RequestProvider interface {
 	// them (a GitHub token without GraphQL access).
 	Threads(ctx context.Context, number int64) ([]Thread, error)
 	// CIStatus is the pipeline status of exactly headSHA (Details gives it), one of the
-	// store's ci_status values, by the mapping tables of Status (DESIGN wave 3 rule 13); an
+	// store's ci_status values, by the mapping tables of Status (DESIGN 5.34 rule 13); an
 	// empty head is none.
 	CIStatus(ctx context.Context, number int64, headSHA string) (string, error)
 	// DefaultBranchStatus is the pipeline state of the project's default branch now (DESIGN
 	// 5.29 rule 12): GitLab's newest pipeline of that ref, GitHub's check runs and combined
 	// status of its head commit.
 	DefaultBranchStatus(ctx context.Context) (BranchStatus, error)
-	// Checks reads the CI of exactly sha with its jobs (DESIGN wave 3 rule 14): GitLab's
+	// Checks reads the CI of exactly sha with its jobs (DESIGN 5.34 rule 14): GitLab's
 	// newest pipeline for the commit, GitHub's check runs and commit statuses.
 	Checks(ctx context.Context, number int64, sha string) (Checks, error)
 	// Diff reads the request's files and patches, page by page until the patches add up to
@@ -227,9 +227,9 @@ type RequestProvider interface {
 	// provider has no log for it.
 	JobLog(ctx context.Context, job string, tail int) (JobLog, error)
 	// CIConfigured tells whether branch has a pipeline or check on any of its last 20
-	// commits (DESIGN wave 3 rule 4's "no CI configured" is its negation).
+	// commits (DESIGN 5.34 rule 4's "no CI configured" is its negation).
 	CIConfigured(ctx context.Context, branch string) (bool, error)
-	// CommitCI is the CI of exactly sha on ref (DESIGN wave 3 rule 4: a prerequisite's merge
+	// CommitCI is the CI of exactly sha on ref (DESIGN 5.34 rule 4: a prerequisite's merge
 	// commit on the default branch): GitLab's newest pipeline of that sha on that ref, GitHub's
 	// check runs and combined status of the commit. State is one of the BranchStatus states.
 	CommitCI(ctx context.Context, ref, sha string) (BranchStatus, error)
@@ -342,7 +342,7 @@ func notFoundOr(status int, err error) error {
 // mergeError maps the provider's answer to a merge (DESIGN 5.20 rule 5): 405, 406, 409
 // and 422 are refusals with the provider's first line, 404 is ErrRequestNotFound, the
 // rest is the error as it came. A merge that named the head (sha not empty) and got 409
-// is *ErrHeadMoved (DESIGN wave 3 rule 15): GitLab and GitHub answer 409 exactly when
+// is *ErrHeadMoved (DESIGN 5.34 rule 15): GitLab and GitHub answer 409 exactly when
 // the head is not that commit.
 func mergeError(err error, sha string) error {
 	var se *errAPIStatus
@@ -503,7 +503,7 @@ var gitlabPipelines = map[string]string{
 
 // Status is DESIGN 5.20 rule 3 for GitLab: the merge request, its discussions' first
 // 100 and the newest pipeline of exactly its head commit (Chief platform control, DESIGN
-// wave 3 rule 13; no longer the newest pipeline of the request, which may be of an older
+// DESIGN 5.34 rule 13; no longer the newest pipeline of the request, which may be of an older
 // head). Only the merge request's own 404 is ErrRequestNotFound; any other failed call
 // fails the status.
 func (g *gitlabProvider) Status(ctx context.Context, number int64) (RequestStatus, error) {
@@ -516,7 +516,7 @@ func (g *gitlabProvider) Status(ctx context.Context, number int64) (RequestStatu
 		// MergeCommit and SquashCommit name the merge's commit on the target branch.
 		MergeCommit  string `json:"merge_commit_sha"`
 		SquashCommit string `json:"squash_commit_sha"`
-		// DetailedMergeStatus and HasConflicts are the merge's account (wave 3 rule 13).
+		// DetailedMergeStatus and HasConflicts are the merge's account (DESIGN 5.34 rule 13).
 		DetailedMergeStatus string `json:"detailed_merge_status"`
 		HasConflicts        bool   `json:"has_conflicts"`
 	}
@@ -562,7 +562,7 @@ func (g *gitlabProvider) Status(ctx context.Context, number int64) (RequestStatu
 	return st, nil
 }
 
-// gitlabMergeable is the merge request's mergeable (DESIGN wave 3 rule 13): unknown while
+// gitlabMergeable is the merge request's mergeable (DESIGN 5.34 rule 13): unknown while
 // GitLab has not finished its check, else whether it merges without conflicts.
 func gitlabMergeable(detailed string, conflicts bool) *bool {
 	switch detailed {
@@ -594,7 +594,7 @@ func (p gitlabPipeline) ciStatus() string {
 	return store.CIStatusPending
 }
 
-// headPipeline is the newest pipeline of exactly sha (DESIGN wave 3 rule 13): GET
+// headPipeline is the newest pipeline of exactly sha (DESIGN 5.34 rule 13): GET
 // pipelines?sha=<sha>&order_by=id&sort=desc&per_page=1, shared by Status, CIStatus and
 // Checks. Any ref counts (the source branch's pipeline and the merge request's detached
 // one alike): the commit is what is checked. An empty sha has no pipeline.
@@ -614,7 +614,7 @@ func (g *gitlabProvider) headPipeline(ctx context.Context, sha string) (gitlabPi
 }
 
 // Merge is PUT merge_requests/<iid>/merge removing the source branch (rule 5), with the
-// head the merge must find as sha (DESIGN wave 3 rule 15).
+// head the merge must find as sha (DESIGN 5.34 rule 15).
 func (g *gitlabProvider) Merge(ctx context.Context, number int64, sha string) error {
 	body := map[string]any{"should_remove_source_branch": true}
 	if sha != "" {
@@ -900,7 +900,7 @@ func (g *githubProvider) Status(ctx context.Context, number int64) (RequestStatu
 		Head     struct {
 			SHA string `json:"sha"`
 		} `json:"head"`
-		// Mergeable is null while GitHub computes it (wave 3 rule 13).
+		// Mergeable is null while GitHub computes it (DESIGN 5.34 rule 13).
 		Mergeable      *bool  `json:"mergeable"`
 		MergeableState string `json:"mergeable_state"`
 	}
@@ -936,7 +936,7 @@ func (g *githubProvider) Status(ctx context.Context, number int64) (RequestStatu
 }
 
 // Merge is PUT pulls/<n>/merge with the merge method merge (rule 5), with the head the
-// merge must find as sha (DESIGN wave 3 rule 15).
+// merge must find as sha (DESIGN 5.34 rule 15).
 func (g *githubProvider) Merge(ctx context.Context, number int64, sha string) error {
 	body := map[string]any{"merge_method": "merge"}
 	if sha != "" {

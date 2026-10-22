@@ -17,7 +17,7 @@ import (
 	"yuno/internal/store"
 )
 
-// Chief platform control, DESIGN wave 3: what the sync and the update from the default
+// Chief platform control, DESIGN 5.34: what the sync and the update from the default
 // branch write on the record (rules 4, 9 to 11 and 13).
 
 // gitProject stores a GitLab project whose repository is a local bare repository with
@@ -189,7 +189,7 @@ func mergeOf(t *testing.T, bare, ours, theirs string) string {
 	return projecttest.Git(t, bare, "commit-tree", tree, "-p", ours, "-p", theirs, "-m", "resolve by hand")
 }
 
-// DESIGN wave 3 rules 4 and 13: the sync persists the merge commit of a merged request,
+// DESIGN 5.34 rules 4 and 13: the sync persists the merge commit of a merged request,
 // and for an open one the check of exactly its head with the pipeline behind it and the
 // provider's account of the merge.
 func TestMergeSHAPersistedOnSync(t *testing.T) {

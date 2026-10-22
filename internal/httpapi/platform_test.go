@@ -17,11 +17,11 @@ import (
 	"yuno/internal/tools"
 )
 
-// Chief platform control, wave 1 part A: platform_call through the api's own chain and the
+// Platform access for agents (DESIGN 5.32): platform_call through the api's own chain and the
 // platform gate.
 
 // platformFixture is the Chief's chat fixture with platform_call dispatched through the
-// api's own chain (DESIGN B6: actor, audit, gate, idempotency, If-Match), and with a count of
+// api's own chain (DESIGN 5.31 rule 6: actor, audit, gate, idempotency, If-Match), and with a count of
 // handler runs by route, taken where the routes sit in that chain.
 type platformFixture struct {
 	*chatFixture
@@ -169,7 +169,7 @@ func TestPlatformCallRoutine(t *testing.T) {
 	}
 }
 
-// Platform control A3 and DESIGN B4: an update of something readable needs if_match; a
+// Platform control A3 and DESIGN 5.31 rule 4: an update of something readable needs if_match; a
 // stale one is 412 and changes nothing; the fresh one succeeds.
 func TestPlatformCallIfMatch(t *testing.T) {
 	p := newPlatformFixture(t)
@@ -602,7 +602,7 @@ func TestPlatformCallArtifacts(t *testing.T) {
 	}
 }
 
-// Platform control A4 and DESIGN B1: the request a platform_call makes carries the agent,
+// Platform control A4 and DESIGN 5.31 rule 1: the request a platform_call makes carries the agent,
 // via chief, on behalf of the conversation's Telegram chat, with the server's own bearer;
 // its audit row names them, with what the gate decided.
 func TestPlatformCallActor(t *testing.T) {

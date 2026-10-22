@@ -655,7 +655,7 @@ func (m *mergeRequest) updateRecorded(ctx context.Context, call Call, pc *projec
 				"; the commit was pushed to " + rec.SourceBranch}, nil
 		}
 		// The check of the old head no longer speaks for the branch (Chief platform control,
-		// DESIGN wave 3 rule 11): the record moves to the pushed commit with its CI pending.
+		// DESIGN 5.34 rule 11): the record moves to the pushed commit with its CI pending.
 		if _, err := store.MergeRequestPushed(ctx, call.Tx, rec.ID, proposal.Commit, time.Now(), false); err != nil {
 			return Result{}, fmt.Errorf("record the push on the merge request: %w", err)
 		}

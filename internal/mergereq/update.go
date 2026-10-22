@@ -10,10 +10,10 @@ import (
 )
 
 // EventUpdated is the event a push the platform made to a request's branch emits (DESIGN
-// wave 3 rule 11), filed under the record's run; its data is {"merge_request": record}.
+// DESIGN 5.34 rule 11), filed under the record's run; its data is {"merge_request": record}.
 const EventUpdated = "merge_request.updated"
 
-// UpdateResult is what an update from the default branch did (DESIGN wave 3 rules 9 to
+// UpdateResult is what an update from the default branch did (DESIGN 5.34 rules 9 to
 // 11): Outcome is project.UpdateUpToDate, UpdateUpdated or UpdateConflicts; Commit the
 // merge commit pushed (updated only); DefaultSHA the default branch's commit merged in or
 // found contained; Conflicts the files that conflicted (conflicts only).
@@ -40,7 +40,7 @@ type ProviderError struct {
 func (e *ProviderError) Error() string { return e.Message }
 
 // UpdateFromDefault merges the project's default branch into an open request's branch and
-// pushes it (DESIGN wave 3 rules 9 to 11). POST /api/merge-requests/{id}/update-from-default
+// pushes it (DESIGN 5.34 rules 9 to 11). POST /api/merge-requests/{id}/update-from-default
 // and the dependency watcher (rule 8a) both call it; the watcher passes the record's
 // head_sha, read fresh, as expectedHead.
 //

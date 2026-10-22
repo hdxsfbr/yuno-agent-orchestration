@@ -726,7 +726,7 @@ func (e *Engine) cancelWaitingRun(ctx context.Context, runID, reason string) (*s
 // closeWaitingRun is the terminal housekeeping of a run that ended while paused.
 func (e *Engine) closeWaitingRun(ctx context.Context, run *store.Run, reason, approvalReason string) {
 	now := e.clock.Now()
-	// DESIGN W2 rules 11 and 12: the stop's state, and the commands the run leaves pending.
+	// DESIGN 5.33 rules 11 and 12: the stop's state, and the commands the run leaves pending.
 	if state := e.stopState(ctx, e.deps.Pool, run); state != "" && state != run.CancelState {
 		if done, err := store.SetRunCancelState(ctx, e.deps.Pool, run.ID, state); err == nil {
 			run = done

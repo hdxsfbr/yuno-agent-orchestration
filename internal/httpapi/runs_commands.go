@@ -11,7 +11,7 @@ import (
 	"yuno/internal/store"
 )
 
-// Recovery commands (DESIGN W2 rules 1 to 3, 14, 15 and 18): pause, resume and steer a run,
+// Recovery commands (DESIGN 5.33 rules 1 to 3, 14, 15 and 18): pause, resume and steer a run,
 // and read a run's commands. Cancel and retry keep their own handlers (runs.go,
 // runs_retry.go) and answer the same way: 202 with the run and its command, 409 with the
 // refusal, 503 when the command could not be recorded.

@@ -13,7 +13,7 @@ const (
 	RunQueued          = "queued"
 	RunRunning         = "running"
 	RunWaitingApproval = "waiting_approval"
-	// RunPaused is a run the operator paused (DESIGN W2 rule 14): not terminal, no worker
+	// RunPaused is a run the operator paused (DESIGN 5.33 rule 14): not terminal, no worker
 	// holds it, and a resume re-queues it.
 	RunPaused    = "paused"
 	RunSucceeded = "succeeded"
@@ -311,14 +311,14 @@ type Run struct {
 	// on a merge request before its first turn (DESIGN 5.22 rule 13): the second parent of the
 	// run's next push, which clears it. Nil when nothing was merged.
 	MergedSHA *string `db:"merged_sha" json:"-"`
-	// LeaseEpoch is the run's worker lease (DESIGN W2 rule 7): every claim and every move to
+	// LeaseEpoch is the run's worker lease (DESIGN 5.33 rule 7): every claim and every move to
 	// queued increments it, and a worker's writes carry the epoch it claimed with.
 	LeaseEpoch int64 `db:"lease_epoch" json:"-"`
 	// CancelState says whether the last turn of a stopped run is confirmed stopped (DESIGN
-	// W2 rules 11 to 13): "" when nothing was stopped, confirmed or unconfirmed.
+	// 5.33 rules 11 to 13): "" when nothing was stopped, confirmed or unconfirmed.
 	CancelState string `db:"cancel_state" json:"cancel_state,omitempty"`
 	// ParkReason is RunParkDependency for a run created paused because its merge request's
-	// dependencies hold it (Chief platform control, DESIGN wave 3 rule 7), "" otherwise;
+	// dependencies hold it (Chief platform control, DESIGN 5.34 rule 7), "" otherwise;
 	// ParkDetail is the reason it waits, as it read then. ResumeNote is the note its steps are
 	// told, until one succeeds, once the dependency watcher re-queued it (rule 8a).
 	ParkReason string  `db:"park_reason" json:"park_reason,omitempty"`
@@ -327,18 +327,18 @@ type Run struct {
 	// AgentNames and Models are not columns; FillRunParticipants sets them for list views.
 	AgentNames []string `db:"-" json:"agent_names,omitempty"`
 	Models     []string `db:"-" json:"models,omitempty"`
-	// Command is the command a recovery request recorded (DESIGN W2 rule 2), set on the run
+	// Command is the command a recovery request recorded (DESIGN 5.33 rule 2), set on the run
 	// the request answers with; not a column.
 	Command *RunCommand `db:"-" json:"command,omitempty"`
 }
 
-// Cancel states (DESIGN W2 rules 11 to 13).
+// Cancel states (DESIGN 5.33 rules 11 to 13).
 const (
 	CancelConfirmed   = "confirmed"
 	CancelUnconfirmed = "unconfirmed"
 )
 
-// Command kinds and outcomes (DESIGN W2 rule 1).
+// Command kinds and outcomes (DESIGN 5.33 rule 1).
 const (
 	CommandCancel = "cancel"
 	CommandPause  = "pause"
@@ -354,7 +354,7 @@ const (
 )
 
 // RunCommand is a request to stop, hold, restart or redirect a run, tracked from receipt to
-// its outcome (DESIGN W2 rules 1 to 6). NodeID is the step a steer names (or a retry starts
+// its outcome (DESIGN 5.33 rules 1 to 6). NodeID is the step a steer names (or a retry starts
 // from); Payload the request's own fields; Actor who sent it.
 type RunCommand struct {
 	ID         string          `db:"id" json:"id"`
@@ -401,7 +401,7 @@ type RunNode struct {
 	// Not part of the contract.
 	WorkspaceDir *string `db:"workspace_dir" json:"-"`
 	RepoSHA      *string `db:"repo_sha" json:"-"`
-	// The recovery columns (DESIGN W2): ParkReason is "paused" for a visit the operator
+	// The recovery columns (DESIGN 5.33): ParkReason is "paused" for a visit the operator
 	// paused (rule 14), the only one in the contract. Not part of it: ResumedAt and ResumeNote
 	// say the visit was resumed and with what note (rule 15); StartSHA is the commit its
 	// checkout started from and RetryFromAt marks the visit a retry from its step rewinds to
@@ -414,11 +414,11 @@ type RunNode struct {
 	TurnUnconfirmed bool       `db:"turn_unconfirmed" json:"-"`
 }
 
-// ParkPaused is run_nodes.park_reason of a visit the operator paused (DESIGN W2 rule 14).
+// ParkPaused is run_nodes.park_reason of a visit the operator paused (DESIGN 5.33 rule 14).
 const ParkPaused = "paused"
 
 // RunParkDependency is runs.park_reason of a run created paused because the merge request it
-// would work on is held by its dependencies (Chief platform control, DESIGN wave 3 rule 7).
+// would work on is held by its dependencies (Chief platform control, DESIGN 5.34 rule 7).
 const RunParkDependency = "dependency"
 
 // RunBranch is one branch of a fork visit (DESIGN 5.26 rule 3): the part of the run that
@@ -633,7 +633,7 @@ type MergeRequest struct {
 	// 11); FollowUpOf the record this one follows (5.29 rule 4).
 	MergeSHA   *string `db:"merge_sha" json:"merge_sha,omitempty"`
 	FollowUpOf *string `db:"follow_up_of" json:"follow_up_of,omitempty"`
-	// The check of exactly one commit (Chief platform control, DESIGN wave 3 rule 13):
+	// The check of exactly one commit (Chief platform control, DESIGN 5.34 rule 13):
 	// CISHA is the commit CIStatus was read for, and the merge guard needs it equal to
 	// HeadSHA; CIPipelineID and CIURL name the pipeline or check behind it.
 	CISHA        *string `db:"ci_sha" json:"ci_sha,omitempty"`
@@ -651,7 +651,7 @@ type MergeRequest struct {
 }
 
 // MergeConflicts is a merge of the default branch into a request's branch that conflicted
-// (DESIGN wave 3 rule 9): the files, sorted, when, and the default branch's commit that
+// (DESIGN 5.34 rule 9): the files, sorted, when, and the default branch's commit that
 // was merged (base_sha).
 type MergeConflicts struct {
 	Files   []string  `json:"files"`

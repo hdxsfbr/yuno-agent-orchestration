@@ -140,7 +140,7 @@ func DeleteAgent(ctx context.Context, q Querier, id string) error {
 	return nil
 }
 
-// Errors of RestoreAgent (DESIGN W4 rule 4).
+// Errors of RestoreAgent (DESIGN 5.35 rule 4).
 var (
 	ErrAgentNotArchived = errors.New("the agent is not archived")
 	ErrAgentNameTaken   = errors.New("a live agent has this name")
@@ -148,7 +148,7 @@ var (
 
 // RestoreAgent undoes DeleteAgent: it clears deleted_at, in one statement, unless a live
 // agent has the same name, compared trimmed and ignoring case as the seed and the
-// templates find agents by name (DESIGN W4 rule 4). It answers ErrNotFound for an unknown
+// templates find agents by name (DESIGN 5.35 rule 4). It answers ErrNotFound for an unknown
 // id, ErrAgentNotArchived for a live agent and ErrAgentNameTaken for a taken name.
 func RestoreAgent(ctx context.Context, q Querier, id string) error {
 	tag, err := q.Exec(ctx, `UPDATE agents a SET deleted_at = NULL, updated_at = now()

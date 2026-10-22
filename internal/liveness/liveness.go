@@ -79,7 +79,7 @@ type Pending struct {
 type Node struct {
 	NodeID string
 	Parked bool
-	// Paused says the visit parked because the operator paused it (DESIGN W2 rule 14).
+	// Paused says the visit parked because the operator paused it (DESIGN 5.33 rule 14).
 	Paused         bool
 	HeartbeatAt    *time.Time
 	ProgressAt     *time.Time
@@ -269,12 +269,12 @@ func ClassifyRun(r Run, th Thresholds, now time.Time) (string, string) {
 		}
 		return Waiting, waitingOn(r.Pending, now)
 	case store.RunPaused:
-		// Chief platform control, DESIGN wave 3 rule 7: held by its merge request's
+		// Chief platform control, DESIGN 5.34 rule 7: held by its merge request's
 		// dependencies until the watcher re-queues it.
 		if r.Blocked != "" {
 			return Blocked, r.Blocked
 		}
-		// DESIGN W2 rule 14: no worker holds it until the operator resumes it.
+		// DESIGN 5.33 rule 14: no worker holds it until the operator resumes it.
 		if r.PausedAt != nil {
 			return Waiting, "paused by the operator " + text(age(now, *r.PausedAt)) + " ago; waiting for a resume"
 		}

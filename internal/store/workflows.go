@@ -14,7 +14,7 @@ import (
 const workflowColumns = `id, name, description, definition, version, template_key, created_at, updated_at, deleted_at,
 	from_template, seeded_hash`
 
-// CreateWorkflow stores a new workflow and its first version in one statement (DESIGN W4
+// CreateWorkflow stores a new workflow and its first version in one statement (DESIGN 5.35
 // rule 1).
 func CreateWorkflow(ctx context.Context, q Querier, w *Workflow) error {
 	if w.ID == "" {
@@ -80,7 +80,7 @@ func ListWorkflows(ctx context.Context, q Querier) ([]Workflow, error) {
 
 // UpdateWorkflow replaces name, description and definition and bumps the version
 // (DESIGN section 4: runs pin workflow_version), writing the new version in the same
-// statement (DESIGN W4 rule 1).
+// statement (DESIGN 5.35 rule 1).
 func UpdateWorkflow(ctx context.Context, q Querier, w *Workflow) error {
 	w.UpdatedAt = time.Now().UTC()
 	rows, err := q.Query(ctx, `WITH w AS (UPDATE workflows SET name=$3, description=$4, definition=$5, version=version+1, updated_at=$6

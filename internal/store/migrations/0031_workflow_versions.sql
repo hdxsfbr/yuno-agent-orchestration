@@ -1,4 +1,4 @@
--- DESIGN W4 rule 1: every version of a workflow, so it can be read back and restored.
+-- DESIGN 5.35 rule 1: every version of a workflow, so it can be read back and restored.
 -- Workflow create and every update write the new version in the same statement as the
 -- workflow row. created_by is the actor of the request that wrote it, {"kind":"platform"}
 -- for a write no request made (the seed, the template loader, a quick-run workflow), and

@@ -11,7 +11,7 @@ import (
 	"yuno/internal/store"
 )
 
-// DESIGN W2 Outputs: the diagnosis gains the run's pending commands (with whether the worker
+// DESIGN 5.33 Outputs: the diagnosis gains the run's pending commands (with whether the worker
 // took them) and its cancel_state; a paused run, and its paused step, wait for a resume.
 func TestDiagnosisRecoveryFields(t *testing.T) {
 	base := diagnosisServer(t)

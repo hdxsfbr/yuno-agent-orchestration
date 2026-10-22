@@ -11,7 +11,7 @@ import (
 	"yuno/internal/store"
 )
 
-// DESIGN wave 3 rules 1 and 2 (TestDependencyEdges): the Planner's depends_on is stored
+// DESIGN 5.34 rules 1 and 2 (TestDependencyEdges): the Planner's depends_on is stored
 // ticket to ticket; a prerequisite in a later wave, the ticket itself, an unknown ticket and
 // a cycle are refused; edges between merge requests are unique, and a self-edge and an edge
 // that would close a cycle are refused with the cycle's path.

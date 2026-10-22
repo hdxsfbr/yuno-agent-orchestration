@@ -13,7 +13,7 @@ import (
 	"yuno/internal/tools"
 )
 
-// The merge request reads of Chief platform control (DESIGN wave 3 rule 14): what the
+// The merge request reads of Chief platform control (DESIGN 5.34 rule 14): what the
 // provider says about a request's diff, the checks of its head and a job's log, redacted
 // and capped before they reach the operator or the Chief.
 

@@ -8,7 +8,7 @@ import (
 	"yuno/internal/store"
 )
 
-// Chief platform control, DESIGN wave 3 rule 11: a push of open_merge_request onto a
+// Chief platform control, DESIGN 5.34 rule 11: a push of open_merge_request onto a
 // recorded request moves the record to the pushed commit with its CI pending, so a pass on
 // the old head never stands for the new one; a call that pushes nothing leaves it.
 func TestOpenMergeRequestPushInvalidatesTheCheck(t *testing.T) {

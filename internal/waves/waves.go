@@ -113,7 +113,7 @@ func (s *Service) requests(pc *project.Config) tools.RequestProvider {
 	return tools.ProviderFor(pc, s.Client)
 }
 
-// gate judges the prerequisites of the plans' tickets (Chief platform control, DESIGN wave 3
+// gate judges the prerequisites of the plans' tickets (Chief platform control, DESIGN 5.34
 // rules 4 and 6), reading a merge commit's CI through its project's provider.
 func (s *Service) gate() *deps.Gate {
 	return &deps.Gate{Pool: s.Pool, Provider: func(ctx context.Context, mr *store.MergeRequest) (*project.Config, tools.RequestProvider, error) {
@@ -135,7 +135,7 @@ func (s *Service) gate() *deps.Gate {
 }
 
 // held judges the tickets of the wave that have prerequisites and returns the ones that are
-// not to be labelled for intake (DESIGN wave 3 rule 6): a prerequisite is not satisfied, or
+// not to be labelled for intake (DESIGN 5.34 rule 6): a prerequisite is not satisfied, or
 // could not be judged now (the next pass judges it again).
 func (s *Service) held(ctx context.Context, planID string, wave int) (map[string]bool, error) {
 	open, err := store.TicketsWithOpenDependencies(ctx, s.Pool, planID)
@@ -167,7 +167,7 @@ func (s *Service) held(ctx context.Context, planID string, wave int) (map[string
 }
 
 // ReleaseSatisfied labels for intake the held tickets of every building plan whose
-// prerequisites are now satisfied (DESIGN wave 3 rules 6 and 8b); the dependency watcher
+// prerequisites are now satisfied (DESIGN 5.34 rules 6 and 8b); the dependency watcher
 // calls it on the merge request sync tick, and each pass of the wave watcher does too. A
 // failure on one plan leaves the others to their turn.
 func (s *Service) ReleaseSatisfied(ctx context.Context) error {
@@ -448,7 +448,7 @@ func pausedIn(ctx context.Context, q store.Querier, projectID string) (paused bo
 // labelWave adds the project's intake label to the issue of each ticket of the wave that is
 // still pending or released (rule 12); adding a label an issue carries is fine, so a retry
 // repeats it. A ticket without an issue cannot be released. A held ticket (an unsatisfied
-// prerequisite, Chief platform control DESIGN wave 3 rule 6) is not labelled.
+// prerequisite, DESIGN 5.34 rule 6) is not labelled.
 func (s *Service) labelWave(ctx context.Context, prov tools.IssueProvider, label string, planID string, wave int, held map[string]bool) error {
 	tickets, err := store.ListWaveTickets(ctx, s.Pool, planID, wave)
 	if err != nil {
@@ -471,7 +471,7 @@ func (s *Service) labelWave(ctx context.Context, prov tools.IssueProvider, label
 // releaseTx sets the wave's pending tickets released and records `wave_released` (once per
 // wave), in the caller's transaction. The event is nil when it was recorded already. A held
 // ticket stays pending until its prerequisites are satisfied (Chief platform control, DESIGN
-// wave 3 rule 6); the edges of the released ones are cleared.
+// DESIGN 5.34 rule 6); the edges of the released ones are cleared.
 func releaseTx(ctx context.Context, q store.Querier, planID string, wave int, held map[string]bool) (*store.PlanEvent, error) {
 	tickets, err := store.ListWaveTickets(ctx, q, planID, wave)
 	if err != nil {
@@ -553,7 +553,7 @@ func (s *Service) building(ctx context.Context, plan *store.Plan, proj *store.Pr
 			return err
 		}
 		// Tickets of the wave held by a prerequisite are released once it is satisfied
-		// (Chief platform control, DESIGN wave 3 rule 6).
+		// (Chief platform control, DESIGN 5.34 rule 6).
 		if err := s.releaseSatisfied(ctx, plan, proj, pc); err != nil {
 			return err
 		}

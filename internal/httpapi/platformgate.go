@@ -19,7 +19,7 @@ import (
 	"yuno/internal/tools"
 )
 
-// The platform gate (Chief platform control, wave 1, DESIGN A3, A5, A6 and A8; its place
+// The platform gate (Chief platform control, wave 1, DESIGN 5.32 rule 4, A5, A6 and A8; its place
 // in the chain is B6): a request whose context carries an agent actor, which only
 // platform_call's in-process dispatch can set, is held to the risk class of its operation.
 // Every other request passes untouched.
@@ -29,7 +29,7 @@ const (
 	// checked at use (rule A6).
 	platformApprovalTTL = time.Hour
 	// platformReplayWindow is how long a used approval lets its repeat through to
-	// idempotency, which replays the stored response: the key's own lifetime (DESIGN B3).
+	// idempotency, which replays the stored response: the key's own lifetime (DESIGN 5.31 rule 3).
 	// After it a repeat asks again rather than run unapproved.
 	platformReplayWindow = 24 * time.Hour
 	// gateBodyMax bounds the body the gate reads to check and hash.
@@ -48,7 +48,7 @@ const (
 	gateBodyTooBig  = "the body is larger than 4 MiB"
 )
 
-// Audit outcomes the gate decides (DESIGN B1).
+// Audit outcomes the gate decides (DESIGN 5.31 rule 1).
 const (
 	outcomeDenied          = "denied"
 	outcomePendingApproval = "pending_approval"
@@ -428,7 +428,7 @@ func (s *Server) platformRisk(ctx context.Context, op *tools.PlatformOperation, 
 			reasons = append(reasons, "it sets run limits above the platform defaults")
 		}
 	case "revertAudit":
-		// DESIGN W4 rule 5: a revert is the change it writes back.
+		// DESIGN 5.35 rule 5: a revert is the change it writes back.
 		return s.revertRisk(ctx, op, params["id"], who)
 	}
 	if len(reasons) > 0 && !op.Risk.Gated() {

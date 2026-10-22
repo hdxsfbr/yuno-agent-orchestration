@@ -535,7 +535,7 @@ describe("the step line inside a fork", () => {
   });
 });
 
-describe("pause, resume and steer (DESIGN W2)", () => {
+describe("pause, resume and steer (DESIGN 5.33)", () => {
   const live = () => run({ status: "running", finished_at: undefined });
 
   it("pauses a live run and says the pause waits for the step to stop", async () => {

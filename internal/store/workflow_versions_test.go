@@ -36,7 +36,7 @@ func versionNumbers(t *testing.T, ctx context.Context, q Querier, id string) []i
 	return out
 }
 
-// DESIGN W4 rule 1: migration 0031 records each workflow's current version and every older
+// DESIGN 5.35 rule 1: migration 0031 records each workflow's current version and every older
 // version a run holds, from its snapshot without the run's overrides, as a backfill. When
 // a version's runs hold different snapshots, the one most runs hold wins; the current
 // version always comes from the workflow row.
@@ -119,7 +119,7 @@ func TestWorkflowVersionsBackfill(t *testing.T) {
 	}
 }
 
-// DESIGN W4 rule 1: create and every update write the version in the same statement, with
+// DESIGN 5.35 rule 1: create and every update write the version in the same statement, with
 // the request's actor as created_by, or the platform without one. A conditional update
 // writes nothing when the workflow moved on.
 func TestWorkflowVersionAuthor(t *testing.T) {

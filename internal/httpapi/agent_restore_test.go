@@ -27,7 +27,7 @@ func listedAgent(t *testing.T, body []byte, id string) (agentListItem, bool) {
 	return list[i], true
 }
 
-// DESIGN W4 rule 4: an archived agent is listed with include_archived=true and archived_at;
+// DESIGN 5.35 rule 4: an archived agent is listed with include_archived=true and archived_at;
 // a restore makes it live and materialises it; a live agent is not_archived; a live agent
 // with the same name (ignoring case) makes it name_taken; a failed materialisation leaves
 // it restored and answers 502. Restoring grants the agent's tools again, so the contract

@@ -70,7 +70,7 @@ func liveIndexError(err error) error {
 
 // CreateRun inserts a run, queued unless r says otherwise: a run on a merge request its
 // dependencies hold is created paused with ParkReason and ParkDetail (Chief platform
-// control, DESIGN wave 3 rule 7).
+// control, DESIGN 5.34 rule 7).
 func CreateRun(ctx context.Context, q Querier, r *Run) error {
 	if r.ID == "" {
 		r.ID = NewID()
@@ -158,7 +158,7 @@ func GetRunForUpdate(ctx context.Context, q Querier, id string) (*Run, error) {
 // the run's limits. now stamps updated_at. A retry re-enters the two live-run indexes
 // (DESIGN 5.22 rule 1, 5.23 rule 3): ErrMergeRequestBusy when another live run names the
 // same merge request, ErrIssueBusy when another live run exists for the same issue; the
-// run stays as it was. The move to queued increments the lease epoch (DESIGN W2 rule 7).
+// run stays as it was. The move to queued increments the lease epoch (DESIGN 5.33 rule 7).
 func RetryRun(ctx context.Context, q Querier, id string, limits *Limits, now time.Time) (*Run, error) {
 	rows, err := q.Query(ctx, `UPDATE runs SET status=$2, retries=retries+1, attempt=1, failure_reason=NULL,
 		finished_at=NULL, cancel_requested=false, cancel_by=NULL, resume_node_visit_id=NULL, reported_at=NULL,
@@ -220,7 +220,7 @@ func ListRuns(ctx context.Context, q Querier, f RunFilter) ([]Run, error) {
 // stamps it from its injected clock as the run starts (runRun), so the time limit
 // restarts from that instant exactly as it does for a run claimed the first time.
 //
-// The claim increments the run's lease epoch (DESIGN W2 rule 7): the returned row carries
+// The claim increments the run's lease epoch (DESIGN 5.33 rule 7): the returned row carries
 // the epoch the worker's writes are fenced with.
 func ClaimQueuedRun(ctx context.Context, pool *pgxpool.Pool) (*Run, error) {
 	rows, err := pool.Query(ctx, `UPDATE runs SET status=$1, lease_epoch=lease_epoch+1,
@@ -262,7 +262,7 @@ func RequestCancel(ctx context.Context, q Querier, id, by string) error {
 }
 
 // AddRunUsage increments counters and tokens in one statement (DESIGN 5.2 consistency),
-// fenced by the worker's lease (DESIGN W2 rule 8).
+// fenced by the worker's lease (DESIGN 5.33 rule 8).
 func AddRunUsage(ctx context.Context, q Querier, id string, steps, toolCalls int, in, out, cacheRead, cacheWrite, costMicros int64) error {
 	l := fence(ctx, id)
 	_, epoch := fenceArgs(l)
@@ -289,7 +289,7 @@ func PauseRun(ctx context.Context, q Querier, id string, resumeNodeVisitID strin
 }
 
 // ResumeRun re-queues a paused run and accumulates the paused time; the move to queued
-// increments the lease epoch (DESIGN W2 rule 7).
+// increments the lease epoch (DESIGN 5.33 rule 7).
 func ResumeRun(ctx context.Context, q Querier, id string) error {
 	_, err := q.Exec(ctx, `UPDATE runs SET status=$2, lease_epoch=lease_epoch+1,
 		paused_total_ms = paused_total_ms + COALESCE(EXTRACT(EPOCH FROM (now() - paused_at)) * 1000, 0)::bigint,
@@ -297,7 +297,7 @@ func ResumeRun(ctx context.Context, q Querier, id string) error {
 	return err
 }
 
-// staleTurnsSQL marks the turns a lost worker may have left running (DESIGN W2 rule 12): the
+// staleTurnsSQL marks the turns a lost worker may have left running (DESIGN 5.33 rule 12): the
 // unfinished agent visits of the swept runs (the CTE stale) that recorded a turn and are not
 // parked. The runs with one get cancel_state unconfirmed in the same statement.
 const staleTurnsSQL = `turns AS (
@@ -308,7 +308,7 @@ const staleTurnsSQL = `turns AS (
 
 // RequeueStaleRuns implements DESIGN 5.1 rule 8: running runs untouched for longer than
 // staleAfter are re-queued once (attempt 2) and failed on the second detection. The sweep is
-// the leases' expiry (DESIGN W2 rule 7): both moves increment the epoch, so the lost
+// the leases' expiry (DESIGN 5.33 rule 7): both moves increment the epoch, so the lost
 // worker's late writes are refused, and a run whose last turn may still run gets
 // cancel_state unconfirmed for it (rule 12).
 func RequeueStaleRuns(ctx context.Context, q Querier, staleAfter time.Duration) (requeued, failed int64, err error) {
@@ -336,7 +336,7 @@ func RequeueStaleRuns(ctx context.Context, q Querier, staleAfter time.Duration) 
 // ---- run nodes --------------------------------------------------------------------
 
 // runNodeInsertColumns are the columns CreateRunNode writes; runNodeColumns adds the
-// recovery columns (DESIGN W2) a visit row reads back.
+// recovery columns (DESIGN 5.33) a visit row reads back.
 const runNodeInsertColumns = `id, run_id, node_id, agent_id, visit, iteration, status, messages, pending_tool_results, output,
 	failure_reason, session_key, openclaw_run_id, started_at, finished_at, question_id, parked_at, branch_id,
 	workspace_dir, repo_sha`
@@ -377,7 +377,7 @@ func SetRunNodeWorkspace(ctx context.Context, q Querier, id, dir string) error {
 }
 
 // SetRunNodeRepoSHA records the run repository commit a visit's checkout ended at (DESIGN
-// 5.30 rule 4), fenced by the worker's lease (DESIGN W2 rule 8).
+// 5.30 rule 4), fenced by the worker's lease (DESIGN 5.33 rule 8).
 func SetRunNodeRepoSHA(ctx context.Context, q Querier, id, sha string) error {
 	l := LeaseOf(ctx)
 	r, e := fenceArgs(l)
@@ -389,7 +389,7 @@ func SetRunNodeRepoSHA(ctx context.Context, q Querier, id, sha string) error {
 }
 
 // SetRunNodeStartSHA records the commit a visit's checkout starts from (DESIGN 5.30 rule 4):
-// start_sha, kept for a retry from the step (DESIGN W2 rule 17), and repo_sha, which the
+// start_sha, kept for a retry from the step (DESIGN 5.33 rule 17), and repo_sha, which the
 // visit's end replaces. Fenced like SetRunNodeRepoSHA.
 func SetRunNodeStartSHA(ctx context.Context, q Querier, id, sha string) error {
 	l := LeaseOf(ctx)
@@ -401,7 +401,7 @@ func SetRunNodeStartSHA(ctx context.Context, q Querier, id, sha string) error {
 	return err
 }
 
-// MarkTurnUnconfirmed records that a visit's turn was not confirmed stopped (DESIGN W2 rule
+// MarkTurnUnconfirmed records that a visit's turn was not confirmed stopped (DESIGN 5.33 rule
 // 11): the reconcile pass checks it until the gateway shows no active run for it. Not fenced:
 // it is a record of what happened, written also after the lease is gone.
 func MarkTurnUnconfirmed(ctx context.Context, q Querier, id string) error {

@@ -16,10 +16,10 @@ import (
 	"yuno/internal/tools"
 )
 
-// POST /api/audit/{id}/revert (DESIGN W4 rule 5): a change the audit log recorded (DESIGN
+// POST /api/audit/{id}/revert (DESIGN 5.35 rule 5): a change the audit log recorded (DESIGN
 // 5.31 rules 1 and 2) is undone by writing the state from before it back through the
 // resource's own PUT handler, behind the same If-Match check as any other update (5.31 rule
-// 4). Workflows are reverted by restoring a version (W4 rule 3).
+// 4). Workflows are reverted by restoring a version (DESIGN 5.35 rule 3).
 
 // revertRoute is the revert's mux pattern without its method.
 const revertRoute = "/api/audit/{id}/revert"
@@ -224,7 +224,7 @@ func (s *Server) revertTarget(r *http.Request) string {
 	return e.Target
 }
 
-// revertRisk is rule A5 for a revert (DESIGN W4 rule 5): it is held to the risk of the
+// revertRisk is rule A5 for a revert (DESIGN 5.35 rule 5): it is held to the risk of the
 // change it writes back, the PUT of its resource with the state before the audited change
 // as the body, judged against the resource as it is now. A revert the handler refuses
 // raises nothing.

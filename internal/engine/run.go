@@ -28,10 +28,10 @@ type outcome struct {
 	// paused means the run waits at an approval node: the worker lets it go and a
 	// decision re-queues it (DESIGN 5.6 rule 8).
 	paused bool
-	// operatorPause is a visit stopped for the operator's pause (DESIGN W2 rule 14): its
+	// operatorPause is a visit stopped for the operator's pause (DESIGN 5.33 rule 14): its
 	// turn is confirmed stopped, and the walk saves its checkout and parks it.
 	operatorPause bool
-	// leaseLost means the worker found its lease gone (DESIGN W2 rule 9): it writes nothing
+	// leaseLost means the worker found its lease gone (DESIGN 5.33 rule 9): it writes nothing
 	// more to the run, which is another worker's now.
 	leaseLost bool
 }
@@ -57,7 +57,7 @@ func violated(v *violation) outcome {
 // (DESIGN 5.1, 5.6).
 func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 	// The worker keeps the lease epoch it claimed the run with; every fenced write of the
-	// run carries it (DESIGN W2 rules 7 and 8).
+	// run carries it (DESIGN 5.33 rules 7 and 8).
 	lease := store.NewLease(run)
 	ctx = store.WithLease(ctx, lease)
 	wctx := context.WithoutCancel(ctx)
@@ -139,7 +139,7 @@ func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 	}
 	switch {
 	case res.leaseLost:
-		// DESIGN W2 rule 9: the run is another worker's; this one stops and writes nothing.
+		// DESIGN 5.33 rule 9: the run is another worker's; this one stops and writes nothing.
 		e.leaseLost(wctx, run.ID)
 		return
 	case res.interrupted:
@@ -155,7 +155,7 @@ func (e *Engine) runRun(ctx context.Context, run *store.Run) {
 	}
 	if res.paused {
 		// The worker let the run go: the commands still pending for it are decided as the api
-		// decides those of a run no worker holds (DESIGN W2 rule 5).
+		// decides those of a run no worker holds (DESIGN 5.33 rule 5).
 		e.settleUnheld(wctx, run.ID)
 	}
 }
@@ -202,7 +202,7 @@ func (e *Engine) finishRun(ctx context.Context, runID string, res outcome, rootS
 	}
 	run, err := e.transition(ctx, runID, res.runStatus, reason, now)
 	if errors.Is(err, store.ErrLeaseLost) {
-		e.leaseLost(ctx, runID) // DESIGN W2 rule 9
+		e.leaseLost(ctx, runID) // DESIGN 5.33 rule 9
 		return
 	}
 	if err != nil {
@@ -211,7 +211,7 @@ func (e *Engine) finishRun(ctx context.Context, runID string, res outcome, rootS
 			return
 		}
 	}
-	// DESIGN W2 rules 11 and 12: whether the run's last turn is confirmed stopped, then the
+	// DESIGN 5.33 rules 11 and 12: whether the run's last turn is confirmed stopped, then the
 	// commands it leaves pending (a cancel applied, or acknowledged until the reconcile pass
 	// confirms the stop; the rest rejected, the run having ended first).
 	if state := e.stopState(ctx, e.deps.Pool, run); state != "" && state != run.CancelState {

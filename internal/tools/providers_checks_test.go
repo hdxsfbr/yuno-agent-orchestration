@@ -16,7 +16,7 @@ import (
 	"yuno/internal/store"
 )
 
-// Chief platform control, DESIGN wave 3 rules 4, 13, 14 and 15: the request shapes of the
+// Chief platform control, DESIGN 5.34 rules 4, 13, 14 and 15: the request shapes of the
 // provider reads and of the merge with the head's sha, for GitLab and GitHub.
 
 // shapeFake answers scripted routes ("GET /merge_requests/7" below the base, a raw text

@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Dependencies between pieces of work (Chief platform control, DESIGN wave 3 rules 1 to
+// Dependencies between pieces of work (Chief platform control, DESIGN 5.34 rules 1 to
 // 8): an edge says its dependent (a plan ticket or a merge request record) waits for its
 // prerequisite. The edges are the store's; whether a prerequisite is satisfied is the
 // deps package's to judge, and the watcher's to record here.

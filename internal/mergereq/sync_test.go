@@ -61,7 +61,7 @@ func newFakeProvider(t *testing.T) (*fakeProvider, *http.Client) {
 		f.tokens = append(f.tokens, r.Header.Get("PRIVATE-TOKEN"))
 		a, ok := f.routes[route]
 		if sha := r.URL.Query().Get("sha"); sha != "" {
-			// The pipelines of one commit (DESIGN wave 3 rule 13) are scripted per commit.
+			// The pipelines of one commit (DESIGN 5.34 rule 13) are scripted per commit.
 			if bySHA, found := f.routes[route+"?sha="+sha]; found {
 				a, ok = bySHA, true
 			}

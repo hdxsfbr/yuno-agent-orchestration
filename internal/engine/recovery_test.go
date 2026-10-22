@@ -17,7 +17,7 @@ import (
 	"yuno/internal/workflow"
 )
 
-// Recovery (DESIGN W2): commands, leases, cancel confirmation, pause and resume, retry from
+// Recovery (DESIGN 5.33): commands, leases, cancel confirmation, pause and resume, retry from
 // a step and steering, engine side. The fake gateway answers chat.abort with "aborted" by
 // default (the confirming chat event); abortEmits off and the sessions it lists stand for a
 // gateway that does not confirm, or shows the turn still running.
@@ -93,7 +93,7 @@ func (env *testEnv) heldRun() (*store.Run, <-chan struct{}, openclaw.ChatSendPar
 
 // TestCommandLifecycle: a command is received (pending, not acknowledged), acknowledged by
 // the worker holding the run, then applied once its effect is confirmed; each change is a
-// run.command event (DESIGN W2 rules 1, 2 and 4, Outputs).
+// run.command event (DESIGN 5.33 rules 1, 2 and 4, Outputs).
 func TestCommandLifecycle(t *testing.T) {
 	env := newEnv(t)
 	ctx := context.Background()
@@ -1141,7 +1141,7 @@ func TestSetupHeartbeat(t *testing.T) {
 	}
 }
 
-// TestStalledStepRecovery is the acceptance test of DESIGN W2: the gateway hangs a turn; the
+// TestStalledStepRecovery is the acceptance test of DESIGN 5.33: the gateway hangs a turn; the
 // diagnosis says the step is stalled, with the evidence; a cancel is acknowledged, the turn
 // aborted and the command applied; the retry starts a new lease, and the hung visit's late
 // write is refused.

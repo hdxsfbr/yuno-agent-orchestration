@@ -21,7 +21,7 @@ const (
 	// answerNotInARun is what a call made with a run token gets (rule 9).
 	answerNotInARun = AnswerQuestionName + " is not available in a run"
 	// answerNotSaid refuses an answer the person's newest message does not carry
-	// (platform control A7).
+	// (DESIGN 5.32 rule 7).
 	answerNotSaid = "relay only what the person said"
 )
 

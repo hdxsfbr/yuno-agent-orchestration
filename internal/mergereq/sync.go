@@ -66,10 +66,10 @@ type Sync struct {
 	// Plans, when set, hears every record that turns merged (DESIGN 5.29 rule 10).
 	Plans PlanHook
 	// Events, when set, records merge_request.updated after a push the platform made
-	// (Chief platform control, DESIGN wave 3 rule 11).
+	// (Chief platform control, DESIGN 5.34 rule 11).
 	Events *events.Recorder
 	// Tickets, when set, releases the held plan tickets whose prerequisites are satisfied
-	// after each dependency pass (Chief platform control, DESIGN wave 3 rule 8b).
+	// after each dependency pass (Chief platform control, DESIGN 5.34 rule 8b).
 	Tickets TicketReleaser
 	// RequeueDependencyRuns, when set, is called once for a dependent merge request the
 	// dependency watcher lets go, with the task note of rule 8a: the server re-queues the
@@ -133,7 +133,7 @@ func (s *Sync) TickOnce(ctx context.Context) (synced, failed int) {
 		}
 	}
 	// The dependency watcher runs on the sync tick, after the records it reads were
-	// refreshed (Chief platform control, DESIGN wave 3 rule 8).
+	// refreshed (Chief platform control, DESIGN 5.34 rule 8).
 	s.WatchDependencies(ctx)
 	return synced, failed
 }
@@ -167,7 +167,7 @@ func (s *Sync) SyncOne(ctx context.Context, id string) (*store.MergeRequest, err
 	cur, _, err := s.refresh(ctx, rec)
 	if err == nil && changedForDependents(rec, cur) {
 		// A prerequisite whose state or CI changed: its dependents are looked at now
-		// (DESIGN wave 3 rule 8), and cur is re-read in case one of them is itself.
+		// (DESIGN 5.34 rule 8), and cur is re-read in case one of them is itself.
 		s.watchDependentsOf(ctx, cur.ID)
 		if again, gerr := store.GetMergeRequest(ctx, s.Pool, cur.ID); gerr == nil {
 			cur = again
@@ -304,7 +304,7 @@ func (s *Sync) refresh(ctx context.Context, rec *store.MergeRequest) (cur *store
 	u := store.MergeRequestSync{State: st.State, CIStatus: st.CIStatus, UnresolvedThreads: st.UnresolvedThreads,
 		SyncedAt: now, ClosedAt: st.ClosedAt, Mergeable: st.Mergeable}
 	if st.MergeSHA != "" && st.State == store.MergeRequestMerged {
-		// DESIGN wave 3 rule 4: the merge commit is persisted from the sync too.
+		// DESIGN 5.34 rule 4: the merge commit is persisted from the sync too.
 		u.MergeSHA = &st.MergeSHA
 	}
 	if st.HeadSHA != "" {

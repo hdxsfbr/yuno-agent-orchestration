@@ -444,7 +444,7 @@ func (p *publishTickets) revise(ctx context.Context, q store.Querier, run *store
 		out.Dropped++
 	}
 
-	// The Planner's edges are the revised plan's (Chief platform control, DESIGN wave 3 rules 2
+	// The Planner's edges are the revised plan's (Chief platform control, DESIGN 5.34 rules 2
 	// and 7: a revision is how a Planner edge is removed).
 	if err := store.ReplacePlannerDependencies(ctx, q, stored.ProjectID, planID, plan.edges); err != nil {
 		return Result{}, err
@@ -514,7 +514,7 @@ func (p *publishTickets) revise(ctx context.Context, q store.Querier, run *store
 // released (rule 16); a label of an earlier attempt (failed, running) comes off. When the
 // wave had never been released it also records `wave_released`. A ticket with a
 // prerequisite the watcher has not found satisfied stays pending, and the wave watcher
-// releases it once it is (Chief platform control, DESIGN wave 3 rule 6).
+// releases it once it is (Chief platform control, DESIGN 5.34 rule 6).
 func (p *publishTickets) rerelease(ctx context.Context, q store.Querier, issues IssueProvider, label, planID string, wave int, rows []store.PlanTicket, first bool, reset []string) (int, error) {
 	held, err := store.HeldTickets(ctx, q, planID)
 	if err != nil {

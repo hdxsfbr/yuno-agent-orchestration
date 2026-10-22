@@ -1,4 +1,4 @@
--- DESIGN W2, recovery: the operator's and the Chief's commands to a run, the run's worker
+-- DESIGN 5.33, recovery: the operator's and the Chief's commands to a run, the run's worker
 -- lease, the confirmation of a stopped turn, and the run status paused.
 
 -- Rules 1 to 6: one row per command, from receipt to its outcome. acked_at is when the

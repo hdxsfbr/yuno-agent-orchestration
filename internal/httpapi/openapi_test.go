@@ -435,7 +435,7 @@ func TestOpenAPISecurity(t *testing.T) {
 					bearer = true
 				}
 			}
-			// /api/openapi.yaml is open, as the auth middleware leaves it (platform control A1
+			// /api/openapi.yaml is open, as the auth middleware leaves it (DESIGN 5.32 rule 1
 			// documents it).
 			if isAPI := strings.HasPrefix(path, "/api/") && path != "/api/openapi.yaml"; bearer != isAPI {
 				t.Errorf("%s %s: bearerAuth applies = %v, want %v", method, path, bearer, isAPI)

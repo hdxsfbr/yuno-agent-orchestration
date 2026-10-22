@@ -12,11 +12,11 @@ import (
 )
 
 // ErrVersionConflict is UpdateWorkflowIfVersion's answer when the workflow is no longer at
-// the version the caller read (DESIGN W4 rule 3).
+// the version the caller read (DESIGN 5.35 rule 3).
 var ErrVersionConflict = errors.New("the workflow changed since it was read")
 
 // WorkflowVersionInfo is one stored version of a workflow without its definition, as the
-// version list shows it (DESIGN W4 rules 1 and 2). CreatedBy is the actor that wrote it
+// version list shows it (DESIGN 5.35 rules 1 and 2). CreatedBy is the actor that wrote it
 // (internal/actor), {"kind":"platform"} for a write no request made, or {"kind":"backfill"}
 // for a version migration 0031 recovered.
 type WorkflowVersionInfo struct {
@@ -54,7 +54,7 @@ func versionAuthor(ctx context.Context) json.RawMessage {
 
 // versionInsert writes the version a workflow statement returned (the CTE w) into
 // workflow_versions, in the same statement, so the workflow and its version are one write
-// (DESIGN W4 rule 1). The caller binds created_by to $1.
+// (DESIGN 5.35 rule 1). The caller binds created_by to $1.
 const versionInsert = ` INSERT INTO workflow_versions (workflow_id, version, name, description, definition, created_at, created_by)
 	SELECT id, version, name, description, definition, updated_at, $1::jsonb FROM w RETURNING version`
 
@@ -88,7 +88,7 @@ func GetWorkflowVersion(ctx context.Context, q Querier, workflowID string, versi
 }
 
 // UpdateWorkflowIfVersion is UpdateWorkflow only while the workflow is still at version
-// expected, checked in the statement that writes it (DESIGN W4 rule 3). It answers
+// expected, checked in the statement that writes it (DESIGN 5.35 rule 3). It answers
 // ErrVersionConflict when the workflow moved on and ErrNotFound when it is gone.
 func UpdateWorkflowIfVersion(ctx context.Context, q Querier, w *Workflow, expected int) error {
 	w.UpdatedAt = time.Now().UTC()

@@ -75,7 +75,7 @@ type PlatformDeps struct {
 	// RunIDForToken resolves a run token for publish_tickets' approval sentence (5.29
 	// rule 2); nil gives the generic sentence.
 	RunIDForToken func(token string) (runID string, ok bool)
-	// Platform sends platform_call's requests through the api (platform control A3); nil
+	// Platform sends platform_call's requests through the api (DESIGN 5.32 rule 4); nil
 	// leaves the tool unable to run.
 	Platform PlatformDispatcher
 }
@@ -88,7 +88,7 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 		codeKey = make([]byte, 32)
 		_, _ = rand.Read(codeKey)
 	}
-	// answer_question accepts a question's code as the person's evidence (platform control A7).
+	// answer_question accepts a question's code as the person's evidence (DESIGN 5.32 rule 7).
 	d.ApprovalCodeKey = codeKey
 	r.Register(NewFinish(d.AcceptFinish, d.RejectFinish))
 	r.Register(NewDeployRelease(d.Deploy))

@@ -101,7 +101,7 @@ func ReopenRunNode(ctx context.Context, q Querier, id string) (*RunNode, error) 
 }
 
 // SetBranchCurrent writes where a branch is (DESIGN 5.26 rule 4); fenced by the worker's
-// lease through the branch's run (DESIGN W2 rule 8).
+// lease through the branch's run (DESIGN 5.33 rule 8).
 func SetBranchCurrent(ctx context.Context, q Querier, id, node string) error {
 	l := LeaseOf(ctx)
 	r, e := fenceArgs(l)
@@ -114,7 +114,7 @@ func SetBranchCurrent(ctx context.Context, q Querier, id, node string) error {
 
 // SetBranchStatus writes a branch's status: a terminal one (succeeded, failed, cancelled)
 // with its finished_at and reason, running or waiting_approval with neither. Fenced by the
-// worker's lease through the branch's run (DESIGN W2 rule 8).
+// worker's lease through the branch's run (DESIGN 5.33 rule 8).
 func SetBranchStatus(ctx context.Context, q Querier, id, status string, reason *string, at time.Time) (*RunBranch, error) {
 	var finished any
 	if status == BranchSucceeded || status == BranchFailed || status == BranchCancelled {
@@ -158,7 +158,7 @@ func SetRunStateNodeInBranch(ctx context.Context, db beginner, runID, nodeID str
 		return nil, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // no-op after commit
-	// A worker's write is fenced by its lease (DESIGN W2 rule 8).
+	// A worker's write is fenced by its lease (DESIGN 5.33 rule 8).
 	l := fence(ctx, runID)
 	_, epoch := fenceArgs(l)
 	run, err := collectRun(tx.Query(ctx, `UPDATE runs SET state = jsonb_set(CASE WHEN jsonb_typeof(state) = 'object' THEN state ELSE '{}'::jsonb END,
@@ -186,7 +186,7 @@ func ParkBranchVisit(ctx context.Context, db beginner, runID, runNodeID, branchI
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // no-op after commit
-	// The park is the worker's write, fenced by its lease (DESIGN W2 rule 8).
+	// The park is the worker's write, fenced by its lease (DESIGN 5.33 rule 8).
 	l := fence(ctx, runID)
 	r, e := fenceArgs(l)
 	tag, err := tx.Exec(ctx, `UPDATE run_nodes SET parked_at=$3, status=$4 WHERE id=$1 AND run_id=$2 AND status IN ($5, $4)

@@ -32,7 +32,7 @@ type NodeEvidence struct {
 }
 
 // StartRunNodeEvidence records a visit's start: its first heartbeat and progress at `at`,
-// waiting on setup, no open call. Fenced by the worker's lease (DESIGN W2 rule 8).
+// waiting on setup, no open call. Fenced by the worker's lease (DESIGN 5.33 rule 8).
 func StartRunNodeEvidence(ctx context.Context, q Querier, id string, at time.Time) error {
 	l := LeaseOf(ctx)
 	r, e := fenceArgs(l)
@@ -46,7 +46,7 @@ func StartRunNodeEvidence(ctx context.Context, q Querier, id string, at time.Tim
 
 // TouchRunNode is TouchRun with the visit's heartbeat in the same statement: the run's
 // updated_at (the stale-run sweeper's evidence, DESIGN 5.1 rule 8) and the visit's
-// heartbeat_at move together. The heartbeat renews the worker's lease (DESIGN W2 rule 8):
+// heartbeat_at move together. The heartbeat renews the worker's lease (DESIGN 5.33 rule 8):
 // both writes carry the epoch, and ErrLeaseLost says the run is another worker's now.
 func TouchRunNode(ctx context.Context, q Querier, runID, runNodeID string, at time.Time) error {
 	l := fence(ctx, runID)
@@ -61,7 +61,7 @@ func TouchRunNode(ctx context.Context, q Querier, runID, runNodeID string, at ti
 }
 
 // SetRunNodeEvidence writes a visit's evidence after a change, fenced by the worker's lease
-// (DESIGN W2 rule 8).
+// (DESIGN 5.33 rule 8).
 func SetRunNodeEvidence(ctx context.Context, q Querier, id string, ev NodeEvidence) error {
 	calls := ev.OpenCalls
 	if len(calls) == 0 {
@@ -100,7 +100,7 @@ type LiveNode struct {
 	Agent          string
 	Status         string
 	Parked         bool
-	ParkReason     string // "paused" for a visit the operator paused (DESIGN W2 rule 14)
+	ParkReason     string // "paused" for a visit the operator paused (DESIGN 5.33 rule 14)
 	HeartbeatAt    *time.Time
 	ProgressAt     *time.Time
 	WaitingOn      string

@@ -12,7 +12,7 @@ import (
 )
 
 // The contract loads with every operation classed, and the operations an agent may not
-// run are classed so (platform control A1).
+// run are classed so (DESIGN 5.32 rule 1).
 func TestPlatformContract(t *testing.T) {
 	c, err := Contract()
 	if err != nil {
@@ -102,7 +102,7 @@ func TestPlatformOperationsSearch(t *testing.T) {
 
 	// By text: every word must appear; machine operations never do.
 	found := ops(search(`{"chat_token":"c_x","query":"Schedule"}`))
-	// The audit revert undoes a schedule's change too (DESIGN W4 rule 5).
+	// The audit revert undoes a schedule's change too (DESIGN 5.35 rule 5).
 	if got := ids(found); !slices.Equal(got, []string{"revertAudit", "listSchedules", "createSchedule", "deleteSchedule", "getSchedule", "updateSchedule"}) {
 		t.Fatalf("schedule = %v", got)
 	}

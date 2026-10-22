@@ -14,7 +14,7 @@ import (
 	"yuno/internal/store"
 )
 
-// The merge request reads of Chief platform control (DESIGN wave 3 rules 4, 13 and 14):
+// The merge request reads of Chief platform control (DESIGN 5.34 rules 4, 13 and 14):
 // the CI of exactly one commit with its jobs, the request's files and patches, a job's
 // log, and whether a branch has CI at all. The callers redact and cap what reaches a
 // person or an agent (mergereq); these return what the provider said.

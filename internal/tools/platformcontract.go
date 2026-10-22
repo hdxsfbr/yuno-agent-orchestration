@@ -14,7 +14,7 @@ import (
 	"yuno/api"
 )
 
-// The platform contract (Chief platform control, wave 1, DESIGN A1): every operation of
+// The platform contract (Chief platform control, wave 1, DESIGN 5.32 rule 1): every operation of
 // api/openapi.yaml with its operationId (the Go handler's name) and its risk class
 // (x-yuno-risk). platform_operations searches it, platform_call builds its requests from
 // it, and the api's platform gate finds the operation of a request in it.

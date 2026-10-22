@@ -6,7 +6,7 @@ import (
 	"yuno/internal/store"
 )
 
-// DESIGN W2 rule 14: a paused run waits for a resume, with its age, and so does its paused
+// DESIGN 5.33 rule 14: a paused run waits for a resume, with its age, and so does its paused
 // step, whatever its heartbeat (no worker holds it).
 func TestDiagnosisPaused(t *testing.T) {
 	got, reason := ClassifyRun(Run{Status: store.RunPaused, PausedAt: ago(95)}, th, checkedAt)

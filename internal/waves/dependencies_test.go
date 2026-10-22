@@ -12,7 +12,7 @@ import (
 	"yuno/internal/tools"
 )
 
-// ciRequests adds the CI of merge commits (Chief platform control, DESIGN wave 3 rule 4)
+// ciRequests adds the CI of merge commits (Chief platform control, DESIGN 5.34 rule 4)
 // to fakeRequests: one state for every commit.
 type ciRequests struct {
 	*fakeRequests
@@ -34,7 +34,7 @@ func (c *ciRequests) set(state string) {
 	c.state = state
 }
 
-// DESIGN wave 3 rule 6: a released wave's ticket whose prerequisite is not satisfied is not
+// DESIGN 5.34 rule 6: a released wave's ticket whose prerequisite is not satisfied is not
 // labelled for intake and stays pending; the watcher labels it once the prerequisite merged
 // and the default branch passed on its merge commit (rule 8b's ReleaseSatisfied).
 func TestTicketNotReleasedUntilSatisfied(t *testing.T) {

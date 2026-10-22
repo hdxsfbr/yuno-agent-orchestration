@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-// Update from the default branch (Chief platform control, DESIGN wave 3 rules 9 and 10):
+// Update from the default branch (Chief platform control, DESIGN 5.34 rules 9 and 10):
 // the platform alone, no agent and no checkout, merges the project's default branch into
 // a merge request's branch and pushes the merge, never forced.
 
@@ -49,7 +49,7 @@ func (e *ErrHeadMoved) Error() string {
 	return "the branch moved to " + e.Current + " since it was read; nothing was pushed"
 }
 
-// IsCommitID reports whether s is a full commit id, 40 lowercase hex digits (DESIGN wave 3
+// IsCommitID reports whether s is a full commit id, 40 lowercase hex digits (DESIGN 5.34
 // units: SHAs are compared exactly).
 func IsCommitID(s string) bool { return commitIDPattern.MatchString(s) }
 
@@ -57,7 +57,7 @@ func IsCommitID(s string) bool { return commitIDPattern.MatchString(s) }
 var beforeUpdatePush func()
 
 // UpdateFromDefault merges the default branch into branch and pushes the merge (DESIGN
-// wave 3 rules 9 and 10):
+// DESIGN 5.34 rules 9 and 10):
 //
 //  1. branch and the default branch are fetched into a throwaway bare repository with the
 //     project's token, deep enough to hold their merge base (FetchRun).

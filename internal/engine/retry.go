@@ -68,14 +68,14 @@ func (e *Engine) Retry(ctx context.Context, runID, by string, limits *store.Limi
 	return e.RetryFrom(ctx, runID, by, "", limits)
 }
 
-// RetryFrom is Retry from a step the run reached (DESIGN W2 rules 16 and 17): fromNode
+// RetryFrom is Retry from a step the run reached (DESIGN 5.33 rules 16 and 17): fromNode
 // becomes the run's current node, the latest visit of it and of every node visited after
 // it are marked retried (D-093), and the step's next visit starts from the commit that
 // latest visit started from; the later nodes run again as the graph reaches them. An empty
 // fromNode is Retry. The request is a command (rule 2): its receipt first, applied in the
 // retry's transaction or settled rejected with the refusal. A run whose last turn is not
 // confirmed stopped is refused with cancel_unconfirmed (rule 13), and one on a merge request
-// its dependencies hold with dependency_blocked (Chief platform control, DESIGN wave 3
+// its dependencies hold with dependency_blocked (Chief platform control, DESIGN 5.34
 // rule 7).
 func (e *Engine) RetryFrom(ctx context.Context, runID, by, fromNode string, limits *store.Limits) (*store.Run, error) {
 	if by == "" {
@@ -131,19 +131,19 @@ func (e *Engine) retry(ctx context.Context, runID, by, fromNode string, limits *
 		if run.Retries >= maxRetries {
 			return &RetryError{Code: RetryLimitReached, Message: fmt.Sprintf("run was retried %d times", maxRetries)}
 		}
-		// DESIGN W2 rule 13: while the last turn may still run, a retry would start a second
+		// DESIGN 5.33 rule 13: while the last turn may still run, a retry would start a second
 		// writer next to it. The reconcile pass is the only way out.
 		if run.CancelState == store.CancelUnconfirmed {
 			return &RetryError{Code: CodeCancelUnconfirmed, Message: unconfirmedDetail(ctx, tx, run.ID)}
 		}
-		// Chief platform control, DESIGN wave 3 rule 7: a run on a merge request its
+		// Chief platform control, DESIGN 5.34 rule 7: a run on a merge request its
 		// dependencies hold does not start again until they are cleared or removed.
 		if held, err := dependencyHold(ctx, tx, run); err != nil {
 			return fmt.Errorf("run %s: its merge request's dependencies: %w", runID, err)
 		} else if held != "" {
 			return &RetryError{Code: CodeDependencyBlocked, Message: held}
 		}
-		// DESIGN W2 rules 16 and 17: a retry from a step the run reached, outside a fork
+		// DESIGN 5.33 rules 16 and 17: a retry from a step the run reached, outside a fork
 		// branch, moves the run there; the step's latest visit is the one its next visit
 		// rewinds to.
 		var rewind *store.RunNode
@@ -266,7 +266,7 @@ func (e *Engine) retry(ctx context.Context, runID, by, fromNode string, limits *
 				return fmt.Errorf("run %s: move its plan ticket: %w", runID, err)
 			}
 		}
-		// The command is applied with the retry (DESIGN W2 rule 5: no worker holds the run).
+		// The command is applied with the retry (DESIGN 5.33 rule 5: no worker holds the run).
 		if cmd != nil {
 			settled, err := store.SettleRunCommand(ctx, tx, cmd.ID, store.CommandApplied, "")
 			if err != nil {

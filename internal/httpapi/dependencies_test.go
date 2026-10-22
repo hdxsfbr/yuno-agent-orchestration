@@ -10,7 +10,7 @@ import (
 	"yuno/internal/store"
 )
 
-// Chief platform control, DESIGN wave 3 rules 1, 3 and 5 through the API: a merge
+// Chief platform control, DESIGN 5.34 rules 1, 3 and 5 through the API: a merge
 // request's prerequisites are set and read, a self-edge, an unknown request and a cycle are
 // refused, the Planner's edges of its ticket are listed and not editable, and the record
 // read says what holds the request.

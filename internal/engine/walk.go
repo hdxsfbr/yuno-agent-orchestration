@@ -265,7 +265,7 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 			v.early = &o
 		}
 		// A run the dependency watcher re-queued tells its steps why it waited and what changed
-		// until one of them succeeded (Chief platform control, DESIGN wave 3 rules 7 and 8a).
+		// until one of them succeeded (Chief platform control, DESIGN 5.34 rules 7 and 8a).
 		if note := strValue(w.run.ResumeNote); note != "" {
 			if done, derr := store.RunStepSucceeded(ctx, e.deps.Pool, w.run.ID); derr != nil {
 				if v.early == nil {
@@ -287,7 +287,7 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 			task += "\n\n" + retriedNotice
 		}
 		// A step the operator paused and resumed is told so, with the resume's note (DESIGN
-		// W2 rule 15).
+		// 5.33 rule 15).
 		if notes, nerr := store.StepResumeNotes(ctx, e.deps.Pool, w.run.ID, node.ID); nerr != nil {
 			if v.early == nil {
 				o := failed(store.RunFailed, "read the step's resume: "+nerr.Error())
@@ -352,7 +352,7 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 	e.removeActive(v)
 	wctx := context.WithoutCancel(ctx)
 	if res.leaseLost || v.lease.Lost() {
-		// The worker lost its lease (DESIGN W2 rule 9): the turn is aborted, the visit lets go
+		// The worker lost its lease (DESIGN 5.33 rule 9): the turn is aborted, the visit lets go
 		// of what it holds in this process, and nothing more is written to the run.
 		v.abortLiveTurn(wctx)
 		v.release()
@@ -428,7 +428,7 @@ func (w *walk) agentNode(ctx context.Context, node *workflow.Node) (string, *out
 	return w.advance(ctx, node, res.output)
 }
 
-// pauseVisit parks a visit whose turn stopped for the operator's pause (DESIGN W2 rule 14):
+// pauseVisit parks a visit whose turn stopped for the operator's pause (DESIGN 5.33 rule 14):
 // the checkout is saved, the visit parked with reason paused and the run paused in one step
 // (store.PauseVisit), and the worker lets the run go. A cancel received while the turn
 // stopped wins (rule 6): the visit ends cancelled. A checkout that cannot be saved fails the
@@ -581,7 +581,7 @@ func (w *walk) carrySources(ctx context.Context, v *visit) ([]carrySource, strin
 			start = src.repoSHA
 		}
 	}
-	// A retry from this step (DESIGN W2 rule 17) rewinds the step's next visit to the commit
+	// A retry from this step (DESIGN 5.33 rule 17) rewinds the step's next visit to the commit
 	// its latest visit started from: a fresh attempt, whatever the later steps committed.
 	for _, n := range visits {
 		if n.NodeID == v.node.ID && n.Visit == v.rn.Visit-1 && n.RetryFromAt != nil && strValue(n.StartSHA) != "" {

@@ -9,7 +9,7 @@ import (
 	"yuno/internal/workflow"
 )
 
-// TestRequeuedRunCarriesNote (Chief platform control, DESIGN wave 3 rules 7 and 8a): a run
+// TestRequeuedRunCarriesNote (Chief platform control, DESIGN 5.34 rules 7 and 8a): a run
 // the dependency watcher re-queued tells its first step the watcher's note, after the task,
 // as a resumed step is told its resume; the steps after one succeeded are not told again.
 func TestRequeuedRunCarriesNote(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 	"yuno/internal/project/projecttest"
 )
 
-// Chief platform control, DESIGN wave 3 rules 9 and 10, against a local bare repository:
+// Chief platform control, DESIGN 5.34 rules 9 and 10, against a local bare repository:
 // the platform merges the default branch into a request's branch and pushes the merge,
 // never forced.
 
@@ -59,7 +59,7 @@ func TestUpdateFromDefault(t *testing.T) {
 			t.Fatal("an up-to-date branch was pushed")
 		}
 		// A branch that has the default branch's newer commit merged in already is up to
-		// date as well (DESIGN wave 3 edge cases).
+		// date as well (DESIGN 5.34 edge cases).
 		handCommit(t, bare, "main", map[string]string{"main.txt": "main\n"})
 		merged, err := cfg.UpdateFromDefault(ctx, "yuno/t1", head)
 		if err != nil || merged.Outcome != UpdateUpdated {

@@ -171,7 +171,7 @@ func errorCodeOf(b []byte) string {
 // routeTarget returns r's route (its mux pattern without the method, "" when no route
 // matches) and its target: the path when a GET route has the same pattern, otherwise the
 // path without its last segment when that has a GET route of the pattern without its last
-// segment, otherwise "". A revert's target is the resource of the row it reverts (DESIGN W4
+// segment, otherwise "". A revert's target is the resource of the row it reverts (DESIGN 5.35
 // rule 5). collection is true when the target's pattern ends in a literal segment (a list
 // such as /api/agents), not a parameter.
 func (s *Server) routeTarget(r *http.Request) (route, target string, collection bool) {
@@ -185,7 +185,7 @@ func (s *Server) routeTarget(r *http.Request) (route, target string, collection 
 		return route, trimSegments(path, up), false
 	}
 	if route == revertRoute {
-		// A revert changes the resource of the row it reverts (DESIGN W4 rule 5).
+		// A revert changes the resource of the row it reverts (DESIGN 5.35 rule 5).
 		return route, s.revertTarget(r), false
 	}
 	if s.getRoute(path) == route {

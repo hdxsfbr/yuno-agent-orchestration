@@ -18,7 +18,7 @@ import (
 	"yuno/internal/store"
 )
 
-// Recovery (DESIGN W2): the operator or the Chief stops, holds, restarts and redirects a
+// Recovery (DESIGN 5.33): the operator or the Chief stops, holds, restarts and redirects a
 // run through commands. Each request is a run_commands row from receipt to its outcome
 // (rules 1 to 6): the api records it, then decides it under the run's row lock. A run no
 // worker holds (queued, paused, parked, or ended) has it applied or rejected at once; a run
@@ -32,7 +32,7 @@ const (
 	CodeCommandRejected   = "command_rejected"
 	CodeCancelUnconfirmed = "cancel_unconfirmed"
 	// CodeDependencyBlocked refuses a resume or a retry of a run on a merge request its
-	// dependencies hold (Chief platform control, DESIGN wave 3 rule 7).
+	// dependencies hold (Chief platform control, DESIGN 5.34 rule 7).
 	CodeDependencyBlocked = "dependency_blocked"
 )
 
@@ -335,7 +335,7 @@ func (e *Engine) stopState(ctx context.Context, q store.Querier, run *store.Run)
 
 // ---- cancel (rules 10 to 12) ---------------------------------------------------------------
 
-// Cancel cancels a run (DESIGN 5.2 rule 2, W2 rules 10 and 11). A queued run, and one no
+// Cancel cancels a run (DESIGN 5.2 rule 2, 5.33 rules 10 and 11). A queued run, and one no
 // worker holds (paused, or waiting on a decision with no live visit), is cancelled at once
 // and the command applied; a held run gets the cancel flag and its worker, woken now,
 // acknowledges the command and stops the turn, and the command is applied when the stop is
@@ -442,7 +442,7 @@ func (e *Engine) decidePause(ctx context.Context, tx pgx.Tx, run *store.Run, by 
 // visit from the paused visit's checkout, whose task carries the notice and the note (at most
 // 2000 characters, redacted). Any other status is rejected, and so is a run whose last turn
 // is not confirmed stopped (rule 13), or one on a merge request its dependencies hold
-// (Chief platform control, DESIGN wave 3 rule 7).
+// (Chief platform control, DESIGN 5.34 rule 7).
 func (e *Engine) Resume(ctx context.Context, runID, by, note string) (*store.Run, error) {
 	if by == "" {
 		by = "user"
@@ -470,7 +470,7 @@ func (e *Engine) decideResume(ctx context.Context, tx pgx.Tx, run *store.Run, by
 	case run.CancelState == store.CancelUnconfirmed:
 		return reject(CodeCancelUnconfirmed, unconfirmedDetail(ctx, tx, run.ID)), nil
 	}
-	// Chief platform control, DESIGN wave 3 rule 7: no run goes on with a merge request its
+	// Chief platform control, DESIGN 5.34 rule 7: no run goes on with a merge request its
 	// dependencies hold; the dependency watcher re-queues a run parked for them.
 	if held, err := dependencyHold(ctx, tx, run); err != nil || held != "" {
 		return reject(CodeDependencyBlocked, held), err

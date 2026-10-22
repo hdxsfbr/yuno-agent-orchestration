@@ -152,7 +152,7 @@ type Service interface {
 	// Trigger validates and queues a run (422 on bad input, 404 on unknown ids, 429 on
 	// guardrail rate limits are returned as typed errors by the implementation).
 	Trigger(ctx context.Context, req TriggerRequest) (*store.Run, error)
-	// Cancel cancels a run (DESIGN 5.2 rule 2, W2 rules 10 and 11). The run comes back with
+	// Cancel cancels a run (DESIGN 5.2 rule 2, 5.33 rules 10 and 11). The run comes back with
 	// its command; a finished run is a *CommandError (409 run_finished), a command whose
 	// receipt could not be written ErrCommandNotTaken (503).
 	Cancel(ctx context.Context, runID, by string) (*store.Run, error)
@@ -160,10 +160,10 @@ type Service interface {
 	// (DESIGN 5.21 rules 1 to 3). Refusals are *RetryError (409), bad limits a
 	// *ValidationError (422), an unknown run store.ErrNotFound.
 	Retry(ctx context.Context, runID, by string, limits *store.Limits) (*store.Run, error)
-	// RetryFrom is Retry from a step the run reached (DESIGN W2 rules 16 and 17); an empty
+	// RetryFrom is Retry from a step the run reached (DESIGN 5.33 rules 16 and 17); an empty
 	// fromNode is Retry.
 	RetryFrom(ctx context.Context, runID, by, fromNode string, limits *store.Limits) (*store.Run, error)
-	// Pause, Resume and Steer are the recovery commands of DESIGN W2 rules 14, 15 and 18.
+	// Pause, Resume and Steer are the recovery commands of DESIGN 5.33 rules 14, 15 and 18.
 	// Each answers the run with its command; a refusal is a *CommandError (409), a bad
 	// note or message a *ValidationError (422).
 	Pause(ctx context.Context, runID, by string) (*store.Run, error)

@@ -22,7 +22,7 @@ func SetRunStartedAt(ctx context.Context, q Querier, id string, at time.Time) er
 // `from`, and returns the updated row. It returns ErrNotFound when the run does not
 // exist or is in none of the expected statuses. finished_at is set for terminal
 // statuses; reason, when non-nil, replaces failure_reason. A worker's transition is
-// fenced by its lease (DESIGN W2 rule 8): ErrLeaseLost when the epoch moved on.
+// fenced by its lease (DESIGN 5.33 rule 8): ErrLeaseLost when the epoch moved on.
 func TransitionRun(ctx context.Context, q Querier, id string, from []string, to string, reason *string, at time.Time) (*Run, error) {
 	var finished any
 	if IsTerminal(to) {
@@ -64,7 +64,7 @@ func AddRunUsageReturning(ctx context.Context, q Querier, id string, steps, tool
 }
 
 // TouchRun refreshes updated_at so the stale-run sweeper (DESIGN 5.1 rule 8) leaves a
-// long, quiet turn alone. The heartbeat renews the worker's lease (DESIGN W2 rule 8): it is
+// long, quiet turn alone. The heartbeat renews the worker's lease (DESIGN 5.33 rule 8): it is
 // fenced, and ErrLeaseLost says the run is another worker's now.
 func TouchRun(ctx context.Context, q Querier, id string) error {
 	l := fence(ctx, id)
@@ -77,7 +77,7 @@ func TouchRun(ctx context.Context, q Querier, id string) error {
 }
 
 // PauseRunAt moves a running run to waiting_approval at the given time; fenced by the
-// worker's lease (DESIGN W2 rule 8).
+// worker's lease (DESIGN 5.33 rule 8).
 func PauseRunAt(ctx context.Context, q Querier, id, resumeNodeVisitID string, at time.Time) (*Run, error) {
 	l := fence(ctx, id)
 	_, epoch := fenceArgs(l)
@@ -95,7 +95,7 @@ func PauseRunAt(ctx context.Context, q Querier, id, resumeNodeVisitID string, at
 
 // ResumeRunAt moves a waiting_approval run back to running in place (the OpenClaw turn
 // never stopped) and adds the paused interval to paused_total_ms; fenced by the worker's
-// lease (DESIGN W2 rule 8).
+// lease (DESIGN 5.33 rule 8).
 func ResumeRunAt(ctx context.Context, q Querier, id string, at time.Time) (*Run, error) {
 	l := fence(ctx, id)
 	_, epoch := fenceArgs(l)
@@ -120,7 +120,7 @@ func ResumeRunAt(ctx context.Context, q Querier, id string, at time.Time) (*Run,
 // state: the visit goroutine that parked it may still save what it holds (a late
 // transcript entry) after the decision re-queued the run, and must not reopen the row.
 //
-// The write is the visit's progress and finish, fenced by the worker's lease (DESIGN W2
+// The write is the visit's progress and finish, fenced by the worker's lease (DESIGN 5.33
 // rule 8).
 func UpdateRunNodeProgress(ctx context.Context, q Querier, n *RunNode) error {
 	l := fence(ctx, n.RunID)
@@ -150,7 +150,7 @@ func SetRunNodeOutput(ctx context.Context, q Querier, id string, output json.Raw
 // FailRunningNodes marks a run's unfinished node visits failed (a re-queued run after
 // a lost worker, DESIGN 5.1 rule 8).
 func FailRunningNodes(ctx context.Context, q Querier, runID, reason string, at time.Time) (int64, error) {
-	// A worker's write is fenced by its lease (DESIGN W2 rule 8).
+	// A worker's write is fenced by its lease (DESIGN 5.33 rule 8).
 	r, e := fenceArgs(fence(ctx, runID))
 	tag, err := q.Exec(ctx, `UPDATE run_nodes SET status=$2, failure_reason=$3, finished_at=$4
 		WHERE run_id=$1 AND status IN ($5, $6, $7) AND `+childFence("run_id", "$8", "$9"),
@@ -257,7 +257,7 @@ func collectRun(rows pgx.Rows, err error) (*Run, error) {
 // here, so once it has, that visit's decision is spent and the node, reached again, is
 // a new entry.
 //
-// A worker's write is fenced by its lease (DESIGN W2 rule 8).
+// A worker's write is fenced by its lease (DESIGN 5.33 rule 8).
 func SetRunCurrentNode(ctx context.Context, q Querier, id, node string) error {
 	l := fence(ctx, id)
 	_, epoch := fenceArgs(l)
@@ -276,7 +276,7 @@ func SetRunStateNode(ctx context.Context, q Querier, id, nodeID string, output j
 	if len(output) == 0 {
 		output = json.RawMessage(`null`)
 	}
-	// A worker's write is fenced by its lease (DESIGN W2 rule 8).
+	// A worker's write is fenced by its lease (DESIGN 5.33 rule 8).
 	l := fence(ctx, id)
 	_, epoch := fenceArgs(l)
 	run, err := collectRun(q.Query(ctx, `UPDATE runs SET state = jsonb_set(CASE WHEN jsonb_typeof(state) = 'object' THEN state ELSE '{}'::jsonb END,
@@ -321,7 +321,7 @@ func AppendPendingEffect(ctx context.Context, q Querier, id string, entry json.R
 // RequeuePausedRunAt moves a waiting_approval run back to queued (an approval node was
 // decided) and adds the paused interval to paused_total_ms.
 //
-// The move to queued increments the lease epoch (DESIGN W2 rule 7).
+// The move to queued increments the lease epoch (DESIGN 5.33 rule 7).
 func RequeuePausedRunAt(ctx context.Context, q Querier, id string, at time.Time) (*Run, error) {
 	return collectRun(q.Query(ctx, `UPDATE runs SET status=$2, lease_epoch=lease_epoch+1,
 		paused_total_ms = paused_total_ms + GREATEST(0, COALESCE(EXTRACT(EPOCH FROM ($3::timestamptz - paused_at)) * 1000, 0))::bigint,
@@ -351,7 +351,7 @@ func ParkVisit(ctx context.Context, db interface {
 	if tag.RowsAffected() == 0 {
 		return nil, ErrNotFound
 	}
-	// The park is the worker's write, fenced by its lease (DESIGN W2 rule 8).
+	// The park is the worker's write, fenced by its lease (DESIGN 5.33 rule 8).
 	l := fence(ctx, runID)
 	_, epoch := fenceArgs(l)
 	run, err := collectRun(tx.Query(ctx, `UPDATE runs SET status=$2, paused_at=COALESCE(paused_at, $3), resume_node_visit_id=$4,
@@ -366,7 +366,7 @@ func ParkVisit(ctx context.Context, db interface {
 	return run, tx.Commit(ctx)
 }
 
-// PauseVisit parks a visit the operator paused (DESIGN W2 rule 14) in one transaction, as
+// PauseVisit parks a visit the operator paused (DESIGN 5.33 rule 14) in one transaction, as
 // ParkVisit parks one on its question: the visit's row becomes waiting_approval with
 // parked_at and park_reason paused, and the run moves to paused with resume_node_visit_id
 // the visit and paused_at the park time. Fenced by the worker's lease (rule 8). ErrNotFound
@@ -447,7 +447,7 @@ func RequeueParkedRun(ctx context.Context, q Querier, runID, runNodeID string, a
 
 // CountNodeLoopVisits returns the visits of a node in a run that count toward
 // max_loop_visits (DESIGN 5.24 rule 5): those that continue no question. CountNodeVisits
-// stays the visit number. A visit the operator paused (DESIGN W2 rule 14) is not counted
+// stays the visit number. A visit the operator paused (DESIGN 5.33 rule 14) is not counted
 // either: the visit that continues it after the resume is the step's same pass.
 func CountNodeLoopVisits(ctx context.Context, q Querier, runID, nodeID string) (int, error) {
 	var n int
@@ -524,7 +524,7 @@ func LatestNodeVisit(ctx context.Context, q Querier, runID, nodeID string) (*Run
 // FinishRunNode sets a node visit's terminal status (approval node visits, which no
 // visit goroutine owns) unless it is already terminal, and returns the row.
 func FinishRunNode(ctx context.Context, q Querier, id, status string, reason *string, at time.Time) (*RunNode, error) {
-	// A worker's write is fenced by its lease (DESIGN W2 rule 8).
+	// A worker's write is fenced by its lease (DESIGN 5.33 rule 8).
 	l := LeaseOf(ctx)
 	r, e := fenceArgs(l)
 	rows, err := q.Query(ctx, `UPDATE run_nodes SET status=$2, failure_reason=COALESCE($3, failure_reason), finished_at=$4

@@ -105,7 +105,7 @@ paths:
         tool_call, approval.requested, approval.decided, agent_message, log,
         run.retry (`{retries, from_node, by, limits, at}`: an operator retried the run from
         the step it stopped at),
-        run.command (`{command}`: a RunCommand was received or changed state, DESIGN W2),
+        run.command (`{command}`: a RunCommand was received or changed state, DESIGN 5.33),
         run.artifacts (`{run_id, count}`: the files a step delivered were collected, DESIGN
         5.25),
         branch.status (`{branch}`: a RunBranch of a fork visit changed, DESIGN 5.26),
@@ -118,7 +118,7 @@ paths:
         approval.requested and approval.decided carry `conversation_id`. A platform approval
         (kind `platform`) has no run either.
         merge_request.updated (`{merge_request}`: the platform pushed to the request's branch,
-        filed under the record's run; Chief platform control wave 3 rule 11).
+        filed under the record's run; DESIGN 5.34 rule 11).
       responses:
         "200": { description: event stream, content: { text/event-stream: { schema: { type: string } } } }
   /api/runs/{id}/events:
@@ -352,7 +352,7 @@ paths:
         it is refused with a 422 detail on `merge_request_id` when the workflow uses no
         project, the id is unknown, the record belongs to another project, the request
         is merged or closed, or a live run (the one that opened it included) is updating
-        it (`... is being updated by run <id>`). Chief platform control, DESIGN wave 3
+        it (`... is being updated by run <id>`). Chief platform control, DESIGN 5.34
         rule 7: a run on a merge request its dependencies hold is created `paused` with
         `park_reason` dependency and `park_detail` the reason, and is queued by itself once
         the dependency watcher lets the request go.
@@ -381,7 +381,7 @@ paths:
       tags: [runs]
       summary: Request cancellation
       description: |
-        DESIGN W2 rules 10 and 11. The request is recorded as a command, returned as the run's
+        DESIGN 5.33 rules 10 and 11. The request is recorded as a command, returned as the run's
         `command`. A queued run, and one no worker holds (paused, or waiting on a decision),
         is cancelled at once and the command applied. A live run's worker acknowledges the
         command and stops the turn; the command is applied when the gateway confirms the turn
@@ -403,11 +403,11 @@ paths:
       description: |
         DESIGN 5.21. Re-queues the run from its current node, keeping its
         state, counters and checkout; `retries` counts it. The optional `limits` replace the run's
-        limits first, which is how a run that died on a cap is retried. DESIGN W2: `from_node`
+        limits first, which is how a run that died on a cap is retried. DESIGN 5.33: `from_node`
         retries from an earlier step the run reached (rules 16 and 17); the request is recorded
         as a command, returned as the run's `command`; a run whose last turn is not confirmed
         stopped is refused with cancel_unconfirmed, naming the session and the turn (rule 13).
-        Chief platform control, DESIGN wave 3 rule 7: a run on a merge request its dependencies
+        Chief platform control, DESIGN 5.34 rule 7: a run on a merge request its dependencies
         hold is refused with dependency_blocked, "blocked by <reason>; remove the dependency to
         override".
       parameters: [ { $ref: "#/components/parameters/Id" } ]
@@ -428,7 +428,7 @@ paths:
       x-yuno-risk: routine
       summary: Pause a run
       description: |
-        DESIGN W2 rule 14. A queued run is paused at once. A live run's worker stops the turn,
+        DESIGN 5.33 rule 14. A queued run is paused at once. A live run's worker stops the turn,
         saves the checkout and parks the step; the run is then paused, and no worker holds it
         until it is resumed. When the turn cannot be confirmed stopped the command fails and
         the run goes on. A run waiting on an approval or a question is refused, as is a paused
@@ -447,12 +447,12 @@ paths:
       x-yuno-risk: routine
       summary: Resume a paused run
       description: |
-        DESIGN W2 rule 15. Re-queues a paused run; the step it was paused in continues in a new
+        DESIGN 5.33 rule 15. Re-queues a paused run; the step it was paused in continues in a new
         visit from the paused visit's checkout, told that the operator paused and resumed it,
         with the note. Refused for a run that is not paused, with cancel_unconfirmed while
         its last turn is not confirmed stopped, and with dependency_blocked ("blocked by
         <reason>; remove the dependency to override") while the merge request it works on is
-        held by its dependencies (Chief platform control, DESIGN wave 3 rule 7).
+        held by its dependencies (Chief platform control, DESIGN 5.34 rule 7).
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       requestBody:
         required: false
@@ -470,7 +470,7 @@ paths:
       x-yuno-risk: routine
       summary: Send the operator's message into a run's live step
       description: |
-        DESIGN W2 rule 18. The step's worker sends "Operator: <message>" into the live turn,
+        DESIGN 5.33 rule 18. The step's worker sends "Operator: <message>" into the live turn,
         which takes it at its next tool boundary; the command is applied when the message shows
         in the step's transcript. If the turn ends first, the message opens the step's next
         turn. Refused when nothing is running, when several steps are live and node_id does not
@@ -491,7 +491,7 @@ paths:
       operationId: listRunCommands
       x-yuno-risk: read
       summary: The run's commands, newest first
-      description: DESIGN W2 rule 3. At most 100.
+      description: DESIGN 5.33 rule 3. At most 100.
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       responses:
         "200": { description: commands, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/RunCommand" } } } } }
@@ -1033,7 +1033,7 @@ paths:
       x-yuno-risk: routine
       summary: Undo a recorded change of an agent, schedule, skill or project
       description: |
-        DESIGN W4 rule 5. Writes the state the audit row recorded before its change back
+        DESIGN 5.35 rule 5. Writes the state the audit row recorded before its change back
         through the resource's own PUT, and answers as that PUT does (the resource, or its
         validation errors). Only a change that succeeded (outcome `ok`) with PUT on an agent, a
         schedule, a skill or a project can be reverted (422 `not_revertible`); a workflow is
@@ -1488,7 +1488,7 @@ paths:
         DESIGN 5.20 rule 5. Needs state `open` and a pipeline that passed on
         exactly the head (`ci_sha` = `head_sha`), or none on it in a project with no CI
         configured; the provider is sent the head, so a head that moved is refused (Chief
-        platform control wave 3 rule 15). A provider refusal (conflicts, a protected branch, a
+        DESIGN 5.34 rule 15). A provider refusal (conflicts, a protected branch, a
         required approval) answers 409 `merge_request_not_mergeable` with the provider's message.
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       responses:
@@ -1503,7 +1503,7 @@ paths:
       x-yuno-risk: routine
       summary: Merge the default branch into the request's branch and push it
       description: |
-        Chief platform control wave 3 rules 9 to 11. The platform fetches the branch and the
+        DESIGN 5.34 rules 9 to 11. The platform fetches the branch and the
         default branch with the project's token, merges without a working tree and pushes a
         two-parent merge commit, never forced. A push updates the record in one write: head_sha
         and ci_sha the new commit, ci_status pending, updated_from_default_at now; event
@@ -1525,7 +1525,7 @@ paths:
       operationId: getMergeRequestDiff
       x-yuno-risk: read
       summary: The request's files and patches, from the provider
-      description: Chief platform control wave 3 rule 14. Redacted, at most 256 KiB of paths and patches, then `truncated`.
+      description: DESIGN 5.34 rule 14. Redacted, at most 256 KiB of paths and patches, then `truncated`.
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       responses:
         "200": { description: diff, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequestDiff" } } } }
@@ -1538,7 +1538,7 @@ paths:
       operationId: getMergeRequestChecks
       x-yuno-risk: read
       summary: The pipeline or check runs of exactly the request's head, with their jobs
-      description: Chief platform control wave 3 rule 14. GitLab's newest pipeline for `head_sha`; GitHub's check runs and commit statuses for it.
+      description: DESIGN 5.34 rule 14. GitLab's newest pipeline for `head_sha`; GitHub's check runs and commit statuses for it.
       parameters: [ { $ref: "#/components/parameters/Id" } ]
       responses:
         "200": { description: checks, content: { application/json: { schema: { $ref: "#/components/schemas/MergeRequestChecks" } } } }
@@ -1551,7 +1551,7 @@ paths:
       operationId: getMergeRequestJobLog
       x-yuno-risk: read
       summary: The tail of a job's log
-      description: Chief platform control wave 3 rule 14. A tail that starts mid-log starts at a line; redacted.
+      description: DESIGN 5.34 rule 14. A tail that starts mid-log starts at a line; redacted.
       parameters:
         - { $ref: "#/components/parameters/Id" }
         - { name: job, in: path, required: true, schema: { type: string }, description: "a job id from the checks" }
@@ -1569,7 +1569,7 @@ paths:
       x-yuno-risk: read
       summary: The request's prerequisites and what holds it
       description: |
-        Chief platform control wave 3 rules 3 and 5. Lists the operator's and the Chief's
+        DESIGN 5.34 rules 3 and 5. Lists the operator's and the Chief's
         prerequisites and the Planner's edges of the request's plan ticket (not editable here),
         each with the dependency watcher's last judgement; `blocked_by` names what holds the
         request now, with the reason. No provider is asked.
@@ -1583,7 +1583,7 @@ paths:
       x-yuno-risk: routine
       summary: Replace the request's operator and Chief prerequisites
       description: |
-        Chief platform control wave 3 rules 1 and 3. The listed merge requests of the same
+        DESIGN 5.34 rules 1 and 3. The listed merge requests of the same
         project become the request's prerequisites set by the operator or the Chief; the
         Planner's edges stay. The request then waits until each is merged and green on its
         merge commit, is updated from the default branch by the platform, and is let go once
@@ -2000,7 +2000,7 @@ components:
         blocked_by:
           type: array
           items: { $ref: "#/components/schemas/DependencyBlocker" }
-          description: "GET /api/merge-requests/{id} only: what holds the open request (Chief platform control wave 3 rule 5); absent when nothing does"
+          description: "GET /api/merge-requests/{id} only: what holds the open request (DESIGN 5.34 rule 5); absent when nothing does"
     DependencyBlocker:
       type: object
       description: "A prerequisite that holds a request, with the reason: \"!17 is not merged\", \"!17 merged; CI on <sha7> is pending\", \"!17 merged; the merge commit is not known yet\", or, once all are satisfied, the platform's progress (conflicts with the default branch, CI on the updated head)."
@@ -2192,7 +2192,7 @@ components:
         reason: { type: string, minLength: 1, maxLength: 500 }
     RunRetry:
       type: object
-      description: "DESIGN 5.21 rule 1: the body of a retry; limits, when given, replace the run's limits before the exhausted-limit check. DESIGN W2 rules 16 and 17: from_node retries from a step the run reached, outside a fork branch; the step starts again from the commit its latest visit started from, and the steps after it run again."
+      description: "DESIGN 5.21 rule 1: the body of a retry; limits, when given, replace the run's limits before the exhausted-limit check. DESIGN 5.33 rules 16 and 17: from_node retries from a step the run reached, outside a fork branch; the step starts again from the commit its latest visit started from, and the steps after it run again."
       properties:
         from_node: { type: string }
         limits: { $ref: "#/components/schemas/Limits" }
@@ -2393,16 +2393,16 @@ components:
           description: "DESIGN 5.20 rule 6: the request the run opened, or (DESIGN 5.22 rule 1) the one it names; absent when none"
         merge_request_id: { type: string, description: "DESIGN 5.22 rule 1: the merge request record the run updates (its branch was cloned); absent for a run that opens its own or none" }
         checkout_sha: { type: string, description: "DESIGN 5.22 rule 2: the commit the run's checkout was cloned at, moved to each commit the run pushed; absent for a run without a checkout" }
-        cancel_state: { type: string, enum: [confirmed, unconfirmed], description: "DESIGN W2 rules 11 to 13: whether the last turn of a stopped run is confirmed stopped; unconfirmed until the gateway shows no active run for it, and a retry or resume is refused meanwhile; absent when nothing was stopped" }
-        park_reason: { type: string, enum: [dependency], description: "Chief platform control, DESIGN wave 3 rule 7: the run was created paused because the merge request it works on is held by its dependencies; it is queued by itself once the dependency watcher lets the request go. Absent otherwise" }
+        cancel_state: { type: string, enum: [confirmed, unconfirmed], description: "DESIGN 5.33 rules 11 to 13: whether the last turn of a stopped run is confirmed stopped; unconfirmed until the gateway shows no active run for it, and a retry or resume is refused meanwhile; absent when nothing was stopped" }
+        park_reason: { type: string, enum: [dependency], description: "Chief platform control, DESIGN 5.34 rule 7: the run was created paused because the merge request it works on is held by its dependencies; it is queued by itself once the dependency watcher lets the request go. Absent otherwise" }
         park_detail: { type: string, description: "with park_reason: why the run waits, as it read when it was parked (\"!17 is not merged\"); the diagnosis says what holds the request now" }
         command:
           allOf: [ { $ref: "#/components/schemas/RunCommand" } ]
-          description: "DESIGN W2 rule 2: the command a cancel, pause, resume, retry or steer request recorded; present only on the answer to that request"
+          description: "DESIGN 5.33 rule 2: the command a cancel, pause, resume, retry or steer request recorded; present only on the answer to that request"
     RunCommand:
       type: object
       description: |
-        DESIGN W2 rules 1 to 6: a request to stop, hold, restart or redirect a run, from
+        DESIGN 5.33 rules 1 to 6: a request to stop, hold, restart or redirect a run, from
         receipt to its outcome. acked_at is when the worker holding the run took it (or the
         api, for a run no worker holds); applied_at when its effect was confirmed. A rejected
         command was not valid in the run's state when it was processed, a failed one could not
@@ -2424,12 +2424,12 @@ components:
         detail: { type: string }
     RunResume:
       type: object
-      description: "DESIGN W2 rule 15: the optional body of a resume; the note goes into the task of the step's next visit."
+      description: "DESIGN 5.33 rule 15: the optional body of a resume; the note goes into the task of the step's next visit."
       properties:
         note: { type: string, maxLength: 2000 }
     RunSteer:
       type: object
-      description: "DESIGN W2 rule 18: an operator's message into a run's live step; node_id names the step when several are live."
+      description: "DESIGN 5.33 rule 18: an operator's message into a run's live step; node_id names the step when several are live."
       required: [message]
       properties:
         node_id: { type: string }
@@ -2457,8 +2457,8 @@ components:
         waiting; waiting_approval is waiting; running is the worst of its live steps (stalled,
         unknown, blocked, waiting, executing), or, between steps, executing while the run was
         updated within heartbeat_fresh_s, unknown within worker_stale_s, stalled after. A
-        paused run (DESIGN W2 rule 14) is waiting for a resume; one parked for its merge
-        request's dependencies (Chief platform control, DESIGN wave 3 rule 7) is blocked, with
+        paused run (DESIGN 5.33 rule 14) is waiting for a resume; one parked for its merge
+        request's dependencies (Chief platform control, DESIGN 5.34 rule 7) is blocked, with
         what holds the request as the reason.
       required: [run_id, status, liveness, reason, checked_at, thresholds, nodes, pending, commands_pending, cancel_state]
       properties:
@@ -2470,8 +2470,8 @@ components:
         thresholds: { $ref: "#/components/schemas/LivenessThresholds" }
         nodes: { type: array, items: { $ref: "#/components/schemas/NodeDiagnosis" }, description: "the run's live agent steps, one per visit (one per branch inside a fork)" }
         pending: { type: array, items: { $ref: "#/components/schemas/PendingDiagnosis" }, description: "the run's undecided approvals and questions, oldest first" }
-        commands_pending: { type: array, items: { $ref: "#/components/schemas/CommandDiagnosis" }, description: "DESIGN W2: the run's commands still pending, oldest first" }
-        cancel_state: { type: string, enum: ["", confirmed, unconfirmed], description: "DESIGN W2 rules 11 to 13: whether the last stopped turn is confirmed stopped; empty when nothing was stopped" }
+        commands_pending: { type: array, items: { $ref: "#/components/schemas/CommandDiagnosis" }, description: "DESIGN 5.33: the run's commands still pending, oldest first" }
+        cancel_state: { type: string, enum: ["", confirmed, unconfirmed], description: "DESIGN 5.33 rules 11 to 13: whether the last stopped turn is confirmed stopped; empty when nothing was stopped" }
     LivenessThresholds:
       type: object
       description: "The thresholds of DESIGN 5.12, in seconds; model_stall_s is MODEL_STALL_AFTER and worker_stale_s ENGINE_STALE_AFTER, 0 when the platform does not act on that silence."
@@ -2554,7 +2554,7 @@ components:
         question_id: { type: string, description: "set on a continuation visit: the question (an approval of kind question) whose answer this visit of the step continues with (DESIGN 5.24 rule 5); such a visit does not count toward max_loop_visits" }
         branch_id: { type: string, description: "set on a visit made inside a branch of a fork: the RunBranch it belongs to (DESIGN 5.26 rule 4)" }
         status: { type: string, enum: [pending, running, waiting_approval, succeeded, failed, skipped] }
-        park_reason: { type: string, enum: [paused], description: "DESIGN W2 rule 14: set on the visit the operator paused; it waits (waiting_approval) until the run is resumed, and the step continues in a new visit" }
+        park_reason: { type: string, enum: [paused], description: "DESIGN 5.33 rule 14: set on the visit the operator paused; it waits (waiting_approval) until the run is resumed, and the step continues in a new visit" }
         messages: { type: array, items: { type: object }, description: "transcript entries mirrored from OpenClaw, never reasoning" }
         output: { description: "the node's validated result; for a fork or join visit, {\"branches\": [<heads in edge order>]} (DESIGN 5.26 rules 3 and 5)" }
         failure_reason: { type: string }

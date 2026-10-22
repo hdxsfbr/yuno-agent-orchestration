@@ -72,7 +72,7 @@ func TestPlatformParity(t *testing.T) {
 	if checked < 96 {
 		t.Fatalf("%d routes checked", checked)
 	}
-	// The routes waves 1, 3 and 4 added are among them (DESIGN W4 rule 8).
+	// The routes waves 1, 3 and 4 added are among them (DESIGN 5.35 rule 8).
 	for _, id := range []string{"listRunEventsPage", "getRunDiagnosis", "listRunDiagnoses", "listAudit", "revertAudit",
 		"listWorkflowVersions", "getWorkflowVersion", "restoreWorkflowVersion", "restoreAgent", "getMergeRequestDiff",
 		"getMergeRequestChecks", "getMergeRequestJobLog", "updateMergeRequestFromDefault"} {
@@ -91,7 +91,7 @@ func TestPlatformParity(t *testing.T) {
 // parityLaterWave marks an acceptance test of PARITY.md that a later wave builds.
 var parityLaterWave = []string{"(wave 2)", "(wave 3 gate)"}
 
-// DESIGN W4 rule 8: PARITY.md has a row for every operation of the contract, naming its
+// DESIGN 5.35 rule 8: PARITY.md has a row for every operation of the contract, naming its
 // handler in the Backend column, and every acceptance test it names is a test of the
 // repository; a test marked for a later wave must not exist yet, so the mark goes when it
 // lands.

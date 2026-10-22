@@ -15,7 +15,7 @@ import (
 	"yuno/internal/store"
 )
 
-// The prerequisites of a merge request (Chief platform control, DESIGN wave 3 rules 1, 3
+// The prerequisites of a merge request (Chief platform control, DESIGN 5.34 rules 1, 3
 // and 5): the operator and the Chief set them; the Planner's edges of the request's ticket
 // are listed and are not editable here. The state shown is what the dependency watcher
 // last recorded; no provider is asked.
@@ -86,7 +86,7 @@ func (s *Server) dependencies(ctx context.Context, mr *store.MergeRequest) (depe
 }
 
 // getMergeRequestDependencies lists a merge request's prerequisites and what holds it
-// (DESIGN wave 3 rule 3).
+// (DESIGN 5.34 rule 3).
 func (s *Server) getMergeRequestDependencies(w http.ResponseWriter, r *http.Request) {
 	mr, err := store.GetMergeRequest(r.Context(), s.pool, r.PathValue("id"))
 	if err != nil {
@@ -102,7 +102,7 @@ func (s *Server) getMergeRequestDependencies(w http.ResponseWriter, r *http.Requ
 }
 
 // putMergeRequestDependencies replaces the operator and Chief prerequisites of a merge
-// request with the listed merge requests of the same project (DESIGN wave 3 rules 1 and 3).
+// request with the listed merge requests of the same project (DESIGN 5.34 rules 1 and 3).
 // A self-edge is a validation error; an edge that would close a cycle is 409
 // dependency_cycle, "would make a cycle: !24 -> !17 -> !24". The Planner's edges stay.
 func (s *Server) putMergeRequestDependencies(w http.ResponseWriter, r *http.Request) {

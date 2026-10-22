@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 )
 
-// Worker leases (DESIGN W2 rules 7 to 9). runs.lease_epoch goes up with every claim and every
+// Worker leases (DESIGN 5.33 rules 7 to 9). runs.lease_epoch goes up with every claim and every
 // move to queued; the worker keeps the epoch it claimed with in a Lease, which travels in the
 // context of everything it does for the run. A write the rules fence carries the epoch in
 // its own statement (AND lease_epoch = $epoch, through the run for node and branch rows), so

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// The reads Chief platform control's wave 3 adds (DESIGN wave 3 rules 13 and 14):
+// The reads Chief platform control's wave 3 adds (DESIGN 5.34 rules 13 and 14):
 // pipelines of one commit with their jobs and traces, a branch's commits, a merge
 // request's diffs and whether it conflicts with its target.
 

@@ -248,7 +248,7 @@ func (e *Engine) sweeper(ctx context.Context) {
 		case <-t.C:
 		}
 		e.sweepStale(ctx)
-		// DESIGN W2 rule 11: the turns not confirmed stopped are checked again, after the
+		// DESIGN 5.33 rule 11: the turns not confirmed stopped are checked again, after the
 		// sweep marked those of the runs it took from a lost worker (rule 12).
 		e.reconcileStops(ctx)
 		// After the stale-run sweep, so a run it failed is reported in the same tick.
@@ -623,7 +623,7 @@ func (e *Engine) queueRun(ctx context.Context, wf *store.Workflow, def *workflow
 	return created, nil
 }
 
-// parkOnDependencies is Chief platform control, DESIGN wave 3 rule 7, in the transaction
+// parkOnDependencies is Chief platform control, DESIGN 5.34 rule 7, in the transaction
 // that inserts the run: a run that would work on a merge request its dependencies hold is
 // created paused, with park reason dependency and the reason, and no worker takes it until
 // the dependency watcher lets the request go and re-queues it (RequeueDependencyRuns). The
@@ -647,7 +647,7 @@ func (e *Engine) parkOnDependencies(ctx context.Context, tx pgx.Tx, run *store.R
 }
 
 // RequeueDependencyRuns is the dependency watcher's re-queue (Chief platform control, DESIGN
-// wave 3 rules 7 and 8a, mergereq.Sync.RequeueDependencyRuns): the runs parked on the merge
+// DESIGN 5.34 rules 7 and 8a, mergereq.Sync.RequeueDependencyRuns): the runs parked on the merge
 // request mrID for its dependencies go to queued, lease epoch + 1, with note for their first
 // step. It returns them.
 func (e *Engine) RequeueDependencyRuns(ctx context.Context, mrID, note string) ([]store.Run, error) {

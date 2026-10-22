@@ -1,5 +1,5 @@
 // Package deps judges whether the prerequisites of dependent work are satisfied (Chief
-// platform control, DESIGN wave 3 rules 4 and 5) and records the judgement on the edges.
+// platform control, DESIGN 5.34 rules 4 and 5) and records the judgement on the edges.
 // The watchers act on it: mergereq for a dependent merge request (rule 8a), waves for a
 // dependent ticket (rules 6 and 8b).
 package deps

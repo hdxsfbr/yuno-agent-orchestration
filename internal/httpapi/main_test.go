@@ -278,7 +278,7 @@ func (f *fakeEngine) Cancel(ctx context.Context, runID, by string) (*store.Run, 
 	if err != nil {
 		return nil, err
 	}
-	// A finished run is refused as the engine refuses it (DESIGN W2 rule 4).
+	// A finished run is refused as the engine refuses it (DESIGN 5.33 rule 4).
 	if run, err := store.GetRun(ctx, f.pool, runID); err == nil && store.IsTerminal(run.Status) {
 		return nil, &engine.CommandError{Code: engine.CodeRunFinished, Message: "the run already ended (" + run.Status + ")"}
 	}
@@ -293,7 +293,7 @@ func (f *fakeEngine) RetryFrom(ctx context.Context, runID, by, fromNode string, 
 	return f.Retry(ctx, runID, by, limits)
 }
 
-// Pause, Resume and Steer are the recovery commands of DESIGN W2; the fake records each as
+// Pause, Resume and Steer are the recovery commands of DESIGN 5.33; the fake records each as
 // the engine's receipt does and decides the plain cases: a queued run pauses, a paused one
 // resumes, anything else is refused as the engine refuses it.
 func (f *fakeEngine) Pause(ctx context.Context, runID, by string) (*store.Run, error) {

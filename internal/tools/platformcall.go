@@ -24,7 +24,7 @@ import (
 	"yuno/internal/store"
 )
 
-// The Chief's platform tools (Chief platform control, wave 1, DESIGN A2 to A4, A8, A9):
+// The Chief's platform tools (Chief platform control, wave 1, DESIGN 5.32 rule 2 to A4, A8, A9):
 // platform_operations finds operations in the contract, platform_call runs one through the
 // api's own handler and middleware, in-process, as the calling agent. The api's platform
 // gate decides what an agent may do (A3, A5, A6, A8); these tools build the request and
@@ -45,7 +45,7 @@ const (
 	platformOperationsBudget = 30 << 10
 )
 
-// Headers between platform_call and the api (rule A3, DESIGN B3 and B4).
+// Headers between platform_call and the api (rule A3, DESIGN 5.31 rule 3 and B4).
 const (
 	HeaderIdempotencyKey      = "Idempotency-Key"
 	HeaderIdempotencyReplayed = "Idempotency-Replayed"

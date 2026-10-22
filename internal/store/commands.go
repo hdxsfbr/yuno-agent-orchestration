@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Recovery commands (DESIGN W2 rules 1 to 6): the receipt of a request to cancel, pause,
+// Recovery commands (DESIGN 5.33 rules 1 to 6): the receipt of a request to cancel, pause,
 // resume, retry or steer a run, and its way to an outcome. The rows are records of what was
 // asked and what came of it; they are written by the api and the worker alike and are not
 // fenced, except the acknowledgement, which only the worker holding the run's lease gives
@@ -178,7 +178,7 @@ func PauseQueuedRun(ctx context.Context, q Querier, id string, at time.Time) (*R
 // (rule 7), the paused interval is added to paused_total_ms (a pause does not count toward
 // the time limit), and the visit the pause parked, when there is one, is closed succeeded
 // without output and marked resumed with the note, so the step's next visit continues it. A
-// run parked for a dependency (Chief platform control, DESIGN wave 3 rule 7) loses its park
+// run parked for a dependency (Chief platform control, DESIGN 5.34 rule 7) loses its park
 // reason. ErrNotFound when the run is not paused.
 func ResumePausedRun(ctx context.Context, q Querier, id, note string, at time.Time) (*Run, error) {
 	return collectRun(q.Query(ctx, `WITH parked AS (
@@ -194,8 +194,8 @@ func ResumePausedRun(ctx context.Context, q Querier, id, note string, at time.Ti
 }
 
 // RequeueDependencyRuns re-queues the runs of a merge request that were parked for its
-// dependencies (Chief platform control, DESIGN wave 3 rules 7 and 8a), in one statement:
-// the lease epoch goes up as for every move to queued (DESIGN W2 rule 7), the park reason
+// dependencies (Chief platform control, DESIGN 5.34 rules 7 and 8a), in one statement:
+// the lease epoch goes up as for every move to queued (DESIGN 5.33 rule 7), the park reason
 // goes, and note is kept for the run's steps until one succeeds. Such a run was parked
 // before it started, so there is no paused interval to count. It returns the runs
 // re-queued, none when nothing waited.
@@ -221,7 +221,7 @@ func RunStepSucceeded(ctx context.Context, q Querier, runID string) (bool, error
 }
 
 // StepResumeNotes returns, oldest first, the resume notes of the step's visits the operator
-// paused and resumed since the step last succeeded or was retried (DESIGN W2 rule 15, D-093):
+// paused and resumed since the step last succeeded or was retried (DESIGN 5.33 rule 15, D-093):
 // one entry per resume, "" for a resume without a note. Empty when the step was not resumed.
 func StepResumeNotes(ctx context.Context, q Querier, runID, nodeID string) ([]string, error) {
 	rows, err := q.Query(ctx, `SELECT COALESCE(r.resume_note, '') FROM run_nodes r

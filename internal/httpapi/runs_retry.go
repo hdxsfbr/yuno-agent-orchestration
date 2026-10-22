@@ -18,7 +18,7 @@ const retriedBy = "operator"
 
 // runRetry is RunRetry: the optional body of a retry. Limits, when given, are resolved
 // and clamped as at trigger time and replace the run's limits before the exhausted-limit
-// check; FromNode names a step the run reached to retry from (DESIGN W2 rule 16).
+// check; FromNode names a step the run reached to retry from (DESIGN 5.33 rule 16).
 type runRetry struct {
 	FromNode string        `json:"from_node"`
 	Limits   *store.Limits `json:"limits"`

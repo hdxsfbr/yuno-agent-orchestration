@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Recovery (DESIGN W2), store side: lease epochs, fenced writes, commands, pause and resume.
+// Recovery (DESIGN 5.33), store side: lease epochs, fenced writes, commands, pause and resume.
 
 // liveRun stores a running run with one live visit of node "work", claimed the way a worker
 // claims it: it returns the run as the claim answered it (with the epoch) and the visit.

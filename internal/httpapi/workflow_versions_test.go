@@ -104,7 +104,7 @@ func TestOpenAPIConformanceW4Versions(t *testing.T) {
 	}
 }
 
-// DESIGN W4 rules 1 and 2: create, update, the template loader, instantiation and the
+// DESIGN 5.35 rules 1 and 2: create, update, the template loader, instantiation and the
 // seed's reset each write the version they make; the list is newest first without
 // definitions and one version reads back with its definition.
 func TestWorkflowVersionsWritten(t *testing.T) {
@@ -191,7 +191,7 @@ func TestWorkflowVersionsWritten(t *testing.T) {
 	}
 }
 
-// DESIGN W4 rule 3: a restore writes the version's name, description and definition as
+// DESIGN 5.35 rule 3: a restore writes the version's name, description and definition as
 // version current + 1; it answers 412 when expected_version is not current and 422 when
 // the definition would not be accepted now; a run in flight keeps its version and
 // snapshot.

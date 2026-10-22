@@ -186,7 +186,7 @@ type visit struct {
 	// live visit (toolSettled), nil before.
 	parkedTools map[string]*store.Approval
 
-	// Recovery (DESIGN W2). lease is the worker's lease on the run, read from the context the
+	// Recovery (DESIGN 5.33). lease is the worker's lease on the run, read from the context the
 	// visit runs in: once a fenced write finds it gone the visit stops itself (rule 9).
 	// cmdWake says a command waits (the api woke the visit, rule 5) and cmdReadAt is when the
 	// visit last read its run's pending commands. pausing is the pause the visit is carrying
@@ -280,7 +280,7 @@ func (v *visit) execute(ctx context.Context) outcome {
 		return *v.early
 	}
 	// The setup (materialise, clone, sandbox, the first send) has a heartbeat of its own until
-	// the event loop's tick takes over: the heartbeat renews the lease (DESIGN W2 rule 8), and
+	// the event loop's tick takes over: the heartbeat renews the lease (DESIGN 5.33 rule 8), and
 	// a long setup must not read as a silent worker.
 	stopBeat := v.setupHeartbeat(ctx)
 	defer stopBeat()
@@ -533,7 +533,7 @@ func (v *visit) setRepoSHA(ctx context.Context, sha string) {
 }
 
 // setStartSHA records the commit the visit's checkout starts from: its start (kept for a
-// retry from the step, DESIGN W2 rule 17) and, until the visit ends, the commit it is at.
+// retry from the step, DESIGN 5.33 rule 17) and, until the visit ends, the commit it is at.
 func (v *visit) setStartSHA(ctx context.Context, sha string) {
 	if err := store.SetRunNodeStartSHA(context.WithoutCancel(ctx), v.e.deps.Pool, v.rn.ID, sha); err != nil {
 		v.log.Warn("record the checkout commit failed", "error", err)
@@ -981,7 +981,7 @@ func (v *visit) startTurn(ctx context.Context, message string) *outcome {
 	v.saveNode(ctx)
 	clear(v.openCalls) // an earlier turn's calls ended with it
 	// Operator messages that did not reach the turn they were sent into, or came while no
-	// turn ran, open this one (DESIGN W2 rule 18).
+	// turn ran, open this one (DESIGN 5.33 rule 18).
 	carried := slices.Clone(v.steers)
 	if len(carried) > 0 {
 		message += "\n\n" + v.steerText()
@@ -1041,7 +1041,7 @@ func (v *visit) startTurn(ctx context.Context, message string) *outcome {
 }
 
 // preflight re-reads the run and refuses to start a turn past a limit, or for a worker that
-// lost its lease (DESIGN W2 rule 9).
+// lost its lease (DESIGN 5.33 rule 9).
 func (v *visit) preflight(ctx context.Context) *outcome {
 	if v.lease.Lost() {
 		return &outcome{leaseLost: true}
@@ -1103,7 +1103,7 @@ func (v *visit) loop(ctx context.Context) outcome {
 	t := time.NewTicker(v.e.tickInterval)
 	defer t.Stop()
 	for v.result == nil {
-		// A fenced write found the lease gone: the run is another worker's (DESIGN W2 rule 9).
+		// A fenced write found the lease gone: the run is another worker's (DESIGN 5.33 rule 9).
 		if v.lease.Lost() {
 			return v.selfFence(ctx)
 		}
@@ -1281,7 +1281,7 @@ func (v *visit) onTranscript(ctx context.Context, raw json.RawMessage, messageID
 		delete(v.openCalls, h.ToolCallID)
 		v.toolResult(ctx, h)
 	case "user":
-		v.steerSeen(ctx, h) // an operator's message reached the turn (DESIGN W2 rule 18)
+		v.steerSeen(ctx, h) // an operator's message reached the turn (DESIGN 5.33 rule 18)
 	}
 }
 
@@ -1928,7 +1928,7 @@ func (v *visit) turnFinal(ctx context.Context, ce openclaw.ChatEvent) {
 	if v.questionTurnEnd(ctx) {
 		return
 	}
-	// An operator's message the turn ended before taking opens the next turn (DESIGN W2 rule
+	// An operator's message the turn ended before taking opens the next turn (DESIGN 5.33 rule
 	// 18): the step goes on with it.
 	if len(v.steers) > 0 {
 		if res := v.startTurn(ctx, continueMessage); res != nil {
@@ -2104,7 +2104,7 @@ func (v *visit) onTick(ctx context.Context) {
 	}
 	if v.aborting != nil {
 		if !e.clock.Now().Before(v.abortAt.Add(e.abortWait)) {
-			// No terminal event in abortWait: the session check decides (DESIGN W2 rule 11).
+			// No terminal event in abortWait: the session check decides (DESIGN 5.33 rule 11).
 			switch {
 			case v.turnStopped(ctx):
 				v.turnLive = false
@@ -2401,7 +2401,7 @@ func (v *visit) finish(ctx context.Context, res outcome) {
 		v.sandboxHeld = false
 		e.releaseSandbox(ctx, v.ocID)
 	}
-	// A turn whose stop was not confirmed is the reconcile pass's to check (DESIGN W2 rule
+	// A turn whose stop was not confirmed is the reconcile pass's to check (DESIGN 5.33 rule
 	// 11), and operator messages the visit did not deliver end with it (rule 18).
 	if v.unconfirmed {
 		if err := store.MarkTurnUnconfirmed(ctx, e.deps.Pool, v.rn.ID); err != nil {

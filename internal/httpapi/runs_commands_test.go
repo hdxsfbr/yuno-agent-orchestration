@@ -14,7 +14,7 @@ import (
 	"yuno/internal/store"
 )
 
-// Recovery commands (DESIGN W2 rules 1 to 3, 14, 15 and 18), API side.
+// Recovery commands (DESIGN 5.33 rules 1 to 3, 14, 15 and 18), API side.
 
 // recoveryConformanceSteps exercises the command routes against the contract: pause, resume,
 // steer and retry from a step with their 202, 409 and 422 answers, the command reads, and

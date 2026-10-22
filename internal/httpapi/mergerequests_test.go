@@ -54,7 +54,7 @@ func newMRProvider(t *testing.T) (*mrProvider, http.RoundTripper) {
 		f.tokens = append(f.tokens, r.Header.Get("PRIVATE-TOKEN"))
 		a, ok := f.routes[route]
 		if sha := r.URL.Query().Get("sha"); sha != "" {
-			// The pipelines of one commit (DESIGN wave 3 rule 13) are scripted per commit.
+			// The pipelines of one commit (DESIGN 5.34 rule 13) are scripted per commit.
 			if bySHA, found := f.routes[route+"?sha="+sha]; found {
 				a, ok = bySHA, true
 			}
@@ -221,7 +221,7 @@ func (e *mrEnv) get(id string) *store.MergeRequest {
 }
 
 // checked makes a record whose check is ci on exactly its head (ci_sha = head_sha), the
-// merge guard's precondition (DESIGN wave 3 rule 15).
+// merge guard's precondition (DESIGN 5.34 rule 15).
 func checked(ci string) func(*store.MergeRequest) {
 	return func(mr *store.MergeRequest) {
 		head := "head-" + uniqueSuffix()
@@ -459,7 +459,7 @@ func TestMergePreconditionsAndRefusals(t *testing.T) {
 func TestMergeSucceeds(t *testing.T) {
 	e := newMREnv(t)
 	// The project has no CI (no commit of the default branch has a pipeline), so a check
-	// that found no pipeline on the head lets the merge through (DESIGN wave 3 rule 15).
+	// that found no pipeline on the head lets the merge through (DESIGN 5.34 rule 15).
 	e.prov.set("GET /repository/commits", 200, []map[string]any{{"id": "c1"}})
 	for _, ci := range []string{store.CIStatusPassed, store.CIStatusNone} {
 		run, rec := e.record(e.project, true, checked(ci))

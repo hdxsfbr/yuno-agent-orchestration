@@ -128,7 +128,7 @@ func GetMergeRequest(ctx context.Context, q Querier, id string) (*MergeRequest, 
 
 // LockMergeRequestShared locks a record's row until the transaction ends (FOR KEY SHARE):
 // a run inserted on the record and the dependency watcher letting it go, which holds the row
-// FOR UPDATE, are one after the other (Chief platform control, DESIGN wave 3 rule 7). A
+// FOR UPDATE, are one after the other (Chief platform control, DESIGN 5.34 rule 7). A
 // record that does not exist locks nothing. q must be a transaction.
 func LockMergeRequestShared(ctx context.Context, q Querier, id string) error {
 	_, err := q.Exec(ctx, `SELECT 1 FROM merge_requests WHERE id=$1 FOR KEY SHARE`, id)
@@ -192,7 +192,7 @@ func ProjectNameAny(ctx context.Context, q Querier, id string) (string, error) {
 }
 
 // liveRunStatuses are the statuses of a live run, the ones the two live-run indexes of
-// migration 0013 hold (DESIGN 5.22 units); a paused run is live too (DESIGN W2 rule 14,
+// migration 0013 hold (DESIGN 5.22 units); a paused run is live too (DESIGN 5.33 rule 14,
 // migration 0032).
 const liveRunStatuses = `('queued', 'running', 'waiting_approval', 'paused')`
 
@@ -287,9 +287,9 @@ type MergeRequestSync struct {
 	SyncedAt          time.Time
 	ClosedAt          *time.Time
 	// MergeSHA is the commit the provider says the merge made, when it merged and says; nil
-	// keeps the one recorded (DESIGN wave 3 rule 4: this wave writes it).
+	// keeps the one recorded (DESIGN 5.34 rule 4: this wave writes it).
 	MergeSHA *string
-	// CISHA is the commit CIStatus was read for (DESIGN wave 3 rule 13): the head, exactly.
+	// CISHA is the commit CIStatus was read for (DESIGN 5.34 rule 13): the head, exactly.
 	// CIPipelineID and CIURL name the pipeline or check behind it.
 	CISHA        *string
 	CIPipelineID *int64
@@ -329,7 +329,7 @@ func UpdateMergeRequestSync(ctx context.Context, q Querier, id string, u MergeRe
 }
 
 // MergeRequestPushed records a push the platform made to an open record's branch in one
-// write, which invalidates the stale check (DESIGN wave 3 rule 11): head_sha is the new
+// write, which invalidates the stale check (DESIGN 5.34 rule 11): head_sha is the new
 // head, ci_status pending for exactly that commit (ci_sha), the old pipeline forgotten, and
 // recorded conflicts cleared. fromDefault marks the push as an update from the default
 // branch (updated_from_default_at). Conditional on state = 'open': false when the record
@@ -346,7 +346,7 @@ func MergeRequestPushed(ctx context.Context, q Querier, id, head string, at time
 }
 
 // SetMergeRequestConflicts records what an update from the default branch met (DESIGN
-// wave 3 rule 9); nil clears it, as an update that found none does. Conditional on state =
+// DESIGN 5.34 rule 9); nil clears it, as an update that found none does. Conditional on state =
 // 'open'.
 func SetMergeRequestConflicts(ctx context.Context, q Querier, id string, c *MergeConflicts) (bool, error) {
 	var raw []byte

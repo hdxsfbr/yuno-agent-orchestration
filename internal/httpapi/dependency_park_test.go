@@ -22,7 +22,7 @@ import (
 	"yuno/internal/workflow"
 )
 
-// Chief platform control, DESIGN wave 3 rule 7, through the API and the real engine: a run
+// Chief platform control, DESIGN 5.34 rule 7, through the API and the real engine: a run
 // that would work on a merge request its dependencies hold is created paused, no worker takes
 // it, a resume or a retry is refused while the request is held, and the dependency watcher
 // queues it once the request is let go (rule 8a).
@@ -154,7 +154,7 @@ func (f *parkFixture) diagnosis(runID string) runDiagnosis {
 	return d
 }
 
-// TestRunOnDependentParks (DESIGN wave 3 rule 7): every path that creates a run on a merge
+// TestRunOnDependentParks (DESIGN 5.34 rule 7): every path that creates a run on a merge
 // request (POST /api/runs, the Chief's delegate_task, changes requested on a plan ticket, a
 // schedule) creates it paused with park reason dependency and the reason while an edge holds
 // the request; the diagnosis says blocked with that reason. A request nothing holds gets a
@@ -227,7 +227,7 @@ func TestRunOnDependentParks(t *testing.T) {
 	parked(t, "schedule", fired[0].Run, reason)
 }
 
-// TestResumeRefusedWhileBlocked (DESIGN wave 3 rule 7): while the request is held, the
+// TestResumeRefusedWhileBlocked (DESIGN 5.34 rule 7): while the request is held, the
 // operator's (or the Chief's) resume of the parked run and a retry of an ended run on the
 // request, or of the run that opened it, are refused with 409 dependency_blocked, "blocked by
 // <reason>; remove the dependency to override", each a command recorded rejected. Once the
@@ -295,7 +295,7 @@ func TestResumeRefusedWhileBlocked(t *testing.T) {
 	}
 }
 
-// Acceptance, DESIGN wave 3 (TestDependencyAcceptanceResumesRun), against the fake forge and
+// Acceptance, DESIGN 5.34 (TestDependencyAcceptanceResumesRun), against the fake forge and
 // the real engine: !2 (the dependent, "!24") depends on !1 (the prerequisite, "!17"); a run
 // on !2 parks; !1 merges and main's pipeline passes on its merge commit; the watcher updates
 // !2 from main (a push); CI passes on the new head; the parked run is queued once, lease

@@ -59,7 +59,7 @@ func jsonFields(v any) map[string]bool {
 	return out
 }
 
-// DESIGN W4 rule 5: each mapper names its route's PUT operation, and only fields that the
+// DESIGN 5.35 rule 5: each mapper names its route's PUT operation, and only fields that the
 // route's input takes and its read shows, never a token.
 func TestRevertMappers(t *testing.T) {
 	c, err := tools.Contract()
@@ -84,7 +84,7 @@ func TestRevertMappers(t *testing.T) {
 	}
 }
 
-// DESIGN W4 rule 5: a PUT recorded in the audit log is undone by writing its before back
+// DESIGN 5.35 rule 5: a PUT recorded in the audit log is undone by writing its before back
 // through the resource's PUT, for an agent, a schedule, a skill and a project (its token
 // left alone); a resource changed since answers 412 until the later change is reverted; a
 // row with nothing a revert writes, or without its before, answers 422; anything but a PUT
@@ -259,7 +259,7 @@ func TestAuditRevert(t *testing.T) {
 	}
 }
 
-// DESIGN W4 rules 5 and 7 through the Chief: a revert restores an agent's prompt; it carries
+// DESIGN 5.35 rules 5 and 7 through the Chief: a revert restores an agent's prompt; it carries
 // the risk of the change it writes back (rule A5), so a revert that gives tools back, changes
 // the Chief itself or raises a budget cap waits for a human, and runs once approved.
 func TestAuditRevertByChief(t *testing.T) {

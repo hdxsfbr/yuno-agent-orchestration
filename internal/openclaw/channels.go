@@ -100,7 +100,7 @@ func SessionsList(ctx context.Context, c Client) ([]SessionRow, error) {
 }
 
 // RunActive reports whether the gateway shows the turn runID still running in the session
-// (DESIGN W2 rule 11): its sessions.list row has an active run, and that run is the turn, or
+// (DESIGN 5.33 rule 11): its sessions.list row has an active run, and that run is the turn, or
 // the row names no run ids to tell. A session the list does not hold has no active run (it
 // ended, or was deleted).
 func RunActive(ctx context.Context, c Client, sessionKey, runID string) (bool, error) {
