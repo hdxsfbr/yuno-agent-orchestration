@@ -20,7 +20,18 @@ const (
 	answerText     = "answer: 1 to 4096 characters"
 	// answerNotInARun is what a call made with a run token gets (rule 9).
 	answerNotInARun = AnswerQuestionName + " is not available in a run"
+	// answerNotSaid refuses an answer the person's newest message does not carry
+	// (platform control A7).
+	answerNotSaid = "relay only what the person said"
 )
+
+// saidIn reports whether answer appears in the person's message, ignoring case and how
+// the whitespace runs.
+func saidIn(message, answer string) bool {
+	norm := func(s string) string { return strings.Join(strings.Fields(strings.ToLower(s)), " ") }
+	a := norm(answer)
+	return a != "" && strings.Contains(norm(message), a)
+}
 
 var answerQuestionSchema = json.RawMessage(`{
   "type": "object",
@@ -44,7 +55,8 @@ func NewAnswerQuestion(d PlatformDeps) *Tool {
 		Name: AnswerQuestionName,
 		Description: "Pass the person's answer to a question a run asked. Use it when a [platform] message said a run " +
 			"asks a question and the person has answered: give the question id from that message and their answer " +
-			"as they wrote it. Returns the run id and its link.",
+			"as they wrote it. The platform accepts it only when the person's latest message contains that answer, " +
+			"or the question's code (run_status shows it). Returns the run id and its link.",
 		InputSchema: answerQuestionSchema,
 		Risk:        RiskComputational,
 		Hits:        HitsPostgres,
@@ -93,6 +105,17 @@ func execAnswerQuestion(ctx context.Context, d PlatformDeps, call Call) (Result,
 	asked, err := pendingQuestion(ctx, d, id)
 	if err != nil {
 		return Result{}, err
+	}
+	// Platform control A7: the evidence decide_approval has. The answer is the person's own
+	// words in their newest message, or that message carries the question's code.
+	latest := ""
+	if call.ConversationID != "" {
+		if latest, err = newestPersonMessage(ctx, d.Pool, call.ConversationID); err != nil {
+			return Result{}, err
+		}
+	}
+	if !saidIn(latest, answer) && !containsCode(latest, ApprovalCode(d.ApprovalCodeKey, id)) {
+		return Result{}, &ModelError{Message: answerNotSaid}
 	}
 	agent, err := store.GetAgentForRun(ctx, d.Pool, call.AgentID)
 	if err != nil {

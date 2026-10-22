@@ -18,6 +18,7 @@ const KIND_LABEL: Record<Approval["kind"], string> = {
   tool: "Tool call",
   node: "Workflow step",
   question: "Question",
+  platform: "Platform action",
 };
 
 /** The most an answer can be, in bytes (DESIGN 5.24 rule 3): the server counts bytes after trimming and has the last word. */
@@ -99,6 +100,8 @@ export default function ApprovalCard({ approval, toolCall, showRun = false, runE
   });
 
   const question = approval.kind === "question";
+  // An agent's platform action belongs to no run or step: its message says what it would do.
+  const platform = approval.kind === "platform";
   const pending = approval.status === "pending" && !alreadyDecided;
   const busy = decide.isPending;
   const outcome = questionOutcome(approval);
@@ -118,7 +121,7 @@ export default function ApprovalCard({ approval, toolCall, showRun = false, runE
       </header>
 
       <dl className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-xs text-zinc-500">
-        {showRun ? (
+        {showRun && !platform ? (
           <div className="flex gap-1.5">
             <dt>{approval.run_id ? "Run" : "Raised in"}</dt>
             <dd>
@@ -135,10 +138,12 @@ export default function ApprovalCard({ approval, toolCall, showRun = false, runE
           </div>
         ) : null}
         {showRun && approval.run_id && SHIP_NODES.includes(approval.node_id) ? <ShipRunPlan runId={approval.run_id} /> : null}
-        <div className="flex gap-1.5">
-          <dt>Node</dt>
-          <dd className="font-mono text-zinc-900 dark:text-zinc-100">{approval.node_id || "—"}</dd>
-        </div>
+        {platform ? null : (
+          <div className="flex gap-1.5">
+            <dt>Node</dt>
+            <dd className="font-mono text-zinc-900 dark:text-zinc-100">{approval.node_id || "—"}</dd>
+          </div>
+        )}
         {approval.status === "pending" || approval.status === "expired" ? (
           <div className="flex gap-1.5">
             <dt>{approval.status === "pending" ? "Expires" : "Expired"}</dt>

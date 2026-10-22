@@ -75,6 +75,9 @@ type PlatformDeps struct {
 	// RunIDForToken resolves a run token for publish_tickets' approval sentence (5.29
 	// rule 2); nil gives the generic sentence.
 	RunIDForToken func(token string) (runID string, ok bool)
+	// Platform sends platform_call's requests through the api (platform control A3); nil
+	// leaves the tool unable to run.
+	Platform PlatformDispatcher
 }
 
 // NewPlatformRegistry returns the platform tools served over MCP (DESIGN 5.7).
@@ -85,6 +88,8 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 		codeKey = make([]byte, 32)
 		_, _ = rand.Read(codeKey)
 	}
+	// answer_question accepts a question's code as the person's evidence (platform control A7).
+	d.ApprovalCodeKey = codeKey
 	r.Register(NewFinish(d.AcceptFinish, d.RejectFinish))
 	r.Register(NewDeployRelease(d.Deploy))
 	r.Register(NewHTTPFetch(d.Fetch))
@@ -94,7 +99,7 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 	r.Register(NewListWorkflows(d.Pool))
 	r.Register(NewListProjects(d.Pool))
 	r.Register(NewDelegateTask(ChiefDeps{Pool: d.Pool, Delegator: d.Delegator, PublicBaseURL: d.PublicBaseURL, Limiter: d.DelegationLimiter}))
-	r.Register(NewRunStatus(d.Pool, d.PublicBaseURL))
+	r.Register(NewRunStatus(d.Pool, d.PublicBaseURL, codeKey))
 	if d.GitLab != nil {
 		r.Register(NewGitLabCreateMR(*d.GitLab))
 	}
@@ -106,6 +111,8 @@ func NewPlatformRegistry(d PlatformDeps) *Registry {
 	r.Register(NewListApprovals(d.Pool, codeKey))
 	r.Register(NewDecideApproval(d.Pool, d.DecideApproval, codeKey))
 	r.Register(NewAddProject(d.Pool, d.AddProject))
+	r.Register(NewPlatformOperations())
+	r.Register(NewPlatformCall(PlatformCallDeps{Pool: d.Pool, Dispatcher: d.Platform}))
 	pt := PublishTicketsConfig{Projects: d.Projects, Client: d.ProviderClient, RunIDForToken: d.RunIDForToken}
 	if d.Pool != nil {
 		pt.DB = d.Pool

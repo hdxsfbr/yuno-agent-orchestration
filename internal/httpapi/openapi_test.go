@@ -407,7 +407,7 @@ func mustDo(t *testing.T, err error) {
 }
 
 // Every /api operation declares the bearer scheme, described as optional without
-// API_TOKEN; health, readiness and the document are open (audit #28).
+// API_TOKEN; health, readiness and the document (at both paths) are open (audit #28).
 func TestOpenAPISecurity(t *testing.T) {
 	doc, err := openapi3.NewLoader().LoadFromData(api.OpenAPI)
 	if err != nil {
@@ -434,7 +434,9 @@ func TestOpenAPISecurity(t *testing.T) {
 					bearer = true
 				}
 			}
-			if isAPI := strings.HasPrefix(path, "/api/"); bearer != isAPI {
+			// /api/openapi.yaml is open, as the auth middleware leaves it (platform control A1
+			// documents it).
+			if isAPI := strings.HasPrefix(path, "/api/") && path != "/api/openapi.yaml"; bearer != isAPI {
 				t.Errorf("%s %s: bearerAuth applies = %v, want %v", method, path, bearer, isAPI)
 			}
 			checked++

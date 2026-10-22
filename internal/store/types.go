@@ -226,6 +226,10 @@ type Approval struct {
 	// ReportedAt is when the approval was announced in the conversation that delegated
 	// its run (DESIGN 5.15 rule 10); nil when it was not.
 	ReportedAt *time.Time `db:"reported_at" json:"reported_at,omitempty"`
+	// Binding is the one call a platform approval allows (wave 1 A6), a PlatformBinding;
+	// nil for every other kind. UsedAt is when a repeat of that call spent it.
+	Binding json.RawMessage `db:"binding" json:"binding,omitempty"`
+	UsedAt  *time.Time      `db:"used_at" json:"used_at,omitempty"`
 }
 
 type Workflow struct {
@@ -451,6 +455,9 @@ const (
 	ApprovalKindNode = "node" // a workflow approval node
 	// ApprovalKindQuestion is a question an agent put to the operator (DESIGN 5.24).
 	ApprovalKindQuestion = "question"
+	// ApprovalKindPlatform gates an agent's platform_call of a destructive or privileged
+	// operation (wave 1 A6): no run, bound to the exact call.
+	ApprovalKindPlatform = "platform"
 
 	ApprovalPending  = "pending"
 	ApprovalApproved = "approved"

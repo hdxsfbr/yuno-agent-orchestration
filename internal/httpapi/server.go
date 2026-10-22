@@ -5,6 +5,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,9 +91,40 @@ type Server struct {
 	mux          *http.ServeMux
 	// versionLocks are If-Match's per-target locks (DESIGN 5.31 rule 4).
 	versionLocks targetLocks
+	// routeTable is every route as routes registered it (platform control A1).
+	routeTable []registeredRoute
+	// contract is api/openapi.yaml indexed by operation; the platform gate finds a
+	// request's operation and risk in it (platform control A3, A5, A6).
+	contract *tools.PlatformContract
+	// codeKey keys the approval codes (D-081): decide_approval's, answer_question's and the
+	// platform gate's are the same.
+	codeKey []byte
 
 	// botName is the Telegram bot username once known (channels.go).
 	botName atomic.Pointer[string]
+}
+
+// registeredRoute is one route of the mux: its pattern and, for a route of the API, its
+// handler (nil for the machine mounts, /mcp and the model proxy).
+type registeredRoute struct {
+	Pattern string
+	Handler http.HandlerFunc
+}
+
+// routeRecorder is the mux as routes builds it: every registration is also recorded.
+type routeRecorder struct {
+	*http.ServeMux
+	routes *[]registeredRoute
+}
+
+func (m routeRecorder) HandleFunc(pattern string, h func(http.ResponseWriter, *http.Request)) {
+	m.ServeMux.HandleFunc(pattern, h)
+	*m.routes = append(*m.routes, registeredRoute{Pattern: pattern, Handler: h})
+}
+
+func (m routeRecorder) Handle(pattern string, h http.Handler) {
+	m.ServeMux.Handle(pattern, h)
+	*m.routes = append(*m.routes, registeredRoute{Pattern: pattern})
 }
 
 // Gateway dial policy for Run (DESIGN 5.5 rule 1): every failure, including the
@@ -328,6 +360,15 @@ func New(d Deps) (*Server, error) {
 	}
 	s.projects = &project.Resolver{DB: d.Pool, Cipher: s.cipher}
 	s.plans = &plans.Service{Pool: d.Pool, Hub: d.Hub, Log: d.Log}
+	contract, err := tools.Contract()
+	if err != nil {
+		return nil, err
+	}
+	s.contract = contract
+	if s.codeKey = approvalCodeKey(d.Cfg); len(s.codeKey) == 0 {
+		s.codeKey = make([]byte, 32)
+		_, _ = rand.Read(s.codeKey)
+	}
 	s.checkClient = tools.ProviderClient(d.CheckTransport)
 	s.tools = tools.NewPlatformRegistry(s.platformDeps(d))
 	s.effects = &tools.Service{
@@ -349,11 +390,13 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes(modelTransport http.RoundTripper) error {
-	mux := http.NewServeMux()
+	// Every route is recorded as it is registered, so TestPlatformParity can hold the
+	// contract to them (platform control A1).
+	mux := routeRecorder{ServeMux: http.NewServeMux(), routes: &s.routeTable}
 	mux.HandleFunc("GET /healthz", s.healthz)
 	mux.HandleFunc("GET /readyz", s.readyz)
 	mux.HandleFunc("GET /openapi.yaml", s.openapi)
-	mux.HandleFunc("GET /api/openapi.yaml", s.openapi)
+	mux.HandleFunc("GET /api/openapi.yaml", s.apiOpenAPI)
 	mux.HandleFunc("GET /api/status", s.status)
 	mux.HandleFunc("GET /api/openclaw/status", s.openclawStatus)
 	mux.HandleFunc("GET /api/events", s.eventsAll)
@@ -483,7 +526,7 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	}
 	mux.Handle(anthropicProxyPrefix+"/", loopbackOnly(proxy))
 	mux.Handle(scriptedProxyPrefix+"/", loopbackOnly(model.NewScriptedHandler(s.scripts, scriptedProxyPrefix, s.log)))
-	s.mux = mux
+	s.mux = mux.ServeMux
 	return nil
 }
 
@@ -513,6 +556,10 @@ func (s *Server) openapi(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/yaml")
 	_, _ = w.Write(api.OpenAPI)
 }
+
+// apiOpenAPI serves the same document under /api: its own handler, so each route has one
+// operationId equal to its handler's name (platform control A1).
+func (s *Server) apiOpenAPI(w http.ResponseWriter, r *http.Request) { s.openapi(w, r) }
 
 type statusResponse struct {
 	Version   string           `json:"version"`
@@ -640,7 +687,9 @@ func (s *Server) platformDeps(d Deps) tools.PlatformDeps {
 		},
 		AddProject: s.chatAddProject,
 		// decide_approval's codes: keyed by the server's own secrets, random when none is set.
-		ApprovalCodeKey: approvalCodeKey(cfg),
+		ApprovalCodeKey: s.codeKey,
+		// platform_call goes through this server's own handler (platform control A3).
+		Platform: platformDispatcher{s: s},
 		// escalate and publish_tickets reach the engine at call time as ask_operator does.
 		Escalate: func(ctx context.Context, runID, kind, reason string) error {
 			e, ok := s.engine.(interface {

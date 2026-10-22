@@ -754,12 +754,15 @@ export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 
 export type Approval = {
   id: string;
-  /** Empty for an approval raised in a conversation, which is not part of a run. */
+  /** Empty for an approval raised in a conversation, or asked for by an agent's platform call, which are not part of a run. */
   run_id: string | null;
   run_node_id: string;
   tool_call_id?: string;
-  /** `question` is a run asking the operator something (DESIGN 5.24): answered through `answerApproval`, declined through `rejectApproval`; approved means answered. */
-  kind: "exec" | "tool" | "node" | "question";
+  /**
+   * `question` is a run asking the operator something (DESIGN 5.24): answered through `answerApproval`, declined through `rejectApproval`; approved means answered.
+   * `platform` is an agent asking to run one destructive or privileged API operation; its message says which.
+   */
+  kind: "exec" | "tool" | "node" | "question" | "platform";
   node_id: string;
   /** The gated command or call, the node's message, or the question's text. */
   message: string;
