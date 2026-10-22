@@ -1,7 +1,11 @@
 package httpapi
 
 import (
+	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -65,13 +69,102 @@ func TestPlatformParity(t *testing.T) {
 			t.Errorf("%s %s (%s) is documented but has no route", op.Method, op.Path, op.ID)
 		}
 	}
-	if checked < 80 {
+	if checked < 96 {
 		t.Fatalf("%d routes checked", checked)
+	}
+	// The routes waves 1, 3 and 4 added are among them (DESIGN W4 rule 8).
+	for _, id := range []string{"listRunEventsPage", "getRunDiagnosis", "listRunDiagnoses", "listAudit", "revertAudit",
+		"listWorkflowVersions", "getWorkflowVersion", "restoreWorkflowVersion", "restoreAgent", "getMergeRequestDiff",
+		"getMergeRequestChecks", "getMergeRequestJobLog", "updateMergeRequestFromDefault"} {
+		if _, ok := routed[id]; !ok {
+			t.Errorf("%s has no route", id)
+		}
 	}
 	// The mounts the rule leaves out are registered, so the gate can refuse them by name.
 	for _, p := range []string{"/mcp", anthropicProxyPrefix + "/", scriptedProxyPrefix + "/"} {
 		if !slices.ContainsFunc(s.routeTable, func(rt registeredRoute) bool { return rt.Pattern == p }) {
 			t.Errorf("%s is not in the route table", p)
+		}
+	}
+}
+
+// parityLaterWave marks an acceptance test of PARITY.md that a later wave builds.
+var parityLaterWave = []string{"(wave 2)", "(wave 3 gate)"}
+
+// DESIGN W4 rule 8: PARITY.md has a row for every operation of the contract, naming its
+// handler in the Backend column, and every acceptance test it names is a test of the
+// repository; a test marked for a later wave must not exist yet, so the mark goes when it
+// lands.
+func TestParityMatrix(t *testing.T) {
+	root := filepath.Join("..", "..")
+	doc, err := os.ReadFile(filepath.Join(root, "docs", "briefs", "chief-platform-control", "PARITY.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defined := map[string]bool{}
+	testFunc := regexp.MustCompile(`(?m)^func (Test\w+)\(`)
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); path != root && (strings.HasPrefix(name, ".") || name == "node_modules") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, m := range testFunc.FindAllSubmatch(src, -1) {
+			defined[string(m[1])] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testName := regexp.MustCompile(`\bTest[A-Z]\w*`)
+	word := regexp.MustCompile(`[A-Za-z]\w*`)
+	backends := map[string]bool{}
+	named := 0
+	for _, line := range strings.Split(string(doc), "\n") {
+		cells := strings.Split(strings.Trim(strings.TrimSpace(line), "|"), "|")
+		if !strings.HasPrefix(line, "|") || len(cells) != 7 || strings.TrimSpace(cells[0]) == "#" || strings.HasPrefix(strings.TrimSpace(cells[0]), "---") {
+			continue
+		}
+		for _, w := range word.FindAllString(cells[2], -1) {
+			backends[w] = true
+		}
+		// The acceptance cell lists tests separated by commas or semicolons; a mark applies to
+		// the names of its own item.
+		for _, item := range strings.FieldsFunc(cells[6], func(r rune) bool { return r == ',' || r == ';' }) {
+			later := slices.ContainsFunc(parityLaterWave, func(m string) bool { return strings.Contains(item, m) })
+			for _, name := range testName.FindAllString(item, -1) {
+				named++
+				switch {
+				case later && defined[name]:
+					t.Errorf("PARITY.md marks %s for a later wave, and it exists: drop the mark", name)
+				case !later && !defined[name]:
+					t.Errorf("PARITY.md names %s, and no func %s is in the repository", name, name)
+				}
+			}
+		}
+	}
+	if named < 100 {
+		t.Fatalf("%d acceptance tests read from PARITY.md", named)
+	}
+	c, err := tools.Contract()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range c.Operations() {
+		if !backends[op.ID] {
+			t.Errorf("PARITY.md has no row whose Backend names %s (%s %s)", op.ID, op.Method, op.Path)
 		}
 	}
 }

@@ -919,6 +919,36 @@ paths:
           description: a page of audit rows
           content: { application/json: { schema: { $ref: "#/components/schemas/AuditPage" } } }
         "422": { $ref: "#/components/responses/Error" }
+  /api/audit/{id}/revert:
+    post:
+      tags: [ops]
+      operationId: revertAudit
+      x-yuno-risk: routine
+      summary: Undo a recorded change of an agent, schedule, skill or project
+      description: |
+        DESIGN W4 rule 5. Writes the state the audit row recorded before its change back
+        through the resource's own PUT, and answers as that PUT does (the resource, or its
+        validation errors). Only a change that succeeded (outcome `ok`) with PUT on an agent, a
+        schedule, a skill or a project can be reverted (422 `not_revertible`); a workflow is
+        reverted by restoring one of its versions. The resource must still be what the change
+        left, in the fields a revert writes: otherwise 412 `version_conflict`, and the later
+        change is reverted first. Tokens are never reverted: a change that touched only a
+        project's token, or a row without the state before it, answers 422
+        `nothing_to_revert`. A value the audit log keeps redacted cannot be written back (422
+        `not_revertible`). For an agent the revert carries the risk of the change it writes
+        back (rule A5): it waits for a human approval when it grants tools, loosens interaction
+        rules, guardrails or the exec policy, changes the calling agent itself, changes a
+        project's repository or provider, or raises a budget cap.
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+      responses:
+        "200":
+          description: the resource after the revert, as its read shows it
+          content: { application/json: { schema: { type: object } } }
+        "404": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
 
   /api/skills:
     get:
