@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -139,6 +140,30 @@ func (e *recordEnv) open(k, title string) (Outcome, mergeRequestOutput, error) {
 	return out, res, err
 }
 
+// callsSince is the routes the provider answered after its nth.
+func (e *recordEnv) callsSince(n int) []string {
+	e.t.Helper()
+	if e.gh != nil {
+		e.gh.mu.Lock()
+		defer e.gh.mu.Unlock()
+		return slices.Clone(e.gh.calls[n:])
+	}
+	e.gl.mu.Lock()
+	defer e.gl.mu.Unlock()
+	return slices.Clone(e.gl.calls[n:])
+}
+
+// onlyStateReads reports whether every call read one request: the state read of a later
+// call on the run's own request.
+func onlyStateReads(calls []string) bool {
+	for _, c := range calls {
+		if !strings.HasPrefix(c, "GET /merge_requests/") && !strings.HasPrefix(c, "GET /pulls/") {
+			return false
+		}
+	}
+	return true
+}
+
 func (e *recordEnv) record() *store.MergeRequest {
 	e.t.Helper()
 	mr, err := store.MergeRequestByRun(context.Background(), testPool, e.run.ID)
@@ -205,8 +230,9 @@ func TestOpenMergeRequestOnePerRun(t *testing.T) {
 					t.Fatalf("a branch for the second key: %v", projecttest.Branches(t, e.bare))
 				}
 			}
-			if e.requests() != 1 || e.seen() != seen {
-				t.Fatalf("the provider was asked again: requests %d, calls %d -> %d", e.requests(), seen, e.seen())
+			// The provider is asked for the request's state (DESIGN 5.29 rule 4) and nothing else.
+			if calls := e.callsSince(seen); e.requests() != 1 || !onlyStateReads(calls) {
+				t.Fatalf("the provider was asked again: requests %d, calls %v", e.requests(), calls)
 			}
 			if rec := e.record(); rec.Title != "First title" || rec.Number != 1 {
 				t.Fatalf("the record changed: %+v", rec)

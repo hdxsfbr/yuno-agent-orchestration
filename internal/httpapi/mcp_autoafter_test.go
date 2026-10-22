@@ -89,6 +89,18 @@ func (f *autoFixture) openMR(t *testing.T) {
 	}
 }
 
+// mergedMR records the run's request as merged: the operator merged it before the ready
+// call, which then opens a follow-up (DESIGN 5.29 rule 4).
+func (f *autoFixture) mergedMR(t *testing.T) {
+	t.Helper()
+	ok, err := store.InsertMergeRequest(context.Background(), testPool, &store.MergeRequest{ProjectID: f.project.ID, RunID: f.run.ID,
+		Provider: "gitlab", Number: 1, URL: "https://gitlab.test/group/demo/-/merge_requests/1", SourceBranch: "yuno/x",
+		TargetBranch: "main", Title: "t", State: store.MergeRequestMerged})
+	if err != nil || !ok {
+		t.Fatalf("insert the request record: %v %v", ok, err)
+	}
+}
+
 func (f *autoFixture) mrArgs() map[string]any {
 	return map[string]any{"run_token": f.token, "title": "Ready", "description": "d", "draft": false,
 		"paths": []string{"docs/plans/checkout"}}
@@ -123,6 +135,29 @@ func TestGateAutoAfterLetsTheReadyUpdateThrough(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no approval row records the auto-approval")
+	}
+}
+
+// DESIGN 5.29 rules 4 and 5: when the operator merged the request before the ready call,
+// the call opens a follow-up, a new request. auto_after lets it through as it lets the ready
+// call through, only when it commits paths under docs/; one that would push code stays gated.
+func TestGateAutoAfterCoversADocsFollowUp(t *testing.T) {
+	f := newAutoFixture(t, "manual_test")
+	f.decide(t, 1, store.ApprovalApproved)
+	f.mergedMR(t)
+	text, isErr := f.call(t, "open_merge_request", f.mrArgs())
+	if isErr || !strings.Contains(text, `"policy":"auto_after:manual_test"`) || f.execs != 1 || len(f.fe.approvalReqs) != 0 {
+		t.Fatalf("docs follow-up: err %v %s (execs %d, approvals requested %d)", isErr, text, f.execs, len(f.fe.approvalReqs))
+	}
+
+	f = newAutoFixture(t, "manual_test")
+	f.decide(t, 1, store.ApprovalApproved)
+	f.mergedMR(t)
+	args := f.mrArgs()
+	args["paths"] = []string{"docs/plans/x", "main.go"}
+	text, _ = f.call(t, "open_merge_request", args)
+	if !strings.Contains(text, "pending_approval") || len(f.fe.approvalReqs) != 1 || f.execs != 0 {
+		t.Fatalf("code follow-up: %s (approvals requested %d, execs %d)", text, len(f.fe.approvalReqs), f.execs)
 	}
 }
 

@@ -344,7 +344,7 @@ func TestOpenMergeRequestCheckoutSHAWriteFailure(t *testing.T) {
 	m := &mergeRequest{}
 	run, err := store.GetRun(context.Background(), testPool, u.run.ID)
 	must(t, err)
-	res, err := m.updateRecorded(context.Background(), Call{RunID: u.run.ID, Tx: tx}, &e.pc, nil, rec, mergeRequestInput{Title: "Fix"}, u.checkout, run, run)
+	res, err := m.updateRecorded(context.Background(), Call{RunID: u.run.ID, Tx: tx}, &e.pc, nil, rec, mergeRequestInput{Title: "Fix"}, u.checkout, run, run, nil)
 	if err != nil || !res.IsError || !strings.Contains(res.Text, "record the new checkout commit after the push") ||
 		!strings.Contains(res.Text, "pushed to "+rec.SourceBranch) || strings.Contains(res.Text, e.pc.Token) {
 		t.Fatalf("result = %+v %v", res, err)

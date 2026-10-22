@@ -4,6 +4,23 @@ Newest first. Each entry says what was decided, by whom, and why. Design rules t
 refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR under
 `docs/adr/`.
 
+## 2026-10-21
+
+**D-086 A merge request merged before the run's last push gets a follow-up, not an error.**
+(Andre, 2026-10-21: "keep the MR as a draft ... until the run's final push is done, and say
+so in the MR. If the MR was merged anyway, automatically open a small follow-up MR with the
+remaining files instead of failing.") Run 01a15722 (T1) escalated because its merge request
+had been merged before the plan documents were pushed. The draft's description now starts by
+telling the operator not to merge it until Yuno marks it ready. A later call on the run's own
+request reads its state from the provider first, since the record lags by a sync; when it is
+merged, the call's changes go onto a new branch from the default branch and a small request
+titled "Follow-up: <title>" is opened and recorded as the run's follow-up of the merged one
+(nothing is opened when nothing is left). `auto_after: manual_test` covers that follow-up only
+on the ready call's terms, every path under `docs/`: it is new, but it carries the documents
+the ready push would have added, and gating it would stall a ticket whose code is already
+merged. A follow-up with code stays gated. Alternative rejected: fail with an error and let
+the operator push the documents by hand. DESIGN 5.29 rules 4 and 5.
+
 ## 2026-10-20
 
 **D-085 A tool call that waits for approval parks the step until the approval is decided.**

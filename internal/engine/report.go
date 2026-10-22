@@ -324,8 +324,30 @@ func (e *Engine) runReportText(ctx context.Context, run *store.Run) string {
 		e.log.Warn("read the run's merge request for the report failed", "run_id", run.ID, "error", err)
 	} else if mr != nil {
 		text += " " + requestLabel(mr.Provider) + ": " + mr.URL
+		// DESIGN 5.29 rule 4: a request merged before the run's last push left the rest to a
+		// follow-up, which the operator merges too; the newest one is named.
+		if fu := e.newestFollowUp(ctx, mr); fu != nil {
+			text += " Follow-up: " + fu.URL
+		}
 	}
 	return text
+}
+
+// newestFollowUp is the last follow-up of a run's request (DESIGN 5.29 rule 4), nil when it
+// has none or it cannot be read, which is logged.
+func (e *Engine) newestFollowUp(ctx context.Context, mr *store.MergeRequest) *store.MergeRequest {
+	var newest *store.MergeRequest
+	for cur := mr; ; {
+		next, err := store.FollowUpMergeRequest(ctx, e.deps.Pool, cur.ID)
+		if err != nil {
+			e.log.Warn("read the run's follow-up merge request for the report failed", "run_id", mr.RunID, "error", err)
+			return newest
+		}
+		if next == nil {
+			return newest
+		}
+		newest, cur = next, next
+	}
 }
 
 // updatedMergeRequest reads the run's trace for the push of DESIGN 5.22 rule 9: the newest

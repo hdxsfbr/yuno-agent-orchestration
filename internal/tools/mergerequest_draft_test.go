@@ -154,7 +154,7 @@ func TestOpenMergeRequestDraftThenReady(t *testing.T) {
 					t.Fatalf("pull = %v", e.gh.pulls[0])
 				}
 				script(&e.gh.scripted, "PATCH /pulls/1", 200, jm{})
-				script(&e.gh.scripted, "GET /pulls/1", 200, jm{"node_id": "PR_1", "draft": true})
+				script(&e.gh.scripted, "GET /pulls/1", 200, jm{"node_id": "PR_1", "draft": true, "state": "open"})
 				script(&e.gh.scripted, "POST /graphql", 200, jm{"data": jm{}})
 			}
 
@@ -210,7 +210,7 @@ func TestOpenMergeRequestReadyRefusedIsAModelError(t *testing.T) {
 				script(&e.gl.scripted, "PUT /merge_requests/1", 403, jm{"message": "403 Forbidden: not allowed to mark ready"})
 			} else {
 				script(&e.gh.scripted, "PATCH /pulls/1", 200, jm{})
-				script(&e.gh.scripted, "GET /pulls/1", 200, jm{"node_id": "PR_1", "draft": true})
+				script(&e.gh.scripted, "GET /pulls/1", 200, jm{"node_id": "PR_1", "draft": true, "state": "open"})
 				script(&e.gh.scripted, "POST /graphql", 200, jm{"errors": []jm{{"message": "Resource not accessible"}}})
 			}
 			out, _, err := e.openDraft(e.key('c'), "Add thing", "body", bp(false))

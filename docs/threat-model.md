@@ -251,7 +251,10 @@ the project's budget cap (required for intake), the take limit and the pause fla
 **Approval carried forward (`auto_after`).** The call that marks a ticket's merge request
 ready runs under the manual-test approval already given, but only when it updates the
 run's own merge request and commits only paths under `docs/`; any other call, or code
-changed after the test, is gated as usual.
+changed after the test, is gated as usual. When the operator merged the request before that
+call, the call opens a follow-up request with what was left (D-086); it passes under the
+same approval only on the same terms, every path under `docs/`, so no code reaches a new
+request without an approval of its own.
 
 **Escalation.** `escalate` can only end the run its token belongs to; it pauses the
 project's waves, which only an operator resumes.
