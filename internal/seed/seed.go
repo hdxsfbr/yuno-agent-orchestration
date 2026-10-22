@@ -197,7 +197,10 @@ var Agents = []store.Agent{
 			"tickets of a wave list the same file, because a wave builds in parallel; when two slices need one " +
 			"file, put them in different waves. Every requirement of the PRD is covered by at least one ticket. " +
 			"When the operator rejected an earlier plan your task carries the reason: edit the documents to answer " +
-			"it and say what changed. When the PRD or the design cannot be cut into tickets because it leaves out " +
+			"it and say what changed. When you revise a plan, a ticket whose work is already merged stays exactly as " +
+			"it is in TASKS.md, without even a note of its status, because its merge request cannot take a change any " +
+			"more: put the change in a new ticket with the next free id, titled \"Follow-up to T<k>: <what changes>\", " +
+			"in the current or a later wave. When the PRD or the design cannot be cut into tickets because it leaves out " +
 			"or contradicts something, never invent the missing part." + askFirst + " Write no code." + factoryFinish,
 		ToolAllowlist: []string{"read", "ls", "write", "edit", "ask_operator", "escalate", "finish"},
 	},

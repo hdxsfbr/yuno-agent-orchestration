@@ -49,11 +49,20 @@ func reviseDescription(ctx context.Context, db store.Querier, plan *publishPlan,
 	text := fmt.Sprintf("Revise the plan of feature %q: %d tickets (%s). New tickets get issues, changed tickets update theirs, "+
 		"tickets left out are closed", plan.feature, plan.count, strings.Join(parts, ", "))
 	if rows, err := store.ListPlanTickets(ctx, db, plan.revise); err == nil && len(rows) > 0 {
-		if cur := currentWaveOf(rows); cur > 1 {
+		cur := currentWaveOf(rows)
+		if cur > 1 {
 			text += fmt.Sprintf(". Waves before wave %d are finished: their tickets stay as they are", cur)
 		}
 		if hashes, err := store.TicketContentHashes(ctx, db, plan.revise); err == nil {
-			if ids := inFlightChanges(rows, hashes, plan); len(ids) > 0 {
+			ids := inFlightChanges(rows, hashes, plan)
+			if fus, _, err := followUpsOf(ctx, db, plan.revise, rows, hashes, plan); err == nil {
+				if lines := followUpSentences(fus); len(lines) > 0 {
+					text += ". " + strings.Join(lines, ". ")
+				}
+				ids = append(ids, followUpsInFlight(rows, fus)...)
+				sort.Strings(ids)
+			}
+			if len(ids) > 0 {
 				text += fmt.Sprintf(". The text of %s changes while it is being built or in review: the work in progress "+
 					"keeps the old text, so request changes on its merge request after approving this", strings.Join(ids, ", "))
 			}
@@ -85,17 +94,49 @@ func inFlightChanges(rows []store.PlanTicket, hashes map[string]string, plan *pu
 			if !ok || (p.Status != store.TicketBuilding && p.Status != store.TicketInReview) {
 				continue
 			}
-			changed := strings.TrimSpace(p.Title) != strings.TrimSpace(t.Title)
-			if h, has := hashes[t.ID]; has {
-				changed = h != ticketContentHash(plan.feature, t)
-			}
-			if changed {
+			if textChanged(p, hashes, plan.feature, t) {
 				ids = append(ids, t.ID)
 			}
 		}
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// followUpsInFlight lists the open follow-ups that are building or in review and take a
+// further change from the revision.
+func followUpsInFlight(rows []store.PlanTicket, fus []followUp) []string {
+	status := map[string]string{}
+	for _, t := range rows {
+		status[t.TicketID] = t.Status
+	}
+	var ids []string
+	for _, fu := range fus {
+		if fu.reused && (status[fu.id] == store.TicketBuilding || status[fu.id] == store.TicketInReview) {
+			ids = append(ids, fu.id)
+		}
+	}
+	return ids
+}
+
+// followUpsOf reads the plan's follow-ups and its current wave's ship run, and lists the
+// follow-ups of the revision (planFollowUps). shipping is the current wave's ship run while
+// it has not ended, nil otherwise.
+func followUpsOf(ctx context.Context, q store.Querier, planID string, rows []store.PlanTicket, hashes map[string]string, plan *publishPlan) (fus []followUp, shipping *store.Run, err error) {
+	links, err := store.ListFollowUps(ctx, q, planID)
+	if err != nil {
+		return nil, nil, err
+	}
+	run, _, err := store.LatestShipRun(ctx, q, planID, currentWaveOf(rows))
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+	case err != nil:
+		return nil, nil, err
+	case !store.IsTerminal(run.Status):
+		shipping = run
+	}
+	fus, err = planFollowUps(rows, hashes, links, plan, shipping != nil)
+	return fus, shipping, err
 }
 
 func (p *publishTickets) revise(ctx context.Context, q store.Querier, run *store.Run, pc *project.Config, plan *publishPlan) (Result, error) {
@@ -127,9 +168,23 @@ func (p *publishTickets) revise(ctx context.Context, q store.Querier, run *store
 		existing[t.TicketID] = t
 	}
 	cur := currentWaveOf(rows)
+	hashes, err := store.TicketContentHashes(ctx, q, planID)
+	if err != nil {
+		return Result{}, err
+	}
+	// A change to a merged or closed ticket becomes a follow-up ticket; the ticket and its
+	// issue stay as they are.
+	fus, shipping, err := followUpsOf(ctx, q, planID, rows, hashes, plan)
+	if err != nil {
+		return Result{}, err
+	}
+	amended := withFollowUps(plan, fus)
+	if amended.count > MaxPlanTickets {
+		return refuse("with its follow-up tickets the plan has %d tickets; at most %d", amended.count, MaxPlanTickets)
+	}
 	revised := map[string]bool{}
 	touchesCurrent, anyOpen := false, false
-	for i, wave := range plan.waves {
+	for i, wave := range amended.waves {
 		for _, t := range wave {
 			revised[t.ID] = true
 			prev, ok := existing[t.ID]
@@ -156,16 +211,8 @@ func (p *publishTickets) revise(ctx context.Context, q store.Querier, run *store
 	}
 	// The wave being shipped is not changed under its ship run (review H1): its advance would
 	// close the new ticket's issue before it is built.
-	if touchesCurrent {
-		if run, _, err := store.LatestShipRun(ctx, q, planID, cur); err == nil && !store.IsTerminal(run.Status) {
-			return refuse("wave %d is being shipped (run %s); revise it when that run has ended", cur, run.ID)
-		} else if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return Result{}, err
-		}
-	}
-	hashes, err := store.TicketContentHashes(ctx, q, planID)
-	if err != nil {
-		return Result{}, err
+	if touchesCurrent && shipping != nil {
+		return refuse("wave %d is being shipped (run %s); revise it when that run has ended", cur, shipping.ID)
 	}
 
 	base, path := p.cfg.APIBase, p.cfg.RepoPath
@@ -222,10 +269,19 @@ func (p *publishTickets) revise(ctx context.Context, q store.Querier, run *store
 
 	out := publishTicketsOutput{PlanID: planID, Issues: []publishedTicketOut{}, Revised: true}
 	out.ChangedInFlight = inFlightChanges(rows, hashes, plan)
+	if more := followUpsInFlight(rows, fus); len(more) > 0 {
+		out.ChangedInFlight = append(out.ChangedInFlight, more...)
+		sort.Strings(out.ChangedInFlight)
+	}
+	followUps := map[string]followUp{}
+	for _, fu := range fus {
+		followUps[fu.id] = fu
+	}
 	var reset []string
 	// Tickets the current wave gained: added, moved into it or reset (review L6).
 	var gained []int
-	for i, wave := range plan.waves {
+	recorded := 0
+	for i, wave := range amended.waves {
 		n := i + 1
 		for _, t := range wave {
 			prev, had := existing[t.ID]
@@ -235,6 +291,24 @@ func (p *publishTickets) revise(ctx context.Context, q store.Querier, run *store
 					out.Issues = append(out.Issues, publishedTicketOut{Ticket: t.ID, Number: *prev.IssueNumber, URL: prev.IssueURL})
 				}
 				continue
+			}
+			fu, isFollowUp := followUps[t.ID]
+			if isFollowUp && !fu.planner {
+				// The follow-up's text says what changed against the old issue, which the
+				// revision leaves as it is.
+				found, res := lookup()
+				if res != nil {
+					return *res, nil
+				}
+				var mr *store.MergeRequest
+				if fu.of.MergeRequestID != nil {
+					if mr, err = store.GetMergeRequest(ctx, q, *fu.of.MergeRequestID); errors.Is(err, store.ErrNotFound) {
+						mr = nil
+					} else if err != nil {
+						return Result{}, err
+					}
+				}
+				t = fu.ticket(found[ticketMarker(planID, fu.of.TicketID)].Body, mr)
 			}
 			marker := ticketMarker(planID, t.ID)
 			title, body := ticketIssueTitle(plan.feature, t), ticketIssueBody(plan.feature, t, docs, planMRURL, marker)
@@ -312,6 +386,20 @@ func (p *publishTickets) revise(ctx context.Context, q store.Querier, run *store
 				return Result{}, err
 			}
 			out.Issues = append(out.Issues, publishedTicketOut{Ticket: t.ID, Number: *row.IssueNumber, URL: row.IssueURL})
+			if isFollowUp {
+				if fu.record {
+					w := n
+					raw, _ := json.Marshal(store.FollowUp{Follows: fu.of.TicketID, Hash: fu.hash})
+					if err := store.AddPlanEvent(ctx, q, &store.PlanEvent{PlanID: planID, Kind: store.PlanEventFollowUp, Wave: &w,
+						TicketID: &fu.id, Detail: raw}); err != nil {
+						return Result{}, err
+					}
+					recorded++
+				}
+				if !fu.planner {
+					out.FollowUps = append(out.FollowUps, followUpOut{Ticket: fu.id, Follows: fu.of.TicketID, Number: *row.IssueNumber, URL: row.IssueURL})
+				}
+			}
 			if had && prev.Status == store.TicketFailed && prev.Wave == cur {
 				if ok, err := store.ResetFailedTicket(ctx, q, planID, t.ID); err != nil {
 					return Result{}, err
@@ -407,8 +495,8 @@ func (p *publishTickets) revise(ctx context.Context, q store.Querier, run *store
 		}
 	}
 
-	detail, _ := json.Marshal(map[string]any{"tickets": plan.count, "waves": len(plan.waves), "added": out.Added, "updated": out.Updated,
-		"dropped": out.Dropped, "reset": out.Reset, "released": out.Released, "current_wave": newCur})
+	detail, _ := json.Marshal(map[string]any{"tickets": amended.count, "waves": len(amended.waves), "added": out.Added, "updated": out.Updated,
+		"dropped": out.Dropped, "reset": out.Reset, "released": out.Released, "current_wave": newCur, "follow_ups": recorded})
 	if err := store.AddPlanEvent(ctx, q, &store.PlanEvent{PlanID: planID, Kind: store.PlanEventRevised, Detail: detail}); err != nil {
 		return Result{}, err
 	}

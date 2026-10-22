@@ -258,7 +258,8 @@ func TestPublishTicketsReviseRetryAfterRollbackReusesNewIssue(t *testing.T) {
 	}
 }
 
-// Tickets of finished waves are left as they are, and nothing may be placed in them.
+// Tickets of finished waves are left as they are, and nothing may be placed in them; a
+// change to one becomes a follow-up ticket in the current wave.
 func TestPublishTicketsReviseLeavesFinishedWaves(t *testing.T) {
 	ctx := context.Background()
 	e := newReviseEnv(t, project.ProviderGitHub)
@@ -282,12 +283,20 @@ func TestPublishTicketsReviseLeavesFinishedWaves(t *testing.T) {
 	if e.logged("1 update") != 0 || e.logged("2 close") != 0 || e.logged("2 comment") != 0 || e.logged("3 update") != 1 {
 		t.Errorf("log = %v", e.log)
 	}
-	if len(e.issues) != before+1 || !strings.Contains(fmt.Sprint(e.issues[3]["labels"]), "wave:3") {
-		t.Errorf("issues = %d, labels %v", len(e.issues), e.issues[len(e.issues)-1]["labels"])
+	// T1's change becomes follow-up T5 in the current wave (issue 4); T4 is issue 5, in wave 3.
+	if len(e.issues) != before+2 || !strings.Contains(fmt.Sprint(e.issues[4]["labels"]), "wave:3") ||
+		e.issues[3]["title"] != "[checkout T5] Follow-up to T1: Rewritten" || !strings.Contains(fmt.Sprint(e.issues[3]["labels"]), "wave:2") {
+		t.Errorf("issues = %d: %v", len(e.issues), e.issues[before:])
+	}
+	if body := e.body(3); !strings.Contains(body, "Follow-up to T1, which is closed.") || !strings.Contains(body, "Title, before: Walking skeleton") {
+		t.Errorf("follow-up body:\n%s", body)
 	}
 	tk := e.tickets()
 	if tk["T1"].Title != "Walking skeleton" || tk["T1"].Status != store.TicketClosed || tk["T2"].Status != store.TicketClosed {
 		t.Errorf("finished tickets = %+v %+v", tk["T1"], tk["T2"])
+	}
+	if tk["T5"].Wave != 2 || tk["T5"].Status != store.TicketReleased {
+		t.Errorf("follow-up = %+v", tk["T5"])
 	}
 	// T3 is still the current wave's ticket; wave 3's ticket is pending until released.
 	if tk["T3"].Title != "Third, changed" || tk["T4"].Wave != 3 || tk["T4"].Status != store.TicketPending {
@@ -494,8 +503,9 @@ func TestPublishTicketsReviseMovesAReleasedTicketLater(t *testing.T) {
 func TestPublishTicketsReviseRefusesNoWork(t *testing.T) {
 	e := newReviseEnv(t, project.ProviderGitLab)
 	e.building(2, map[string]string{"T1": store.TicketClosed, "T2": store.TicketClosed})
+	// T1 unchanged: a change to it would be a follow-up ticket, work to build.
 	only := `{
-	  "slicer": {"tickets": [{"id": "T1", "title": "Walking skeleton", "slice": "End to end.", "files": ["a.go"], "tests": ["TestA"]}]},
+	  "slicer": {"tickets": [{"id": "T1", "title": "Walking skeleton", "slice": "End to end.", "files": ["a.go", "a_test.go"], "tests": ["TestA", "TestB"]}]},
 	  "waves": {"waves": [{"n": 1, "tickets": ["T1"]}]}
 	}`
 	var me *ModelError
@@ -577,5 +587,274 @@ func TestPublishTicketsReviseKeepsThePlanMRLink(t *testing.T) {
 	must(t, json.Unmarshal(res.Output, &out))
 	if out.Updated != 0 || e.logged("update") != 0 {
 		t.Errorf("updated %d, log %v", out.Updated, e.log)
+	}
+}
+
+// followUpState revises T1 (merged in the tests below): a new title, slice and test.
+const followUpState = `{
+  "slicer": {"tickets": [
+    {"id": "T1", "title": "Walking skeleton, new metrics", "slice": "End to end, with the p95 metric.", "files": ["a.go", "a_test.go"], "tests": ["TestA", "TestP95"]},
+    {"id": "T2", "title": "Second", "slice": "More.", "files": ["b.go"], "tests": ["TestC"]},
+    {"id": "T3", "title": "Third", "slice": "Later.", "files": ["c.go"], "tests": ["TestD"]}
+  ]},
+  "waves": {"waves": [{"n": 1, "tickets": ["T1", "T2"]}, {"n": 2, "tickets": ["T3"]}]}
+}`
+
+// mergedT1 links T1 to a merged merge request record of its own run.
+func (e *reviseEnv) mergedT1(number int64) *store.MergeRequest {
+	e.t.Helper()
+	mr := projectRecord(e.t, e.project, newRunOf(e.t, e.ticketEnv, `{"feature":"checkout"}`, testPlanState), number, store.MergeRequestMerged)
+	must(e.t, store.SetTicketMR(context.Background(), testPool, e.planID, "T1", mr.ID))
+	return mr
+}
+
+// onIssue counts the logged calls on issue n.
+func (e *reviseEnv) onIssue(n int) int {
+	c := 0
+	for _, l := range e.log {
+		if strings.HasPrefix(l, fmt.Sprintf("%d ", n)) {
+			c++
+		}
+	}
+	return c
+}
+
+func (e *reviseEnv) followUpEvents() []store.FollowUp {
+	e.t.Helper()
+	links, err := store.ListFollowUps(context.Background(), testPool, e.planID)
+	must(e.t, err)
+	return links
+}
+
+// P8: a revision that changes a merged ticket leaves it and its issue as they are and adds
+// one follow-up ticket with its own issue in the current wave; a retried visit and a later
+// revision with the same text add nothing; a revision back to the merged text drops it.
+func TestPublishTicketsReviseFollowsUpAMergedTicket(t *testing.T) {
+	for _, provider := range []project.Provider{project.ProviderGitLab, project.ProviderGitHub} {
+		t.Run(string(provider), func(t *testing.T) {
+			ctx := context.Background()
+			e := newReviseEnv(t, provider)
+			mr := e.mergedT1(18)
+			e.building(1, map[string]string{"T1": store.TicketMerged, "T2": store.TicketBuilding})
+			hashBefore, err := store.TicketContentHashes(ctx, testPool, e.planID)
+			must(t, err)
+			before := len(e.issues)
+
+			e.run = e.reviseRun("checkout", followUpState)
+			if got := e.tool.Describe(json.RawMessage(`{"run_token":"tok"}`)); !strings.Contains(got, "T1 is merged; its change becomes follow-up ticket T4 (wave 1)") {
+				t.Errorf("description = %q", got)
+			}
+			res, err := e.call(e.run)
+			if err != nil || res.IsError {
+				t.Fatalf("revise = %+v, %v", res, err)
+			}
+			var out publishTicketsOutput
+			must(t, json.Unmarshal(res.Output, &out))
+			if len(out.FollowUps) != 1 || out.FollowUps[0].Ticket != "T4" || out.FollowUps[0].Follows != "T1" || out.FollowUps[0].Number != 4 ||
+				out.Added != 1 || out.Updated != 0 || out.Dropped != 0 {
+				t.Fatalf("output = %+v", out)
+			}
+			if len(e.issues) != before+1 || e.issues[3]["title"] != "[checkout T4] Follow-up to T1: Walking skeleton, new metrics" {
+				t.Fatalf("issues = %v", e.issues[before:])
+			}
+			labels := fmt.Sprint(e.issues[3]["labels"])
+			if !strings.Contains(labels, "wave:1") || !strings.Contains(labels, "feature:checkout") {
+				t.Errorf("labels = %s", labels)
+			}
+			tk := e.tickets()
+			body := e.body(3)
+			for _, want := range []string{"Follow-up to T1, which is merged (" + mr.Label() + ": " + mr.URL + ").", tk["T1"].IssueURL,
+				"Title, before: Walking skeleton", "Slice, before: End to end.", "Acceptance tests added: TestP95",
+				"Acceptance tests no longer listed: TestB", "End to end, with the p95 metric.", "- TestP95", "Feature: checkout"} {
+				if !strings.Contains(body, want) {
+					t.Errorf("body lacks %q:\n%s", want, body)
+				}
+			}
+			if strings.Contains(body, "Files added") || !strings.HasSuffix(body, ticketMarker(e.planID, "T4")) {
+				t.Errorf("body:\n%s", body)
+			}
+			// T1 and its issue are untouched; T2 (building, unchanged) too.
+			if e.onIssue(1) != 0 || e.onIssue(2) != 0 {
+				t.Errorf("log = %v", e.log)
+			}
+			hashAfter, err := store.TicketContentHashes(ctx, testPool, e.planID)
+			must(t, err)
+			if tk["T1"].Status != store.TicketMerged || tk["T1"].Title != "Walking skeleton" || hashAfter["T1"] != hashBefore["T1"] {
+				t.Errorf("T1 = %+v", tk["T1"])
+			}
+			// The follow-up is released with its wave, which was released before.
+			if tk["T4"].Wave != 1 || tk["T4"].Status != store.TicketReleased || tk["T4"].Title != "Follow-up to T1: Walking skeleton, new metrics" ||
+				e.logged("4 +") != 1 && e.logged("4 add_labels") != 1 {
+				t.Errorf("T4 = %+v, log %v", tk["T4"], e.log)
+			}
+			if links := e.followUpEvents(); len(links) != 1 || links[0].TicketID != "T4" || links[0].Follows != "T1" {
+				t.Errorf("follow-up events = %+v", links)
+			}
+
+			// A retried visit creates nothing, updates nothing and records nothing.
+			logged := len(e.log)
+			res, err = e.call(e.run)
+			if err != nil || res.IsError {
+				t.Fatalf("retry = %+v, %v", res, err)
+			}
+			var again publishTicketsOutput
+			must(t, json.Unmarshal(res.Output, &again))
+			if len(e.issues) != before+1 || len(e.log) != logged || again.Added != 0 || again.Updated != 0 || len(again.FollowUps) != 1 ||
+				len(e.followUpEvents()) != 1 {
+				t.Errorf("retry: issues %d, log %v, output %+v", len(e.issues), e.log[logged:], again)
+			}
+
+			// A later revision that still carries the change keeps the follow-up as it is.
+			res, err = e.call(e.reviseRun("checkout", followUpState))
+			if err != nil || res.IsError {
+				t.Fatalf("second revision = %+v, %v", res, err)
+			}
+			if len(e.issues) != before+1 || len(e.log) != logged || e.tickets()["T4"].Status != store.TicketReleased || len(e.followUpEvents()) != 1 {
+				t.Errorf("second revision: issues %d, log %v, T4 %+v", len(e.issues), e.log[logged:], e.tickets()["T4"])
+			}
+
+			// A revision back to the merged text needs no follow-up: it is dropped.
+			res, err = e.call(e.reviseRun("checkout", testPlanState))
+			if err != nil || res.IsError {
+				t.Fatalf("revert = %+v, %v", res, err)
+			}
+			if e.logged("4 close") != 1 || e.tickets()["T4"].Status != store.TicketClosed || e.onIssue(1) != 0 {
+				t.Errorf("revert: log %v, T4 %+v", e.log, e.tickets()["T4"])
+			}
+		})
+	}
+}
+
+// A retried visit after a rolled-back first attempt finds the follow-up's issue by its marker.
+func TestPublishTicketsReviseFollowUpRetryAfterRollback(t *testing.T) {
+	ctx := context.Background()
+	e := newReviseEnv(t, project.ProviderGitLab)
+	e.mergedT1(18)
+	e.building(1, map[string]string{"T1": store.TicketMerged})
+	run := e.reviseRun("checkout", followUpState)
+	if res, err := e.call(run); err != nil || res.IsError {
+		t.Fatalf("revise = %+v, %v", res, err)
+	}
+	// The transaction rolled back: the follow-up's row and event are gone, its issue stays.
+	_, err := testPool.Exec(ctx, `DELETE FROM plan_tickets WHERE plan_id=$1 AND ticket_id='T4'`, e.planID)
+	must(t, err)
+	_, err = testPool.Exec(ctx, `DELETE FROM plan_events WHERE plan_id=$1 AND kind=$2`, e.planID, store.PlanEventFollowUp)
+	must(t, err)
+	n := len(e.issues)
+	res, err := e.call(run)
+	if err != nil || res.IsError {
+		t.Fatalf("retry = %+v, %v", res, err)
+	}
+	if tk := e.tickets()["T4"]; len(e.issues) != n || tk.IssueNumber == nil || *tk.IssueNumber != 4 || len(e.followUpEvents()) != 1 {
+		t.Fatalf("issues %d, want %d; T4 %+v", len(e.issues), n, tk)
+	}
+}
+
+// An unchanged merged ticket yields no follow-up; without a recorded hash the title decides.
+func TestPublishTicketsReviseUnchangedMergedTicketHasNoFollowUp(t *testing.T) {
+	ctx := context.Background()
+	e := newReviseEnv(t, project.ProviderGitLab)
+	e.mergedT1(18)
+	e.building(1, map[string]string{"T1": store.TicketMerged})
+	before := len(e.issues)
+	e.run = e.reviseRun("checkout", testPlanState)
+	if got := e.tool.Describe(json.RawMessage(`{"run_token":"tok"}`)); strings.Contains(got, "follow-up") {
+		t.Errorf("description = %q", got)
+	}
+	res, err := e.call(e.run)
+	if err != nil || res.IsError {
+		t.Fatalf("revise = %+v, %v", res, err)
+	}
+	var out publishTicketsOutput
+	must(t, json.Unmarshal(res.Output, &out))
+	if len(out.FollowUps) != 0 || len(e.issues) != before || len(e.followUpEvents()) != 0 || e.onIssue(1) != 0 {
+		t.Fatalf("output %+v, issues %d, log %v", out, len(e.issues), e.log)
+	}
+
+	// A ticket published before the hash was recorded: the same title is no change, another is.
+	_, err = testPool.Exec(ctx, `UPDATE plan_tickets SET content_hash=NULL WHERE plan_id=$1 AND ticket_id='T1'`, e.planID)
+	must(t, err)
+	sameTitle := strings.Replace(testPlanState, `"slice": "End to end."`, `"slice": "End to end, reworded."`, 1)
+	if res, err := e.call(e.reviseRun("checkout", sameTitle)); err != nil || res.IsError || len(e.issues) != before {
+		t.Fatalf("same title: %+v, %v, issues %d", res, err, len(e.issues))
+	}
+	if res, err := e.call(e.reviseRun("checkout", followUpState)); err != nil || res.IsError || len(e.issues) != before+1 {
+		t.Fatalf("new title: %+v, %v, issues %d", res, err, len(e.issues))
+	}
+	if links := e.followUpEvents(); len(links) != 1 || links[0].Follows != "T1" {
+		t.Errorf("follow-up events = %+v", links)
+	}
+}
+
+// The follow-up goes to the next wave while the current one is being shipped, and to a later
+// wave while a ticket of its wave lists one of its files.
+func TestPublishTicketsReviseFollowUpWave(t *testing.T) {
+	ctx := context.Background()
+	e := newReviseEnv(t, project.ProviderGitLab)
+	e.mergedT1(18)
+	e.building(1, map[string]string{"T1": store.TicketMerged, "T2": store.TicketMerged})
+	must(t, store.SetPlanStatus(ctx, testPool, e.planID, store.PlanShipping))
+	e.shipRun(1, 1, store.RunWaitingApproval)
+	e.run = e.reviseRun("checkout", followUpState)
+	if got := e.tool.Describe(json.RawMessage(`{"run_token":"tok"}`)); !strings.Contains(got, "follow-up ticket T4 (wave 2)") {
+		t.Errorf("description = %q", got)
+	}
+	if res, err := e.call(e.run); err != nil || res.IsError {
+		t.Fatalf("revise while shipping = %+v, %v", res, err)
+	}
+	if tk := e.tickets()["T4"]; tk.Wave != 2 || tk.Status != store.TicketPending || e.status() != store.PlanShipping ||
+		!strings.Contains(fmt.Sprint(e.issues[3]["labels"]), "wave:2") {
+		t.Errorf("T4 = %+v, plan %s, labels %v", tk, e.status(), e.issues[3]["labels"])
+	}
+
+	// T2 now lists a.go too, so T1's follow-up waits for wave 2.
+	e2 := newReviseEnv(t, project.ProviderGitLab)
+	e2.mergedT1(18)
+	e2.building(1, map[string]string{"T1": store.TicketMerged})
+	shared := strings.Replace(followUpState, `"files": ["b.go"]`, `"files": ["b.go", "a.go"]`, 1)
+	if res, err := e2.call(e2.reviseRun("checkout", shared)); err != nil || res.IsError {
+		t.Fatalf("revise = %+v, %v", res, err)
+	}
+	if tk := e2.tickets()["T4"]; tk.Wave != 2 || tk.Status != store.TicketPending {
+		t.Errorf("T4 = %+v", tk)
+	}
+}
+
+// A follow-up the Planner names itself is the one: the platform adds none, and the link is
+// recorded so that a later revision with the same text adds none either.
+func TestPublishTicketsRevisePlannerNamesTheFollowUp(t *testing.T) {
+	e := newReviseEnv(t, project.ProviderGitLab)
+	e.mergedT1(18)
+	e.building(1, map[string]string{"T1": store.TicketMerged})
+	named := `{
+	  "slicer": {"tickets": [
+	    {"id": "T1", "title": "Walking skeleton (merged)", "slice": "End to end.", "files": ["a.go", "a_test.go"], "tests": ["TestA", "TestB"]},
+	    {"id": "T2", "title": "Second", "slice": "More.", "files": ["b.go"], "tests": ["TestC"]},
+	    {"id": "T3", "title": "Third", "slice": "Later.", "files": ["c.go"], "tests": ["TestD"]},
+	    {"id": "T4", "title": "Follow-up to T1: the p95 metric", "slice": "Add p95.", "files": ["a.go"], "tests": ["TestP95"]}
+	  ]},
+	  "waves": {"waves": [{"n": 1, "tickets": ["T1", "T2"]}, {"n": 2, "tickets": ["T3", "T4"]}]}
+	}`
+	before := len(e.issues)
+	e.run = e.reviseRun("checkout", named)
+	if got := e.tool.Describe(json.RawMessage(`{"run_token":"tok"}`)); strings.Contains(got, "becomes follow-up") {
+		t.Errorf("description = %q", got)
+	}
+	res, err := e.call(e.run)
+	if err != nil || res.IsError {
+		t.Fatalf("revise = %+v, %v", res, err)
+	}
+	var out publishTicketsOutput
+	must(t, json.Unmarshal(res.Output, &out))
+	if len(out.FollowUps) != 0 || len(e.issues) != before+1 || e.issues[3]["title"] != "[checkout T4] Follow-up to T1: the p95 metric" {
+		t.Fatalf("output %+v, issues %v", out, e.issues[before:])
+	}
+	if links := e.followUpEvents(); len(links) != 1 || links[0].TicketID != "T4" || links[0].Follows != "T1" {
+		t.Errorf("follow-up events = %+v", links)
+	}
+	// Once T4 is merged, the same revision again adds nothing.
+	must(t, store.SetTicketStatus(context.Background(), testPool, e.planID, "T4", store.TicketMerged))
+	if res, err := e.call(e.reviseRun("checkout", named)); err != nil || res.IsError || len(e.issues) != before+1 || len(e.followUpEvents()) != 1 {
+		t.Fatalf("again: %+v, %v, issues %d", res, err, len(e.issues))
 	}
 }

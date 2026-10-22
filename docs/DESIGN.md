@@ -4218,7 +4218,8 @@ Rules:
     its current wave. Choices: `revise_plan` names an open plan of the run's project whose
     feature is the run's; a plan that is done or cancelled, another project's, or one for another
     feature is refused before any effect. The current wave is the lowest wave with a ticket not
-    `closed`; tickets that are merged or closed are left as they are (issue, title, wave), nothing
+    `closed`; tickets that are merged or closed are left as they are (issue, title, wave), and a
+    change to one becomes a follow-up ticket (below); nothing
     may be placed in an earlier wave, and a changed ticket is the one whose title, body or wave
     differs from its issue. A dropped ticket's issue is commented and closed, its plan ticket set
     `closed`. Resuming unpauses the project (a `resumed` event only when it was paused), moves a
@@ -4237,6 +4238,27 @@ Rules:
     `plan:<id>:wave:<n>:<k>` (the form without `k` is attempt 1), and the watcher starts attempt
     k+1 when the wave's latest attempt ended without `wave_done` and the plan is `building`
     again with its tickets merged and main green.
+    Follow-ups (Andre, 2026-10-21, after revision run 01a15fed amended T8's text while T8's
+    merge request had merged with the old text): when the revision changes the text of a
+    `merged` or `closed` ticket (by `content_hash`, or by title where none is stored), that
+    ticket and its issue stay as they are and `publish_tickets` adds a follow-up ticket: the
+    next free id `T<n>` (above every id of the plan and of the revision), titled `Follow-up to
+    T<k>: <title>`, with the labels of a new ticket and the marker of rule 2. Its issue opens
+    with what changed against the merged version (title, slice, files and acceptance tests,
+    read back from the old issue) and links T<k>'s merge request and old issue, then carries the
+    revised text. It goes in the current wave, in the next one while the current wave's ship
+    run is live, and later still while an open ticket of that wave lists one of its files. A
+    plan event `follow_up` (`ticket_id` the follow-up, detail `{follows, hash}`, the hash of the
+    revised text it carries) is the link: a retried visit or a later revision with the same
+    text adds nothing and keeps the follow-up (it is not dropped although the documents do not
+    list it), a further change goes to the follow-up while it is open and to a new one once it
+    is merged, and a revision back to the merged text drops it. The approval text says "T8 is
+    merged; its change becomes follow-up ticket T21 (wave 3)", and the result lists
+    `follow_ups`. The Planner is told to leave a merged ticket exactly as it is and to name the
+    change itself as a ticket titled `Follow-up to T<k>: ...`; such a ticket, new or open, is the
+    follow-up (its link is recorded the same way) and the platform adds none. A revision whose
+    only change is to merged tickets has work to build and is not refused; the caps of rule 2
+    count the follow-ups.
 17. **The fake forge (D-079).** Evals that need a tracker run against `forgefake`, a role
     of the one binary started only under the compose profile `eval`: an in-memory GitLab
     REST subset (the issue, label, merge request and pipeline endpoints the platform
@@ -4293,7 +4315,10 @@ holding only the files left, recorded and answered with `follow_up`, a later cal
 onto it, a merged request with nothing left is a no-op with `merged`, a request closed on
 the provider is refused; the store keeps one own record per run and one follow-up per
 record; `auto_after` lets a `docs/` follow-up through and gates one with code; the report
-names the newest follow-up; evals 026 (loop limit
+names the newest follow-up; T5.29.14 a revision on both providers, its refusals, and its
+follow-ups (one ticket and issue for a changed merged ticket in the right wave, none again on
+a retried visit or after a rollback, none for an unchanged one, the Planner's own
+follow-up); evals 026 (loop limit
 escalation), 027 (PRD gap escalation), 028 (two waves auto-advance with the pause flag).
 
 Limitations: one open plan per project; main's status is read, not run, so a project
