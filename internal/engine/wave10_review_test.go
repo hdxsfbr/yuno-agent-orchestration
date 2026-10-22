@@ -452,10 +452,11 @@ func TestUnreadableAnswersFailTheVisit(t *testing.T) {
 	}
 }
 
-// L13: a retry of a run whose answered question has no continuation visit yet does not
-// count the step's loop visits: the walk lets that visit in whatever the count, so the
-// retry must not refuse the run for a limit the visit is free of.
-func TestRetryOfARunWithAnUnconsumedContinuationCountsNoLoopVisits(t *testing.T) {
+// L13, amended by D-093: a run whose answered question has no continuation visit yet is
+// retried. The retry starts the step afresh, so its visit continues nothing: it counts
+// toward max_loop_visits (the parked visit used the limit of 1 up; the refusal marks
+// nothing), and with the limit raised it runs without the answer, told the step was retried.
+func TestRetryOfARunWithAnUnconsumedContinuationStartsAfresh(t *testing.T) {
 	env := newEnv(t)
 	ctx := context.Background()
 	ag := env.questionAgent()
@@ -483,20 +484,30 @@ func TestRetryOfARunWithAnUnconsumedContinuationCountsNoLoopVisits(t *testing.T)
 	if got := visitsOf(runNodes(t, env, run.ID)); !slices.Equal(got, []string{"agent#1:succeeded"}) {
 		t.Fatalf("visits = %v; no continuation started", got)
 	}
-	retried, err := env.e.Retry(ctx, run.ID, "andre", nil)
+	var re *RetryError
+	if _, err := env.e.Retry(ctx, run.ID, "andre", nil); !errors.As(err, &re) || re.Code != RetryLimitsExhausted ||
+		!slices.Equal(re.Details, []string{"max_loop_visits: 1 of 1 used"}) {
+		t.Fatalf("retry at max_loop_visits 1 = %v; the retried visit is a fresh one and counts", err)
+	}
+	if n := env.count(`SELECT count(*) FROM run_nodes WHERE run_id=$1 AND retried_at IS NOT NULL`, run.ID); n != 0 {
+		t.Fatalf("the refused retry marked %d visits", n)
+	}
+	retried, err := env.e.Retry(ctx, run.ID, "andre", &store.Limits{MaxLoopVisits: 2})
 	if err != nil {
-		t.Fatalf("retry: %v; the unconsumed continuation is free of max_loop_visits", err)
+		t.Fatal(err)
 	}
 	if retried.Status != store.RunQueued {
 		t.Fatalf("retried run = %s", retried.Status)
 	}
-	// The retried walk really does start it: a continuation visit, past the limit.
 	r := env.resume(env.e, run.ID)
 	if r.Status != store.RunSucceeded {
 		t.Fatalf("resumed run = %s %q", r.Status, deref(r.FailureReason))
 	}
-	if nodes := runNodes(t, env, run.ID); len(nodes) != 2 || nodes[1].QuestionID == nil || *nodes[1].QuestionID != q.ID {
-		t.Fatalf("visits = %v", visitsOf(nodes))
+	if nodes := runNodes(t, env, run.ID); len(nodes) != 2 || nodes[1].QuestionID != nil {
+		t.Fatalf("visits = %v; the retried visit continues nothing", visitsOf(nodes))
+	}
+	if m := rig.snt.at(1).Message; !strings.HasPrefix(m, "go\n\n"+retriedNotice+"\n\n--- platform protocol ---\n") || strings.Contains(m, "this one") {
+		t.Fatalf("the retried visit's task:\n%s", m)
 	}
 }
 

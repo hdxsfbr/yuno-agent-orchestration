@@ -370,6 +370,27 @@ func CountNodeLoopVisits(ctx context.Context, q Querier, runID, nodeID string) (
 	return n, err
 }
 
+// MarkStepRetried marks the step's latest visit retried_at when the operator retries the run
+// from that step (DESIGN 5.21 rule 4, D-093): the questions and tool approvals of the visits
+// up to it belong to attempts the retry replaced. A step with no visit has nothing to mark.
+func MarkStepRetried(ctx context.Context, q Querier, runID, nodeID string, at time.Time) error {
+	_, err := q.Exec(ctx, `UPDATE run_nodes SET retried_at=$3 WHERE id = (SELECT id FROM run_nodes
+		WHERE run_id=$1 AND node_id=$2 ORDER BY visit DESC LIMIT 1)`, runID, nodeID, at.UTC())
+	return err
+}
+
+// StepRetried reports whether the operator retried the run from the step and no visit of
+// the step has succeeded since (D-093): the visits of the retried attempt, its first, the
+// ones that replace it after a restart and the continuations after its questions, whose task
+// says the step was retried. A parked visit, closed succeeded without a result, has not.
+func StepRetried(ctx context.Context, q Querier, runID, nodeID string) (bool, error) {
+	var retried bool
+	err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM run_nodes r WHERE r.run_id=$1 AND r.node_id=$2 AND r.retried_at IS NOT NULL
+		AND NOT EXISTS (SELECT 1 FROM run_nodes s WHERE s.run_id=$1 AND s.node_id=$2 AND s.visit > r.visit
+		                AND s.status=$3 AND s.parked_at IS NULL))`, runID, nodeID, NodeSucceeded).Scan(&retried)
+	return retried, err
+}
+
 // SetApprovalExternalID stores the gateway's id for an approval registered with it.
 func SetApprovalExternalID(ctx context.Context, q Querier, id, externalID string) error {
 	_, err := q.Exec(ctx, `UPDATE approvals SET external_id=$2 WHERE id=$1`, id, externalID)

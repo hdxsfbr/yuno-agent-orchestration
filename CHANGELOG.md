@@ -5,6 +5,9 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- Retrying a step starts it fresh: answers you gave the failed attempt are not replayed.
+  Neither are your decisions on its tool approvals. The retried step is told you retried
+  it after it failed, and it may ask you its questions again.
 - A step interrupted by a platform restart, or retried, gets its checkout back. A step whose
   starting code cannot be found stops before the agent starts and says why, instead of
   running without it.

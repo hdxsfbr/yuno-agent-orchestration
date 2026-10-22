@@ -4,6 +4,41 @@ Newest first. Each entry says what was decided, by whom, and why. Design rules t
 refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR under
 `docs/adr/`.
 
+## 2026-10-22
+
+**D-093 A Retry starts the failed step afresh: the answers and tool outcomes its failed
+attempt was given are not replayed, and the retried visit is told the operator retried the
+step.** (Andre, 2026-10-22, after run 01a160c8: its documentation audit found the checkout
+missing and asked the operator, who answered "Stop this ticket"; the agent escalated and
+the run failed. Once D-092 fixed the checkout the operator pressed Retry, and the retried
+audit's task still said "The operator answered: Stop this ticket", so the agent escalated
+again at once.) The retried visit was not a continuation (its `question_id` was empty): the
+answer paragraph of DESIGN 5.24 rule 7 listed every decided question of the step in the
+run, whichever visit asked it, and the rule said a retried visit carries it. A decision
+that landed as a run ended, before its continuation started, also made the retried visit a
+continuation of it, with the answer or the tool outcome in its task. Now the Retry marks
+the latest visit of each step it runs again (`run_nodes.retried_at`, in its transaction),
+and the step's questions and tool approvals raised by that visit or an earlier one are left
+out of the answer paragraph, of the continuation lookup and of the step's 3-question count,
+so the retried step may ask again; their rows stay on the run page as decided. Earlier
+passes of the step through a loop are left out too: what their answers led to is already in
+the run's state and checkout, which the retry keeps, and one cut-off per step is what the
+operator can see and reason about. The retried
+visit's task gains one sentence, "The operator retried this step after it failed; work on
+the step again.", kept in the visits of that attempt until one succeeds. Not a retry, and
+unchanged: a continuation after a parked question or tool approval (5.24 rule 5, D-085),
+which carries its decision; a visit that replaces one an api restart interrupted (the same
+attempt), which carries the answers given before the restart; a loop revisit. A step
+retried after `question unanswered` no longer lists the expired question either. A retry
+whose answered question was never continued now counts the retried visit toward
+`max_loop_visits` like any fresh visit. Alternatives rejected: dropping only the answers of
+the failed visit itself (the failed attempt spans its continuations and restart
+replacements, as on run 01a160c8, whose question was asked by a replacement visit); telling
+the agent to ignore earlier answers while still listing them (the agent would read them
+anyway); clearing the answers from the approval rows (the operator's record of what was
+asked and answered would be lost). Design: DESIGN 5.21 rule 4, 5.24 rules 2, 5, 7, 8 and
+10, 5.3 rule 5, 5.26 rule 9.
+
 ## 2026-10-21
 
 **D-092 A step that replaces an interrupted or failed attempt gets its checkout from the

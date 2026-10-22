@@ -830,12 +830,14 @@ func TestRetryRule4ResumesAtTheFailedNode(t *testing.T) {
 	if got := f.found("two#2"); got != "draft by one | half a review" {
 		t.Fatalf("visit 2 of two started with %q", got)
 	}
-	// The task text is the same.
+	// The task text is the same, with the sentence that says the step was retried (D-093).
 	f.mu.Lock()
 	two := f.messages["two"]
 	f.mu.Unlock()
-	if len(two) != 2 || maskToken(two[0]) != maskToken(two[1]) || !strings.Contains(two[1], `Context from earlier nodes:`) {
-		t.Fatalf("task messages of two differ:\n%q", two)
+	const protocol = "\n\n--- platform protocol ---\n"
+	if len(two) != 2 || maskToken(two[0]) != strings.Replace(maskToken(two[1]), "\n\n"+retriedNotice+protocol, protocol, 1) ||
+		!strings.Contains(two[1], `Context from earlier nodes:`) || !strings.Contains(two[1], retriedNotice+protocol) {
+		t.Fatalf("task messages of two differ by more than the retry sentence:\n%q", two)
 	}
 	// Two root spans: the first attempt's ended with its failure, the retry's carries the
 	// number; nothing stays open.
