@@ -1,7 +1,22 @@
 import { useState, type ReactNode } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { ApiError, cancelRun, delegatedConversationId, isDelegatedRun, isTerminalStatus, issueRef, retryRun, type Approval, type Run, type RunBranch, type ToolCall } from "@/lib/api";
+import {
+  ApiError,
+  cancelRun,
+  delegatedConversationId,
+  isDelegatedRun,
+  isTerminalStatus,
+  issueRef,
+  pauseRun,
+  resumeRun,
+  retryRun,
+  steerRun,
+  type Approval,
+  type Run,
+  type RunBranch,
+  type ToolCall,
+} from "@/lib/api";
 import { elapsedMs, formatCount, formatDateTime, formatDuration, formatMicros, shortId } from "@/lib/format";
 import { requestNoun, requestRef } from "@/lib/mergeRequest";
 import { shipRunRef } from "@/lib/plan";
@@ -12,6 +27,7 @@ import { forkProgress } from "@/lib/trace";
 import type { Connection } from "@/lib/useEventStream";
 import Button from "../Button";
 import { Card } from "../Card";
+import { control } from "../fields";
 import ConnectionIndicator from "../ConnectionIndicator";
 import { Badge, RunStatusBadge } from "../Badge";
 import PlanWaveLink from "../project/PlanWaveLink";
@@ -108,8 +124,30 @@ export default function RunHeader({ run, connection, now, toolCalls = [], approv
       if (err instanceof ApiError && err.status === 409 && err.code === "limits_exhausted") setLimitsRefusal(err);
     },
   });
+  const pause = useMutation({ mutationFn: () => pauseRun(run.id), onSuccess: onRunChange });
+  const [note, setNote] = useState("");
+  const resume = useMutation({
+    mutationFn: () => resumeRun(run.id, note),
+    onSuccess: (next: Run) => {
+      setNote("");
+      pause.reset();
+      onRunChange(next);
+    },
+  });
+  const [steering, setSteering] = useState(false);
+  const [message, setMessage] = useState("");
+  const steer = useMutation({
+    mutationFn: () => steerRun(run.id, message.trim()),
+    onSuccess: (next: Run) => {
+      setMessage("");
+      setSteering(false);
+      onRunChange(next);
+    },
+  });
   const terminal = isTerminalStatus(run.status);
   const requested = cancel.isSuccess || !!run.cancel_requested;
+  const paused = run.status === "paused";
+  const live = run.status === "running";
   const duration = elapsedMs(run.started_at, run.finished_at, now);
   const retries = run.retries ?? 0;
   const retryError = retry.error && !limitsRefusal ? retry.error : null;
@@ -151,16 +189,80 @@ export default function RunHeader({ run, connection, now, toolCalls = [], approv
                 </Button>
               ) : null
             ) : (
-              <Button variant="danger" onClick={() => cancel.mutate()} disabled={requested || cancel.isPending}>
-                {cancel.isPending ? "Cancelling…" : requested ? "Cancel requested" : "Cancel run"}
-              </Button>
+              <>
+                {paused ? (
+                  <>
+                    <input
+                      aria-label="Note for the step"
+                      placeholder="Note for the step (optional)"
+                      value={note}
+                      maxLength={2000}
+                      onChange={(e) => setNote(e.target.value)}
+                      className={control(false, "!w-56")}
+                    />
+                    <Button variant="primary" onClick={() => resume.mutate()} disabled={resume.isPending || requested} title="Continue the step it was paused in">
+                      {resume.isPending ? "Resuming…" : "Resume"}
+                    </Button>
+                  </>
+                ) : !requested && (live || run.status === "queued") ? (
+                  <Button onClick={() => pause.mutate()} disabled={pause.isPending} title="Stop the step's turn and hold the run until it is resumed">
+                    {pause.isPending ? "Pausing…" : "Pause"}
+                  </Button>
+                ) : null}
+                {live && !requested ? (
+                  <Button onClick={() => setSteering((open) => !open)} aria-expanded={steering} title="Send a message into the running step">
+                    Steer
+                  </Button>
+                ) : null}
+                <Button variant="danger" onClick={() => cancel.mutate()} disabled={requested || cancel.isPending}>
+                  {cancel.isPending ? "Cancelling…" : requested ? "Cancel requested" : "Cancel run"}
+                </Button>
+              </>
             )}
           </div>
         </div>
 
+        {steering && live && !requested ? (
+          <form
+            className="mt-3 flex flex-col gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              steer.mutate();
+            }}
+          >
+            <label htmlFor="steer-message" className="text-sm font-medium">
+              Message to the running step
+            </label>
+            <textarea id="steer-message" rows={3} maxLength={4000} value={message} onChange={(e) => setMessage(e.target.value)} className={control()} />
+            <div className="flex gap-2">
+              <Button type="submit" variant="primary" disabled={!message.trim() || steer.isPending}>
+                {steer.isPending ? "Sending…" : "Send"}
+              </Button>
+              <Button onClick={() => setSteering(false)}>Close</Button>
+            </div>
+          </form>
+        ) : null}
+        {steer.isSuccess && live ? <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-400">Sent to the running step.</p> : null}
+        {pause.isSuccess && live ? <p className="mt-3 text-sm text-zinc-600 dark:text-zinc-400">Pause requested: the run pauses once its step stops.</p> : null}
+
         {cancel.error ? (
           <div className="mt-3">
             <InlineError>Could not cancel the run: {errorText(cancel.error)}</InlineError>
+          </div>
+        ) : null}
+        {pause.error ? (
+          <div className="mt-3">
+            <InlineError>Could not pause the run: {errorText(pause.error)}</InlineError>
+          </div>
+        ) : null}
+        {resume.error ? (
+          <div className="mt-3">
+            <InlineError>Could not resume the run: {errorText(resume.error)}</InlineError>
+          </div>
+        ) : null}
+        {steer.error ? (
+          <div className="mt-3">
+            <InlineError>Could not send the message: {errorText(steer.error)}</InlineError>
           </div>
         ) : null}
         {retryError ? (
@@ -199,7 +301,7 @@ export default function RunHeader({ run, connection, now, toolCalls = [], approv
           <Item label="Created">{formatDateTime(run.created_at)}</Item>
           <Item label="Started">{formatDateTime(run.started_at)}</Item>
           <Item label="Finished">{formatDateTime(run.finished_at)}</Item>
-          <Item label="Duration" title={run.paused_total_ms ? `Includes ${formatDuration(run.paused_total_ms)} waiting for approval` : undefined}>
+          <Item label="Duration" title={run.paused_total_ms ? `Includes ${formatDuration(run.paused_total_ms)} waiting for approval or paused` : undefined}>
             {formatDuration(duration)}
           </Item>
           <Item label="Steps">{formatCount(run.step_count)}</Item>

@@ -83,6 +83,11 @@ type SessionRow struct {
 	CreatedVia  string         `json:"createdVia,omitempty"`
 	Origin      *SessionOrigin `json:"origin,omitempty"`
 	UpdatedAt   int64          `json:"updatedAt,omitempty"`
+	// HasActiveRun says a run of the session is in progress [probed: the session snapshot of
+	// session.message carries it]; ActiveRunIDs lists those runs ([docs]
+	// gateway/protocol/rpc-session-control.md; the probe saw the field null).
+	HasActiveRun bool     `json:"hasActiveRun,omitempty"`
+	ActiveRunIDs []string `json:"activeRunIds,omitempty"`
 }
 
 // SessionsList returns the gateway's sessions.
@@ -92,6 +97,35 @@ func SessionsList(ctx context.Context, c Client) ([]SessionRow, error) {
 	}
 	err := CallAs(ctx, c, "sessions.list", map[string]any{}, &out)
 	return out.Sessions, err
+}
+
+// RunActive reports whether the gateway shows the turn runID still running in the session
+// (DESIGN W2 rule 11): its sessions.list row has an active run, and that run is the turn, or
+// the row names no run ids to tell. A session the list does not hold has no active run (it
+// ended, or was deleted).
+func RunActive(ctx context.Context, c Client, sessionKey, runID string) (bool, error) {
+	rows, err := SessionsList(ctx, c)
+	if err != nil {
+		return false, err
+	}
+	for _, r := range rows {
+		if r.Key != sessionKey {
+			continue
+		}
+		if !r.HasActiveRun {
+			return false, nil
+		}
+		if len(r.ActiveRunIDs) == 0 || runID == "" {
+			return true, nil
+		}
+		for _, id := range r.ActiveRunIDs {
+			if id == runID {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	return false, nil
 }
 
 // SessionsChangedEvent is the payload of sessions.changed. The gateway sends the key as

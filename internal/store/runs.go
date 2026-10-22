@@ -21,7 +21,7 @@ const runColumns = `id, workflow_id, workflow_version, workflow_snapshot, trigge
 	limits, current_node, resume_node_visit_id, step_count, tool_call_count, attempt, cancel_requested, cancel_by,
 	failure_reason, cost_usd_micros, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, paused_at,
 	paused_total_ms, created_at, started_at, finished_at, updated_at, reported_at, toolchain, project_id, project_snapshot, retries,
-	merge_request_id, checkout_sha, merged_sha`
+	merge_request_id, checkout_sha, merged_sha, lease_epoch, cancel_state`
 
 // Constraint names of the partial unique indexes that refuse a second live run for the
 // same merge request (DESIGN 5.22 rule 1) or the same issue (5.23 rule 3).
@@ -155,11 +155,12 @@ func GetRunForUpdate(ctx context.Context, q Querier, id string) (*Run, error) {
 // the run's limits. now stamps updated_at. A retry re-enters the two live-run indexes
 // (DESIGN 5.22 rule 1, 5.23 rule 3): ErrMergeRequestBusy when another live run names the
 // same merge request, ErrIssueBusy when another live run exists for the same issue; the
-// run stays as it was.
+// run stays as it was. The move to queued increments the lease epoch (DESIGN W2 rule 7).
 func RetryRun(ctx context.Context, q Querier, id string, limits *Limits, now time.Time) (*Run, error) {
 	rows, err := q.Query(ctx, `UPDATE runs SET status=$2, retries=retries+1, attempt=1, failure_reason=NULL,
 		finished_at=NULL, cancel_requested=false, cancel_by=NULL, resume_node_visit_id=NULL, reported_at=NULL,
-		started_at=NULL, paused_at=NULL, paused_total_ms=0, limits=COALESCE($3::jsonb, limits), updated_at=$4
+		started_at=NULL, paused_at=NULL, paused_total_ms=0, limits=COALESCE($3::jsonb, limits), updated_at=$4,
+		lease_epoch=lease_epoch+1
 		WHERE id=$1 AND status IN ($5, $6, $7) RETURNING `+runColumns,
 		id, RunQueued, limits, now.UTC(), RunFailed, RunTimedOut, RunCancelled)
 	if err != nil {
@@ -215,8 +216,11 @@ func ListRuns(ctx context.Context, q Querier, f RunFilter) ([]Run, error) {
 // 5.21 rule 2) comes back with started_at cleared and keeps it empty here: the engine
 // stamps it from its injected clock as the run starts (runRun), so the time limit
 // restarts from that instant exactly as it does for a run claimed the first time.
+//
+// The claim increments the run's lease epoch (DESIGN W2 rule 7): the returned row carries
+// the epoch the worker's writes are fenced with.
 func ClaimQueuedRun(ctx context.Context, pool *pgxpool.Pool) (*Run, error) {
-	rows, err := pool.Query(ctx, `UPDATE runs SET status=$1,
+	rows, err := pool.Query(ctx, `UPDATE runs SET status=$1, lease_epoch=lease_epoch+1,
 		started_at=CASE WHEN retries = 0 THEN COALESCE(started_at, now()) ELSE started_at END, updated_at=now()
 		WHERE id = (SELECT id FROM runs WHERE status=$2 ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
 		RETURNING `+runColumns, RunRunning, RunQueued)
@@ -254,12 +258,18 @@ func RequestCancel(ctx context.Context, q Querier, id, by string) error {
 	return nil
 }
 
-// AddRunUsage increments counters and tokens in one statement (DESIGN 5.2 consistency).
+// AddRunUsage increments counters and tokens in one statement (DESIGN 5.2 consistency),
+// fenced by the worker's lease (DESIGN W2 rule 8).
 func AddRunUsage(ctx context.Context, q Querier, id string, steps, toolCalls int, in, out, cacheRead, cacheWrite, costMicros int64) error {
-	_, err := q.Exec(ctx, `UPDATE runs SET step_count=step_count+$2, tool_call_count=tool_call_count+$3,
+	l := fence(ctx, id)
+	_, epoch := fenceArgs(l)
+	tag, err := q.Exec(ctx, `UPDATE runs SET step_count=step_count+$2, tool_call_count=tool_call_count+$3,
 		input_tokens=input_tokens+$4, output_tokens=output_tokens+$5, cache_read_tokens=cache_read_tokens+$6,
-		cache_write_tokens=cache_write_tokens+$7, cost_usd_micros=cost_usd_micros+$8, updated_at=now() WHERE id=$1`,
-		id, steps, toolCalls, in, out, cacheRead, cacheWrite, costMicros)
+		cache_write_tokens=cache_write_tokens+$7, cost_usd_micros=cost_usd_micros+$8, updated_at=now() WHERE id=$1 AND `+runFence("$9"),
+		id, steps, toolCalls, in, out, cacheRead, cacheWrite, costMicros, epoch)
+	if err == nil && tag.RowsAffected() == 0 {
+		return lostOr(ctx, q, l, nil)
+	}
 	return err
 }
 
@@ -275,26 +285,45 @@ func PauseRun(ctx context.Context, q Querier, id string, resumeNodeVisitID strin
 	return err
 }
 
-// ResumeRun re-queues a paused run and accumulates the paused time.
+// ResumeRun re-queues a paused run and accumulates the paused time; the move to queued
+// increments the lease epoch (DESIGN W2 rule 7).
 func ResumeRun(ctx context.Context, q Querier, id string) error {
-	_, err := q.Exec(ctx, `UPDATE runs SET status=$2,
+	_, err := q.Exec(ctx, `UPDATE runs SET status=$2, lease_epoch=lease_epoch+1,
 		paused_total_ms = paused_total_ms + COALESCE(EXTRACT(EPOCH FROM (now() - paused_at)) * 1000, 0)::bigint,
 		paused_at=NULL, updated_at=now() WHERE id=$1 AND status=$3`, id, RunQueued, RunWaitingApproval)
 	return err
 }
 
+// staleTurnsSQL marks the turns a lost worker may have left running (DESIGN W2 rule 12): the
+// unfinished agent visits of the swept runs (the CTE stale) that recorded a turn and are not
+// parked. The runs with one get cancel_state unconfirmed in the same statement.
+const staleTurnsSQL = `turns AS (
+		UPDATE run_nodes SET turn_unconfirmed = true
+		WHERE run_id IN (SELECT id FROM stale) AND agent_id IS NOT NULL AND openclaw_run_id IS NOT NULL
+		  AND finished_at IS NULL AND parked_at IS NULL AND status IN ('pending', 'running', 'waiting_approval')
+		RETURNING run_id)`
+
 // RequeueStaleRuns implements DESIGN 5.1 rule 8: running runs untouched for longer than
-// staleAfter are re-queued once (attempt 2) and failed on the second detection.
+// staleAfter are re-queued once (attempt 2) and failed on the second detection. The sweep is
+// the leases' expiry (DESIGN W2 rule 7): both moves increment the epoch, so the lost
+// worker's late writes are refused, and a run whose last turn may still run gets
+// cancel_state unconfirmed for it (rule 12).
 func RequeueStaleRuns(ctx context.Context, q Querier, staleAfter time.Duration) (requeued, failed int64, err error) {
 	cutoff := time.Now().UTC().Add(-staleAfter)
-	tag, err := q.Exec(ctx, `UPDATE runs SET status=$1, attempt=attempt+1, updated_at=now()
-		WHERE status=$2 AND updated_at < $3 AND attempt < 2`, RunQueued, RunRunning, cutoff)
+	tag, err := q.Exec(ctx, `WITH stale AS (SELECT id FROM runs WHERE status=$2 AND updated_at < $3 AND attempt < 2 FOR UPDATE),
+		`+staleTurnsSQL+`
+		UPDATE runs SET status=$1, attempt=attempt+1, lease_epoch=lease_epoch+1, updated_at=now(),
+			cancel_state = CASE WHEN id IN (SELECT run_id FROM turns) THEN $4 ELSE cancel_state END
+		WHERE id IN (SELECT id FROM stale)`, RunQueued, RunRunning, cutoff, CancelUnconfirmed)
 	if err != nil {
 		return 0, 0, err
 	}
 	requeued = tag.RowsAffected()
-	tag, err = q.Exec(ctx, `UPDATE runs SET status=$1, failure_reason='worker lost', finished_at=now(), updated_at=now()
-		WHERE status=$2 AND updated_at < $3 AND attempt >= 2`, RunFailed, RunRunning, cutoff)
+	tag, err = q.Exec(ctx, `WITH stale AS (SELECT id FROM runs WHERE status=$2 AND updated_at < $3 AND attempt >= 2 FOR UPDATE),
+		`+staleTurnsSQL+`
+		UPDATE runs SET status=$1, failure_reason='worker lost', finished_at=now(), updated_at=now(), lease_epoch=lease_epoch+1,
+			cancel_state = CASE WHEN id IN (SELECT run_id FROM turns) THEN $4 ELSE cancel_state END
+		WHERE id IN (SELECT id FROM stale)`, RunFailed, RunRunning, cutoff, CancelUnconfirmed)
 	if err != nil {
 		return requeued, 0, err
 	}
@@ -303,9 +332,13 @@ func RequeueStaleRuns(ctx context.Context, q Querier, staleAfter time.Duration) 
 
 // ---- run nodes --------------------------------------------------------------------
 
-const runNodeColumns = `id, run_id, node_id, agent_id, visit, iteration, status, messages, pending_tool_results, output,
+// runNodeInsertColumns are the columns CreateRunNode writes; runNodeColumns adds the
+// recovery columns (DESIGN W2) a visit row reads back.
+const runNodeInsertColumns = `id, run_id, node_id, agent_id, visit, iteration, status, messages, pending_tool_results, output,
 	failure_reason, session_key, openclaw_run_id, started_at, finished_at, question_id, parked_at, branch_id,
 	workspace_dir, repo_sha`
+
+const runNodeColumns = runNodeInsertColumns + `, park_reason, resumed_at, resume_note, start_sha, retry_from_at, turn_unconfirmed`
 
 func CreateRunNode(ctx context.Context, q Querier, n *RunNode) error {
 	if n.ID == "" {
@@ -326,7 +359,7 @@ func CreateRunNode(ctx context.Context, q Querier, n *RunNode) error {
 	if len(n.Output) == 0 {
 		n.Output = json.RawMessage(`null`)
 	}
-	_, err := q.Exec(ctx, `INSERT INTO run_nodes (`+runNodeColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+	_, err := q.Exec(ctx, `INSERT INTO run_nodes (`+runNodeInsertColumns+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
 		n.ID, n.RunID, n.NodeID, n.AgentID, n.Visit, n.Iteration, n.Status, n.Messages, n.PendingToolResults, n.Output,
 		n.FailureReason, n.SessionKey, n.OpenClawRunID, n.StartedAt, n.FinishedAt, n.QuestionID, n.ParkedAt, n.BranchID,
 		n.WorkspaceDir, n.RepoSHA)
@@ -340,10 +373,36 @@ func SetRunNodeWorkspace(ctx context.Context, q Querier, id, dir string) error {
 	return err
 }
 
-// SetRunNodeRepoSHA records the run repository commit a visit's checkout is at (DESIGN
-// 5.30 rule 4): the one it starts from, then the one it ends at.
+// SetRunNodeRepoSHA records the run repository commit a visit's checkout ended at (DESIGN
+// 5.30 rule 4), fenced by the worker's lease (DESIGN W2 rule 8).
 func SetRunNodeRepoSHA(ctx context.Context, q Querier, id, sha string) error {
-	_, err := q.Exec(ctx, `UPDATE run_nodes SET repo_sha=$2 WHERE id=$1`, id, sha)
+	l := LeaseOf(ctx)
+	r, e := fenceArgs(l)
+	tag, err := q.Exec(ctx, `UPDATE run_nodes SET repo_sha=$2 WHERE id=$1 AND `+childFence("run_id", "$3", "$4"), id, sha, r, e)
+	if err == nil && tag.RowsAffected() == 0 {
+		return lostOr(ctx, q, l, nil)
+	}
+	return err
+}
+
+// SetRunNodeStartSHA records the commit a visit's checkout starts from (DESIGN 5.30 rule 4):
+// start_sha, kept for a retry from the step (DESIGN W2 rule 17), and repo_sha, which the
+// visit's end replaces. Fenced like SetRunNodeRepoSHA.
+func SetRunNodeStartSHA(ctx context.Context, q Querier, id, sha string) error {
+	l := LeaseOf(ctx)
+	r, e := fenceArgs(l)
+	tag, err := q.Exec(ctx, `UPDATE run_nodes SET start_sha=$2, repo_sha=$2 WHERE id=$1 AND `+childFence("run_id", "$3", "$4"), id, sha, r, e)
+	if err == nil && tag.RowsAffected() == 0 {
+		return lostOr(ctx, q, l, nil)
+	}
+	return err
+}
+
+// MarkTurnUnconfirmed records that a visit's turn was not confirmed stopped (DESIGN W2 rule
+// 11): the reconcile pass checks it until the gateway shows no active run for it. Not fenced:
+// it is a record of what happened, written also after the lease is gone.
+func MarkTurnUnconfirmed(ctx context.Context, q Querier, id string) error {
+	_, err := q.Exec(ctx, `UPDATE run_nodes SET turn_unconfirmed=true WHERE id=$1`, id)
 	return err
 }
 

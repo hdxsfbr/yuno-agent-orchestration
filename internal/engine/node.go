@@ -11,8 +11,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -183,6 +185,20 @@ type visit struct {
 	// outcome as for a question's answer. The value is the decision once it reached the
 	// live visit (toolSettled), nil before.
 	parkedTools map[string]*store.Approval
+
+	// Recovery (DESIGN W2). lease is the worker's lease on the run, read from the context the
+	// visit runs in: once a fenced write finds it gone the visit stops itself (rule 9).
+	// cmdWake says a command waits (the api woke the visit, rule 5) and cmdReadAt is when the
+	// visit last read its run's pending commands. pausing is the pause the visit is carrying
+	// out (rule 14), steers the operator's messages taken and not yet delivered (rule 18), and
+	// unconfirmed says the turn's stop was not confirmed (rule 11). All but cmdWake are owned
+	// by the visit goroutine.
+	lease       *store.Lease
+	cmdWake     atomic.Bool
+	cmdReadAt   time.Time
+	pausing     *store.RunCommand
+	steers      []*steerMsg
+	unconfirmed bool
 }
 
 // SessionKey is the node-scoped OpenClaw session of a visit (DESIGN 5.14 rule 5). It
@@ -207,6 +223,7 @@ func (e *Engine) newVisit(ctx context.Context, run *store.Run, node *workflow.No
 		openCalls: map[string]*openCall{},
 		calls:     make(chan func()), loopDone: make(chan struct{}),
 		lastTouch: time.Now(), lastEventAt: time.Now(),
+		lease: store.LeaseOf(ctx),
 	}
 	v.cancelCtx, v.cancelSignal = context.WithCancel(context.Background())
 	prior, err := store.CountNodeVisits(ctx, e.deps.Pool, run.ID, node.ID)
@@ -262,6 +279,11 @@ func (v *visit) execute(ctx context.Context) outcome {
 	if v.early != nil {
 		return *v.early
 	}
+	// The setup (materialise, clone, sandbox, the first send) has a heartbeat of its own until
+	// the event loop's tick takes over: the heartbeat renews the lease (DESIGN W2 rule 8), and
+	// a long setup must not read as a silent worker.
+	stopBeat := v.setupHeartbeat(ctx)
+	defer stopBeat()
 	e := v.e
 	gw := e.deps.Gateway
 	if gw == nil {
@@ -338,7 +360,44 @@ func (v *visit) execute(ctx context.Context) outcome {
 	if res := v.startTurn(ctx, msg); res != nil {
 		return *res
 	}
+	stopBeat()
 	return v.loop(ctx)
+}
+
+// setupHeartbeat writes the visit's heartbeat, with the run's updated_at under the lease,
+// every heartbeat interval until the returned stop is called (the event loop's start) or ctx
+// ends. A lease found gone stops it; the visit reads the lease before its turn.
+func (v *visit) setupHeartbeat(ctx context.Context) (stop func()) {
+	done, stopped := make(chan struct{}), make(chan struct{})
+	e, runID, visitID, log := v.e, v.run.ID, v.rn.ID, v.log
+	go func() {
+		defer close(stopped)
+		t := time.NewTicker(e.heartbeat)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			err := store.TouchRunNode(context.WithoutCancel(ctx), e.deps.Pool, runID, visitID, e.clock.Now())
+			if errors.Is(err, store.ErrLeaseLost) {
+				return
+			}
+			if err != nil {
+				log.Warn("setup heartbeat failed", "error", err)
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+			<-stopped
+		})
+	}
 }
 
 // setupContext bounds one setup RPC (materialisation, sessions.patch, subscribe) by the
@@ -449,7 +508,7 @@ func (v *visit) prepareRunDir(ctx context.Context) error {
 	if v.startSHA != "" {
 		// A visit that fails before its checkout is made, a failed copy included, names the
 		// commit it would have started from, so the next attempt starts there too.
-		v.setRepoSHA(ctx, v.startSHA)
+		v.setStartSHA(ctx, v.startSHA)
 	}
 	if err := openclaw.EnsureRunDirAt(ws, v.run.ID); err != nil {
 		v.log.Warn("create run directory failed", "error", err)
@@ -471,6 +530,15 @@ func (v *visit) setRepoSHA(ctx context.Context, sha string) {
 		v.log.Warn("record the checkout commit failed", "error", err)
 	}
 	v.rn.RepoSHA = &sha
+}
+
+// setStartSHA records the commit the visit's checkout starts from: its start (kept for a
+// retry from the step, DESIGN W2 rule 17) and, until the visit ends, the commit it is at.
+func (v *visit) setStartSHA(ctx context.Context, sha string) {
+	if err := store.SetRunNodeStartSHA(context.WithoutCancel(ctx), v.e.deps.Pool, v.rn.ID, sha); err != nil {
+		v.log.Warn("record the checkout commit failed", "error", err)
+	}
+	v.rn.RepoSHA, v.rn.StartSHA = &sha, &sha
 }
 
 // carrySource is one earlier visit the carry rules name: the OpenClaw agent id, the visit
@@ -565,7 +633,7 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 			return &o
 		}
 		v.startSHA, v.checkout = sha, true
-		v.setRepoSHA(ctx, sha)
+		v.setStartSHA(ctx, sha)
 		// A run on a merge request starts from its branch with the default branch merged in
 		// (DESIGN 5.22 rule 13); the agents resolve what conflicts.
 		var merged project.PreMerge
@@ -585,7 +653,7 @@ func (v *visit) prepareProject(ctx context.Context) *outcome {
 			}
 			if merged.Commit != "" {
 				v.startSHA = merged.Commit
-				v.setRepoSHA(ctx, merged.Commit)
+				v.setStartSHA(ctx, merged.Commit)
 			}
 			v.conflicts = merged.Conflicts
 		}
@@ -912,6 +980,12 @@ func (v *visit) startTurn(ctx context.Context, message string) *outcome {
 	v.rn.OpenClawRunID = &v.runID
 	v.saveNode(ctx)
 	clear(v.openCalls) // an earlier turn's calls ended with it
+	// Operator messages that did not reach the turn they were sent into, or came while no
+	// turn ran, open this one (DESIGN W2 rule 18).
+	carried := slices.Clone(v.steers)
+	if len(carried) > 0 {
+		message += "\n\n" + v.steerText()
+	}
 	var lastErr error
 	for attempt := 1; attempt <= maxSendAttempts; attempt++ {
 		if res := v.preflight(ctx); res != nil {
@@ -931,6 +1005,7 @@ func (v *visit) startTurn(ctx context.Context, message string) *outcome {
 			}
 			e.logEvent(ctx, v.run.ID, "info", fmt.Sprintf("turn %d started", v.turn), "openclaw_run_id", v.runID)
 			v.progressAt = e.clock.Now()
+			v.steersOpened(ctx, carried)
 			if r.Status == "ok" {
 				// The gateway deduplicated the key: the run already happened (a retry after a
 				// lost response). Its events are gone, so read the outcome from the history.
@@ -965,8 +1040,12 @@ func (v *visit) startTurn(ctx context.Context, message string) *outcome {
 	return &o
 }
 
-// preflight re-reads the run and refuses to start a turn past a limit.
+// preflight re-reads the run and refuses to start a turn past a limit, or for a worker that
+// lost its lease (DESIGN W2 rule 9).
 func (v *visit) preflight(ctx context.Context) *outcome {
+	if v.lease.Lost() {
+		return &outcome{leaseLost: true}
+	}
 	if run, err := v.e.readRun(ctx, v.run.ID); err == nil {
 		v.run = run
 	}
@@ -1024,7 +1103,16 @@ func (v *visit) loop(ctx context.Context) outcome {
 	t := time.NewTicker(v.e.tickInterval)
 	defer t.Stop()
 	for v.result == nil {
+		// A fenced write found the lease gone: the run is another worker's (DESIGN W2 rule 9).
+		if v.lease.Lost() {
+			return v.selfFence(ctx)
+		}
 		v.recordEvidence(ctx)
+		if v.commandsDue() {
+			if v.commands(ctx); v.result != nil {
+				break
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return outcome{interrupted: true}
@@ -1192,6 +1280,8 @@ func (v *visit) onTranscript(ctx context.Context, raw json.RawMessage, messageID
 	case "toolResult":
 		delete(v.openCalls, h.ToolCallID)
 		v.toolResult(ctx, h)
+	case "user":
+		v.steerSeen(ctx, h) // an operator's message reached the turn (DESIGN W2 rule 18)
 	}
 }
 
@@ -1838,6 +1928,14 @@ func (v *visit) turnFinal(ctx context.Context, ce openclaw.ChatEvent) {
 	if v.questionTurnEnd(ctx) {
 		return
 	}
+	// An operator's message the turn ended before taking opens the next turn (DESIGN W2 rule
+	// 18): the step goes on with it.
+	if len(v.steers) > 0 {
+		if res := v.startTurn(ctx, continueMessage); res != nil {
+			v.end(ctx, *res)
+		}
+		return
+	}
 	v.end(ctx, failed(store.RunFailed, "agent did not call finish"))
 }
 
@@ -1930,9 +2028,12 @@ func (v *visit) startAbort(ctx context.Context, o outcome) {
 	e := v.e
 	v.aborting = &o
 	v.abortAt = e.clock.Now()
-	if o.reason != "" {
+	switch {
+	case o.operatorPause:
+		e.logEvent(ctx, v.run.ID, "info", "pausing at the operator's request; stopping the turn", "node_id", v.node.ID)
+	case o.reason != "":
 		e.logEvent(ctx, v.run.ID, "warn", "stopping the turn: "+o.reason)
-	} else {
+	default:
 		e.logEvent(ctx, v.run.ID, "info", "finish was accepted; ending the turn")
 	}
 	if !v.turnLive {
@@ -2003,7 +2104,17 @@ func (v *visit) onTick(ctx context.Context) {
 	}
 	if v.aborting != nil {
 		if !e.clock.Now().Before(v.abortAt.Add(e.abortWait)) {
-			v.log.Warn("abort not confirmed in time; ending the visit")
+			// No terminal event in abortWait: the session check decides (DESIGN W2 rule 11).
+			switch {
+			case v.turnStopped(ctx):
+				v.turnLive = false
+			case v.aborting.operatorPause:
+				v.pauseUnconfirmed(ctx) // rule 14: the step goes on
+				return
+			default:
+				v.unconfirmed = true
+				v.log.Warn("abort not confirmed in time; ending the visit")
+			}
 			v.end(ctx, *v.aborting)
 		}
 		return
@@ -2290,6 +2401,14 @@ func (v *visit) finish(ctx context.Context, res outcome) {
 		v.sandboxHeld = false
 		e.releaseSandbox(ctx, v.ocID)
 	}
+	// A turn whose stop was not confirmed is the reconcile pass's to check (DESIGN W2 rule
+	// 11), and operator messages the visit did not deliver end with it (rule 18).
+	if v.unconfirmed {
+		if err := store.MarkTurnUnconfirmed(ctx, e.deps.Pool, v.rn.ID); err != nil {
+			v.log.Warn("record the unconfirmed turn failed", "error", err)
+		}
+	}
+	v.steersDropped(ctx)
 	if e.deps.Gateway != nil && v.sessionCreated {
 		if _, up := e.deps.Gateway.Info(); up {
 			v.reconcile(ctx)

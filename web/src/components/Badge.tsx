@@ -28,6 +28,7 @@ const statusTones: Record<Kind, Record<string, Tone>> = {
     queued: "zinc",
     running: "blue",
     waiting_approval: "amber",
+    paused: "amber",
     succeeded: "green",
     failed: "red",
     cancelled: "zinc",

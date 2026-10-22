@@ -92,7 +92,14 @@ type ChatSendParams struct {
 	Message        string `json:"message"`
 	IdempotencyKey string `json:"idempotencyKey"`
 	Deliver        bool   `json:"deliver,omitempty"`
+	// QueueMode "steer" injects the message into the session's active run at its next tool
+	// boundary instead of starting a turn ([docs] concepts/messages.md, tools/steer.md; not
+	// probed). Empty sends a turn as before.
+	QueueMode string `json:"queueMode,omitempty"`
 }
+
+// QueueSteer is ChatSendParams.QueueMode for a message steered into the active run.
+const QueueSteer = "steer"
 
 type ChatSendResult struct {
 	RunID  string `json:"runId"`

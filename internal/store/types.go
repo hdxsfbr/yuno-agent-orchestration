@@ -13,10 +13,13 @@ const (
 	RunQueued          = "queued"
 	RunRunning         = "running"
 	RunWaitingApproval = "waiting_approval"
-	RunSucceeded       = "succeeded"
-	RunFailed          = "failed"
-	RunCancelled       = "cancelled"
-	RunTimedOut        = "timed_out"
+	// RunPaused is a run the operator paused (DESIGN W2 rule 14): not terminal, no worker
+	// holds it, and a resume re-queues it.
+	RunPaused    = "paused"
+	RunSucceeded = "succeeded"
+	RunFailed    = "failed"
+	RunCancelled = "cancelled"
+	RunTimedOut  = "timed_out"
 )
 
 // Node statuses (DESIGN 5.1 rule 3).
@@ -308,9 +311,57 @@ type Run struct {
 	// on a merge request before its first turn (DESIGN 5.22 rule 13): the second parent of the
 	// run's next push, which clears it. Nil when nothing was merged.
 	MergedSHA *string `db:"merged_sha" json:"-"`
+	// LeaseEpoch is the run's worker lease (DESIGN W2 rule 7): every claim and every move to
+	// queued increments it, and a worker's writes carry the epoch it claimed with.
+	LeaseEpoch int64 `db:"lease_epoch" json:"-"`
+	// CancelState says whether the last turn of a stopped run is confirmed stopped (DESIGN
+	// W2 rules 11 to 13): "" when nothing was stopped, confirmed or unconfirmed.
+	CancelState string `db:"cancel_state" json:"cancel_state,omitempty"`
 	// AgentNames and Models are not columns; FillRunParticipants sets them for list views.
 	AgentNames []string `db:"-" json:"agent_names,omitempty"`
 	Models     []string `db:"-" json:"models,omitempty"`
+	// Command is the command a recovery request recorded (DESIGN W2 rule 2), set on the run
+	// the request answers with; not a column.
+	Command *RunCommand `db:"-" json:"command,omitempty"`
+}
+
+// Cancel states (DESIGN W2 rules 11 to 13).
+const (
+	CancelConfirmed   = "confirmed"
+	CancelUnconfirmed = "unconfirmed"
+)
+
+// Command kinds and outcomes (DESIGN W2 rule 1).
+const (
+	CommandCancel = "cancel"
+	CommandPause  = "pause"
+	CommandResume = "resume"
+	CommandRetry  = "retry"
+	CommandSteer  = "steer"
+
+	CommandPending    = "pending"
+	CommandApplied    = "applied"
+	CommandRejected   = "rejected"
+	CommandFailed     = "failed"
+	CommandSuperseded = "superseded"
+)
+
+// RunCommand is a request to stop, hold, restart or redirect a run, tracked from receipt to
+// its outcome (DESIGN W2 rules 1 to 6). NodeID is the step a steer names (or a retry starts
+// from); Payload the request's own fields; Actor who sent it.
+type RunCommand struct {
+	ID         string          `db:"id" json:"id"`
+	RunID      string          `db:"run_id" json:"run_id"`
+	Kind       string          `db:"kind" json:"kind"`
+	NodeID     *string         `db:"node_id" json:"node_id,omitempty"`
+	Payload    json.RawMessage `db:"payload" json:"payload"`
+	Actor      json.RawMessage `db:"actor" json:"actor"`
+	RequestID  string          `db:"request_id" json:"request_id,omitempty"`
+	ReceivedAt time.Time       `db:"received_at" json:"received_at"`
+	AckedAt    *time.Time      `db:"acked_at" json:"acked_at,omitempty"`
+	AppliedAt  *time.Time      `db:"applied_at" json:"applied_at,omitempty"`
+	Outcome    string          `db:"outcome" json:"outcome"`
+	Detail     string          `db:"detail" json:"detail,omitempty"`
 }
 
 type RunNode struct {
@@ -343,7 +394,21 @@ type RunNode struct {
 	// Not part of the contract.
 	WorkspaceDir *string `db:"workspace_dir" json:"-"`
 	RepoSHA      *string `db:"repo_sha" json:"-"`
+	// The recovery columns (DESIGN W2): ParkReason is "paused" for a visit the operator
+	// paused (rule 14), the only one in the contract. Not part of it: ResumedAt and ResumeNote
+	// say the visit was resumed and with what note (rule 15); StartSHA is the commit its
+	// checkout started from and RetryFromAt marks the visit a retry from its step rewinds to
+	// (rule 17); TurnUnconfirmed says its turn was not confirmed stopped (rules 11 and 12).
+	ParkReason      string     `db:"park_reason" json:"park_reason,omitempty"`
+	ResumedAt       *time.Time `db:"resumed_at" json:"-"`
+	ResumeNote      *string    `db:"resume_note" json:"-"`
+	StartSHA        *string    `db:"start_sha" json:"-"`
+	RetryFromAt     *time.Time `db:"retry_from_at" json:"-"`
+	TurnUnconfirmed bool       `db:"turn_unconfirmed" json:"-"`
 }
+
+// ParkPaused is run_nodes.park_reason of a visit the operator paused (DESIGN W2 rule 14).
+const ParkPaused = "paused"
 
 // RunBranch is one branch of a fork visit (DESIGN 5.26 rule 3): the part of the run that
 // started at one outgoing edge of the fork and runs at the same time as its siblings

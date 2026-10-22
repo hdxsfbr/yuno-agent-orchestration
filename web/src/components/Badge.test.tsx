@@ -15,6 +15,7 @@ describe("RunStatusBadge", () => {
     ["queued", "bg-zinc-100"],
     ["running", "bg-blue-100"],
     ["waiting_approval", "bg-amber-100"],
+    ["paused", "bg-amber-100"],
     ["succeeded", "bg-emerald-100"],
     ["failed", "bg-red-100"],
     ["cancelled", "bg-zinc-100"],

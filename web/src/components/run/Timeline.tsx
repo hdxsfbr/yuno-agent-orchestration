@@ -148,7 +148,9 @@ function NodeCard({ node, items, now, repeated, branch }: CardProps) {
         ) : null}
         <JsonView label="Output" value={node.output} defaultOpen />
         {items.length === 0 && !node.failure_reason && (node.output === undefined || node.output === null) ? (
-          <p className="text-sm text-zinc-500">{node.status === "waiting_approval" ? "Waiting for an approval." : running ? "Working…" : "No activity recorded."}</p>
+          <p className="text-sm text-zinc-500">
+            {node.status === "waiting_approval" ? (node.park_reason === "paused" ? "Paused by the operator." : "Waiting for an approval.") : running ? "Working…" : "No activity recorded."}
+          </p>
         ) : null}
       </div>
     </section>

@@ -101,13 +101,13 @@ func UpdateWorkflow(ctx context.Context, q Querier, w *Workflow) error {
 }
 
 // DeleteWorkflowIfIdle soft-deletes the workflow in one statement, only while it is still
-// at the given version and has no run queued, running or waiting for approval, so a run
+// at the given version and has no run queued, running, waiting for approval or paused, so a run
 // or an edit that starts between a caller's check and the delete cannot be lost. It
 // reports whether the row was deleted.
 func DeleteWorkflowIfIdle(ctx context.Context, q Querier, id string, version int) (bool, error) {
 	tag, err := q.Exec(ctx, `UPDATE workflows SET deleted_at=now() WHERE id=$1 AND version=$2 AND deleted_at IS NULL
-		AND NOT EXISTS (SELECT 1 FROM runs WHERE workflow_id = $1 AND status IN ($3, $4, $5))`,
-		id, version, RunQueued, RunRunning, RunWaitingApproval)
+		AND NOT EXISTS (SELECT 1 FROM runs WHERE workflow_id = $1 AND status IN ($3, $4, $5, $6))`,
+		id, version, RunQueued, RunRunning, RunWaitingApproval, RunPaused)
 	if err != nil {
 		return false, err
 	}

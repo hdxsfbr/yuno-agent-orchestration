@@ -437,6 +437,12 @@ func (s *Server) routes(modelTransport http.RoundTripper) error {
 	mux.HandleFunc("GET /api/runs/{id}", s.getRun)
 	mux.HandleFunc("POST /api/runs/{id}/cancel", s.cancelRun)
 	mux.HandleFunc("POST /api/runs/{id}/retry", s.retryRun)
+	// DESIGN W2: recovery commands and their status.
+	mux.HandleFunc("POST /api/runs/{id}/pause", s.pauseRun)
+	mux.HandleFunc("POST /api/runs/{id}/resume", s.resumeRun)
+	mux.HandleFunc("POST /api/runs/{id}/steer", s.steerRun)
+	mux.HandleFunc("GET /api/runs/{id}/commands", s.listRunCommands)
+	mux.HandleFunc("GET /api/runs/{id}/commands/{cid}", s.getRunCommand)
 	mux.HandleFunc("GET /api/runs/{id}/trace", s.getTrace)
 	mux.HandleFunc("GET /api/runs/{id}/artifacts", s.listArtifacts)
 	mux.HandleFunc("GET /api/runs/{id}/artifacts/{artifactId}", s.downloadArtifact)
@@ -598,7 +604,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		Version:   config.Version,
 		UptimeS:   int64(time.Since(s.startedAt).Seconds()),
 		Workers:   s.cfg.EngineWorkers,
-		Runs:      map[string]int64{"queued": 0, "running": 0, "waiting_approval": 0},
+		Runs:      map[string]int64{"queued": 0, "running": 0, "waiting_approval": 0, "paused": 0},
 		SSEClient: s.hub.Subscribers(),
 		Scheduler: schedulerStatus{TickSeconds: tick.Seconds()},
 	}
@@ -607,7 +613,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 			at := next.UTC()
 			resp.Scheduler.NextDueAt = &at
 		}
-		rows, err := s.pool.Query(ctx, `SELECT status, count(*) FROM runs WHERE status IN ('queued','running','waiting_approval') GROUP BY status`)
+		rows, err := s.pool.Query(ctx, `SELECT status, count(*) FROM runs WHERE status IN ('queued','running','waiting_approval','paused') GROUP BY status`)
 		if err == nil {
 			resp.DBOK = true
 			for rows.Next() {

@@ -77,8 +77,10 @@ type Pending struct {
 // raised that are still pending, oldest first; Parked says the visit parked on one of them
 // and released its worker (DESIGN 5.24 rule 5).
 type Node struct {
-	NodeID         string
-	Parked         bool
+	NodeID string
+	Parked bool
+	// Paused says the visit parked because the operator paused it (DESIGN W2 rule 14).
+	Paused         bool
 	HeartbeatAt    *time.Time
 	ProgressAt     *time.Time
 	WaitingOn      string
@@ -118,6 +120,9 @@ func ClassifyNode(n Node, th Thresholds, now time.Time) Verdict {
 	// waiting_approval is what the run rule reads (DESIGN 5.12 edge cases).
 	if n.Parked {
 		v.Liveness, v.Reason = Waiting, "parked, "+waitingOn(n.Pending, now)
+		if n.Paused {
+			v.Reason = "paused by the operator; a resume continues the step"
+		}
 		return v
 	}
 	// Rules 1 to 3: the worker's heartbeat.
@@ -262,6 +267,12 @@ func ClassifyRun(r Run, th Thresholds, now time.Time) (string, string) {
 			return Waiting, "paused " + text(age(now, *r.PausedAt)) + ", waiting on a decision"
 		}
 		return Waiting, waitingOn(r.Pending, now)
+	case store.RunPaused:
+		// DESIGN W2 rule 14: no worker holds it until the operator resumes it.
+		if r.PausedAt != nil {
+			return Waiting, "paused by the operator " + text(age(now, *r.PausedAt)) + " ago; waiting for a resume"
+		}
+		return Waiting, "paused by the operator; waiting for a resume"
 	case store.RunRunning:
 		if len(r.Nodes) == 0 {
 			// Between steps: the run row's own write time is the only evidence.

@@ -100,27 +100,36 @@ func ReopenRunNode(ctx context.Context, q Querier, id string) (*RunNode, error) 
 	return n, err
 }
 
-// SetBranchCurrent writes where a branch is (DESIGN 5.26 rule 4).
+// SetBranchCurrent writes where a branch is (DESIGN 5.26 rule 4); fenced by the worker's
+// lease through the branch's run (DESIGN W2 rule 8).
 func SetBranchCurrent(ctx context.Context, q Querier, id, node string) error {
-	_, err := q.Exec(ctx, `UPDATE run_branches SET current_node=$2 WHERE id=$1`, id, node)
+	l := LeaseOf(ctx)
+	r, e := fenceArgs(l)
+	tag, err := q.Exec(ctx, `UPDATE run_branches SET current_node=$2 WHERE id=$1 AND `+childFence("run_id", "$3", "$4"), id, node, r, e)
+	if err == nil && tag.RowsAffected() == 0 {
+		return lostOr(ctx, q, l, nil)
+	}
 	return err
 }
 
 // SetBranchStatus writes a branch's status: a terminal one (succeeded, failed, cancelled)
-// with its finished_at and reason, running or waiting_approval with neither.
+// with its finished_at and reason, running or waiting_approval with neither. Fenced by the
+// worker's lease through the branch's run (DESIGN W2 rule 8).
 func SetBranchStatus(ctx context.Context, q Querier, id, status string, reason *string, at time.Time) (*RunBranch, error) {
 	var finished any
 	if status == BranchSucceeded || status == BranchFailed || status == BranchCancelled {
 		finished = at.UTC()
 	}
-	rows, err := q.Query(ctx, `UPDATE run_branches SET status=$2, failure_reason=$3, finished_at=$4 WHERE id=$1 RETURNING `+branchColumns,
-		id, status, reason, finished)
+	l := LeaseOf(ctx)
+	r, e := fenceArgs(l)
+	rows, err := q.Query(ctx, `UPDATE run_branches SET status=$2, failure_reason=$3, finished_at=$4 WHERE id=$1 AND `+
+		childFence("run_id", "$5", "$6")+` RETURNING `+branchColumns, id, status, reason, finished, r, e)
 	if err != nil {
 		return nil, err
 	}
 	b, err := pgx.CollectExactlyOneRow(rows, pgx.RowToAddrOfStructByName[RunBranch])
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, lostOr(ctx, q, l, ErrNotFound)
 	}
 	return b, err
 }
@@ -149,8 +158,14 @@ func SetRunStateNodeInBranch(ctx context.Context, db beginner, runID, nodeID str
 		return nil, err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // no-op after commit
+	// A worker's write is fenced by its lease (DESIGN W2 rule 8).
+	l := fence(ctx, runID)
+	_, epoch := fenceArgs(l)
 	run, err := collectRun(tx.Query(ctx, `UPDATE runs SET state = jsonb_set(CASE WHEN jsonb_typeof(state) = 'object' THEN state ELSE '{}'::jsonb END,
-		ARRAY[$2::text], $3::jsonb, true), updated_at=now() WHERE id=$1 RETURNING `+runColumns, runID, nodeID, output))
+		ARRAY[$2::text], $3::jsonb, true), updated_at=now() WHERE id=$1 AND `+runFence("$4")+` RETURNING `+runColumns, runID, nodeID, output, epoch))
+	if errors.Is(err, ErrNotFound) {
+		return nil, lostOr(ctx, tx, l, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -171,13 +186,16 @@ func ParkBranchVisit(ctx context.Context, db beginner, runID, runNodeID, branchI
 		return err
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // no-op after commit
-	tag, err := tx.Exec(ctx, `UPDATE run_nodes SET parked_at=$3, status=$4 WHERE id=$1 AND run_id=$2 AND status IN ($5, $4)`,
-		runNodeID, runID, at.UTC(), NodeWaitingApproval, NodeRunning)
+	// The park is the worker's write, fenced by its lease (DESIGN W2 rule 8).
+	l := fence(ctx, runID)
+	r, e := fenceArgs(l)
+	tag, err := tx.Exec(ctx, `UPDATE run_nodes SET parked_at=$3, status=$4 WHERE id=$1 AND run_id=$2 AND status IN ($5, $4)
+		AND `+childFence("run_id", "$6", "$7"), runNodeID, runID, at.UTC(), NodeWaitingApproval, NodeRunning, r, e)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		return lostOr(ctx, tx, l, ErrNotFound)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE run_branches SET status=$2 WHERE id=$1`, branchID, BranchWaitingApproval); err != nil {
 		return err

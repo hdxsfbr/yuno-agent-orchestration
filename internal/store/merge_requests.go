@@ -183,8 +183,9 @@ func ProjectNameAny(ctx context.Context, q Querier, id string) (string, error) {
 }
 
 // liveRunStatuses are the statuses of a live run, the ones the two live-run indexes of
-// migration 0013 hold (DESIGN 5.22 units).
-const liveRunStatuses = `('queued', 'running', 'waiting_approval')`
+// migration 0013 hold (DESIGN 5.22 units); a paused run is live too (DESIGN W2 rule 14,
+// migration 0032).
+const liveRunStatuses = `('queued', 'running', 'waiting_approval', 'paused')`
 
 // LiveRunForMergeRequest returns the live run (queued, running or waiting for an
 // approval) that names the merge request record, the one runs_merge_request_live_idx

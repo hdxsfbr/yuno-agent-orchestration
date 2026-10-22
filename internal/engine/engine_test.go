@@ -22,10 +22,13 @@ import (
 // ---- pure rules -----------------------------------------------------------------------
 
 func TestTransitionTable(t *testing.T) {
+	// DESIGN W2 rules 14 and 15 add paused: from queued and running, left by a resume
+	// (queued), a cancel or a failure.
 	allowed := map[string][]string{
-		store.RunQueued:          {store.RunRunning, store.RunCancelled},
-		store.RunRunning:         {store.RunQueued, store.RunWaitingApproval, store.RunSucceeded, store.RunFailed, store.RunCancelled, store.RunTimedOut},
+		store.RunQueued:          {store.RunRunning, store.RunCancelled, store.RunPaused},
+		store.RunRunning:         {store.RunQueued, store.RunWaitingApproval, store.RunPaused, store.RunSucceeded, store.RunFailed, store.RunCancelled, store.RunTimedOut},
 		store.RunWaitingApproval: {store.RunQueued, store.RunRunning, store.RunFailed, store.RunCancelled, store.RunTimedOut},
+		store.RunPaused:          {store.RunQueued, store.RunFailed, store.RunCancelled},
 	}
 	n := 0
 	for _, from := range RunStatuses {
@@ -43,7 +46,7 @@ func TestTransitionTable(t *testing.T) {
 			}
 		}
 	}
-	if n != 49 {
+	if n != 64 {
 		t.Fatalf("checked %d pairs", n)
 	}
 }
