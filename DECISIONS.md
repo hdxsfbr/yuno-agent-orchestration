@@ -6,6 +6,40 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-22
 
+**D-096 Text Yuno stores from agents loses its NUL characters: the redactor every stored
+string and JSON document passes through drops them.** (Found on run 01a16451, 2026-10-22: the
+run succeeded and its merge request was marked ready, but its documentation audit step
+stayed "running" on the run page.) A tool result in the audit's transcript held a NUL
+(`\u0000`), which Postgres refuses in `jsonb` and `text` ("unsupported Unicode escape
+sequence"). The node row is written whole, transcript included, so from that entry on every
+write of the row failed: its final status and output, and the `node.status` event. The run
+went on because the engine keeps the outcome in memory. Any agent that reads a binary or
+data file could hit it. `obs.Redact`, which the transcript mirror, tool outputs, run events
+and logs already call before storage, now drops NUL characters, and `RedactJSON` drops them
+from keys too. Nothing a person reads is lost: a NUL has no printed form. Alternatives
+rejected: escaping it as text (the transcript would show an escape the agent never saw);
+dropping the whole entry (the rest of the tool result is useful); storing the transcript
+apart from the status (the same NUL would still be refused, only in another write).
+Design: DESIGN 5.12 rule 4.
+
+**D-095 OpenAI agents run with OpenClaw's Code Mode off: their entry sets `codeMode: false`
+next to the runtime pin.** (Andre, 2026-10-22: "disable that code mode that is slowing
+things down", after run 01a16451's Builder step.) Once every agent moved to
+`openai/gpt-6-astra`, OpenClaw's Code Mode engaged by itself: its default is `"auto"`, which
+turns it on for the models the provider catalog flags as preferred, and the OpenAI models
+are flagged on the embedded runtime D-091 pins. The Claude agents never had it, because the
+api's proxy provider carries no such flag. Engaged, the model sees only `exec` (a JavaScript
+program calling the hidden tools) and `wait`, each call with a 10 s budget. On run 01a16451
+the second Builder visit made 62 `wait` calls (8.8 minutes) and 11 sleep calls in 107
+model iterations, its `finish` reached the api 79 s after the agent made it and a memory
+save 4.7 minutes after, both queued behind the test suite running in the same program
+runtime. Off, the agent calls its tools directly again: a shell command blocks until it
+ends, as on Claude. The setting is per agent and per model, so it changes nothing for a
+Claude agent and needs no gateway-wide switch; it is part of the entry, so each OpenAI
+agent re-materialises once. Alternative rejected: the gateway-wide `tools.codeMode: false`
+(it would also cover agents Yuno does not manage, and the per-model field is what the
+OpenClaw docs name for opting one model out). Design: DESIGN 5.14 rule 14.
+
 **D-094 A turn whose model reply never comes is aborted after `MODEL_STALL_AFTER` (10
 minutes) without progress and no tool call open, and continued in a new turn from the
 model-error retry budget.** (Andre, 2026-10-22, after run 01a16451: its Builder's last tool

@@ -5,6 +5,11 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- A step whose agent read a binary file no longer stays "running" on the run page after
+  the run ends.
+- Agents on OpenAI models call their tools directly again. The gateway had switched them
+  to an experimental "code mode" that made them poll long commands, such as a test suite,
+  every 10 seconds, and delayed their calls to Yuno, `finish` included.
 - A step whose model stops answering no longer sits "running" for hours. After 10 minutes
   with no reply and no tool running, the turn is stopped and the agent continues where it
   was, up to three times; then the step fails with "model reply stalled for 10 minutes".

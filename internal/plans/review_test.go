@@ -9,14 +9,16 @@ import (
 	"yuno/internal/store"
 )
 
-// Review M3: the ticket's move, the pause and the event are one transaction. A reason the
-// event's JSON column refuses (a NUL) fails the last statement; nothing of the first two stays.
+// Review M3: the ticket's move, the pause and the event are one transaction. A kind the
+// event's JSON column refuses (a NUL; only the event carries the kind, and the redactor
+// drops a NUL from the reason, D-096) fails the last statement; nothing of the first two
+// stays.
 func TestEscalateIsOneTransaction(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	run := e.newRun()
 	mustDo(t, e.svc.OnIssueTaken(ctx, e.project.ID, 11, run.ID))
-	if ev, err := e.svc.Escalate(ctx, e.get("T1"), "other", "bad\x00reason", run.ID); err == nil || ev != nil {
+	if ev, err := e.svc.Escalate(ctx, e.get("T1"), "oth\x00er", "bad reason", run.ID); err == nil || ev != nil {
 		t.Fatalf("Escalate = %v %v, want an error", ev, err)
 	}
 	if tk := e.get("T1"); tk.Status != store.TicketBuilding {

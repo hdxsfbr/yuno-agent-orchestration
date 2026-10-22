@@ -882,7 +882,10 @@ Rules:
 4. The slog handler redacts values of keys named `*token*`, `*secret*`, `*key*`,
    `authorization` and any string matching `sk-ant-[A-Za-z0-9_-]{10,}`, `sk-or-v1-[A-Za-z0-9]{10,}`, run tokens `r_[a-z2-7]{24}` or
    `\d{6,}:[A-Za-z0-9_-]{30,}` (Telegram bot tokens) with `[redacted]`. The same function
-   runs on tool outputs before storage.
+   runs on tool outputs before storage, and on the transcript entries a node mirrors; it
+   also drops NUL characters, which Postgres refuses in text and jsonb (D-096): one in a
+   mirrored tool result made every later write of its node row fail, its final status
+   included.
 5. `GET /healthz` (process up), `GET /readyz` (DB ping ≤ 1 s), `GET /api/status`
    (`{version, uptime_s, db_ok, workers, runs: {queued, running, waiting_approval}}`) with
    a 500 ms server-side budget; `/api/status` is measured in the integration suite at p95.
@@ -1166,9 +1169,17 @@ Rules:
     and every platform tool would be gone; pinned, a sandboxed quick run on
     `openai/gpt-6-astra` called `exec`, `write` and `yuno__finish` and succeeded, and its
     `model_calls` row has provider `openai`, model `gpt-6-astra`, tokens and cost
-    **[probed]** (public gateway). The pin is part of the entry and so of
-    `materialized_hash`: a model change re-materialises, the patch nulls the previous ref's
-    pin, and a switch back to Claude deletes the entry's `models`. `thinkingDefault`,
+    **[probed]** (public gateway). The same model entry sets `codeMode: false` (D-095):
+    OpenClaw's Code Mode defaults to `"auto"`, which engages it for the OpenAI models its
+    catalog flags as preferred on the embedded runtime **[docs]**
+    (tools/code-mode/configuration.md). Engaged, the model sees only a JavaScript `exec`
+    and `wait`, each with a 10 s budget, so a 5-minute test suite becomes a loop of `wait`
+    calls, and a platform call made inside the program queues behind a running command
+    (run 01a16451: `finish` reached the api 79 s after the agent made it, a memory save
+    4.7 min). Off, the agent calls its tools directly, as a Claude agent does. The pin is
+    part of the entry and so of `materialized_hash`: a model change re-materialises, the
+    patch nulls the previous ref's pin, and a switch back to Claude deletes the entry's
+    `models`. `thinkingDefault`,
     `reasoningDefault: off` and `params.maxTokens` are written as for a Claude agent: the
     gateway's config schema accepts them for these refs (**[probed]** `openclaw config
     validate` with the 2026.10.3 image, every thinking level); a level the model lacks is
