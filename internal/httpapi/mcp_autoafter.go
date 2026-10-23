@@ -93,12 +93,12 @@ func (g *gateCall) autoAfter(ctx context.Context) string {
 }
 
 // draftApprover is the decided_by and policy text of an open_merge_request call that went
-// through as a draft (D-106).
+// through as a draft (D-107).
 const draftApprover = "auto:draft"
 
 // autoDraft reports an open_merge_request call of a run that opens a draft merge request,
 // or pushes onto the run's own request while it is still a draft: it needs no approval
-// (D-106, Andre: "auto-approve opening draft MRs, merge stays mine"). The call must say
+// (D-107, Andre: "auto-approve opening draft MRs, merge stays mine"). The call must say
 // draft true. A run that names a request, or already opened one, passes only while that
 // request is a draft, so a push onto a request under review, or marking one ready, stays
 // gated, as does every merge (the operator's merge button). Any doubt, a database error
