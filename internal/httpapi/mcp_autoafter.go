@@ -92,6 +92,44 @@ func (g *gateCall) autoAfter(ctx context.Context) string {
 	return node.AutoAfter
 }
 
+// draftApprover is the decided_by and policy text of an open_merge_request call that went
+// through as a draft (D-106).
+const draftApprover = "auto:draft"
+
+// autoDraft reports an open_merge_request call of a run that opens a draft merge request,
+// or pushes onto the run's own request while it is still a draft: it needs no approval
+// (D-106, Andre: "auto-approve opening draft MRs, merge stays mine"). The call must say
+// draft true. A run that names a request, or already opened one, passes only while that
+// request is a draft, so a push onto a request under review, or marking one ready, stays
+// gated, as does every merge (the operator's merge button). Any doubt, a database error
+// included, leaves the call gated.
+func (g *gateCall) autoDraft(ctx context.Context) bool {
+	if g.s.pool == nil || g.rc.RunID == "" || g.t.Name != tools.OpenMergeRequestName {
+		return false
+	}
+	var in struct {
+		Draft *bool `json:"draft"`
+	}
+	if json.Unmarshal(g.args, &in) != nil || in.Draft == nil || !*in.Draft {
+		return false
+	}
+	run, err := store.GetRun(ctx, g.s.pool, g.rc.RunID)
+	if err != nil {
+		return false
+	}
+	if run.MergeRequestID != nil && *run.MergeRequestID != "" {
+		named, err := store.GetMergeRequest(ctx, g.s.pool, *run.MergeRequestID)
+		if err != nil || !named.Draft {
+			return false
+		}
+	}
+	own, err := store.MergeRequestByRun(ctx, g.s.pool, g.rc.RunID)
+	if err != nil {
+		return false
+	}
+	return own == nil || own.Draft
+}
+
 // docsOnlyPaths reports whether an open_merge_request call names paths and every one is a
 // clean relative path under docs/ (no "..", no absolute path). Without paths the call would
 // commit the whole working tree.
@@ -115,10 +153,8 @@ func docsOnlyPaths(args json.RawMessage) bool {
 // earlier decision: kind tool, approved, decided_by auto_after:<node>, linked to the
 // call's row so the run trace lists it with the others. The row's output carries the
 // same policy, so a failure here is logged and costs nothing else.
-func (g *gateCall) recordAutoApproval(ctx context.Context, approvalNode string) {
+func (g *gateCall) recordAutoApproval(ctx context.Context, by, reason string) {
 	now := time.Now().UTC()
-	by := autoApprover(approvalNode)
-	reason := "covered by the approved " + approvalNode + " step"
 	callID := g.row.ID
 	a := &store.Approval{
 		RunID: g.rc.RunID, RunNodeID: g.rc.RunNodeID, ToolCallID: &callID, Kind: store.ApprovalKindTool, NodeID: g.rc.NodeID,

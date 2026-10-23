@@ -239,11 +239,12 @@ func (g *gateCall) run(ctx context.Context) (string, bool) {
 		g.call.IdempotencyKey = key
 		g.row.IdempotencyKey = &key
 	}
-	autoBy := ""
+	autoBy, draftAuto := "", false
 	if policy == tools.PolicyRequireApproval && g.chat == nil {
 		autoBy = g.autoAfter(ctx)
+		draftAuto = autoBy == "" && g.autoDraft(ctx)
 	}
-	if policy == tools.PolicyRequireApproval && autoBy == "" {
+	if policy == tools.PolicyRequireApproval && autoBy == "" && !draftAuto {
 		if g.chat != nil {
 			// An approval pauses a run, and a conversation has none: an operator who
 			// gates this tool for the agent gets no ungated chat-time calls either.
@@ -263,8 +264,11 @@ func (g *gateCall) run(ctx context.Context) (string, bool) {
 		// The audit row says the effect ran without a human decision (T5.3.6), or that
 		// an earlier approval of the workflow covered it (DESIGN 5.29 rule 5).
 		pol := tools.PolicyAuto
-		if autoBy != "" {
+		switch {
+		case autoBy != "":
 			pol = autoApprover(autoBy)
+		case draftAuto:
+			pol = draftApprover
 		}
 		res = tools.Result{Output: tools.WithFields(res.Output, map[string]any{"policy": pol})}
 	}
@@ -276,8 +280,11 @@ func (g *gateCall) run(ctx context.Context) (string, bool) {
 		status = store.ToolFailed
 	}
 	text, isErr := g.finish(ctx, status, res, out.Attempts)
-	if autoBy != "" {
-		g.recordAutoApproval(ctx, autoBy)
+	switch {
+	case autoBy != "":
+		g.recordAutoApproval(ctx, autoApprover(autoBy), "covered by the approved "+autoBy+" step")
+	case draftAuto:
+		g.recordAutoApproval(ctx, draftApprover, "a draft merge request opens without an approval; merging stays the operator's")
 	}
 	return text, isErr
 }
