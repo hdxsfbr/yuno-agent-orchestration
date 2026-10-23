@@ -315,8 +315,8 @@ steps:
       expect_issues:
         - { title_contains: "[greeting T1]", labels: ["yuno:running"], state: opened }
       timeout_seconds: 300
-  # Wave 1's ticket run: the draft merge request, the operator's manual test, the ready merge request.
-  - approve: { decision: approve, node: integrator_draft, reason: Open the draft merge request., timeout_seconds: 300 }
+  # Wave 1's ticket run: the draft merge request opens without an approval (D-107), then the
+  # operator's manual test, then the ready merge request.
   - approve: { decision: approve, node: manual_test, reason: The branch works., timeout_seconds: 300 }
   # The forge merges it and main goes green; the watcher then starts the ship run.
   - forge: { merge_open: { count: 1 }, timeout_seconds: 300 }
@@ -332,7 +332,6 @@ steps:
       timeout_seconds: 60
   # The operator pauses the waves. Wave 2 is built and merged, main is green, and no ship run starts.
   - pause_waves: Holding wave 2 for a check before it ships.
-  - approve: { decision: approve, node: integrator_draft, reason: Open the draft merge request., timeout_seconds: 300 }
   - approve: { decision: approve, node: manual_test, reason: The branch works., timeout_seconds: 300 }
   - forge: { merge_open: { count: 1 }, timeout_seconds: 300 }
   - forge: { pipeline: passed }
