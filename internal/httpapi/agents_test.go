@@ -58,7 +58,8 @@ func TestCreateAgentValidation(t *testing.T) {
 func TestAgentModelValidation(t *testing.T) {
 	_, ts := newTestServer(t, nil, &fakeEngine{}, nil)
 	for model, want := range map[string]string{
-		"anthropic/claude-opus-5-5":      `unknown model provider "anthropic": must be one of claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, openai/gpt-6-astra, openai/gpt-5.6-terra, openai/gpt-5.6-luna`,
+		"anthropic/claude-opus-5-5":      `unknown model provider "anthropic": must be one of claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, openai/gpt-6-astra, openai/gpt-5.6-terra, openai/gpt-5.6-luna, xai/grok-4.7, xai/grok-4.6, xai/grok-4.5`,
+		"xai/grok-9":                     "unknown xAI model: must be one of xai/grok-4.7, xai/grok-4.6, xai/grok-4.5",
 		"yuno-anthropic/claude-opus-5-5": `unknown model provider "yuno-anthropic"`,
 		"google/gemini-3":                `unknown model provider "google"`,
 		"openai/gpt-5":                   "unknown OpenAI model: must be one of openai/gpt-6-astra, openai/gpt-5.6-terra, openai/gpt-5.6-luna",
@@ -83,7 +84,8 @@ func TestAgentOpenAIModel(t *testing.T) {
 	pool := needDB(t)
 	fe := &fakeEngine{pool: pool}
 	_, ts := newTestServer(t, pool, fe, nil)
-	for _, model := range []string{"openai/gpt-6-astra", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna"} {
+	// D-106: the xAI refs are accepted the same way.
+	for _, model := range []string{"openai/gpt-6-astra", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna", "xai/grok-4.7", "xai/grok-4.6", "xai/grok-4.5"} {
 		code, body := do(t, ts, http.MethodPost, "/api/agents", `{"name":"`+model+`","model":"`+model+`","thinking":"high"}`)
 		if code != http.StatusCreated {
 			t.Fatalf("%s: %d %s", model, code, body)

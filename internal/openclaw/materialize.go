@@ -310,7 +310,7 @@ func desiredEntry(a *store.Agent, skillNames []string) map[string]any {
 	if a.MaxTokens > 0 {
 		entry["params"] = map[string]any{"maxTokens": a.MaxTokens}
 	}
-	if IsOpenAIModel(a.Model) {
+	if IsGatewayModel(a.Model) {
 		// Pin the embedded runtime for this model (D-091). Unpinned, a subscription route
 		// may select the Codex app-server runtime, which disables user MCP servers while a
 		// sandbox is active: yuno__finish and every platform tool would be gone [docs:

@@ -1224,7 +1224,10 @@ Rules:
     network and no socket.
 13. **Health.** `GET /healthz` on the gateway port **[probed]**; api `readyz` also checks
     the gateway connection is open and scoped.
-14. **OpenAI models through the operator's sign-in. [decision D-091]** An agent's `model`
+14. **OpenAI and xAI models through the operator's sign-in. [decisions D-091, D-106]**
+    Everything this rule says of `openai/<id>` refs holds for `xai/<id>` refs too
+    (`xai/grok-4.7`, `xai/grok-4.6`, `xai/grok-4.5`), served by OpenClaw's `xai` provider with
+    the operator's SuperGrok sign-in (Grok OAuth, `--provider xai --method oauth`). An agent's `model`
     is a Claude id, materialised as `yuno-anthropic/<id>` and served through the proxy
     (rule 8), or one of `openai/gpt-6-astra`, `openai/gpt-5.6-terra` and
     `openai/gpt-5.6-luna`, the refs OpenClaw 2026.10.3 lists for a ChatGPT/Codex

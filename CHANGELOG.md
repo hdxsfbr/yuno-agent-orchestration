@@ -5,6 +5,10 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- Agents can run on xAI Grok models with your SuperGrok subscription: sign the gateway in
+  once with `docker compose exec openclaw node openclaw.mjs models auth login --provider xai
+  --method oauth --agent main`, then pick `xai/grok-4.7`, `xai/grok-4.6` or `xai/grok-4.5`
+  under "xAI (your SuperGrok subscription)" in the agent's form.
 - The Chief of Staff on OpenAI can fill in what its calls need again: a workflow's input
   when it delegates, and the path, query and body of a platform call. The gateway's strict
   tool schemas had emptied them, as they had `finish`'s result. They now go as JSON text.

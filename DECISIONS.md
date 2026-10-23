@@ -4,6 +4,25 @@ Newest first. Each entry says what was decided, by whom, and why. Design rules t
 refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR under
 `docs/adr/`.
 
+## 2026-10-23
+
+**D-106 Agents can run on xAI Grok models through the operator's SuperGrok sign-in on the
+gateway, as on OpenAI (D-091).** (Andre, 2026-10-23: the ChatGPT plan's weekly usage
+was spent, "0% left, resets 6d 15h", no Anthropic credits and an invalid OpenRouter key;
+"I have cursor/grok subscription too".)
+- **Sign-in.** OpenClaw ships an `xai` provider that signs in with Grok OAuth, by device
+  code on a server (`openclaw models auth login --provider xai --method oauth --agent main`).
+  It serves the models on the embedded runtime, so the platform's MCP tools stay available
+  in the sandbox.
+- **What Yuno accepts.** An agent's model may now be `xai/grok-4.7`, `xai/grok-4.6` or
+  `xai/grok-4.5`, OpenClaw's curated default and the earlier text models its provider
+  documents.
+- **How it is materialised.** Yuno writes these refs as given (no proxy), pins the
+  embedded runtime and turns Code Mode off, as for OpenAI (`IsGatewayModel`).
+- **Reset.** A scoped seed reset with `--keep-models` keeps them.
+- **Rejected:** Cursor. Its subscription runs Cursor's own agent loop as an ACP harness, in
+  which the platform's tools, `finish` among them, are not the run's tools.
+
 ## 2026-10-22
 
 **D-105 The Plan and Ship pipelines get limits sized for OpenAI agents.** (Andre,

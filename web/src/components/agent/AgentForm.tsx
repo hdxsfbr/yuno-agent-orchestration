@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link } from "react-router";
-import { MODELS, OPENAI_MODELS, THINKING_LEVELS, isOpenAIModel, type Agent, type AgentInput, type Skill, type Tool, type ThinkingLevel } from "@/lib/api";
+import { MODELS, OPENAI_MODELS, XAI_MODELS, THINKING_LEVELS, isOpenAIModel, isXAIModel, type Agent, type AgentInput, type Skill, type Tool, type ThinkingLevel } from "@/lib/api";
 import {
   LIMIT_FIELDS,
   agentToForm,
@@ -22,6 +22,7 @@ import SkillPicker from "./SkillPicker";
 import ToolPicker from "./ToolPicker";
 
 const OPENAI_GROUP = "OpenAI (your ChatGPT subscription)";
+const XAI_GROUP = "xAI (your SuperGrok subscription)";
 
 function Section({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
   return (
@@ -95,12 +96,13 @@ export default function AgentForm({ agent, tools, skills, saving, serverErrors, 
   };
 
   const toolNames = (tools.data ?? []).map((t) => t.name);
-  const known: readonly string[] = [...MODELS, ...OPENAI_MODELS];
+  const known: readonly string[] = [...MODELS, ...OPENAI_MODELS, ...XAI_MODELS];
   const modelOptions: Option[] = [
     // A model the agent holds that is no longer offered stays shown, so the choice shown is the choice held.
     ...(known.includes(form.model) ? [] : toOptions([form.model])),
     ...MODELS.map((m) => ({ value: m, label: m, group: "Anthropic" })),
     ...OPENAI_MODELS.map((m) => ({ value: m, label: m, group: OPENAI_GROUP })),
+    ...XAI_MODELS.map((m) => ({ value: m, label: m, group: XAI_GROUP })),
   ];
 
   return (
@@ -134,7 +136,13 @@ export default function AgentForm({ agent, tools, skills, saving, serverErrors, 
             value={form.model}
             onChange={(v) => set({ model: v })}
             options={modelOptions}
-            hint={isOpenAIModel(form.model) ? "Uses the ChatGPT account signed in on the gateway. Costs are estimates at OpenAI's API prices." : undefined}
+            hint={
+              isOpenAIModel(form.model)
+                ? "Uses the ChatGPT account signed in on the gateway. Costs are estimates at OpenAI's API prices."
+                : isXAIModel(form.model)
+                  ? "Uses the SuperGrok account signed in on the gateway. Costs are estimates at xAI's API prices."
+                  : undefined
+            }
             errors={errorsFor(errors, "model")}
           />
           <NumberField label="Max tokens" hint="Largest reply the model may write." value={form.maxTokens} onChange={(v) => set({ maxTokens: v })} errors={errorsFor(errors, "max_tokens")} placeholder="8192" />

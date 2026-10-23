@@ -103,6 +103,7 @@ describe("AgentForm models", () => {
     setup();
     expect(group("Anthropic")).toEqual(["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
     expect(group("OpenAI (your ChatGPT subscription)")).toEqual(["openai/gpt-6-astra", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna"]);
+    expect(group("xAI (your SuperGrok subscription)")).toEqual(["xai/grok-4.7", "xai/grok-4.6", "xai/grok-4.5"]);
     expect(model().value).toBe("claude-opus-5-5");
     expect(screen.queryByText(/ChatGPT account signed in on the gateway/)).toBeNull();
   });

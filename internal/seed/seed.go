@@ -538,7 +538,7 @@ func ResetShippedScoped(ctx context.Context, q store.Querier, r Resetter, scope 
 		// The shipped agents are Claude agents: one the operator moved to OpenAI goes back
 		// to its shipped model, while a Claude model of the operator's choosing is kept (D-091).
 		model := a.Model
-		if openclaw.IsOpenAIModel(model) && !scope.KeepModels {
+		if openclaw.IsGatewayModel(model) && !scope.KeepModels {
 			model = tpl.Model
 		}
 		if a.Role == tpl.Role && a.SystemPrompt == tpl.SystemPrompt && slices.Equal(a.ToolAllowlist, tpl.ToolAllowlist) && a.Model == model {
