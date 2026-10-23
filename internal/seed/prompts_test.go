@@ -107,15 +107,17 @@ func TestCodeReviewerOnlyReadsAndChecksItsFirstFindings(t *testing.T) {
 	}
 }
 
-// D-090: the Builder runs the whole suite last, every round, and reports the command and the
-// result, and answers every numbered finding fixed or declined with the reason.
+// D-090, D-108: the Builder runs only the affected tests while it works and the whole suite
+// once, last, every round, reports the command and the result, and answers every numbered
+// finding fixed or declined with the reason.
 func TestBuilderReportsTheSuiteAndAnswersEachFinding(t *testing.T) {
 	a := shippedAgentDef(t, "Builder")
 	if !slices.Contains(a.ToolAllowlist, "exec") {
 		t.Error("the Builder cannot run the suite")
 	}
 	for _, want := range []string{
-		"Run the project's whole suite as the last thing before you hand over, every round",
+		"Run the project's whole suite once, as the last thing before you hand over, every round",
+		"run only the tests that cover what you change",
 		"the Code Reviewer only reads and runs nothing",
 		"the exact command in test_command",
 		"the pass count or the failures",
