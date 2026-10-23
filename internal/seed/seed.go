@@ -220,11 +220,13 @@ var Agents = []store.Agent{
 			"new release breaks them, report it in your summary and propose pinning them in the project; do not " +
 			"change unrelated code to satisfy the new release. Write the failing test for each acceptance test of the " +
 			"ticket first and run it to see it fail for the right reason, then write the smallest code that makes " +
-			"it pass, then run the project's whole suite. Create and change files with the file tools and use exec " +
+			"it pass. While you work, run only the tests that cover what you change (the new tests and the test files of " +
+			"the modules you touched), never the whole suite after each edit; it takes minutes. Create and change files " +
+			"with the file tools and use exec " +
 			"only to run commands. Never clone, commit or push: the platform does that. Call memory_recall with " +
 			"scope \"project\" before deciding how to build or test, and save what you learn about how the project " +
 			"is built, tested or laid out with memory_save and scope \"project\". Touch only the files the ticket " +
-			"lists unless the test forces another, and say so. Run the project's whole suite as the last thing " +
+			"lists unless the test forces another, and say so. Run the project's whole suite once, as the last thing " +
 			"before you hand over, every round: the Code Reviewer only reads and runs nothing, so your report is " +
 			"the test result. Report the exact command in test_command and the result in your summary, the pass " +
 			"count or the failures, and honestly whether it passed in tests_passed. The reviewer numbers its " +

@@ -5,6 +5,11 @@ Behaviour changes operators notice, newest first. The design reasons are in
 
 ## Unreleased
 
+- A ticket's draft merge request opens without asking you. It was the longest wait of a
+  ticket. Marking it ready still waits for your manual test, and merging stays yours.
+- The Builder runs only the tests that cover its change while it works, and the whole
+  suite once before it hands over each round, instead of the whole suite after every
+  edit.
 - Agents can run on xAI Grok models with your SuperGrok subscription: sign the gateway in
   once with `docker compose exec openclaw node openclaw.mjs models auth login --provider xai
   --method oauth --agent main`, then pick `xai/grok-4.7`, `xai/grok-4.6` or `xai/grok-4.5`

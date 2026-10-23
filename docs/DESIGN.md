@@ -4536,6 +4536,12 @@ Rules:
    `manual_test` approval was granted and the call only updates the run's existing MR
    (a per-node policy `auto_after: manual_test`, validated at save: the named node must
    be an approval node that precedes it); every other call stays gated.
+   `integrator_draft`'s call needs no approval either [decision D-107]: an
+   `open_merge_request` call of a run with `draft: true` passes when it opens a new draft
+   or pushes onto the run's own request while that is still a draft (and the request the
+   run names, if any, is a draft too). Its policy and approval row say `auto:draft`. A push
+   onto a request under review, `draft: false` or `draft` left out, and every merge (the
+   operator's merge button) stay gated.
    `integrator_draft`'s result is the request the tool returned, `merge_request_url` an
    http(s) URL and `branch` a name without spaces, or both empty when opening it was
    rejected or its approval expired. Its output schema and the state schema refuse a status

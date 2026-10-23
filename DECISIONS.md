@@ -6,6 +6,29 @@ refer to are in `docs/DESIGN.md`. Architecture-level choices also have an ADR un
 
 ## 2026-10-23
 
+**D-108 The Builder runs only the tests that cover its change while it works, and the whole
+suite once, last, before it hands over.** (Andre, 2026-10-23: "Builder runs targeted
+tests and the full suite once at the end"; on T13 and T29 the Builder ran the 5-minute
+suite 5 to 8 times per ticket.) The reviewer still relies on the Builder's last full run
+(D-090), so every round ends with one. Between edits the Builder runs the new tests and
+the test files of the modules it touched. The prompt and the wave pipeline's builder task
+say so. Rejected: skipping the full suite on fix rounds, because the review and the manual
+test read its result.
+
+**D-107 A draft merge request opens without an approval; merging stays the operator's.**
+(Andre, 2026-10-23: "auto-approve opening draft MRs (merge stays mine)". The draft-MR
+approval was the longest wait of a ticket, 9 to 33 minutes on T13 and T29.)
+- **Rule.** An `open_merge_request` call of a run with `draft: true` passes the gate when it
+  opens a new draft or pushes onto the run's own request while that is still a draft. A run
+  that names a request needs that request to be a draft too.
+- **Still gated:** a push onto a request under review, `draft: false` or `draft` left out,
+  marking a request ready (the `auto_after: manual_test` rule, unchanged), and every merge.
+- **Record.** The call's policy and its approval row say `auto:draft`.
+- **Rejected:** an `auto` interaction rule on the Integrator, which would also have let
+  its non-draft pushes through.
+
+Design: DESIGN 5.29 rule 5.
+
 **D-106 Agents can run on xAI Grok models through the operator's SuperGrok sign-in on the
 gateway, as on OpenAI (D-091).** (Andre, 2026-10-23: the ChatGPT plan's weekly usage
 was spent, "0% left, resets 6d 15h", no Anthropic credits and an invalid OpenRouter key;
