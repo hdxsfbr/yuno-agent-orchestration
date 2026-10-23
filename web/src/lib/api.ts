@@ -257,8 +257,12 @@ export const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5
 /** OpenAI models, run through the operator's ChatGPT sign-in on the gateway (D-091). */
 export const OPENAI_MODELS = ["openai/gpt-6-astra", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna"] as const;
 export const isOpenAIModel = (model: string) => model.startsWith("openai/");
-/** A model call's model as agents name it: OpenAI calls carry the provider prefix. */
-export const callModel = (call: { provider: string; model: string }) => (call.provider === "openai" ? `openai/${call.model}` : call.model);
+/** xAI Grok models, run through the operator's SuperGrok sign-in on the gateway (D-106). */
+export const XAI_MODELS = ["xai/grok-4.7", "xai/grok-4.6", "xai/grok-4.5"] as const;
+export const isXAIModel = (model: string) => model.startsWith("xai/");
+/** A model call's model as agents name it: OpenAI and xAI calls carry the provider prefix. */
+export const callModel = (call: { provider: string; model: string }) =>
+  call.provider === "openai" || call.provider === "xai" ? `${call.provider}/${call.model}` : call.model;
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max"] as const;
 export type Effort = (typeof EFFORTS)[number];

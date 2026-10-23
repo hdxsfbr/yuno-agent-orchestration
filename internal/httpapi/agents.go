@@ -173,18 +173,21 @@ func checkInteractionRule(fe *fieldErrors, registry *tools.Registry, key, value 
 	}
 }
 
-// checkModel validates an agent's model (D-091): a Claude id served through the api's
-// proxy, or an openai/<id> ref the gateway serves with the operator's ChatGPT sign-in.
+// checkModel validates an agent's model (D-091, D-106): a Claude id served through the
+// api's proxy, or an openai/<id> or xai/<id> ref the gateway serves with the operator's
+// ChatGPT or SuperGrok sign-in.
 // Both are exact lists, so a typo is refused here rather than by the gateway at the
 // first run; a ref with any other provider prefix is named as such.
 func checkModel(fe *fieldErrors, model string) {
 	switch provider, _, qualified := strings.Cut(model, "/"); {
 	case model == "":
 		fe.add("model", "is required")
-	case qualified && provider != openclaw.OpenAIProviderID:
+	case qualified && provider != openclaw.OpenAIProviderID && provider != openclaw.XAIProviderID:
 		fe.add("model", "unknown model provider %q: must be one of %s", provider, strings.Join(openclaw.AgentModels(), ", "))
-	case qualified && !slices.Contains(openclaw.OpenAIModels, model):
+	case provider == openclaw.OpenAIProviderID && qualified && !slices.Contains(openclaw.OpenAIModels, model):
 		fe.add("model", "unknown OpenAI model: must be one of %s", strings.Join(openclaw.OpenAIModels, ", "))
+	case provider == openclaw.XAIProviderID && qualified && !slices.Contains(openclaw.XAIModels, model):
+		fe.add("model", "unknown xAI model: must be one of %s", strings.Join(openclaw.XAIModels, ", "))
 	case !qualified && !slices.Contains(openclaw.ManagedModels, model):
 		fe.add("model", "must be one of %s", strings.Join(openclaw.AgentModels(), ", "))
 	}

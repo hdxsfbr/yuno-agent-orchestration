@@ -15,6 +15,7 @@ func TestModelRef(t *testing.T) {
 		"claude-opus-5-5":      "yuno-anthropic/claude-opus-5-5",
 		"openai/gpt-6-astra":   "openai/gpt-6-astra",
 		"openai/gpt-5.6-terra": "openai/gpt-5.6-terra",
+		"xai/grok-4.7":         "xai/grok-4.7",
 	} {
 		if got := ModelRef(model); got != want {
 			t.Errorf("ModelRef(%q) = %q, want %q", model, got, want)
@@ -23,7 +24,10 @@ func TestModelRef(t *testing.T) {
 	if IsOpenAIModel("claude-opus-5-5") || IsOpenAIModel("openaix/gpt") || !IsOpenAIModel("openai/gpt-5.6-luna") {
 		t.Fatal("IsOpenAIModel")
 	}
-	if got := AgentModels(); !slices.Equal(got, append(slices.Clone(ManagedModels), OpenAIModels...)) {
+	if !IsGatewayModel("xai/grok-4.7") || !IsGatewayModel("openai/gpt-6-astra") || IsGatewayModel("claude-opus-5-5") || IsGatewayModel("xaix/grok") {
+		t.Fatal("IsGatewayModel")
+	}
+	if got := AgentModels(); !slices.Equal(got, append(append(slices.Clone(ManagedModels), OpenAIModels...), XAIModels...)) {
 		t.Fatalf("AgentModels = %v", got)
 	}
 }
@@ -114,5 +118,21 @@ func TestMaterializeSwitchesProvider(t *testing.T) {
 	// claude, astra, luna: three distinct hashes; back on claude the first one returns.
 	if len(hashes) != 3 {
 		t.Fatalf("distinct hashes = %d, want 3", len(hashes))
+	}
+}
+
+// D-106: an xAI agent's entry pins the embedded runtime and turns Code Mode off, as an
+// OpenAI agent's does.
+func TestDesiredEntryXAI(t *testing.T) {
+	a := testAgent()
+	a.Model = "xai/grok-4.7"
+	e := desiredEntry(a, nil)
+	if p := e["model"].(map[string]any)["primary"]; p != "xai/grok-4.7" {
+		t.Fatalf("primary = %v", p)
+	}
+	models, _ := e["models"].(map[string]any)
+	pin, _ := models["xai/grok-4.7"].(map[string]any)
+	if len(models) != 1 || pin["agentRuntime"].(map[string]any)["id"] != "openclaw" || pin["codeMode"] != false {
+		t.Fatalf("models = %v", e["models"])
 	}
 }

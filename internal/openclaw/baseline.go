@@ -44,10 +44,15 @@ const ScriptedProviderID = "scripted"
 // OpenAI with the operator's ChatGPT sign-in, not through the api's proxy (D-091).
 const OpenAIProviderID = "openai"
 
+// XAIProviderID is OpenClaw's own xAI provider. Its calls go from the gateway to xAI with
+// the operator's SuperGrok sign-in (Grok OAuth), not through the api's proxy (D-106).
+const XAIProviderID = "xai"
+
 // ModelRef returns the OpenClaw model reference for an agent's model: an Anthropic id
-// goes through the api's proxy provider, an openai/<id> ref is used as given.
+// goes through the api's proxy provider, a gateway model ref (openai/<id>, xai/<id>) is
+// used as given.
 func ModelRef(model string) string {
-	if IsOpenAIModel(model) {
+	if IsGatewayModel(model) {
 		return model
 	}
 	return ProviderID + "/" + model
@@ -55,6 +60,12 @@ func ModelRef(model string) string {
 
 // IsOpenAIModel reports whether an agent's model is an OpenAI ref ("openai/<id>").
 func IsOpenAIModel(model string) bool { return strings.HasPrefix(model, OpenAIProviderID+"/") }
+
+// IsGatewayModel reports a model the gateway serves with a subscription the operator
+// signed in to on it: an OpenAI ref (D-091) or an xAI ref (D-106).
+func IsGatewayModel(model string) bool {
+	return IsOpenAIModel(model) || strings.HasPrefix(model, XAIProviderID+"/")
+}
 
 // ManagedModels are the Anthropic models exposed through the proxy, with the price
 // table OpenClaw uses for its own cost accounting (USD per million tokens).
@@ -65,8 +76,15 @@ var ManagedModels = []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-hai
 // own catalog prices them, so the gateway reports their cost (D-091).
 var OpenAIModels = []string{"openai/gpt-6-astra", "openai/gpt-5.6-terra", "openai/gpt-5.6-luna"}
 
+// XAIModels are the xAI refs an agent may use: OpenClaw 2026.10.3's curated Grok default
+// and the earlier text models its provider documents (providers/xai.md). OpenClaw's own
+// catalog prices them, so the gateway reports their cost, as for OpenAI.
+var XAIModels = []string{"xai/grok-4.7", "xai/grok-4.6", "xai/grok-4.5"}
+
 // AgentModels are the models an agent may be configured with, Anthropic ones first.
-func AgentModels() []string { return append(slices.Clone(ManagedModels), OpenAIModels...) }
+func AgentModels() []string {
+	return append(append(slices.Clone(ManagedModels), OpenAIModels...), XAIModels...)
+}
 
 // Baseline returns the managed keys as a nested map keyed by dotted path. Paths listed
 // here are owned by the platform and overwritten on every inputs change; everything
